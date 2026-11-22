@@ -1,0 +1,22 @@
+# Build and Go artifacts
+bin/
+build/
+dist/
+*.test
+*.out
+coverage.txt
+
+# Local state and secrets
+.env
+.env.*
+*.local.yaml
+*.local.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.local/
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
