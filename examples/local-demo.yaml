@@ -167,3 +167,14 @@ spec:
     - name: verify
       workload: health-controller
       prompt: Run deterministic verification checks with zero LLM calls.
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Schedule
+metadata:
+  name: periodic-health-check
+spec:
+  cron: "*/15 * * * *"
+  targetKind: workload
+  targetName: health-controller
+  input: '{"check":"periodic"}'
+  enabled: false

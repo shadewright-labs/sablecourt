@@ -62,6 +62,7 @@ type taskRow struct {
 	Cancelable  bool
 	Suspendable bool
 	Resumable   bool
+	LastReply   string
 }
 
 type viewData struct {
@@ -69,7 +70,9 @@ type viewData struct {
 	Notice           string
 	ErrMsg           string
 	SelectedWorkload string
+	StateFilter      string
 	ActiveTasks      int
+	TotalTasks       int
 	TotalCostUSD     string
 	TotalTokens      int64
 	Workloads        []domain.WorkloadRecord
@@ -197,6 +200,11 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stateFilter := r.URL.Query().Get("state")
+	if stateFilter == "" {
+		stateFilter = "all"
+	}
+
 	var rows []taskRow
 	active := 0
 	for _, t := range tasks {
@@ -204,6 +212,34 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isActive {
 			active++
 		}
+		switch stateFilter {
+		case "active":
+			if !isActive {
+				continue
+			}
+		case "completed":
+			if t.State != domain.TaskStateCompleted {
+				continue
+			}
+		case "failed":
+			if t.State != domain.TaskStateFailed {
+				continue
+			}
+		}
+
+		var lastReply string
+		if msgs, err := d.store.ListTaskMessages(ctx, t.ID); err == nil {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role == "agent" || msgs[i].Role == "system" {
+					lastReply = msgs[i].Content
+					if len(lastReply) > 360 {
+						lastReply = lastReply[:360] + "..."
+					}
+					break
+				}
+			}
+		}
+
 		stale := t.State == domain.TaskStateWorking && (t.LastHeartbeatAt == nil || now.Sub(*t.LastHeartbeatAt) > d.stalenessWindow)
 		rows = append(rows, taskRow{
 			Task:        t,
@@ -211,6 +247,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Cancelable:  isActive,
 			Suspendable: t.State == domain.TaskStateWorking,
 			Resumable:   t.State == domain.TaskStateSuspended,
+			LastReply:   lastReply,
 		})
 	}
 
@@ -240,7 +277,9 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Notice:           r.URL.Query().Get("notice"),
 		ErrMsg:           r.URL.Query().Get("err"),
 		SelectedWorkload: r.URL.Query().Get("workload"),
+		StateFilter:      stateFilter,
 		ActiveTasks:      active,
+		TotalTasks:       len(tasks),
 		TotalCostUSD:     fmt.Sprintf("%.4f", float64(totals.CostMicroUSD)/1_000_000.0),
 		TotalTokens:      totals.InputTokens + totals.OutputTokens,
 		Workloads:        workloads,

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/robfig/cron/v3"
 	"sigs.k8s.io/yaml"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -22,6 +23,7 @@ type Bundle struct {
 	Policies       map[string]domain.Policy
 	Budgets        map[string]domain.Budget
 	Workflows      map[string]domain.Workflow
+	Schedules      map[string]domain.Schedule
 	ManifestDigest string
 }
 
@@ -64,6 +66,7 @@ func LoadPath(path string) (*Bundle, error) {
 		Policies:  make(map[string]domain.Policy),
 		Budgets:   make(map[string]domain.Budget),
 		Workflows: make(map[string]domain.Workflow),
+		Schedules: make(map[string]domain.Schedule),
 	}
 
 	for _, file := range files {
@@ -156,6 +159,19 @@ func parseDocuments(source string, raw []byte, bundle *Bundle) error {
 			}
 			bundle.Workflows[wf.Metadata.Name] = wf
 
+		case domain.KindSchedule:
+			var sc domain.Schedule
+			if err := yaml.UnmarshalStrict(doc, &sc); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Schedule: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(sc.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Schedule metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Schedules[sc.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Schedule %q", source, idx+1, sc.Metadata.Name)
+			}
+			bundle.Schedules[sc.Metadata.Name] = sc
+
 		default:
 			return fmt.Errorf("%s (doc %d): unsupported kind %q", source, idx+1, meta.Kind)
 		}
@@ -232,6 +248,24 @@ func validateBundle(bundle *Bundle) error {
 			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
 				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
 			}
+		}
+	}
+
+	for name, sc := range bundle.Schedules {
+		if _, err := cron.ParseStandard(sc.Spec.Cron); err != nil {
+			return fmt.Errorf("schedule %q: invalid cron expression %q: %w", name, sc.Spec.Cron, err)
+		}
+		switch sc.Spec.TargetKind {
+		case "workload":
+			if _, ok := bundle.Workloads[sc.Spec.TargetName]; !ok {
+				return fmt.Errorf("schedule %q: target workload %q not found", name, sc.Spec.TargetName)
+			}
+		case "workflow":
+			if _, ok := bundle.Workflows[sc.Spec.TargetName]; !ok {
+				return fmt.Errorf("schedule %q: target workflow %q not found", name, sc.Spec.TargetName)
+			}
+		default:
+			return fmt.Errorf("schedule %q: targetKind must be workload or workflow (got %q)", name, sc.Spec.TargetKind)
 		}
 	}
 	return nil
