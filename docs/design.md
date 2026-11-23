@@ -21,7 +21,7 @@ Sablecourt avoids reimplementing standard protocols or low-level drivers in v0.1
 | Embedded SQLite | `modernc.org/sqlite` | Pure Go SQLite driver with WAL support and zero CGO, keeping `go test -race ./...` and cross-compilation simple. |
 | MCP server and client | `github.com/modelcontextprotocol/go-sdk` | Official Go SDK with Streamable HTTP transport and typed tool schemas for the Data/Action Gate. |
 | A2A task envelopes | `github.com/a2aproject/a2a-go` | Official Go types for Agent Cards, stateful Task envelopes, and typed Artifacts. |
-| Container runtime | `github.com/docker/docker/client` | Moby Go SDK; one Docker Engine API client works across Docker Desktop, OrbStack, Colima, Podman sockets, and Linux Docker. |
+| Container runtime | `github.com/moby/moby/client` | Moby Go SDK; one Docker Engine API client works across Docker Desktop, OrbStack, Colima, Podman sockets, and Linux Docker. |
 | OS credential storage | `github.com/zalando/go-keyring` | Reads raw upstream keys from macOS Keychain or Linux Secret Service, paired with a `0600` file fallback for headless Linux and CI. |
 | Observability | `go.opentelemetry.io/otel` + `log/slog` | Standard traces and metrics alongside structured JSON logs. |
 | CLI framework | `github.com/spf13/cobra` | Subcommand routing, flag parsing, and shell completions for `sablectl` and `sablecourtd`. |

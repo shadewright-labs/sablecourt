@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sablecourt Control Plane</title>
+  <style>
+    :root {
+      --bg-night: #08060E;
+      --bg-slate: #111422;
+      --accent-indigo: #4C1D95;
+      --text-bone: #EFE9DC;
+      --text-muted: #DDD6CA;
+      --accent-jade: #2DD4BF;
+      --status-amber: #F0B86A;
+      --status-red: #F87171;
+      --border: #25203A;
+      --serif: "Iowan Old Style", Georgia, serif;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg-night); color: var(--text-bone); font-family: var(--sans); line-height: 1.5; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 28px; }
+    h1, h2 { font-family: var(--serif); font-weight: 600; margin: 0 0 12px; }
+    h1 { font-size: 28px; }
+    h2 { font-size: 20px; margin-top: 32px; }
+    .meta { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
+    .card { background: var(--bg-slate); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--text-muted); }
+    .mono { font-family: var(--mono); font-size: 12px; }
+    .badge { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid; }
+    .b-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
+    .b-wait { color: var(--status-amber); border-color: var(--status-amber); }
+    .b-err { color: var(--status-red); border-color: var(--status-red); }
+    .b-muted { color: var(--text-muted); border-color: var(--border); }
+    .empty { color: var(--text-muted); font-size: 13px; margin: 6px 0 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Sablecourt</h1>
+        <div class="meta">Shadewright Labs · Local-first control plane</div>
+      </div>
+      <div class="meta">Observed at {{.ObservedAt}}</div>
+    </header>
+
+    <h2>Workloads ({{len .Workloads}})</h2>
+    <div class="card">
+      {{if .Workloads}}
+      <table>
+        <thead><tr><th>Name</th><th>Zone</th><th>Class</th><th>Manifest digest</th></tr></thead>
+        <tbody>
+          {{range .Workloads}}
+          <tr>
+            <td class="mono">{{.Name}}</td>
+            <td><span class="badge {{if eq (printf "%s" .Zone) "sandbox"}}b-wait{{else}}b-ok{{end}}">{{.Zone}}</span></td>
+            <td class="mono">{{.Class}}</td>
+            <td class="mono">{{.ManifestDigest}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}<p class="empty">No workloads registered.</p>{{end}}
+    </div>
+
+    <h2>Pending approvals ({{len .Approvals}})</h2>
+    <div class="card">
+      {{if .Approvals}}
+      <table>
+        <thead><tr><th>ID</th><th>Workload</th><th>Capability</th><th>Pinned SHA-256</th><th>Expires</th></tr></thead>
+        <tbody>
+          {{range .Approvals}}
+          <tr>
+            <td class="mono">{{.ID}}</td>
+            <td class="mono">{{.WorkloadName}}</td>
+            <td class="mono">{{.Capability}}</td>
+            <td class="mono">{{.PayloadSHA256}}</td>
+            <td class="mono">{{.ExpiresAt.Format "2006-01-02 15:04:05Z"}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}<p class="empty">No pending approvals.</p>{{end}}
+    </div>
+
+    <h2>Tasks ({{len .Tasks}})</h2>
+    <div class="card">
+      {{if .Tasks}}
+      <table>
+        <thead><tr><th>ID</th><th>Workload</th><th>State</th><th>Parent</th><th>Last heartbeat</th></tr></thead>
+        <tbody>
+          {{range .Tasks}}
+          <tr>
+            <td class="mono">{{.ID}}</td>
+            <td class="mono">{{.WorkloadName}}</td>
+            <td><span class="badge {{if eq (printf "%s" .State) "failed"}}b-err{{else if eq (printf "%s" .State) "input-required"}}b-wait{{else if eq (printf "%s" .State) "working"}}b-ok{{else}}b-muted{{end}}">{{.State}}</span></td>
+            <td class="mono">{{if .ParentTaskID}}{{.ParentTaskID}}{{else}}-{{end}}</td>
+            <td class="mono">{{if .LastHeartbeatAt}}{{.LastHeartbeatAt.Format "15:04:05Z"}}{{else}}none{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}<p class="empty">No tasks submitted.</p>{{end}}
+    </div>
+
+    <h2>Recent audit events ({{len .Audit}})</h2>
+    <div class="card">
+      {{if .Audit}}
+      <table>
+        <thead><tr><th>Time</th><th>Category</th><th>Workload</th><th>Action</th><th>Outcome</th></tr></thead>
+        <tbody>
+          {{range .Audit}}
+          <tr>
+            <td class="mono">{{.CreatedAt.Format "15:04:05Z"}}</td>
+            <td class="mono">{{.Category}}</td>
+            <td class="mono">{{.WorkloadName}}</td>
+            <td class="mono">{{.Action}}</td>
+            <td><span class="badge {{if eq .Outcome "denied"}}b-err{{else if eq .Outcome "pending"}}b-wait{{else}}b-ok{{end}}">{{.Outcome}}</span></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}<p class="empty">No audit records yet.</p>{{end}}
+    </div>
+  </div>
+</body>
+</html>

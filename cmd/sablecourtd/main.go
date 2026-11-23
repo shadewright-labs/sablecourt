@@ -16,13 +16,19 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
+	"github.com/shadewright-labs/sablecourt/internal/ui"
 )
 
 func main() {
@@ -121,7 +127,46 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		Approvals: approvalQueue,
 	})
 
-	mux := newHandler(st, modelGate, dataActionGate, approvalQueue)
+	adapters := map[domain.WorkloadClass]scruntime.Adapter{
+		domain.ClassCodingAgent: coding.NewAdapter(os.TempDir()),
+	}
+	if dockerAdapter, err := docker.NewFromEnv(); err == nil {
+		adapters[domain.ClassLongLivedAgent] = dockerAdapter
+		adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
+	} else {
+		logger.Warn("docker runtime unavailable", "error", err)
+	}
+
+	reconciler := controlplane.NewReconciler(controlplane.Options{
+		Store:        st,
+		Bundle:       bundle,
+		Policy:       policyEng,
+		Adapters:     adapters,
+		ModelGateURL: "http://" + listenAddr + "/gate/model",
+		DataGateURL:  "http://" + listenAddr + "/gate/mcp",
+	})
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if bundle != nil {
+					_ = reconciler.ReconcileOnce(ctx)
+				}
+			}
+		}
+	}()
+
+	dash, err := ui.NewDashboard(st)
+	if err != nil {
+		return fmt.Errorf("init web ui: %w", err)
+	}
+
+	mux := newHandler(st, modelGate, dataActionGate, approvalQueue, reconciler, dash)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -147,8 +192,11 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 	}
 }
 
-func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue) http.Handler {
+func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	if dash != nil {
+		mux.Handle("GET /{$}", dash)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -162,6 +210,31 @@ func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.G
 	})
 	mux.HandleFunc("GET /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListTasks(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	})
+	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Workload       string `json:"workload"`
+			IdempotencyKey string `json:"idempotencyKey"`
+			InputJSON      string `json:"inputJson"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		task, err := reconciler.SubmitTask(r.Context(), body.Workload, body.IdempotencyKey, body.InputJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, task)
+	})
+	mux.HandleFunc("GET /api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
+		items, err := st.ListAudit(r.Context(), 50)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
