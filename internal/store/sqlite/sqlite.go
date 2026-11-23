@@ -580,12 +580,29 @@ func (s *SQLiteStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTotal
 }
 
 func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO audit_log (category, task_id, workload_name, action, outcome, detail_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prevHash := "genesis"
+	var last string
+	if err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last); err == nil && last != "" {
+		prevHash = last
+	}
+	rec.DetailJSON = defaultJSON(rec.DetailJSON, "{}")
+	createdStr := formatTime(rec.CreatedAt)
+	rowHash := domain.ComputeAuditRowHash(prevHash, rec, createdStr)
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_log (category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome,
-		defaultJSON(rec.DetailJSON, "{}"), formatTime(rec.CreatedAt))
-	return err
+		rec.DetailJSON, prevHash, rowHash, createdStr); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error) {
@@ -593,7 +610,7 @@ func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditR
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, category, task_id, workload_name, action, outcome, detail_json, created_at
+		SELECT id, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
 		FROM audit_log
 		ORDER BY id DESC
 		LIMIT ?
@@ -607,13 +624,49 @@ func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditR
 	for rows.Next() {
 		var rec domain.AuditRecord
 		var created string
-		if err := rows.Scan(&rec.ID, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &created); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
 			return nil, err
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) VerifyAuditChain(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
+		FROM audit_log
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	expectedPrev := "genesis"
+	verified := 0
+	for rows.Next() {
+		var rec domain.AuditRecord
+		var created string
+		if err := rows.Scan(&rec.ID, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
+			return verified, err
+		}
+		if rec.RowHash == "" {
+			// Legacy pre-migration row without chain hash.
+			continue
+		}
+		if rec.PrevHash != expectedPrev {
+			return verified, fmt.Errorf("audit chain broken at row %d: prev_hash=%q expected=%q", rec.ID, rec.PrevHash, expectedPrev)
+		}
+		want := domain.ComputeAuditRowHash(rec.PrevHash, rec, created)
+		if rec.RowHash != want {
+			return verified, fmt.Errorf("audit row %d tampered: row_hash=%q computed=%q", rec.ID, rec.RowHash, want)
+		}
+		expectedPrev = rec.RowHash
+		verified++
+	}
+	return verified, rows.Err()
 }
 
 func (s *SQLiteStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error {

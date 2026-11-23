@@ -69,7 +69,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	}
 
 	attachHub := attach.NewHub()
-	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, conclaveBroker, attachHub, nil, dash)
+	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), conclaveBroker, attachHub, nil, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
