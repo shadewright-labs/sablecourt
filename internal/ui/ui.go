@@ -150,6 +150,7 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /ui/tasks", d.handleSubmitTask)
 	mux.HandleFunc("POST /ui/tasks/{id}/cancel", d.handleCancelTask)
+	mux.HandleFunc("POST /ui/tasks/{id}/messages", d.handlePostMessage)
 	mux.HandleFunc("POST /ui/approvals/{id}/approve", d.handleApprove)
 	mux.HandleFunc("POST /ui/approvals/{id}/deny", d.handleDeny)
 	mux.HandleFunc("POST /ui/providers/{id}/connect", d.handleProviderConnect)
@@ -243,6 +244,7 @@ func (d *Dashboard) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, _ := d.store.ListTaskEvents(ctx, id)
+	messages, _ := d.store.ListTaskMessages(ctx, id)
 	budget, _ := d.store.TaskBudgetTotals(ctx, id)
 	cancelable := task.State == domain.TaskStateSubmitted || task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired
 
@@ -250,10 +252,26 @@ func (d *Dashboard) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	_ = d.taskTmpl.Execute(w, map[string]any{
 		"Task":       task,
 		"Events":     events,
+		"Messages":   messages,
 		"Budget":     budget,
 		"CostUSD":    fmt.Sprintf("%.4f", float64(budget.CostMicroUSD)/1_000_000.0),
 		"Cancelable": cancelable,
 	})
+}
+
+func (d *Dashboard) handlePostMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	_ = r.ParseForm()
+	content := strings.TrimSpace(r.FormValue("content"))
+	if content != "" {
+		_ = d.store.AppendTaskMessage(r.Context(), domain.TaskMessage{
+			TaskID:    id,
+			Role:      "user",
+			Content:   content,
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+	http.Redirect(w, r, "/tasks/"+id, http.StatusSeeOther)
 }
 
 func (d *Dashboard) handleCancelTask(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +449,7 @@ func (d *Dashboard) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	if class == domain.ClassCodingAgent {
 		harness := target
-		if harness != "claude" && harness != "codex" {
+		if harness != "claude" && harness != "codex" && harness != "agy" {
 			harness = "claude"
 		}
 		wl.Spec.Runtime = domain.RuntimeConfig{Type: "worktree-cli"}

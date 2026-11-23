@@ -141,6 +141,14 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 	if err := r.store.CreateTask(ctx, task); err != nil {
 		return domain.Task{}, err
 	}
+	if inputJSON != "" && inputJSON != "{}" {
+		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+			TaskID:    task.ID,
+			Role:      "user",
+			Content:   inputJSON,
+			CreatedAt: now,
+		})
+	}
 	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       task.ID,
@@ -299,6 +307,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 				r.mu.Lock()
 				delete(r.handles, task.ID)
 				r.mu.Unlock()
+				r.advanceWorkflowStep(ctx, task)
 			case scruntime.StateFailed:
 				r.persistArtifacts(ctx, task.ID, adapter, handle)
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateFailed, "runtime_failed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode))
@@ -346,6 +355,78 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 	_ = r.store.RecordHeartbeat(ctx, task.ID, r.now())
 	return nil
+}
+
+func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) {
+	var meta struct {
+		Workflow  string `json:"workflow"`
+		StepIndex int    `json:"step_index"`
+		Input     string `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(completedTask.InputJSON), &meta); err != nil || meta.Workflow == "" {
+		return
+	}
+	r.mu.Lock()
+	b := r.bundle
+	r.mu.Unlock()
+	if b == nil {
+		return
+	}
+	wf, ok := b.Workflows[meta.Workflow]
+	if !ok {
+		return
+	}
+	nextIdx := meta.StepIndex + 1
+	if nextIdx >= len(wf.Spec.Steps) {
+		return
+	}
+	nextStep := wf.Spec.Steps[nextIdx]
+	payload := map[string]any{
+		"workflow":   meta.Workflow,
+		"step":       nextStep.Name,
+		"step_index": nextIdx,
+		"prompt":     nextStep.Prompt,
+		"input":      meta.Input,
+	}
+	if nextStep.Provider != "" {
+		payload["provider"] = nextStep.Provider
+	}
+	if nextStep.Model != "" {
+		payload["model"] = nextStep.Model
+	}
+	raw, _ := json.Marshal(payload)
+	nextID, err := newTaskID()
+	if err != nil {
+		return
+	}
+	now := r.now()
+	child := domain.Task{
+		ID:             nextID,
+		ParentTaskID:   completedTask.ID,
+		IdempotencyKey: fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx),
+		WorkloadName:   nextStep.Workload,
+		State:          domain.TaskStateSubmitted,
+		InputJSON:      string(raw),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := r.store.CreateTask(ctx, child); err == nil {
+		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+			TaskID:    child.ID,
+			Role:      "system",
+			Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
+			CreatedAt: now,
+		})
+		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+			Category:     "workflow",
+			TaskID:       child.ID,
+			WorkloadName: nextStep.Workload,
+			Action:       "workflow.advance",
+			Outcome:      "submitted",
+			DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step":%q,"step_index":%d,"parent_task_id":%q}`, meta.Workflow, nextStep.Name, nextIdx, completedTask.ID),
+			CreatedAt:    now,
+		})
+	}
 }
 
 func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) {

@@ -275,6 +275,39 @@ func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]doma
 	return out, rows.Err()
 }
 
+func (s *SQLiteStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO task_messages (task_id, role, content, created_at)
+		VALUES (?, ?, ?, ?)
+	`, msg.TaskID, msg.Role, msg.Content, formatTime(msg.CreatedAt))
+	return err
+}
+
+func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]domain.TaskMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, task_id, role, content, created_at
+		FROM task_messages
+		WHERE task_id = ?
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.TaskMessage
+	for rows.Next() {
+		var m domain.TaskMessage
+		var created string
+		if err := rows.Scan(&m.ID, &m.TaskID, &m.Role, &m.Content, &created); err != nil {
+			return nil, err
+		}
+		m.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

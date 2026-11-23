@@ -199,6 +199,14 @@ type TaskEvent struct {
 	CreatedAt time.Time
 }
 
+type TaskMessage struct {
+	ID        int64
+	TaskID    string
+	Role      string // user | agent | system
+	Content   string
+	CreatedAt time.Time
+}
+
 type Lease struct {
 	TokenSHA256  string
 	TaskID       string
