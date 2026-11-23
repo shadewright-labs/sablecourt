@@ -145,5 +145,24 @@
       </aside>
     </div>
   </div>
+  <script>
+    (function() {
+      let lastFp = null;
+      const bodyEl = document.getElementById("body");
+      const es = new EventSource("/api/v1/conclaves/{{.Session.ID}}/stream");
+      es.addEventListener("state", function(e) {
+        if (lastFp === null) {
+          lastFp = e.data;
+          return;
+        }
+        if (e.data !== lastFp) {
+          lastFp = e.data;
+          if (!bodyEl || document.activeElement !== bodyEl || bodyEl.value.trim() === "") {
+            window.location.reload();
+          }
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

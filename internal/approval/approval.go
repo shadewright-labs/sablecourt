@@ -42,9 +42,10 @@ type Approver interface {
 }
 
 type Queue struct {
-	store    store.Store
-	approver Approver
-	now      func() time.Time
+	store       store.Store
+	approver    Approver
+	now         func() time.Time
+	onRequested func(domain.Approval)
 }
 
 func NewQueue(st store.Store, approver Approver) *Queue {
@@ -53,6 +54,10 @@ func NewQueue(st store.Store, approver Approver) *Queue {
 		approver: approver,
 		now:      func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (q *Queue) SetOnRequested(fn func(domain.Approval)) {
+	q.onRequested = fn
 }
 
 func CanonicalizeAndHash(payload any) (string, string, error) {
@@ -100,6 +105,9 @@ func (q *Queue) Request(ctx context.Context, taskID, workloadName, capability st
 		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"payload_sha256":%q}`, apr.ID, apr.PayloadSHA256),
 		CreatedAt:    now,
 	})
+	if q.onRequested != nil {
+		q.onRequested(apr)
+	}
 	return apr, nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
+	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -30,6 +31,7 @@ type Options struct {
 	Store      store.Store
 	Reconciler *controlplane.Reconciler
 	GetBundle  func() *config.Bundle
+	Notifier   *notify.Notifier
 	Now        func() time.Time
 }
 
@@ -37,6 +39,7 @@ type Broker struct {
 	store      store.Store
 	reconciler *controlplane.Reconciler
 	getBundle  func() *config.Bundle
+	notifier   *notify.Notifier
 	now        func() time.Time
 }
 
@@ -49,6 +52,7 @@ func NewBroker(opts Options) *Broker {
 		store:      opts.Store,
 		reconciler: opts.Reconciler,
 		getBundle:  opts.GetBundle,
+		notifier:   opts.Notifier,
 		now:        nowFn,
 	}
 }
@@ -167,7 +171,7 @@ func (b *Broker) PostMessage(ctx context.Context, conclaveID, fromRole, toRole, 
 				})
 				return domain.ConclaveMessage{}, err
 			}
-			if wardReason, tripped := b.checkWards(ctx, conclaveID, tpl.Spec.Wards, fromRole); tripped {
+			if wardReason, tripped := b.checkWards(ctx, conclaveID, tpl, fromRole); tripped {
 				_ = b.store.UpdateConclaveState(ctx, conclaveID, domain.ConclaveStateInputRequired, wardReason)
 				_, _ = b.store.AppendConclaveMessage(ctx, domain.ConclaveMessage{
 					ConclaveID: conclaveID,
@@ -185,6 +189,16 @@ func (b *Broker) PostMessage(ctx context.Context, conclaveID, fromRole, toRole, 
 					DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"ward":%q}`, conclaveID, wardReason),
 					CreatedAt:  b.now(),
 				})
+				if b.notifier != nil {
+					go func(id, title, reason string) {
+						_ = b.notifier.Send(context.Background(), notify.Event{
+							Type:   "conclave.ward_paused",
+							Title:  "Conclave Ward tripped: " + title,
+							Detail: fmt.Sprintf("Conclave %s paused (%s). Operator Decree required.", id, reason),
+							Path:   "/conclaves/" + id,
+						})
+					}(conclaveID, session.Title, wardReason)
+				}
 				return domain.ConclaveMessage{}, fmt.Errorf("%w: %s", ErrWardTripped, wardReason)
 			}
 		}
@@ -427,12 +441,30 @@ func checkVassalCanMessage(tpl domain.Conclave, fromRole, toRole string) error {
 	return fmt.Errorf("%w: unknown vassal role %q", ErrMessageDenied, fromRole)
 }
 
-func (b *Broker) checkWards(ctx context.Context, conclaveID string, wards domain.ConclaveWards, nextFromRole string) (string, bool) {
+func (b *Broker) checkWards(ctx context.Context, conclaveID string, tpl domain.Conclave, nextFromRole string) (string, bool) {
+	wards := tpl.Spec.Wards
 	msgs, err := b.store.ListConclaveMessages(ctx, conclaveID, 0)
 	if err != nil {
 		return "", false
 	}
-	// Count non-system messages since the last operator Decree.
+	// 1. Check aggregate session budget ceiling when budgetRef is declared.
+	if tpl.Spec.BudgetRef != "" && b.getBundle != nil {
+		if bundle := b.getBundle(); bundle != nil {
+			if budget, ok := bundle.Budgets[tpl.Spec.BudgetRef]; ok {
+				totals := b.sessionBudgetTotals(ctx, conclaveID, msgs)
+				if budget.Spec.PerTask.MaxCostUSD > 0 && float64(totals.CostMicroUSD)/1_000_000.0 >= budget.Spec.PerTask.MaxCostUSD {
+					return fmt.Sprintf("budget_exceeded($%.4f >= $%.2f)", float64(totals.CostMicroUSD)/1_000_000.0, budget.Spec.PerTask.MaxCostUSD), true
+				}
+				if budget.Spec.PerTask.MaxInputTokens > 0 && totals.InputTokens >= budget.Spec.PerTask.MaxInputTokens {
+					return fmt.Sprintf("input_tokens_exceeded(%d >= %d)", totals.InputTokens, budget.Spec.PerTask.MaxInputTokens), true
+				}
+				if budget.Spec.PerTask.MaxOutputTokens > 0 && totals.OutputTokens >= budget.Spec.PerTask.MaxOutputTokens {
+					return fmt.Sprintf("output_tokens_exceeded(%d >= %d)", totals.OutputTokens, budget.Spec.PerTask.MaxOutputTokens), true
+				}
+			}
+		}
+	}
+	// 2. Count non-system messages since the last operator Decree.
 	var sinceDecree []domain.ConclaveMessage
 	for _, m := range msgs {
 		if m.FromRole == "operator" {
@@ -459,6 +491,32 @@ func (b *Broker) checkWards(ctx context.Context, conclaveID string, wards domain
 		}
 	}
 	return "", false
+}
+
+func (b *Broker) sessionBudgetTotals(ctx context.Context, conclaveID string, msgs []domain.ConclaveMessage) domain.BudgetTotals {
+	taskIDs := make(map[string]struct{})
+	for _, m := range msgs {
+		if m.TaskID != "" {
+			taskIDs[m.TaskID] = struct{}{}
+		}
+	}
+	if tasks, err := b.store.ListTasks(ctx); err == nil {
+		needle := fmt.Sprintf(`"conclaveId":%q`, conclaveID)
+		for _, t := range tasks {
+			if strings.Contains(t.InputJSON, needle) {
+				taskIDs[t.ID] = struct{}{}
+			}
+		}
+	}
+	var sum domain.BudgetTotals
+	for tid := range taskIDs {
+		if tot, err := b.store.TaskBudgetTotals(ctx, tid); err == nil {
+			sum.InputTokens += tot.InputTokens
+			sum.OutputTokens += tot.OutputTokens
+			sum.CostMicroUSD += tot.CostMicroUSD
+		}
+	}
+	return sum
 }
 
 func newID(prefix string) string {

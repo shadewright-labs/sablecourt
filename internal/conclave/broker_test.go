@@ -133,4 +133,31 @@ func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 	if err != nil || gotRelic.SHA256 != relic.SHA256 {
 		t.Fatalf("GetConclaveRelic mismatch: %v %+v", err, gotRelic)
 	}
+
+	// 7. Session budget Ward: attach a $0.50 budget, record $0.60 spend on coder's task, verify Ward trips.
+	bundle.Budgets = map[string]domain.Budget{
+		"conclave-cap": {
+			Metadata: domain.ObjectMeta{Name: "conclave-cap"},
+			Spec:     domain.BudgetSpec{PerTask: domain.PerTaskBudget{MaxCostUSD: 0.50}},
+		},
+	}
+	cc := bundle.Conclaves["feature-delivery"]
+	cc.Spec.BudgetRef = "conclave-cap"
+	bundle.Conclaves["feature-delivery"] = cc
+	if err := st.RecordBudgetUsage(ctx, domain.BudgetEntry{
+		TaskID:       tasks[0].ID,
+		WorkloadName: "coder-wl",
+		Provider:     "anthropic",
+		Model:        "claude-sonnet-4-5",
+		InputTokens:  1000,
+		OutputTokens: 500,
+		CostMicroUSD: 600_000, // $0.60 > $0.50 cap
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordBudgetUsage: %v", err)
+	}
+	_, err = broker.PostMessage(ctx, sess.ID, "coder", "reviewer", "proposal", "Another turn after budget cap", tasks[0].ID)
+	if !errors.Is(err, ErrWardTripped) || !strings.Contains(err.Error(), "budget_exceeded") {
+		t.Fatalf("expected budget_exceeded ErrWardTripped, got %v", err)
+	}
 }
