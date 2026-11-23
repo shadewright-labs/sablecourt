@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +10,11 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+const maxAgentTurns = 4
 
 type taskInput struct {
 	Prompt   string `json:"prompt"`
@@ -18,9 +23,22 @@ type taskInput struct {
 	Model    string `json:"model"`
 }
 
-// sablecourt-agent is a lightweight container runner that executes a single LLM turn
-// exclusively through Sablecourt's Model Gate and posts the reply back to the task thread.
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type toolCallDirective struct {
+	MCPTool string         `json:"mcp_tool,omitempty"`
+	Action  string         `json:"action,omitempty"`
+	Args    map[string]any `json:"args,omitempty"`
+}
+
+// sablecourt-agent executes multi-turn LLM reasoning exclusively through Sablecourt's
+// Model Gate, loads prior thread history from /gate/task/messages, and can invoke
+// allowlisted MCP tools or typed actions within a bounded turn limit.
 func main() {
+	ctx := context.Background()
 	taskID := os.Getenv("SABLECOURT_TASK_ID")
 	workload := os.Getenv("SABLECOURT_WORKLOAD")
 	token := os.Getenv("SABLECOURT_TASK_TOKEN")
@@ -40,17 +58,6 @@ func main() {
 			in.Prompt = rawIn
 		}
 	}
-	prompt := strings.TrimSpace(in.Prompt)
-	if in.Input != "" {
-		if prompt != "" {
-			prompt += "\n\nContext:\n" + in.Input
-		} else {
-			prompt = in.Input
-		}
-	}
-	if prompt == "" {
-		prompt = fmt.Sprintf("Hello from Sablecourt task %s (%s). Report readiness briefly.", taskID, workload)
-	}
 
 	provider := strings.ToLower(strings.TrimSpace(in.Provider))
 	if provider == "" {
@@ -61,21 +68,182 @@ func main() {
 		model = defaultModelFor(provider)
 	}
 
-	reply, err := callModelGate(modelGate, token, provider, model, prompt)
-	if err != nil {
-		if gateRoot != "" {
-			_ = postThreadMessage(gateRoot+"/gate/task/messages", token, "system", fmt.Sprintf("Model Gate call (%s/%s) failed: %v", provider, model, err))
+	history := loadThreadHistory(gateRoot, token)
+	if len(history) == 0 {
+		prompt := strings.TrimSpace(in.Prompt)
+		if in.Input != "" {
+			if prompt != "" {
+				prompt += "\n\nContext:\n" + in.Input
+			} else {
+				prompt = in.Input
+			}
 		}
-		fmt.Fprintf(os.Stderr, "model gate error: %v\n", err)
-		os.Exit(1)
+		if prompt == "" {
+			prompt = fmt.Sprintf("Hello from Sablecourt task %s (%s). Report readiness briefly.", taskID, workload)
+		}
+		history = append(history, chatMessage{Role: "user", Content: prompt})
 	}
 
-	fmt.Println(reply)
-	if gateRoot != "" {
-		if err := postThreadMessage(gateRoot+"/gate/task/messages", token, "agent", reply); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to post reply to thread: %v\n", err)
+	var mcpSession *mcp.ClientSession
+	if dataGate != "" {
+		if sess, toolNames, err := connectMCP(ctx, dataGate, token); err == nil {
+			mcpSession = sess
+			defer mcpSession.Close()
+			if len(toolNames) > 0 {
+				history = append([]chatMessage{{
+					Role: "user",
+					Content: fmt.Sprintf("Available MCP tools: %s. To invoke one, reply ONLY with JSON {\"mcp_tool\":\"<name>\",\"args\":{...}}.",
+						strings.Join(toolNames, ", ")),
+				}}, history...)
+			}
 		}
 	}
+
+	cli := &http.Client{Timeout: 90 * time.Second}
+	for turn := 0; turn < maxAgentTurns; turn++ {
+		reply, err := callModelGate(cli, modelGate, token, provider, model, history)
+		if err != nil {
+			if gateRoot != "" {
+				_ = postThreadMessage(gateRoot+"/gate/task/messages", token, "system", fmt.Sprintf("Model Gate call (%s/%s) failed: %v", provider, model, err))
+			}
+			fmt.Fprintf(os.Stderr, "model gate error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if dir, ok := parseToolDirective(reply); ok && turn < maxAgentTurns-1 {
+			toolOut := executeDirective(ctx, mcpSession, gateRoot, token, dir)
+			history = append(history,
+				chatMessage{Role: "assistant", Content: reply},
+				chatMessage{Role: "user", Content: "Tool result:\n" + toolOut},
+			)
+			continue
+		}
+
+		fmt.Println(reply)
+		if gateRoot != "" {
+			if err := postThreadMessage(gateRoot+"/gate/task/messages", token, "agent", reply); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to post reply to thread: %v\n", err)
+			}
+		}
+		return
+	}
+}
+
+func loadThreadHistory(gateRoot, token string) []chatMessage {
+	if gateRoot == "" {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/task/messages", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var raw []struct {
+		Role    string `json:"Role"`
+		Content string `json:"Content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil
+	}
+	out := make([]chatMessage, 0, len(raw))
+	for _, m := range raw {
+		role := "user"
+		if m.Role == "agent" {
+			role = "assistant"
+		}
+		out = append(out, chatMessage{Role: role, Content: m.Content})
+	}
+	return out
+}
+
+type authTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (a authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	cp := r.Clone(r.Context())
+	cp.Header.Set("Authorization", "Bearer "+a.token)
+	return a.base.RoundTrip(cp)
+}
+
+func connectMCP(ctx context.Context, mcpURL, token string) (*mcp.ClientSession, []string, error) {
+	cli := mcp.NewClient(&mcp.Implementation{Name: "sablecourt-agent", Version: "0.1.0"}, nil)
+	httpCli := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: authTransport{base: http.DefaultTransport, token: token},
+	}
+	sess, err := cli.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   mcpURL,
+		HTTPClient: httpCli,
+	}, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	list, err := sess.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		_ = sess.Close()
+		return nil, nil, err
+	}
+	names := make([]string, 0, len(list.Tools))
+	for _, t := range list.Tools {
+		names = append(names, t.Name)
+	}
+	return sess, names, nil
+}
+
+func parseToolDirective(reply string) (toolCallDirective, bool) {
+	trimmed := strings.TrimSpace(reply)
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return toolCallDirective{}, false
+	}
+	var dir toolCallDirective
+	if err := json.Unmarshal([]byte(trimmed), &dir); err != nil {
+		return toolCallDirective{}, false
+	}
+	if dir.MCPTool == "" && dir.Action == "" {
+		return toolCallDirective{}, false
+	}
+	return dir, true
+}
+
+func executeDirective(ctx context.Context, sess *mcp.ClientSession, gateRoot, token string, dir toolCallDirective) string {
+	if dir.MCPTool != "" {
+		if sess == nil {
+			return "error: MCP session unavailable"
+		}
+		res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: dir.MCPTool, Arguments: dir.Args})
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		var parts []string
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				parts = append(parts, tc.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	if dir.Action != "" && gateRoot != "" {
+		raw, _ := json.Marshal(map[string]any{"payload": dir.Args})
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gateRoot+"/gate/actions/"+dir.Action, bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return "error: unsupported directive"
 }
 
 func defaultModelFor(provider string) string {
@@ -91,8 +259,7 @@ func defaultModelFor(provider string) string {
 	}
 }
 
-func callModelGate(baseURL, token, provider, model, prompt string) (string, error) {
-	cli := &http.Client{Timeout: 90 * time.Second}
+func callModelGate(cli *http.Client, baseURL, token, provider, model string, history []chatMessage) (string, error) {
 	var endpoint string
 	var body []byte
 	var err error
@@ -101,27 +268,30 @@ func callModelGate(baseURL, token, provider, model, prompt string) (string, erro
 	case "openai", "local":
 		endpoint = baseURL + "/" + provider + "/v1/chat/completions"
 		body, err = json.Marshal(map[string]any{
-			"model": model,
-			"messages": []map[string]string{
-				{"role": "user", "content": prompt},
-			},
+			"model":    model,
+			"messages": history,
 		})
 	case "anthropic":
 		endpoint = baseURL + "/anthropic/v1/messages"
 		body, err = json.Marshal(map[string]any{
 			"model":      model,
 			"max_tokens": 1024,
-			"messages": []map[string]string{
-				{"role": "user", "content": prompt},
-			},
+			"messages":   history,
 		})
 	case "gemini":
 		endpoint = fmt.Sprintf("%s/gemini/v1beta/models/%s:generateContent", baseURL, model)
-		body, err = json.Marshal(map[string]any{
-			"contents": []map[string]any{
-				{"parts": []map[string]string{{"text": prompt}}},
-			},
-		})
+		contents := make([]map[string]any, 0, len(history))
+		for _, m := range history {
+			role := "user"
+			if m.Role == "assistant" {
+				role = "model"
+			}
+			contents = append(contents, map[string]any{
+				"role":  role,
+				"parts": []map[string]string{{"text": m.Content}},
+			})
+		}
+		body, err = json.Marshal(map[string]any{"contents": contents})
 	default:
 		return "", fmt.Errorf("unsupported provider %q", provider)
 	}

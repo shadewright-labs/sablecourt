@@ -35,6 +35,7 @@ import (
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 	"github.com/shadewright-labs/sablecourt/internal/telemetry"
 	"github.com/shadewright-labs/sablecourt/internal/ui"
@@ -43,8 +44,9 @@ import (
 
 func main() {
 	var (
-		dbPath           string
-		manifestsPath    string
+		dbPath          string
+		postgresDSN     string
+		manifestsPath   string
 		listenAddr       string
 		socketPath       string
 		gateHost         string
@@ -62,6 +64,7 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon(cmd.Context(), daemonConfig{
 				dbPath:          dbPath,
+				postgresDSN:     postgresDSN,
 				manifestsPath:   manifestsPath,
 				listenAddr:      listenAddr,
 				socketPath:      socketPath,
@@ -77,6 +80,7 @@ func main() {
 	}
 
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
+	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
@@ -99,6 +103,7 @@ func main() {
 
 type daemonConfig struct {
 	dbPath          string
+	postgresDSN     string
 	manifestsPath   string
 	listenAddr      string
 	socketPath      string
@@ -126,7 +131,22 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		manifestsPath = discoverManifestsPath()
 	}
 
-	st, err := sqlite.Open(dbPath)
+	pgDSN := cfg.postgresDSN
+	if pgDSN == "" {
+		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
+	}
+	var (
+		st  store.Store
+		err error
+	)
+	if pgDSN != "" {
+		st, err = postgres.Open(pgDSN)
+		if err == nil {
+			logger.Info("using postgres store")
+		}
+	} else {
+		st, err = sqlite.Open(dbPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -578,6 +598,25 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		writeJSON(w, http.StatusOK, apr)
+	})
+	mux.HandleFunc("GET /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
+			return
+		}
+		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+			return
+		}
+		msgs, err := st.ListTaskMessages(r.Context(), lease.TaskID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, msgs)
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
