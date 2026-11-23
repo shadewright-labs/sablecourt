@@ -130,3 +130,52 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 		t.Fatalf("Web UI failed: code=%d", rec.Code)
 	}
 }
+
+func TestOperatorAuthRequiredMiddleware(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// 1. Fail closed when operator_bearer_token is missing.
+	emptyStore := secret.NewMemoryStore(nil)
+	hEmpty := requireOperatorAuth(okHandler, emptyStore)
+	rec := httptest.NewRecorder()
+	hEmpty.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when token missing from store, got %d", rec.Code)
+	}
+
+	// 2. Configured token allows public/self-authenticated routes and enforces bearer on operator routes.
+	sec := secret.NewMemoryStore(map[string]string{"operator_bearer_token": "op-secret-123"})
+	h := requireOperatorAuth(okHandler, sec)
+
+	for _, openPath := range []string{"/healthz", "/.well-known/agent-card.json", "/gate/model/v1/chat/completions", "/api/v1/hooks/github", "/a2a"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, openPath, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected %s to bypass operator auth, got %d", openPath, rec.Code)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without Authorization header, got %d", rec.Code)
+	}
+
+	reqWrong := httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil)
+	reqWrong.Header.Set("Authorization", "Bearer wrong-token")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, reqWrong)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", rec.Code)
+	}
+
+	reqOK := httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil)
+	reqOK.Header.Set("Authorization", "Bearer op-secret-123")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, reqOK)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid operator token, got %d", rec.Code)
+	}
+}

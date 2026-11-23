@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,9 +54,10 @@ func main() {
 		secretFile       string
 		repoRoot         string
 		runtimeBackend   string
-		k8sNamespace     string
-		k8sRuntimeClass  string
-		kubeconfigPath   string
+		k8sNamespace         string
+		k8sRuntimeClass      string
+		kubeconfigPath       string
+		operatorAuthRequired bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -63,18 +65,19 @@ func main() {
 		Short: "Sablecourt local-first control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon(cmd.Context(), daemonConfig{
-				dbPath:          dbPath,
-				postgresDSN:     postgresDSN,
-				manifestsPath:   manifestsPath,
-				listenAddr:      listenAddr,
-				socketPath:      socketPath,
-				gateHost:        gateHost,
-				secretFile:      secretFile,
-				repoRoot:        repoRoot,
-				runtimeBackend:  runtimeBackend,
-				k8sNamespace:    k8sNamespace,
-				k8sRuntimeClass: k8sRuntimeClass,
-				kubeconfigPath:  kubeconfigPath,
+				dbPath:               dbPath,
+				postgresDSN:          postgresDSN,
+				manifestsPath:        manifestsPath,
+				listenAddr:           listenAddr,
+				socketPath:           socketPath,
+				gateHost:             gateHost,
+				secretFile:           secretFile,
+				repoRoot:             repoRoot,
+				runtimeBackend:       runtimeBackend,
+				k8sNamespace:         k8sNamespace,
+				k8sRuntimeClass:      k8sRuntimeClass,
+				kubeconfigPath:       kubeconfigPath,
+				operatorAuthRequired: operatorAuthRequired,
 			})
 		},
 	}
@@ -91,6 +94,7 @@ func main() {
 	rootCmd.Flags().StringVar(&k8sNamespace, "k8s-namespace", "default", "Kubernetes namespace when --runtime=k8s")
 	rootCmd.Flags().StringVar(&k8sRuntimeClass, "k8s-runtime-class", "", "Optional Kubernetes RuntimeClassName (e.g. gvisor, kata)")
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
+	rootCmd.Flags().BoolVar(&operatorAuthRequired, "operator-auth-required", false, "Require Authorization: Bearer <operator_bearer_token> on operator UI and API routes")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -102,18 +106,19 @@ func main() {
 }
 
 type daemonConfig struct {
-	dbPath          string
-	postgresDSN     string
-	manifestsPath   string
-	listenAddr      string
-	socketPath      string
-	gateHost        string
-	secretFile      string
-	repoRoot        string
-	runtimeBackend  string
-	k8sNamespace    string
-	k8sRuntimeClass string
-	kubeconfigPath  string
+	dbPath               string
+	postgresDSN          string
+	manifestsPath        string
+	listenAddr           string
+	socketPath           string
+	gateHost             string
+	secretFile           string
+	repoRoot             string
+	runtimeBackend       string
+	k8sNamespace         string
+	k8sRuntimeClass      string
+	kubeconfigPath       string
+	operatorAuthRequired bool
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -328,6 +333,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 
 	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, provReg, dash)
+	if cfg.operatorAuthRequired {
+		logger.Info("operator bearer authentication enabled on UI and API routes")
+		mux = requireOperatorAuth(mux, secretStore)
+	}
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -758,4 +767,45 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/healthz" ||
+			p == "/.well-known/agent-card.json" ||
+			p == "/favicon.ico" ||
+			p == "/apple-touch-icon.png" ||
+			strings.HasPrefix(p, "/assets/") ||
+			strings.HasPrefix(p, "/gate/") ||
+			p == "/api/v1/hooks/github" ||
+			p == "/a2a" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if secrets == nil {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
+			return
+		}
+		want, err := secrets.Get(r.Context(), "operator_bearer_token")
+		if err != nil || strings.TrimSpace(want) == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator bearer token required"})
+			return
+		}
+		got := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(want))) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid operator bearer token"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

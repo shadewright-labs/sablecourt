@@ -29,6 +29,7 @@ func main() {
 		apiURL     string
 		socketPath string
 		secretFile string
+		opToken    string
 		jsonOut    bool
 	)
 
@@ -39,20 +40,28 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api", "http://127.0.0.1:7432", "sablecourtd HTTP API base URL")
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", "", "Optional sablecourtd Unix domain socket path")
 	rootCmd.PersistentFlags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file instead of OS Keychain")
+	rootCmd.PersistentFlags().StringVar(&opToken, "token", "", "Optional operator bearer token (or set SABLECOURT_OPERATOR_TOKEN)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output raw JSON instead of styled tables")
 
 	httpClient := func(timeout time.Duration) (*http.Client, string) {
-		if socketPath != "" {
-			return &http.Client{
-				Timeout: timeout,
-				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-						return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-					},
-				},
-			}, "http://unix"
+		tok := strings.TrimSpace(opToken)
+		if tok == "" {
+			tok = strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
 		}
-		return &http.Client{Timeout: timeout}, strings.TrimRight(apiURL, "/")
+		var baseRT http.RoundTripper = http.DefaultTransport
+		baseURL := strings.TrimRight(apiURL, "/")
+		if socketPath != "" {
+			baseRT = &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+				},
+			}
+			baseURL = "http://unix"
+		}
+		if tok != "" {
+			baseRT = &bearerTransport{base: baseRT, token: tok}
+		}
+		return &http.Client{Timeout: timeout, Transport: baseRT}, baseURL
 	}
 
 	validateCmd := &cobra.Command{
@@ -635,4 +644,15 @@ func writeJSONOut(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
 }

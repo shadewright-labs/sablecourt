@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sablecourtd
+  namespace: sablecourt
+spec:
+  template:
+    spec:
+      containers:
+        - name: sablecourtd
+          args:
+            - --listen=0.0.0.0:7432
+            - --gate-host=sablecourtd.sablecourt.svc:7432
+            - --runtime=k8s
+            - --k8s-namespace=sablecourt
+            - --db=/var/lib/sablecourt/sablecourt.db
+            - --manifests=/etc/sablecourt/manifests
+            - --secret-file=/run/secrets/sablecourt/secrets.json
+            - --operator-auth-required=true
