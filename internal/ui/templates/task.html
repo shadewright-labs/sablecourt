@@ -11,43 +11,73 @@
     :root {
       --bg-night: #08060E;
       --bg-slate: #111422;
+      --bg-elevated: #171B2E;
       --accent-indigo: #4C1D95;
       --text-bone: #EFE9DC;
-      --text-muted: #B9B2A6;
+      --text-muted: #A9A39A;
       --accent-jade: #2DD4BF;
       --status-amber: #F0B86A;
       --status-red: #F87171;
-      --border: #25203A;
+      --border: rgba(255, 255, 255, 0.08);
       --serif: "Iowan Old Style", Georgia, serif;
       --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg-night); color: var(--text-bone); font-family: var(--sans); line-height: 1.5; }
-    .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 24px 64px; }
-    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 24px 64px; }
+    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 22px; }
     header img { height: 46px; width: auto; display: block; }
-    a { color: var(--accent-jade); text-decoration: none; font-family: var(--mono); font-size: 12px; }
-    a:hover { text-decoration: underline; }
+    a.back-btn {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+      border-radius: 7px; border: 1px solid var(--border);
+      background: linear-gradient(180deg, #1A1E33 0%, #121526 100%);
+      color: var(--text-bone); font-family: var(--mono); font-size: 12px; text-decoration: none;
+    }
+    a.back-btn:hover { border-color: rgba(45,212,191,0.4); }
     h1, h2 { font-family: var(--serif); font-weight: 600; margin: 0 0 12px; }
     h1 { font-size: 24px; }
-    h2 { font-size: 18px; margin-top: 28px; }
-    .card { background: var(--bg-slate); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
+    h2 { font-size: 18px; margin-top: 26px; }
+    .card { background: linear-gradient(180deg, #14182B 0%, #0F1220 100%); border: 1px solid var(--border); border-radius: 9px; padding: 16px; margin-bottom: 18px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
-    .label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--text-muted); }
+    .label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
     .val { font-family: var(--mono); font-size: 13px; color: var(--text-bone); margin-top: 4px; }
-    .badge { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid; background: var(--bg-night); }
-    .b-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
-    .b-wait { color: var(--status-amber); border-color: var(--status-amber); }
-    .b-err { color: var(--status-red); border-color: var(--status-red); }
+    .badge { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid; background: var(--bg-night); }
+    .b-ok { color: #5EEAD4; border-color: rgba(45,212,191,0.4); background: rgba(45,212,191,0.10); }
+    .b-wait { color: #F6D29E; border-color: rgba(240,184,106,0.4); background: rgba(240,184,106,0.10); }
+    .b-err { color: #FCA5A5; border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.10); }
     .b-muted { color: var(--text-muted); border-color: var(--border); }
+
+    .msg { padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); background: rgba(8,6,14,0.75); margin-bottom: 10px; }
+    .msg-user { border-left: 3px solid var(--accent-jade); }
+    .msg-agent { border-left: 3px solid #A78BFA; }
+    .msg-system { border-left: 3px solid var(--status-amber); }
+    .msg-head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
+    .msg-body { font-family: var(--mono); font-size: 12px; color: var(--text-bone); white-space: pre-wrap; word-break: break-word; }
+
+    textarea { width: 100%; min-height: 70px; background: rgba(8,6,14,0.85); color: var(--text-bone); border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; font-family: var(--mono); font-size: 12px; margin-bottom: 10px; resize: vertical; }
+    textarea:focus { outline: none; border-color: rgba(45,212,191,0.45); }
+
+    button {
+      font-family: var(--sans); font-size: 12px; font-weight: 500;
+      padding: 8px 14px; border-radius: 7px; cursor: pointer;
+      color: #F5F2EA;
+      border: 1px solid rgba(45, 212, 191, 0.36);
+      background: linear-gradient(180deg, rgba(45, 212, 191, 0.20) 0%, rgba(76, 29, 149, 0.32) 100%);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    button:hover { background: linear-gradient(180deg, rgba(45, 212, 191, 0.28) 0%, rgba(76, 29, 149, 0.42) 100%); }
+    button.btn-deny {
+      background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(248, 113, 113, 0.06) 100%);
+      border-color: rgba(248, 113, 113, 0.30);
+      color: #FCA5A5;
+    }
+
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
     th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--text-muted); }
     .mono { font-family: var(--mono); font-size: 12px; }
-    pre { background: var(--bg-night); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin: 0; }
-    button { font-family: var(--mono); font-size: 12px; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--status-red); background: var(--bg-night); color: var(--status-red); cursor: pointer; }
-    button:hover { background: #1B1522; }
+    pre { background: rgba(8,6,14,0.85); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin: 0; }
     .top-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   </style>
 </head>
@@ -55,14 +85,14 @@
   <div class="wrap">
     <header>
       <a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt"></a>
-      <a href="/">&larr; Back to dashboard</a>
+      <a class="back-btn" href="/">&larr; Back to cockpit</a>
     </header>
 
     <div class="top-row">
       <h1>Task <span class="mono">{{.Task.ID}}</span></h1>
       {{if .Cancelable}}
       <form method="POST" action="/ui/tasks/{{.Task.ID}}/cancel">
-        <button type="submit">Cancel task</button>
+        <button type="submit" class="btn-deny">Cancel task</button>
       </form>
       {{end}}
     </div>
@@ -90,6 +120,28 @@
       </div>
     </div>
 
+    <h2>Thread ({{len .Messages}})</h2>
+    <div class="card">
+      {{if .Messages}}
+        {{range .Messages}}
+        <div class="msg msg-{{.Role}}">
+          <div class="msg-head">
+            <span>{{.Role}}</span>
+            <span>{{.CreatedAt.Format "15:04:05Z"}}</span>
+          </div>
+          <div class="msg-body">{{.Content}}</div>
+        </div>
+        {{end}}
+      {{else}}
+        <p class="mono" style="color:var(--text-muted);margin-top:0;">No messages in this thread yet.</p>
+      {{end}}
+
+      <form method="POST" action="/ui/tasks/{{.Task.ID}}/messages" style="margin-top:14px;">
+        <textarea name="content" placeholder="Add a follow-up instruction or operator note to this task thread..." required></textarea>
+        <button type="submit">Post message</button>
+      </form>
+    </div>
+
     <h2>State transitions ({{len .Events}})</h2>
     <div class="card">
       {{if .Events}}
@@ -107,11 +159,6 @@
         </tbody>
       </table>
       {{else}}<p class="mono" style="color:var(--text-muted)">No state transitions recorded yet.</p>{{end}}
-    </div>
-
-    <h2>Input payload</h2>
-    <div class="card">
-      <pre>{{.Task.InputJSON}}</pre>
     </div>
 
     <h2>Artifacts</h2>

@@ -34,7 +34,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return scruntime.Handle{}, errors.New("coding config is required")
 	}
 	cfg := spec.Workload.Spec.Coding
-	if cfg.Harness != "claude" && cfg.Harness != "codex" {
+	if cfg.Harness != "claude" && cfg.Harness != "codex" && cfg.Harness != "agy" {
 		return scruntime.Handle{}, fmt.Errorf("unsupported coding harness %q", cfg.Harness)
 	}
 
@@ -194,6 +194,9 @@ func buildCommand(harness, sandbox, workDir, prompt string) (string, []string, e
 	case "codex":
 		baseBin = "codex"
 		baseArgs = []string{"exec", prompt}
+	case "agy":
+		baseBin = "agy"
+		baseArgs = []string{"-p", prompt}
 	default:
 		return "", nil, fmt.Errorf("unsupported harness %q", harness)
 	}

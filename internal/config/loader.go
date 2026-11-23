@@ -247,7 +247,7 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		if w.Spec.Coding == nil {
 			return fmt.Errorf("workload %q: coding config is required for class %q", name, w.Spec.Class)
 		}
-		if w.Spec.Coding.Harness != "claude" && w.Spec.Coding.Harness != "codex" {
+		if w.Spec.Coding.Harness != "claude" && w.Spec.Coding.Harness != "codex" && w.Spec.Coding.Harness != "agy" {
 			return fmt.Errorf("workload %q: unsupported coding harness %q", name, w.Spec.Coding.Harness)
 		}
 		if strings.TrimSpace(w.Spec.Coding.RepoPath) == "" {
