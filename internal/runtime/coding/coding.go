@@ -308,7 +308,10 @@ func buildCommand(harness, sandbox, workDir, prompt string) (string, []string, e
 }
 
 func createWorktree(ctx context.Context, repoPath, worktreeDir, branch string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-b", branch, worktreeDir)
+	if strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("invalid worktree branch name %q", branch)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-b", branch, "--", worktreeDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git worktree add: %w (%s)", err, strings.TrimSpace(string(out)))
