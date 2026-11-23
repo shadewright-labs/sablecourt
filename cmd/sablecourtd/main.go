@@ -31,6 +31,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -40,20 +41,36 @@ import (
 
 func main() {
 	var (
-		dbPath        string
-		manifestsPath string
-		listenAddr    string
-		socketPath    string
-		gateHost      string
-		secretFile    string
-		repoRoot      string
+		dbPath           string
+		manifestsPath    string
+		listenAddr       string
+		socketPath       string
+		gateHost         string
+		secretFile       string
+		repoRoot         string
+		runtimeBackend   string
+		k8sNamespace     string
+		k8sRuntimeClass  string
+		kubeconfigPath   string
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "sablecourtd",
 		Short: "Sablecourt local-first control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, socketPath, gateHost, secretFile, repoRoot)
+			return runDaemon(cmd.Context(), daemonConfig{
+				dbPath:          dbPath,
+				manifestsPath:   manifestsPath,
+				listenAddr:      listenAddr,
+				socketPath:      socketPath,
+				gateHost:        gateHost,
+				secretFile:      secretFile,
+				repoRoot:        repoRoot,
+				runtimeBackend:  runtimeBackend,
+				k8sNamespace:    k8sNamespace,
+				k8sRuntimeClass: k8sRuntimeClass,
+				kubeconfigPath:  kubeconfigPath,
+			})
 		},
 	}
 
@@ -64,6 +81,10 @@ func main() {
 	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
+	rootCmd.Flags().StringVar(&runtimeBackend, "runtime", "docker", "Container runtime backend: docker or k8s")
+	rootCmd.Flags().StringVar(&k8sNamespace, "k8s-namespace", "default", "Kubernetes namespace when --runtime=k8s")
+	rootCmd.Flags().StringVar(&k8sRuntimeClass, "k8s-runtime-class", "", "Optional Kubernetes RuntimeClassName (e.g. gvisor, kata)")
+	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -74,7 +95,29 @@ func main() {
 	}
 }
 
-func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPath, gateHost, secretFile, repoRoot string) error {
+type daemonConfig struct {
+	dbPath          string
+	manifestsPath   string
+	listenAddr      string
+	socketPath      string
+	gateHost        string
+	secretFile      string
+	repoRoot        string
+	runtimeBackend  string
+	k8sNamespace    string
+	k8sRuntimeClass string
+	kubeconfigPath  string
+}
+
+func runDaemon(ctx context.Context, cfg daemonConfig) error {
+	dbPath := cfg.dbPath
+	manifestsPath := cfg.manifestsPath
+	listenAddr := cfg.listenAddr
+	socketPath := cfg.socketPath
+	gateHost := cfg.gateHost
+	secretFile := cfg.secretFile
+	repoRoot := cfg.repoRoot
+
 	logger := telemetry.NewLogger()
 
 	if manifestsPath == "" {
@@ -163,11 +206,22 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{
 		domain.ClassCodingAgent: coding.NewAdapter(os.TempDir()),
 	}
-	if dockerAdapter, err := docker.NewFromEnv(); err == nil {
-		adapters[domain.ClassLongLivedAgent] = dockerAdapter
-		adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
-	} else {
-		logger.Warn("docker runtime unavailable", "error", err)
+	switch cfg.runtimeBackend {
+	case "k8s":
+		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
+			adapters[domain.ClassLongLivedAgent] = k8sAdapter
+			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
+			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
+		} else {
+			logger.Warn("kubernetes runtime unavailable", "error", err)
+		}
+	default:
+		if dockerAdapter, err := docker.NewFromEnv(); err == nil {
+			adapters[domain.ClassLongLivedAgent] = dockerAdapter
+			adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
+		} else {
+			logger.Warn("docker runtime unavailable", "error", err)
+		}
 	}
 
 	if gateHost == "" {
