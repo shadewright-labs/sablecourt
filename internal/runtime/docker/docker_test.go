@@ -62,6 +62,10 @@ func (f *fakeEngine) ContainerStop(_ context.Context, _ string, _ client.Contain
 	return client.ContainerStopResult{}, nil
 }
 
+func (f *fakeEngine) ContainerRemove(_ context.Context, _ string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+	return client.ContainerRemoveResult{}, nil
+}
+
 func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 	ctx := context.Background()
 	eng := &fakeEngine{

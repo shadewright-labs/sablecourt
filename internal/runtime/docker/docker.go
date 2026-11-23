@@ -28,6 +28,7 @@ type EngineClient interface {
 	ContainerStart(ctx context.Context, containerID string, options client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerInspect(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error)
 	ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	ContainerRemove(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
 }
 
 type Adapter struct {
@@ -234,9 +235,12 @@ func (a *Adapter) Resume(ctx context.Context, handle scruntime.Handle, _ scrunti
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	timeout := 10
 	_, err := a.Client.ContainerStop(ctx, handle.ExternalID, client.ContainerStopOptions{Timeout: &timeout})
+	_, _ = a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
 	return err
 }
 
-func (a *Adapter) CollectArtifacts(_ context.Context, _ scruntime.Handle) ([]scruntime.Artifact, error) {
+func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle) ([]scruntime.Artifact, error) {
+	// Clean up exited container after final observation to avoid accumulating stopped containers.
+	_, _ = a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
 	return nil, nil
 }
