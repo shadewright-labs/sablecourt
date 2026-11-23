@@ -130,3 +130,54 @@ func (d *Dashboard) handleCloseConclave(w http.ResponseWriter, r *http.Request) 
 	}
 	http.Redirect(w, r, "/conclaves/"+id+"?notice="+url.QueryEscape("Conclave closed"), http.StatusSeeOther)
 }
+
+func (d *Dashboard) handleStudioCreateConclave(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("name"))
+	desc := strings.TrimSpace(r.FormValue("description"))
+	if name == "" {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("conclave name is required"), http.StatusSeeOther)
+		return
+	}
+	var maxMsgs, maxPP int
+	_, _ = fmt.Sscanf(r.FormValue("max_messages"), "%d", &maxMsgs)
+	_, _ = fmt.Sscanf(r.FormValue("max_ping_pong"), "%d", &maxPP)
+
+	var vassals []domain.ConclaveVassal
+	for _, p := range []string{"v1", "v2"} {
+		role := strings.TrimSpace(r.FormValue(p + "_role"))
+		wl := strings.TrimSpace(r.FormValue(p + "_workload"))
+		act := domain.ConclaveActivation(strings.TrimSpace(r.FormValue(p + "_activation")))
+		if role == "" || wl == "" {
+			continue
+		}
+		if act != domain.ActivationAlwaysOn && act != domain.ActivationOnMention {
+			act = domain.ActivationOnMention
+		}
+		vassals = append(vassals, domain.ConclaveVassal{
+			Role:       role,
+			Workload:   wl,
+			Activation: act,
+			CanMessage: []string{"all"},
+		})
+	}
+	if len(vassals) == 0 {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("at least one vassal is required"), http.StatusSeeOther)
+		return
+	}
+
+	cc := domain.Conclave{
+		TypeMeta: domain.TypeMeta{APIVersion: domain.APIVersionV1Alpha1, Kind: domain.KindConclave},
+		Metadata: domain.ObjectMeta{Name: name},
+		Spec: domain.ConclaveSpec{
+			Description: desc,
+			Wards:       domain.ConclaveWards{MaxMessages: maxMsgs, MaxPingPong: maxPP},
+			Vassals:     vassals,
+		},
+	}
+	if err := d.appendManifestDoc(cc); err != nil {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/studio?notice="+url.QueryEscape("Saved Conclave "+name+" and reloaded manifests"), http.StatusSeeOther)
+}

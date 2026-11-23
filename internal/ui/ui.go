@@ -162,6 +162,7 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
 	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)
 	mux.HandleFunc("POST /ui/conclaves/{id}/close", d.handleCloseConclave)
+	mux.HandleFunc("POST /ui/studio/conclave", d.handleStudioCreateConclave)
 	mux.Handle("GET /assets/", d.assets)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")

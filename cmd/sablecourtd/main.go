@@ -28,6 +28,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
@@ -222,7 +223,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	})
 
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	notifier := notify.New(notify.Options{Secrets: secretStore})
 	approvalQueue := approval.NewQueue(st, &approval.MacOSDialogApprover{})
+	approvalQueue.SetOnRequested(func(apr domain.Approval) {
+		go func() {
+			_ = notifier.Send(context.Background(), notify.Event{
+				Type:   "approval.requested",
+				Title:  fmt.Sprintf("Approval required: %s (%s)", apr.Capability, apr.WorkloadName),
+				Detail: fmt.Sprintf("Approval %s for task %s awaits confirmation (sha256=%s).", apr.ID, apr.TaskID, apr.PayloadSHA256[:12]),
+				Path:   "/tasks/" + apr.TaskID,
+			})
+		}()
+	})
 	dataActionGate := mcpgate.New(mcpgate.Options{
 		Store:     st,
 		Bundle:    bundle,
@@ -330,6 +342,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Store:      st,
 		Reconciler: reconciler,
 		GetBundle:  getBundle,
+		Notifier:   notifier,
 	})
 	conclaveBroker.RegisterMCPTools(dataActionGate)
 
@@ -661,6 +674,19 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 		}
 	})
+	mux.HandleFunc("POST /api/v1/notify/test", func(w http.ResponseWriter, r *http.Request) {
+		n := notify.New(notify.Options{Secrets: secrets})
+		if err := n.Send(r.Context(), notify.Event{
+			Type:   "notify.test",
+			Title:  "Test notification from Sablecourt",
+			Detail: "Outbound notifications are configured and reachable.",
+			Path:   "/",
+		}); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())
 		if err != nil {
@@ -884,6 +910,49 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				"messages": msgs,
 				"relics":   relics,
 			})
+		})
+		mux.HandleFunc("GET /api/v1/conclaves/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			emit := func() bool {
+				sess, err := st.GetConclave(r.Context(), id)
+				if err != nil {
+					return false
+				}
+				msgs, _ := st.ListConclaveMessages(r.Context(), id, 0)
+				relics, _ := st.ListConclaveRelics(r.Context(), id)
+				var lastID int64
+				if len(msgs) > 0 {
+					lastID = msgs[len(msgs)-1].ID
+				}
+				fp := fmt.Sprintf("%s:%d:%d:%d", sess.State, len(msgs), lastID, len(relics))
+				_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp)
+				flusher.Flush()
+				return true
+			}
+			if !emit() {
+				return
+			}
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+					if !emit() {
+						return
+					}
+				}
+			}
 		})
 		mux.HandleFunc("POST /api/v1/conclaves/{id}/decree", func(w http.ResponseWriter, r *http.Request) {
 			var body struct {

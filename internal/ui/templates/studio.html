@@ -172,6 +172,60 @@
     </div>
 
     <div class="panel">
+      <h2>Define Conclave (multi-agent room)</h2>
+      <form method="POST" action="/ui/studio/conclave">
+        <div class="grid-2" style="margin-bottom:8px;">
+          <div class="field">
+            <label>Conclave template name</label>
+            <input type="text" name="name" placeholder="e.g. security-war-room" required>
+          </div>
+          <div class="field">
+            <label>Description</label>
+            <input type="text" name="description" placeholder="Coordinate coding, review, and verification under Wards." required>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-bottom:8px;">
+          <div class="field">
+            <label>Ward: maxMessages</label>
+            <input type="number" name="max_messages" value="40" min="1">
+          </div>
+          <div class="field">
+            <label>Ward: maxPingPong</label>
+            <input type="number" name="max_ping_pong" value="4" min="1">
+          </div>
+        </div>
+        <div class="step-box">
+          <label>Vassal 1 (always-on)</label>
+          <div class="step-row">
+            <input type="text" name="v1_role" placeholder="role (e.g. coder)" value="coder" required>
+            <select name="v1_workload" required>
+              {{range .Workloads}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
+            </select>
+            <select name="v1_activation">
+              <option value="always-on" selected>always-on</option>
+              <option value="on-mention">on-mention</option>
+            </select>
+          </div>
+        </div>
+        <div class="step-box">
+          <label>Vassal 2 (on-mention)</label>
+          <div class="step-row">
+            <input type="text" name="v2_role" placeholder="role (e.g. reviewer)" value="reviewer">
+            <select name="v2_workload">
+              <option value="">-- none --</option>
+              {{range .Workloads}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
+            </select>
+            <select name="v2_activation">
+              <option value="on-mention" selected>on-mention</option>
+              <option value="always-on">always-on</option>
+            </select>
+          </div>
+        </div>
+        <button type="submit">Save Conclave YAML &amp; reload</button>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2>Declared workflows ({{len .Workflows}})</h2>
       {{if .Workflows}}
         {{range .Workflows}}

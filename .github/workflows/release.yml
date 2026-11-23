@@ -1,0 +1,68 @@
+name: Release Container Images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. 0.1.0)"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push sablecourtd (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: daemon
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/shadewright-labs/sablecourt:${{ steps.meta.outputs.tag }}
+            ghcr.io/shadewright-labs/sablecourt:latest
+
+      - name: Build and push sablecourt-agent (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/shadewright-labs/sablecourt-agent:${{ steps.meta.outputs.tag }}
+            ghcr.io/shadewright-labs/sablecourt-agent:latest
