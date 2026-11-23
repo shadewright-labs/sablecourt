@@ -13,7 +13,12 @@ Sablecourt is an active orchestrator for heterogeneous workloads under Shadewrig
 - Live process attach: `Scry` (read-only redacted output streaming across `coding-agent`, Docker, and Kubernetes Pods) and `Takeover` (exclusive `stdin` control for local coding agents).
 - Persistence and deployment: embedded SQLite (WAL) or Postgres (`--postgres-dsn`), Kustomize Kubernetes deployment (`deploy/k8s/overlays/tailscale` and `deploy/k8s/overlays/public` with `--operator-auth-required`), Prometheus `/metrics`, GitHub webhooks, A2A JSON-RPC broker, and outbound alerts for Slack, Discord, ntfy, or generic webhooks.
 
-Architecture decisions live in [docs/adr/](docs/adr/README.md) and the v0.1 design is in [docs/design.md](docs/design.md).
+Architecture decisions live in [docs/adr/](docs/adr/README.md). Technical documentation:
+
+- [docs/architecture.md](docs/architecture.md) - system topology, package map, Sanctum/Citadel modes, and request lifecycle
+- [docs/reference.md](docs/reference.md) - manifest kinds (`sablecourt.io/v1alpha1`), HTTP/SSE/MCP APIs, and `sablectl` CLI commands
+- [docs/integrations.md](docs/integrations.md) - upstream MCP server bridge, Shadewright Contract 3 escalation API, Kubernetes Deployments, Prometheus `/metrics`, Court Memory UI, and task retry
+- [docs/design.md](docs/design.md) - original v0.1 design baseline
 
 ## Quickstart
 

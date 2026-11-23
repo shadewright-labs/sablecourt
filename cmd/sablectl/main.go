@@ -269,6 +269,29 @@ func main() {
 		},
 	})
 	taskCmd.AddCommand(&cobra.Command{
+		Use:   "retry <task-id>",
+		Short: "Re-submit an interrupted or failed task with its original workload and input",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/retry", map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var t domain.Task
+			if err := json.Unmarshal(body, &t); err == nil && t.ID != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s retried %s as %s (%s)\n", stJade.Render("↻"), args[0], t.ID, t.WorkloadName)
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s retried task %s\n", stJade.Render("↻"), args[0])
+			return nil
+		},
+	})
+	taskCmd.AddCommand(&cobra.Command{
 		Use:   "scry <task-id>",
 		Short: "Stream live redacted output from a running task (read-only)",
 		Args:  cobra.ExactArgs(1),
