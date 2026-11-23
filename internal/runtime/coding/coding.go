@@ -2,6 +2,7 @@ package coding
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,6 +52,8 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if err := createWorktree(ctx, cfg.RepoPath, worktreeDir, branch); err != nil {
 		return scruntime.Handle{}, err
 	}
+
+	writeSessionMarker(worktreeDir, spec)
 
 	handle := scruntime.Handle{
 		AdapterName: "coding:" + cfg.Harness,
@@ -142,6 +145,30 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	handle.PID = cmd.Process.Pid
 	_ = cmd.Process.Release()
 	return handle, nil
+}
+
+func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) {
+	var meta struct {
+		ConclaveID string `json:"conclaveId"`
+		Role       string `json:"role"`
+	}
+	_ = json.Unmarshal([]byte(spec.InputJSON), &meta)
+	marker := map[string]any{
+		"managed_by": "sablecourt",
+		"task_id":    spec.TaskID,
+		"workload":   spec.Workload.Metadata.Name,
+		"zone":       string(spec.Workload.Metadata.Zone),
+		"started_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if meta.ConclaveID != "" {
+		marker["conclave_id"] = meta.ConclaveID
+		marker["role"] = meta.Role
+	}
+	raw, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(worktreeDir, ".sablecourt-session.json"), raw, 0o444)
 }
 
 func (a *Adapter) Observe(_ context.Context, handle scruntime.Handle) (scruntime.Observation, error) {

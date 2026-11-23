@@ -21,6 +21,10 @@ type logStreamer interface {
 	ContainerLogs(ctx context.Context, containerID string, options client.ContainerLogsOptions) (client.ContainerLogsResult, error)
 }
 
+type containerAttacher interface {
+	ContainerAttach(ctx context.Context, containerID string, options client.ContainerAttachOptions) (client.ContainerAttachResult, error)
+}
+
 const DefaultNetworkName = "sablecourt-internal"
 
 // EngineClient is the narrow subset of github.com/moby/moby/client.Client used by the Docker adapter.
@@ -172,8 +176,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-" + spec.TaskID,
 		Config: &container.Config{
-			Image: spec.Workload.Spec.Runtime.Image,
-			Env:   env,
+			Image:     spec.Workload.Spec.Runtime.Image,
+			Env:       env,
+			OpenStdin: a.AttachHub != nil,
 			Labels: map[string]string{
 				"sablecourt.io/task-id":  spec.TaskID,
 				"sablecourt.io/workload": spec.Workload.Metadata.Name,
@@ -187,14 +192,31 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return scruntime.Handle{}, fmt.Errorf("create container: %w", err)
 	}
 
+	var stdinCloser io.WriteCloser
+	if a.AttachHub != nil {
+		if att, ok := a.Client.(containerAttacher); ok {
+			if hijacked, err := att.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
+				Stream: true,
+				Stdin:  true,
+			}); err == nil && hijacked.Conn != nil {
+				stdinCloser = hijacked.Conn
+			}
+		}
+	}
+
 	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		if stdinCloser != nil {
+			_ = stdinCloser.Close()
+		}
 		return scruntime.Handle{}, fmt.Errorf("start container %s: %w", created.ID, err)
 	}
 
 	if a.AttachHub != nil {
 		if ls, ok := a.Client.(logStreamer); ok {
-			a.AttachHub.Register(spec.TaskID, nil)
+			a.AttachHub.Register(spec.TaskID, stdinCloser)
 			go a.streamLogs(spec.TaskID, created.ID, ls)
+		} else if stdinCloser != nil {
+			a.AttachHub.Register(spec.TaskID, stdinCloser)
 		}
 	}
 
