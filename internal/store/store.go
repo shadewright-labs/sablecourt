@@ -28,6 +28,7 @@ type Store interface {
 
 	CreateApproval(ctx context.Context, a domain.Approval) error
 	GetApproval(ctx context.Context, id string) (domain.Approval, error)
+	ListApprovals(ctx context.Context, status domain.ApprovalStatus) ([]domain.Approval, error)
 	DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error
 
 	CreateLease(ctx context.Context, lease domain.Lease) error

@@ -345,6 +345,50 @@ func (s *SQLiteStore) GetApproval(ctx context.Context, id string) (domain.Approv
 	return a, nil
 }
 
+func (s *SQLiteStore) ListApprovals(ctx context.Context, status domain.ApprovalStatus) ([]domain.Approval, error) {
+	query := `
+		SELECT id, task_id, workload_name, capability, payload_canonical_json,
+		       payload_sha256, status, decided_by, proof_json, expires_at, created_at, decided_at
+		FROM approvals
+	`
+	var args []any
+	if status != "" {
+		query += ` WHERE status = ?`
+		args = append(args, string(status))
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Approval
+	for rows.Next() {
+		var a domain.Approval
+		var st, expires, created string
+		var decided sql.NullString
+		if err := rows.Scan(
+			&a.ID, &a.TaskID, &a.WorkloadName, &a.Capability, &a.PayloadCanonicalJSON,
+			&a.PayloadSHA256, &st, &a.DecidedBy, &a.ProofJSON, &expires, &created, &decided,
+		); err != nil {
+			return nil, err
+		}
+		a.Status = domain.ApprovalStatus(st)
+		a.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+		a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if decided.Valid {
+			parsed, err := time.Parse(time.RFC3339Nano, decided.String)
+			if err == nil {
+				a.DecidedAt = &parsed
+			}
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error {
 	now := nowRFC3339()
 	res, err := s.db.ExecContext(ctx, `
