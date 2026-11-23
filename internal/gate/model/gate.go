@@ -257,6 +257,19 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	injectUpstreamAuth(upReq.Header, provider, upstreamKey, upCfg.AnthropicVer)
 
 	upResp, err := g.client.Do(upReq)
+	activeProvider := provider
+	if err != nil || isFallbackStatus(upResp.StatusCode) {
+		if fbProv, fbResp, fbErr := g.tryFallback(ctx, r, provider, upstreamPath, reqBody, workload); fbErr == nil && fbResp != nil {
+			if upResp != nil && upResp.Body != nil {
+				_ = upResp.Body.Close()
+			}
+			upResp = fbResp
+			err = nil
+			activeProvider = fbProv
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model.fallback", "ok", fmt.Sprintf(`{"from":%q,"to":%q}`, provider, fbProv))
+			w.Header().Set("X-Sablecourt-Fallback-Provider", fbProv)
+		}
+	}
 	if err != nil {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"upstream_request_failed"}`)
 		writeErr(w, http.StatusBadGateway, "upstream request failed")
@@ -288,26 +301,76 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
-		usage := parseUsage(provider, captured.Bytes(), upResp.Header.Get("Content-Type"))
+		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
 		modelName := usage.Model
 		if modelName == "" {
 			modelName = reqModel
 		}
-		costMicro := EstimateMicroUSD(provider, modelName, usage.InputTokens, usage.OutputTokens, g.pricing)
+		costMicro := EstimateMicroUSD(activeProvider, modelName, usage.InputTokens, usage.OutputTokens, g.pricing)
 		_ = g.store.RecordBudgetUsage(ctx, domain.BudgetEntry{
 			TaskID:       lease.TaskID,
 			WorkloadName: lease.WorkloadName,
-			Provider:     provider,
+			Provider:     activeProvider,
 			Model:        modelName,
 			InputTokens:  usage.InputTokens,
 			OutputTokens: usage.OutputTokens,
 			CostMicroUSD: costMicro,
 			CreatedAt:    g.now(),
 		})
-		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "allowed",
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
 			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
 				modelName, usage.InputTokens, usage.OutputTokens, costMicro))
 	}
+}
+
+func isFallbackStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+}
+
+func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider, upstreamPath string, reqBody []byte, wl domain.Workload) (string, *http.Response, error) {
+	if failedProvider != "openai" && failedProvider != "local" {
+		return "", nil, errors.New("no wire-compatible fallback")
+	}
+	for _, cand := range wl.Spec.Grants.ModelGate.Providers {
+		if cand == failedProvider || (cand != "openai" && cand != "local") {
+			continue
+		}
+		upCfg, ok := g.upstreams[cand]
+		if !ok {
+			continue
+		}
+		var key string
+		if upCfg.SecretName != "" && g.secrets != nil {
+			k, err := g.secrets.Get(ctx, upCfg.SecretName)
+			if err != nil {
+				if upCfg.RequireSecret {
+					continue
+				}
+			} else {
+				key = k
+			}
+		} else if upCfg.RequireSecret {
+			continue
+		}
+		targetURL, err := joinUpstreamURL(upCfg.BaseURL, upstreamPath, r.URL.RawQuery)
+		if err != nil {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(reqBody))
+		if err != nil {
+			continue
+		}
+		copySafeRequestHeaders(req.Header, r.Header)
+		injectUpstreamAuth(req.Header, cand, key, upCfg.AnthropicVer)
+		resp, err := g.client.Do(req)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return cand, resp, nil
+		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+	}
+	return "", nil, errors.New("fallback unavailable")
 }
 
 func (g *Gate) checkBudget(ctx context.Context, taskID, workloadName string, b domain.Budget, now time.Time) (bool, string, error) {

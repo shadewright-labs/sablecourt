@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -11,8 +13,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
@@ -20,6 +24,7 @@ import (
 
 type Options struct {
 	Client           kubernetes.Interface
+	RestConfig       *rest.Config
 	Namespace        string
 	RuntimeClassName string
 	AttachHub        *attach.Hub
@@ -30,6 +35,7 @@ type Options struct {
 // RuntimeClassName (for gVisor / Kata / agent-sandbox microVMs).
 type Adapter struct {
 	client           kubernetes.Interface
+	restConfig       *rest.Config
 	namespace        string
 	runtimeClassName string
 	attachHub        *attach.Hub
@@ -62,6 +68,7 @@ func NewFromConfig(kubeconfigPath, namespace, runtimeClassName string) (*Adapter
 	}
 	return NewAdapter(Options{
 		Client:           clientset,
+		RestConfig:       cfg,
 		Namespace:        namespace,
 		RuntimeClassName: runtimeClassName,
 	}), nil
@@ -74,6 +81,7 @@ func NewAdapter(opts Options) *Adapter {
 	}
 	return &Adapter{
 		client:           opts.Client,
+		restConfig:       opts.RestConfig,
 		namespace:        ns,
 		runtimeClassName: opts.RuntimeClassName,
 		attachHub:        opts.AttachHub,
@@ -127,6 +135,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 				Name:  "workload",
 				Image: spec.Workload.Spec.Runtime.Image,
 				Env:   env,
+				Stdin: a.attachHub != nil,
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &falseVal,
 					ReadOnlyRootFilesystem:   &readOnlyRoot,
@@ -206,6 +215,36 @@ func (a *Adapter) streamPodLogs(taskID, jobName string) {
 	if podName == "" {
 		return
 	}
+
+	// If RestConfig is present, attach live stdin/stdout/stderr over SPDY for full Scry + Takeover.
+	if a.restConfig != nil {
+		if rc := a.client.CoreV1().RESTClient(); rc != nil {
+			req := rc.Post().
+				Resource("pods").
+				Name(podName).
+				Namespace(a.namespace).
+				SubResource("attach").
+				VersionedParams(&corev1.PodAttachOptions{
+					Container: "workload",
+					Stdin:     true,
+					Stdout:    true,
+					Stderr:    true,
+				}, scheme.ParameterCodec)
+			if exec, err := remotecommand.NewSPDYExecutor(a.restConfig, http.MethodPost, req.URL()); err == nil {
+				stdinR, stdinW := io.Pipe()
+				a.attachHub.Register(taskID, stdinW)
+				outWriter := &hubWriter{hub: a.attachHub, taskID: taskID}
+				_ = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+					Stdin:  stdinR,
+					Stdout: outWriter,
+					Stderr: outWriter,
+				})
+				_ = stdinR.Close()
+				return
+			}
+		}
+	}
+
 	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container: "workload",
 		Follow:    true,
@@ -304,4 +343,14 @@ func sanitizeK8sName(s string) string {
 		return "sablecourt-job"
 	}
 	return out
+}
+
+type hubWriter struct {
+	hub    *attach.Hub
+	taskID string
+}
+
+func (w *hubWriter) Write(p []byte) (int, error) {
+	w.hub.WriteOutput(w.taskID, p)
+	return len(p), nil
 }

@@ -131,6 +131,10 @@
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <button type="submit">Issue Decree</button>
             <button type="button" id="btn-voice-decree" class="btn-ghost">Voice Decree (local STT)</button>
+            <label style="display:inline-flex; align-items:center; gap:6px; margin:10px 0 0; cursor:pointer;">
+              <input type="checkbox" id="chk-autospeak" style="width:auto;">
+              <span>Auto-speak replies</span>
+            </label>
             <span id="voice-status" class="meta"></span>
           </div>
         </form>
@@ -193,6 +197,27 @@
           }
         });
       });
+
+      const autoSpeak = document.getElementById("chk-autospeak");
+      if (autoSpeak) {
+        autoSpeak.checked = localStorage.getItem("sablecourt_autospeak") === "1";
+        autoSpeak.addEventListener("change", function() {
+          localStorage.setItem("sablecourt_autospeak", autoSpeak.checked ? "1" : "0");
+        });
+        if (autoSpeak.checked) {
+          const speakBtns = document.querySelectorAll(".btn-speak");
+          if (speakBtns.length > 0) {
+            const lastBtn = speakBtns[speakBtns.length - 1];
+            const lastText = lastBtn.getAttribute("data-text") || "";
+            const key = "sablecourt_spoken_{{.Session.ID}}";
+            const lastKey = speakBtns.length + ":" + lastText.slice(0, 32);
+            if (lastText && sessionStorage.getItem(key) !== lastKey) {
+              sessionStorage.setItem(key, lastKey);
+              lastBtn.click();
+            }
+          }
+        }
+      }
 
       const voiceBtn = document.getElementById("btn-voice-decree");
       const voiceStatus = document.getElementById("voice-status");
