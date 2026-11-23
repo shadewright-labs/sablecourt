@@ -485,9 +485,10 @@
                 <option value="">default model</option>
               </select>
               {{end}}
+              <button type="button" id="btn-voice-prompt" title="Dictate task prompt via local STT" style="background:transparent; color:var(--text-muted); border:1px solid var(--border);">Mic</button>
               <button type="submit">Dispatch task</button>
             </div>
-            <textarea name="input_json" placeholder="Describe the task or paste JSON payload (e.g. Fix timeout in sqlite store)..."></textarea>
+            <textarea id="task-prompt-input" name="input_json" placeholder="Describe the task or paste JSON payload (e.g. Fix timeout in sqlite store)..."></textarea>
           </form>
         </div>
         {{end}}
@@ -656,6 +657,40 @@
           return;
         }
         window.location.reload();
+      });
+    })();
+
+    (function () {
+      const btn = document.getElementById("btn-voice-prompt");
+      const input = document.getElementById("task-prompt-input");
+      if (!btn || !input || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      let rec = null;
+      let chunks = [];
+      btn.addEventListener("click", async function () {
+        if (rec && rec.state === "recording") {
+          rec.stop();
+          btn.textContent = "Mic";
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          chunks = [];
+          rec = new MediaRecorder(stream);
+          rec.ondataavailable = function (ev) { if (ev.data.size > 0) chunks.push(ev.data); };
+          rec.onstop = async function () {
+            stream.getTracks().forEach(t => t.stop());
+            const fd = new FormData();
+            fd.append("file", new Blob(chunks, { type: "audio/webm" }), "prompt.webm");
+            const res = await fetch("/api/v1/voice/transcribe", { method: "POST", body: fd });
+            if (res.ok) {
+              const data = await res.json();
+              input.value = (input.value ? input.value + " " : "") + data.text;
+              input.focus();
+            }
+          };
+          rec.start();
+          btn.textContent = "Stop";
+        } catch (_) {}
       });
     })();
   </script>

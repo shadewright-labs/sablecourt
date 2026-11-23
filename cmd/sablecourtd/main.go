@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -43,6 +44,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 	"github.com/shadewright-labs/sablecourt/internal/telemetry"
 	"github.com/shadewright-labs/sablecourt/internal/ui"
+	"github.com/shadewright-labs/sablecourt/internal/voice"
 	"github.com/shadewright-labs/sablecourt/internal/webhook"
 )
 
@@ -742,6 +744,78 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 		}
 	})
+	voiceSvc := voice.New(voice.Options{Secrets: secrets})
+	mux.HandleFunc("GET /api/v1/voice/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, voiceSvc.Status(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/voice/transcribe", func(w http.ResponseWriter, r *http.Request) {
+		audioBytes, filename, lang, err := readUploadedAudio(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		text, err := voiceSvc.Transcribe(r.Context(), audioBytes, filename, lang)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			Category:   "voice",
+			Action:     "voice.transcribe",
+			Outcome:    "ok",
+			DetailJSON: fmt.Sprintf(`{"bytes":%d,"chars":%d}`, len(audioBytes), len(text)),
+			CreatedAt:  time.Now().UTC(),
+		})
+		writeJSON(w, http.StatusOK, map[string]string{"text": text})
+	})
+	mux.HandleFunc("POST /api/v1/voice/speak", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text  string `json:"text"`
+			Voice string `json:"voice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		audioBytes, ct, err := voiceSvc.Speak(r.Context(), body.Text, body.Voice)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", ct)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(audioBytes)
+	})
+	if conclaveBroker != nil {
+		mux.HandleFunc("POST /api/v1/conclaves/{id}/voice-decree", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			audioBytes, filename, lang, err := readUploadedAudio(r)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			text, err := voiceSvc.Transcribe(r.Context(), audioBytes, filename, lang)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+			to := strings.TrimSpace(r.URL.Query().Get("to"))
+			if to == "" && r.MultipartForm != nil {
+				if vals := r.MultipartForm.Value["to"]; len(vals) > 0 {
+					to = strings.TrimSpace(vals[0])
+				}
+			}
+			if to == "" {
+				to = "all"
+			}
+			msg, err := conclaveBroker.PostMessage(r.Context(), id, "operator", to, "decree", text, "")
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{"text": text, "message": msg})
+		})
+	}
 	mux.HandleFunc("POST /api/v1/notify/test", func(w http.ResponseWriter, r *http.Request) {
 		n := notify.New(notify.Options{Secrets: secrets})
 		if err := n.Send(r.Context(), notify.Event{
@@ -1415,6 +1489,31 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(24 << 20); err != nil {
+			return nil, "", "", fmt.Errorf("parse multipart audio: %w", err)
+		}
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			return nil, "", "", fmt.Errorf("missing audio form field 'file': %w", err)
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, 24<<20))
+		if err != nil {
+			return nil, "", "", err
+		}
+		lang := strings.TrimSpace(r.FormValue("language"))
+		return data, hdr.Filename, lang, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, 24<<20))
+	if err != nil {
+		return nil, "", "", err
+	}
+	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
 }
 
 func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Handler {
