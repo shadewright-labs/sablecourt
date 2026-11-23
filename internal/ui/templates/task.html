@@ -161,10 +161,100 @@
       {{else}}<p class="mono" style="color:var(--text-muted)">No state transitions recorded yet.</p>{{end}}
     </div>
 
+    <h2>Live console (Scry / Takeover)</h2>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px;">
+        <span id="scry-status" class="mono" style="font-size:12px; color:var(--text-muted);">Connecting to Scry stream...</span>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="btn-takeover" style="margin-top:0; padding:5px 10px; font-size:12px;">Takeover</button>
+          <button type="button" id="btn-detach" style="margin-top:0; padding:5px 10px; font-size:12px; background:transparent; color:var(--text-muted); border:1px solid var(--border); display:none;">Detach</button>
+        </div>
+      </div>
+      <pre id="scry-term" style="min-height:110px; max-height:320px; overflow:auto; background:#08060E; border:1px solid var(--border); border-radius:6px; padding:10px; color:#EFE9DC;"></pre>
+      <form id="stdin-form" style="display:none; margin-top:10px; gap:8px;">
+        <input id="stdin-input" type="text" placeholder="Type command or response to send to process stdin..." style="flex:1; background:#08060E; color:#EFE9DC; border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-family:var(--mono); font-size:12px;">
+        <button type="submit" style="margin-top:0; padding:7px 12px; font-size:12px;">Send</button>
+      </form>
+    </div>
+
     <h2>Artifacts</h2>
     <div class="card">
       <pre>{{.Task.ArtifactsJSON}}</pre>
     </div>
   </div>
+  <script>
+    (function() {
+      const taskId = "{{.Task.ID}}";
+      const term = document.getElementById("scry-term");
+      const status = document.getElementById("scry-status");
+      const btnTakeover = document.getElementById("btn-takeover");
+      const btnDetach = document.getElementById("btn-detach");
+      const stdinForm = document.getElementById("stdin-form");
+      const stdinInput = document.getElementById("stdin-input");
+
+      const es = new EventSource("/api/v1/tasks/" + taskId + "/scry");
+      es.addEventListener("history", function(e) {
+        term.textContent += JSON.parse(e.data);
+        term.scrollTop = term.scrollHeight;
+        status.textContent = "Scry live (read-only)";
+      });
+      es.addEventListener("chunk", function(e) {
+        term.textContent += JSON.parse(e.data);
+        term.scrollTop = term.scrollHeight;
+        status.textContent = "Scry live (read-only)";
+      });
+      es.addEventListener("closed", function() {
+        status.textContent = "Process output stream closed";
+        es.close();
+      });
+      es.onerror = function() {
+        if (term.textContent === "") {
+          status.textContent = "No live attach stream for this task (idle or completed)";
+        }
+        es.close();
+      };
+
+      btnTakeover.addEventListener("click", async function() {
+        const res = await fetch("/api/v1/tasks/" + taskId + "/takeover", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({operator: "web-ui"})
+        });
+        if (res.ok) {
+          status.textContent = "Takeover active (read-write)";
+          btnTakeover.style.display = "none";
+          btnDetach.style.display = "inline-block";
+          stdinForm.style.display = "flex";
+          stdinInput.focus();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          status.textContent = "Takeover unavailable: " + (err.error || res.status);
+        }
+      });
+
+      btnDetach.addEventListener("click", async function() {
+        await fetch("/api/v1/tasks/" + taskId + "/detach", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({operator: "web-ui"})
+        });
+        status.textContent = "Scry live (read-only)";
+        btnDetach.style.display = "none";
+        btnTakeover.style.display = "inline-block";
+        stdinForm.style.display = "none";
+      });
+
+      stdinForm.addEventListener("submit", async function(e) {
+        e.preventDefault();
+        const val = stdinInput.value;
+        stdinInput.value = "";
+        await fetch("/api/v1/tasks/" + taskId + "/stdin", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({operator: "web-ui", data: val + "\n"})
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

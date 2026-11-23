@@ -268,6 +268,41 @@ func main() {
 			return nil
 		},
 	})
+	taskCmd.AddCommand(&cobra.Command{
+		Use:   "scry <task-id>",
+		Short: "Stream live redacted output from a running task (read-only)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(0)
+			return streamScry(cmd.Context(), cli, base+"/api/v1/tasks/"+args[0]+"/scry", cmd.OutOrStdout())
+		},
+	})
+	taskCmd.AddCommand(&cobra.Command{
+		Use:   "takeover <task-id>",
+		Short: "Attach to a running task with exclusive stdin control (Ctrl-C to detach)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			if _, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/takeover", map[string]string{"operator": "sablectl"}); err != nil {
+				return err
+			}
+			defer func() {
+				_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/detach", map[string]string{"operator": "sablectl"})
+			}()
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s takeover acquired on %s (type lines to send to stdin)\n", stJade.Render("●"), args[0])
+			go func() {
+				sc := bufio.NewScanner(cmd.InOrStdin())
+				for sc.Scan() {
+					_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/stdin", map[string]string{
+						"operator": "sablectl",
+						"data":     sc.Text() + "\n",
+					})
+				}
+			}()
+			streamCli, _ := httpClient(0)
+			return streamScry(cmd.Context(), streamCli, base+"/api/v1/tasks/"+args[0]+"/scry", cmd.OutOrStdout())
+		},
+	})
 
 	budgetCmd := &cobra.Command{
 		Use:   "budget",
@@ -755,4 +790,33 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+t.token)
 	return t.base.RoundTrip(r)
+}
+
+func streamScry(ctx context.Context, client *http.Client, url string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data: ") {
+			raw := strings.TrimPrefix(line, "data: ")
+			var chunk string
+			if err := json.Unmarshal([]byte(raw), &chunk); err == nil {
+				_, _ = io.WriteString(out, chunk)
+			}
+		}
+	}
+	return sc.Err()
 }
