@@ -13,8 +13,13 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
+
+type logStreamer interface {
+	ContainerLogs(ctx context.Context, containerID string, options client.ContainerLogsOptions) (client.ContainerLogsResult, error)
+}
 
 const DefaultNetworkName = "sablecourt-internal"
 
@@ -34,6 +39,7 @@ type EngineClient interface {
 type Adapter struct {
 	Client      EngineClient
 	NetworkName string
+	AttachHub   *attach.Hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -185,11 +191,50 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return scruntime.Handle{}, fmt.Errorf("start container %s: %w", created.ID, err)
 	}
 
+	if a.AttachHub != nil {
+		if ls, ok := a.Client.(logStreamer); ok {
+			a.AttachHub.Register(spec.TaskID, nil)
+			go a.streamLogs(spec.TaskID, created.ID, ls)
+		}
+	}
+
 	return scruntime.Handle{
 		AdapterName: "docker",
 		ExternalID:  created.ID,
 		WorkDir:     spec.WorkDir,
 	}, nil
+}
+
+func (a *Adapter) streamLogs(taskID, containerID string, ls logStreamer) {
+	defer a.AttachHub.Close(taskID)
+	rc, err := ls.ContainerLogs(context.Background(), containerID, client.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+	})
+	if err != nil || rc == nil {
+		return
+	}
+	defer rc.Close()
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := rc.Read(buf)
+		if n > 0 {
+			chunk := stripDockerMuxHeader(buf[:n])
+			a.AttachHub.WriteOutput(taskID, chunk)
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+func stripDockerMuxHeader(p []byte) []byte {
+	// Docker non-TTY multiplexed stream frames start with [stream(1), 0, 0, 0, size(4)].
+	if len(p) >= 8 && (p[0] == 1 || p[0] == 2) && p[1] == 0 && p[2] == 0 && p[3] == 0 {
+		return p[8:]
+	}
+	return p
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {

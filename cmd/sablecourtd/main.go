@@ -241,6 +241,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	switch cfg.runtimeBackend {
 	case "k8s":
 		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
+			k8sAdapter.SetAttachHub(attachHub)
 			adapters[domain.ClassLongLivedAgent] = k8sAdapter
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
 			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
@@ -249,6 +250,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	default:
 		if dockerAdapter, err := docker.NewFromEnv(); err == nil {
+			dockerAdapter.AttachHub = attachHub
 			adapters[domain.ClassLongLivedAgent] = dockerAdapter
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
 		} else {

@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -21,6 +22,7 @@ type Options struct {
 	Client           kubernetes.Interface
 	Namespace        string
 	RuntimeClassName string
+	AttachHub        *attach.Hub
 }
 
 // Adapter executes Sablecourt workloads as hardened Kubernetes batch/v1 Jobs
@@ -30,6 +32,11 @@ type Adapter struct {
 	client           kubernetes.Interface
 	namespace        string
 	runtimeClassName string
+	attachHub        *attach.Hub
+}
+
+func (a *Adapter) SetAttachHub(hub *attach.Hub) {
+	a.attachHub = hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -69,6 +76,7 @@ func NewAdapter(opts Options) *Adapter {
 		client:           opts.Client,
 		namespace:        ns,
 		runtimeClassName: opts.RuntimeClassName,
+		attachHub:        opts.AttachHub,
 	}
 }
 
@@ -163,10 +171,58 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("create kubernetes job: %w", err)
 	}
+	if a.attachHub != nil {
+		a.attachHub.Register(spec.TaskID, nil)
+		go a.streamPodLogs(spec.TaskID, created.Name)
+	}
 	return scruntime.Handle{
 		AdapterName: "k8s",
 		ExternalID:  created.Name,
 	}, nil
+}
+
+func (a *Adapter) streamPodLogs(taskID, jobName string) {
+	defer a.attachHub.Close(taskID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	var podName string
+	for i := 0; i < 60; i++ {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "job-name=" + jobName,
+		})
+		if err == nil && len(pods.Items) > 0 && pods.Items[0].Status.Phase != corev1.PodPending {
+			podName = pods.Items[0].Name
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+	if podName == "" {
+		return
+	}
+	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: "workload",
+		Follow:    true,
+	}).Stream(ctx)
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := stream.Read(buf)
+		if n > 0 {
+			a.attachHub.WriteOutput(taskID, buf[:n])
+		}
+		if readErr != nil {
+			return
+		}
+	}
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {

@@ -17,10 +17,12 @@ import (
 const maxAgentTurns = 4
 
 type taskInput struct {
-	Prompt   string `json:"prompt"`
-	Input    string `json:"input"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	Prompt     string `json:"prompt"`
+	Input      string `json:"input"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	ConclaveID string `json:"conclaveId"`
+	Role       string `json:"role"`
 }
 
 type chatMessage struct {
@@ -69,6 +71,11 @@ func main() {
 	}
 
 	history := loadThreadHistory(gateRoot, token)
+	if in.ConclaveID != "" && gateRoot != "" {
+		if cMsgs := loadConclaveHistory(gateRoot, in.ConclaveID, token); len(cMsgs) > 0 {
+			history = append(cMsgs, history...)
+		}
+	}
 	if len(history) == 0 {
 		prompt := strings.TrimSpace(in.Prompt)
 		if in.Input != "" {
@@ -124,6 +131,12 @@ func main() {
 			if err := postThreadMessage(gateRoot+"/gate/task/messages", token, "agent", reply); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to post reply to thread: %v\n", err)
 			}
+			if in.ConclaveID != "" {
+				to, body := parseMentionTarget(reply)
+				if err := postConclaveMessage(gateRoot+"/gate/conclave/"+in.ConclaveID+"/messages", token, to, "proposal", body); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to post reply to conclave: %v\n", err)
+				}
+			}
 		}
 		return
 	}
@@ -160,6 +173,75 @@ func loadThreadHistory(gateRoot, token string) []chatMessage {
 		out = append(out, chatMessage{Role: role, Content: m.Content})
 	}
 	return out
+}
+
+func loadConclaveHistory(gateRoot, conclaveID, token string) []chatMessage {
+	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/conclave/"+conclaveID+"/messages", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var raw []struct {
+		FromRole string `json:"FromRole"`
+		ToRole   string `json:"ToRole"`
+		Kind     string `json:"Kind"`
+		Body     string `json:"Body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil
+	}
+	out := make([]chatMessage, 0, len(raw))
+	for _, m := range raw {
+		out = append(out, chatMessage{
+			Role:    "user",
+			Content: fmt.Sprintf("[Conclave @%s -> @%s (%s)]: %s", m.FromRole, m.ToRole, m.Kind, m.Body),
+		})
+	}
+	return out
+}
+
+func postConclaveMessage(endpoint, token, to, kind, body string) error {
+	raw, _ := json.Marshal(map[string]string{
+		"to":   to,
+		"kind": kind,
+		"body": body,
+	})
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("conclave post returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func parseMentionTarget(reply string) (string, string) {
+	trimmed := strings.TrimSpace(reply)
+	if strings.HasPrefix(trimmed, "@") {
+		parts := strings.SplitN(trimmed, " ", 2)
+		target := strings.TrimRight(strings.TrimPrefix(parts[0], "@"), ":,")
+		if target != "" {
+			if len(parts) == 2 {
+				return target, strings.TrimSpace(parts[1])
+			}
+			return target, trimmed
+		}
+	}
+	return "operator", trimmed
 }
 
 type authTransport struct {
