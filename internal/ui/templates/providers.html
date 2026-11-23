@@ -132,8 +132,27 @@
 
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .row form { margin: 0; }
-    .models { display: flex; flex-wrap: wrap; gap: 6px; max-height: 112px; overflow-y: auto; padding-top: 2px; }
-    .model-chip { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 5px; background: rgba(8,6,14,0.75); border: 1px solid var(--border); color: var(--text-muted); }
+    .models-form { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .default-row { display: flex; gap: 8px; align-items: center; }
+    .default-row label { font-family: var(--mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+    .default-row select {
+      flex: 1; background: rgba(8,6,14,0.85); color: var(--text-bone);
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+      font-family: var(--mono); font-size: 11px;
+    }
+    .models { display: flex; flex-wrap: wrap; gap: 6px; max-height: 140px; overflow-y: auto; padding-top: 2px; }
+    .model-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-family: var(--mono); font-size: 11px; padding: 4px 8px; border-radius: 6px;
+      background: rgba(8,6,14,0.75); border: 1px solid var(--border); color: var(--text-muted);
+      cursor: pointer; user-select: none;
+    }
+    .model-toggle input { accent-color: #2DD4BF; margin: 0; }
+    .model-toggle:has(input:checked) {
+      border-color: rgba(45,212,191,0.38);
+      background: rgba(45,212,191,0.09);
+      color: var(--text-bone);
+    }
   </style>
 </head>
 <body>
@@ -215,9 +234,26 @@
         {{end}}
 
         {{if .Models}}
-        <div class="models">
-          {{range .Models}}<span class="model-chip">{{.ID}}</span>{{end}}
-        </div>
+        <form class="models-form" method="POST" action="/ui/providers/{{.ID}}/models">
+          <div class="default-row">
+            <label>Default</label>
+            <select name="default_model">
+              {{$def := .DefaultModel}}
+              {{range .Models}}
+              <option value="{{.ID}}" {{if eq .ID $def}}selected{{end}}>{{.ID}}</option>
+              {{end}}
+            </select>
+            <button type="submit">Save models</button>
+          </div>
+          <div class="models">
+            {{range .Models}}
+            <label class="model-toggle">
+              <input type="checkbox" name="enabled_models" value="{{.ID}}" {{if .Enabled}}checked{{end}}>
+              <span>{{.ID}}</span>
+            </label>
+            {{end}}
+          </div>
+        </form>
         {{end}}
       </div>
       {{end}}

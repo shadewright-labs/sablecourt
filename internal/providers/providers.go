@@ -7,29 +7,35 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 type ModelInfo struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
+	Enabled  bool   `json:"enabled"`
 }
 
 type ProviderStatus struct {
-	ID           string      `json:"id"`
-	DisplayName  string      `json:"displayName"`
-	Kind         string      `json:"kind"` // api_key | local | cli
-	SecretName   string      `json:"secretName,omitempty"`
-	BaseURL      string      `json:"baseUrl,omitempty"`
-	Connected    bool        `json:"connected"`
-	Detail       string      `json:"detail,omitempty"`
-	Models       []ModelInfo `json:"models,omitempty"`
-	LastSyncedAt *time.Time  `json:"lastSyncedAt,omitempty"`
+	ID            string      `json:"id"`
+	DisplayName   string      `json:"displayName"`
+	Kind          string      `json:"kind"` // api_key | local | cli
+	SecretName    string      `json:"secretName,omitempty"`
+	BaseURL       string      `json:"baseUrl,omitempty"`
+	Connected     bool        `json:"connected"`
+	Detail        string      `json:"detail,omitempty"`
+	DefaultModel  string      `json:"defaultModel,omitempty"`
+	EnabledModels []string    `json:"enabledModels,omitempty"`
+	Models        []ModelInfo `json:"models,omitempty"`
+	LastSyncedAt  *time.Time  `json:"lastSyncedAt,omitempty"`
 }
 
 type providerDef struct {
@@ -77,6 +83,7 @@ var builtinProviders = []providerDef{
 }
 
 type Registry struct {
+	store   store.Store
 	secrets secret.SecretStore
 	client  *http.Client
 	baseMap map[string]string
@@ -86,9 +93,11 @@ type Registry struct {
 	synced     map[string][]ModelInfo
 	syncedAt   map[string]time.Time
 	lastErrors map[string]string
+	prefs      map[string]domain.ProviderPrefs
 }
 
 type Options struct {
+	Store   store.Store
 	Secrets secret.SecretStore
 	Client  *http.Client
 	BaseURL map[string]string
@@ -108,7 +117,14 @@ func NewRegistry(opts Options) *Registry {
 			baseMap[k] = strings.TrimRight(v, "/")
 		}
 	}
+	prefs := make(map[string]domain.ProviderPrefs)
+	if opts.Store != nil {
+		if loaded, err := opts.Store.ListProviderPrefs(context.Background()); err == nil {
+			prefs = loaded
+		}
+	}
 	return &Registry{
+		store:      opts.Store,
 		secrets:    opts.Secrets,
 		client:     cli,
 		baseMap:    baseMap,
@@ -116,7 +132,39 @@ func NewRegistry(opts Options) *Registry {
 		synced:     make(map[string][]ModelInfo),
 		syncedAt:   make(map[string]time.Time),
 		lastErrors: make(map[string]string),
+		prefs:      prefs,
 	}
+}
+
+func (r *Registry) SavePrefs(ctx context.Context, providerID, defaultModel string, enabledModels []string) error {
+	if _, ok := findDef(providerID); !ok {
+		return fmt.Errorf("unknown provider %q", providerID)
+	}
+	cleaned := make([]string, 0, len(enabledModels))
+	for _, m := range enabledModels {
+		if s := strings.TrimSpace(m); s != "" && !slices.Contains(cleaned, s) {
+			cleaned = append(cleaned, s)
+		}
+	}
+	defModel := strings.TrimSpace(defaultModel)
+	if defModel != "" && len(cleaned) > 0 && !slices.Contains(cleaned, defModel) {
+		cleaned = append([]string{defModel}, cleaned...)
+	}
+	p := domain.ProviderPrefs{
+		ProviderID:    providerID,
+		DefaultModel:  defModel,
+		EnabledModels: cleaned,
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if r.store != nil {
+		if err := r.store.UpsertProviderPrefs(ctx, p); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	r.prefs[providerID] = p
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *Registry) List(ctx context.Context) []ProviderStatus {
@@ -150,13 +198,30 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 			}
 		}
 
+		pref := r.prefs[def.ID]
+		st.DefaultModel = pref.DefaultModel
+		st.EnabledModels = append([]string(nil), pref.EnabledModels...)
+
+		var rawModels []ModelInfo
 		if models, ok := r.synced[def.ID]; ok && len(models) > 0 {
-			st.Models = append([]ModelInfo(nil), models...)
+			rawModels = append([]ModelInfo(nil), models...)
 			ts := r.syncedAt[def.ID]
 			st.LastSyncedAt = &ts
 		} else {
 			for _, m := range def.DefaultModels {
-				st.Models = append(st.Models, ModelInfo{ID: m, Provider: def.ID})
+				rawModels = append(rawModels, ModelInfo{ID: m, Provider: def.ID})
+			}
+		}
+		for i := range rawModels {
+			rawModels[i].Enabled = len(pref.EnabledModels) == 0 || slices.Contains(pref.EnabledModels, rawModels[i].ID)
+		}
+		st.Models = rawModels
+		if st.DefaultModel == "" && len(st.Models) > 0 {
+			for _, m := range st.Models {
+				if m.Enabled {
+					st.DefaultModel = m.ID
+					break
+				}
 			}
 		}
 		if errMsg := r.lastErrors[def.ID]; errMsg != "" {

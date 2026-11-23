@@ -76,6 +76,7 @@ type viewData struct {
 	Audit            []domain.AuditRecord
 	Providers        []providers.ProviderStatus
 	ModelsByProvider template.JS
+	DefaultsByProv   template.JS
 }
 
 func NewDashboard(opts Options) (*Dashboard, error) {
@@ -156,6 +157,7 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/providers/{id}/connect", d.handleProviderConnect)
 	mux.HandleFunc("POST /ui/providers/{id}/disconnect", d.handleProviderDisconnect)
 	mux.HandleFunc("POST /ui/providers/{id}/sync", d.handleProviderSync)
+	mux.HandleFunc("POST /ui/providers/{id}/models", d.handleProviderSaveModels)
 	mux.HandleFunc("POST /ui/studio/agent", d.handleCreateAgent)
 	mux.HandleFunc("POST /ui/studio/workflow", d.handleCreateWorkflow)
 	mux.HandleFunc("POST /ui/workflows/{name}/run", d.handleRunWorkflow)
@@ -204,18 +206,23 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var provList []providers.ProviderStatus
 	modelsMap := make(map[string][]string)
+	defaultsMap := make(map[string]string)
 	if d.providers != nil {
 		for _, p := range d.providers.List(ctx) {
 			if p.Kind == "cli" {
 				continue
 			}
 			provList = append(provList, p)
+			defaultsMap[p.ID] = p.DefaultModel
 			for _, m := range p.Models {
-				modelsMap[p.ID] = append(modelsMap[p.ID], m.ID)
+				if m.Enabled {
+					modelsMap[p.ID] = append(modelsMap[p.ID], m.ID)
+				}
 			}
 		}
 	}
 	modelsJSON, _ := json.Marshal(modelsMap)
+	defaultsJSON, _ := json.Marshal(defaultsMap)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = d.tmpl.Execute(w, viewData{
@@ -232,6 +239,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Audit:            audit,
 		Providers:        provList,
 		ModelsByProvider: template.JS(modelsJSON),
+		DefaultsByProv:   template.JS(defaultsJSON),
 	})
 }
 
@@ -401,6 +409,22 @@ func (d *Dashboard) handleProviderSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/providers?notice="+url.QueryEscape(fmt.Sprintf("Synced %d models from %s", len(models), id)), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleProviderSaveModels(w http.ResponseWriter, r *http.Request) {
+	if d.providers == nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape("provider registry unavailable"), http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := r.PathValue("id")
+	defModel := strings.TrimSpace(r.FormValue("default_model"))
+	enabled := r.Form["enabled_models"]
+	if err := d.providers.SavePrefs(r.Context(), id, defModel, enabled); err != nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/providers?notice="+url.QueryEscape(fmt.Sprintf("Saved model selection for %s (default: %s)", id, defModel)), http.StatusSeeOther)
 }
 
 func (d *Dashboard) handleStudioPage(w http.ResponseWriter, r *http.Request) {

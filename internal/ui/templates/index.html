@@ -566,17 +566,20 @@
   <script>
     (function () {
       const modelsByProvider = {{if .ModelsByProvider}}{{.ModelsByProvider}}{{else}}{}{{end}};
+      const defaultsByProv = {{if .DefaultsByProv}}{{.DefaultsByProv}}{{else}}{}{{end}};
       const wl = document.getElementById("wl-select");
       const prov = document.getElementById("prov-select");
       const mod = document.getElementById("model-select");
       if (!wl || !prov || !mod) return;
       function syncModels() {
         const list = modelsByProvider[prov.value] || [];
+        const defModel = defaultsByProv[prov.value] || "";
         mod.innerHTML = '<option value="">default model</option>';
         for (const id of list) {
           const opt = document.createElement("option");
           opt.value = id;
           opt.textContent = id;
+          if (id === defModel) opt.selected = true;
           mod.appendChild(opt);
         }
       }
