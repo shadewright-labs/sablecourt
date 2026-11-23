@@ -154,4 +154,23 @@ func TestReconcilerLifecycleAndHubSpokeDelegation(t *testing.T) {
 	if gotCtrl.State != domain.TaskStateCompleted {
 		t.Fatalf("expected controller completed, got %q", gotCtrl.State)
 	}
+
+	// Suspend and resume the long-lived parent task with checkpoint persistence.
+	if err := rec.SuspendTask(ctx, parent.ID, "pause for review"); err != nil {
+		t.Fatalf("SuspendTask: %v", err)
+	}
+	gotParent, _ := st.GetTask(ctx, parent.ID)
+	if gotParent.State != domain.TaskStateSuspended {
+		t.Fatalf("expected parent suspended, got %q", gotParent.State)
+	}
+	if _, err := st.LatestCheckpoint(ctx, parent.ID); err != nil {
+		t.Fatalf("expected saved checkpoint, got %v", err)
+	}
+	if err := rec.ResumeTask(ctx, parent.ID); err != nil {
+		t.Fatalf("ResumeTask: %v", err)
+	}
+	gotParent, _ = st.GetTask(ctx, parent.ID)
+	if gotParent.State != domain.TaskStateWorking {
+		t.Fatalf("expected parent working after resume, got %q", gotParent.State)
+	}
 }

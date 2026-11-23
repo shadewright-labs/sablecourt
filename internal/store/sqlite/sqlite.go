@@ -616,6 +616,28 @@ func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditR
 	return out, rows.Err()
 }
 
+func (s *SQLiteStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO checkpoints (task_id, workload_name, ref_json, created_at)
+		VALUES (?, ?, ?, ?)
+	`, taskID, workloadName, defaultJSON(refJSON, "{}"), nowRFC3339())
+	return err
+}
+
+func (s *SQLiteStore) LatestCheckpoint(ctx context.Context, taskID string) (string, error) {
+	var refJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT ref_json FROM checkpoints
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID).Scan(&refJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", store.ErrNotFound
+	}
+	return refJSON, err
+}
+
 func (s *SQLiteStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error {
 	raw, err := json.Marshal(prefs.EnabledModels)
 	if err != nil {

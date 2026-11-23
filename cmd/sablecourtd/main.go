@@ -362,6 +362,61 @@ func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func()
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "id": id})
 	})
+	mux.HandleFunc("POST /api/v1/tasks/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := reconciler.SuspendTask(r.Context(), id, "api_suspended"); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "suspended", "id": id})
+	})
+	mux.HandleFunc("POST /api/v1/tasks/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := reconciler.ResumeTask(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "working", "id": id})
+	})
+	mux.HandleFunc("GET /api/v1/stream", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		emit := func() {
+			tasks, _ := st.ListTasks(r.Context())
+			approvals, _ := st.ListApprovals(r.Context(), domain.ApprovalPending)
+			audits, _ := st.ListAudit(r.Context(), 1)
+			var lastAudit int64
+			if len(audits) > 0 {
+				lastAudit = audits[0].ID
+			}
+			var lastTaskUpd string
+			if len(tasks) > 0 {
+				lastTaskUpd = tasks[0].UpdatedAt.Format(time.RFC3339Nano)
+			}
+			fp := fmt.Sprintf("%d:%d:%d:%s", len(tasks), len(approvals), lastAudit, lastTaskUpd)
+			_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp)
+			flusher.Flush()
+		}
+
+		emit()
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				emit()
+			}
+		}
+	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())
 		if err != nil {
