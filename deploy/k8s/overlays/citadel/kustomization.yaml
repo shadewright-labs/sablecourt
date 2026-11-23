@@ -7,4 +7,4 @@ resources:
   - agentgateway.yaml
 
 patches:
-  - path: patch-enterprise.yaml
+  - path: patch-citadel.yaml

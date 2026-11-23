@@ -9,7 +9,7 @@ spec:
       containers:
         - name: sablecourtd
           args:
-            - --mode=enterprise
+            - --mode=citadel
             - --listen=0.0.0.0:7432
             - --gate-host=sablecourtd.sablecourt.svc:7432
             - --runtime=k8s

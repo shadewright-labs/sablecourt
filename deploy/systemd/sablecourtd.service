@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sablecourtd --mode=local --listen=127.0.0.1:7432 --db=/var/lib/sablecourt/sablecourt.db --manifests=/etc/sablecourt/manifests --secret-file=/etc/sablecourt/secrets.json
+ExecStart=/usr/local/bin/sablecourtd --mode=sanctum --listen=127.0.0.1:7432 --db=/var/lib/sablecourt/sablecourt.db --manifests=/etc/sablecourt/manifests --secret-file=/etc/sablecourt/secrets.json
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

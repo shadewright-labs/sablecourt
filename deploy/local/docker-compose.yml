@@ -6,7 +6,7 @@ services:
     depends_on:
       - tailscale
     command:
-      - --mode=local
+      - --mode=sanctum
       - --listen=127.0.0.1:7432
       - --db=/var/lib/sablecourt/sablecourt.db
       - --manifests=/etc/sablecourt/manifests
