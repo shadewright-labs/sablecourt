@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
@@ -67,7 +68,8 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 		t.Fatalf("NewDashboard: %v", err)
 	}
 
-	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, conclaveBroker, nil, dash)
+	attachHub := attach.NewHub()
+	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, conclaveBroker, attachHub, nil, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()

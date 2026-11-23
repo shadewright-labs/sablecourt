@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -21,6 +24,7 @@ import (
 type Adapter struct {
 	WorktreeRoot string
 	DryRun       bool
+	AttachHub    *attach.Hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -70,6 +74,62 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 
 	// Capture session output next to the worktree so git status stays clean.
 	logPath := worktreeDir + ".log"
+	if a.AttachHub != nil {
+		stdinPipe, err := cmd.StdinPipe()
+		if err != nil {
+			return scruntime.Handle{}, fmt.Errorf("stdin pipe: %w", err)
+		}
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			return scruntime.Handle{}, fmt.Errorf("stdout pipe: %w", err)
+		}
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			return scruntime.Handle{}, fmt.Errorf("stderr pipe: %w", err)
+		}
+		if err := cmd.Start(); err != nil {
+			return scruntime.Handle{}, fmt.Errorf("start coding harness %q: %w", cfg.Harness, err)
+		}
+		handle.PID = cmd.Process.Pid
+		a.AttachHub.Register(spec.TaskID, stdinPipe)
+
+		logFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		go func() {
+			defer func() {
+				if logFile != nil {
+					_ = logFile.Close()
+				}
+				a.AttachHub.Close(spec.TaskID)
+			}()
+			var logMu sync.Mutex
+			pump := func(r io.Reader) {
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := r.Read(buf)
+					if n > 0 {
+						chunk := buf[:n]
+						a.AttachHub.WriteOutput(spec.TaskID, chunk)
+						if logFile != nil {
+							logMu.Lock()
+							_, _ = logFile.Write(chunk)
+							logMu.Unlock()
+						}
+					}
+					if readErr != nil {
+						return
+					}
+				}
+			}
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); pump(stdoutPipe) }()
+			go func() { defer wg.Done(); pump(stderrPipe) }()
+			wg.Wait()
+			_ = cmd.Wait()
+		}()
+		return handle, nil
+	}
+
 	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile

@@ -21,6 +21,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/a2a"
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
@@ -231,8 +232,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	})
 	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
 
+	attachHub := attach.NewHub()
+	codingAdapter := coding.NewAdapter(os.TempDir())
+	codingAdapter.AttachHub = attachHub
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{
-		domain.ClassCodingAgent: coding.NewAdapter(os.TempDir()),
+		domain.ClassCodingAgent: codingAdapter,
 	}
 	switch cfg.runtimeBackend {
 	case "k8s":
@@ -341,7 +345,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, conclaveBroker, provReg, dash)
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, conclaveBroker, attachHub, provReg, dash)
 	if cfg.operatorAuthRequired {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
 		mux = requireOperatorAuth(mux, secretStore)
@@ -393,7 +397,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, conclaveBroker *conclave.Broker, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -496,6 +500,126 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "working", "id": id})
 	})
+	if attachHub != nil {
+		mux.HandleFunc("GET /api/v1/tasks/{id}/scry", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			hist, ch, closed, unsub, err := attachHub.Subscribe(id)
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+				return
+			}
+			defer unsub()
+
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+				Category:  "attach",
+				TaskID:    id,
+				Action:    "task.scry",
+				Outcome:   "attached",
+				CreatedAt: time.Now().UTC(),
+			})
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			if hist != "" {
+				raw, _ := json.Marshal(hist)
+				_, _ = fmt.Fprintf(w, "event: history\ndata: %s\n\n", raw)
+				flusher.Flush()
+			}
+			if closed {
+				_, _ = fmt.Fprintf(w, "event: closed\ndata: {}\n\n")
+				flusher.Flush()
+				return
+			}
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case chunk, open := <-ch:
+					if !open {
+						_, _ = fmt.Fprintf(w, "event: closed\ndata: {}\n\n")
+						flusher.Flush()
+						return
+					}
+					raw, _ := json.Marshal(chunk)
+					_, _ = fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", raw)
+					flusher.Flush()
+				}
+			}
+		})
+		mux.HandleFunc("POST /api/v1/tasks/{id}/takeover", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			var body struct {
+				Operator string `json:"operator"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Operator == "" {
+				body.Operator = "operator"
+			}
+			if err := attachHub.AcquireTakeover(id, body.Operator); err != nil {
+				code := http.StatusConflict
+				if errors.Is(err, attach.ErrSessionNotFound) {
+					code = http.StatusNotFound
+				}
+				writeJSON(w, code, map[string]string{"error": err.Error()})
+				return
+			}
+			_ = st.RecordHeartbeat(r.Context(), id, time.Now().UTC())
+			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+				Category:   "attach",
+				TaskID:     id,
+				Action:     "task.takeover",
+				Outcome:    "acquired",
+				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
+				CreatedAt:  time.Now().UTC(),
+			})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "takeover", "id": id, "operator": body.Operator})
+		})
+		mux.HandleFunc("POST /api/v1/tasks/{id}/stdin", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			var body struct {
+				Operator string `json:"operator"`
+				Data     string `json:"data"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			n, err := attachHub.SendInput(id, body.Operator, []byte(body.Data))
+			if err != nil {
+				code := http.StatusConflict
+				if errors.Is(err, attach.ErrSessionNotFound) {
+					code = http.StatusNotFound
+				}
+				writeJSON(w, code, map[string]string{"error": err.Error()})
+				return
+			}
+			_ = st.RecordHeartbeat(r.Context(), id, time.Now().UTC())
+			writeJSON(w, http.StatusOK, map[string]any{"status": "written", "bytes": n})
+		})
+		mux.HandleFunc("POST /api/v1/tasks/{id}/detach", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			var body struct {
+				Operator string `json:"operator"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			attachHub.ReleaseTakeover(id, body.Operator)
+			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+				Category:   "attach",
+				TaskID:     id,
+				Action:     "task.detach",
+				Outcome:    "released",
+				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
+				CreatedAt:  time.Now().UTC(),
+			})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "detached", "id": id})
+		})
+	}
 	mux.HandleFunc("GET /api/v1/stream", func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
