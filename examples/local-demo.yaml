@@ -1,0 +1,125 @@
+apiVersion: sablecourt.io/v1alpha1
+kind: Budget
+metadata:
+  name: local-daily
+spec:
+  perTask:
+    maxInputTokens: 200000
+    maxOutputTokens: 40000
+    maxCostUSD: 2.50
+  daily:
+    maxCostUSD: 15.00
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Policy
+metadata:
+  name: local-court-policy
+spec:
+  defaultEffect: deny
+  rules:
+    - workload: triage-agent
+      capability: mcp:sablecourt.list_workloads
+      effect: allow
+    - workload: triage-agent
+      capability: action:git.create_branch
+      effect: allow
+    - workload: triage-agent
+      capability: action:git.open_pr
+      effect: approve
+    - workload: triage-agent
+      capability: delegate:go-coder
+      effect: allow
+    - workload: "*"
+      capability: policy:*
+      effect: deny
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: go-coder
+  zone: runtime
+spec:
+  class: coding-agent
+  runtime:
+    type: worktree-cli
+  coding:
+    harness: claude
+    repoPath: .
+    sandbox: seatbelt
+  agentCard:
+    description: Edits Go code inside an isolated Git worktree and OS sandbox.
+    skills:
+      - go-coding
+      - unit-tests
+  grants:
+    modelGate:
+      allowed: true
+      providers: [anthropic, openai, gemini]
+      budgetRef: local-daily
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: triage-agent
+  zone: runtime
+spec:
+  class: long-lived-agent
+  runtime:
+    type: docker
+    image: alpine:3.21
+    readOnlyRootfs: true
+  agentCard:
+    description: Triages repository tasks, queries allowlisted MCP tools, and proposes PRs.
+    skills:
+      - issue-triage
+      - pr-proposal
+  grants:
+    modelGate:
+      allowed: true
+      providers: [anthropic, openai, gemini, local]
+      budgetRef: local-daily
+    mcpTools:
+      - sablecourt.list_workloads
+    actions:
+      - git.create_branch
+      - git.open_pr
+    delegateTo:
+      - go-coder
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: health-controller
+  zone: runtime
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: alpine:3.21
+    readOnlyRootfs: true
+  agentCard:
+    description: Non-LLM deterministic health check controller with zero Model Gate access.
+    skills:
+      - health-check
+  grants:
+    modelGate:
+      allowed: false
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: experimental-sandbox
+  zone: sandbox
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: alpine:3.21
+    readOnlyRootfs: true
+  agentCard:
+    description: Ephemeral sandbox workload with zero production mutation grants.
+    skills:
+      - dry-run-analysis
+  grants:
+    modelGate:
+      allowed: false
