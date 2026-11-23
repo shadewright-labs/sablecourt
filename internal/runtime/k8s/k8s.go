@@ -109,6 +109,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	falseVal := false
 	trueVal := true
 	backoffLimit := int32(0)
+	ttlAfterFinished := int32(3600)
 	readOnlyRoot := spec.Workload.Spec.Runtime.ReadOnlyRootfs
 
 	jobName := sanitizeK8sName("sc-" + spec.TaskID)
@@ -153,7 +154,8 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoffLimit,
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{

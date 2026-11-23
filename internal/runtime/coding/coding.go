@@ -195,6 +195,10 @@ func (a *Adapter) Stop(_ context.Context, handle scruntime.Handle) error {
 	if handle.PID > 0 {
 		_ = syscall.Kill(-handle.PID, syscall.SIGTERM)
 	}
+	if handle.WorkDir != "" {
+		_ = os.Remove(handle.WorkDir + ".log")
+		_ = os.RemoveAll(handle.WorkDir)
+	}
 	return nil
 }
 

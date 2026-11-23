@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
@@ -204,7 +205,8 @@ func (h *Hub) Status(taskID string) (active bool, canTakeover bool, owner string
 	return !s.closed, s.stdin != nil && !s.closed, s.takeoverOwner
 }
 
-// Close marks a task session finished and closes all active Scry subscribers.
+// Close marks a task session finished, closes all active Scry subscribers,
+// and evicts the buffered session from memory after a short grace period.
 func (h *Hub) Close(taskID string) {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
@@ -213,6 +215,13 @@ func (h *Hub) Close(taskID string) {
 		return
 	}
 	s.closeLocked()
+	time.AfterFunc(10*time.Minute, func() {
+		h.mu.Lock()
+		if cur, exists := h.sessions[taskID]; exists && cur == s {
+			delete(h.sessions, taskID)
+		}
+		h.mu.Unlock()
+	})
 }
 
 func (s *session) closeLocked() {

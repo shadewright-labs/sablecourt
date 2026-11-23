@@ -183,7 +183,9 @@
             });
             if (res.ok) {
               const blob = await res.blob();
-              const audio = new Audio(URL.createObjectURL(blob));
+              const objURL = URL.createObjectURL(blob);
+              const audio = new Audio(objURL);
+              audio.addEventListener("ended", function() { URL.revokeObjectURL(objURL); });
               audio.play();
             }
           } finally {
