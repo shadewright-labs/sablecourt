@@ -9,6 +9,7 @@ const (
 	KindPolicy   = "Policy"
 	KindBudget   = "Budget"
 	KindWorkflow = "Workflow"
+	KindSchedule = "Schedule"
 )
 
 type WorkloadZone string
@@ -164,6 +165,20 @@ type WorkflowStep struct {
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
+}
+
+type Schedule struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta   `json:"metadata"`
+	Spec     ScheduleSpec `json:"spec"`
+}
+
+type ScheduleSpec struct {
+	Cron       string `json:"cron"`
+	TargetKind string `json:"targetKind"` // workload | workflow
+	TargetName string `json:"targetName"`
+	Input      string `json:"input,omitempty"`
+	Enabled    bool   `json:"enabled"`
 }
 
 type WorkloadRecord struct {

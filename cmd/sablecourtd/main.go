@@ -185,6 +185,11 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 		ModelGateURL: "http://" + gateHost + "/gate/model",
 		DataGateURL:  "http://" + gateHost + "/gate/mcp",
 	})
+	scheduler := controlplane.NewScheduler(reconciler)
+	if err := scheduler.Reload(ctx, bundle); err != nil {
+		return err
+	}
+	defer scheduler.Stop()
 
 	reloadFn := func() error {
 		b, pol, err := loadAndSync()
@@ -197,8 +202,9 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 		modelGate.SetBundle(b)
 		dataActionGate.Reload(b, pol)
 		reconciler.Reload(b, pol)
+		_ = scheduler.Reload(ctx, b)
 		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "digest", b.ManifestDigest[:12])
+			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", b.ManifestDigest[:12])
 		}
 		return nil
 	}
@@ -301,6 +307,7 @@ func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.Handle("GET /metrics", telemetry.MetricsHandler(st))
 	mux.HandleFunc("GET /api/v1/providers", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
 			writeJSON(w, http.StatusOK, []any{})

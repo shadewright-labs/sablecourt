@@ -304,6 +304,27 @@
       max-height: 180px;
       overflow-y: auto;
     }
+    .filter-tabs { display: flex; gap: 6px; align-items: center; }
+    .filter-tab {
+      font-family: var(--mono); font-size: 10px; padding: 3px 8px; border-radius: 5px;
+      border: 1px solid var(--border); background: var(--bg-night); color: var(--text-muted);
+      text-decoration: none;
+    }
+    .filter-tab:hover { border-color: rgba(45,212,191,0.38); color: var(--text-bone); text-decoration: none; }
+    .filter-tab.active { border-color: rgba(45,212,191,0.45); background: rgba(45,212,191,0.10); color: #5EEAD4; }
+    .task-reply {
+      margin-top: 8px;
+      background: rgba(76, 29, 149, 0.14);
+      border: 1px solid rgba(167, 139, 250, 0.25);
+      border-left: 3px solid #A78BFA;
+      border-radius: 6px;
+      padding: 9px 11px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-bone);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .task-actions { display: flex; gap: 8px; align-items: center; }
     .task-actions form { margin: 0; }
 
@@ -465,8 +486,13 @@
 
         <div class="panel">
           <div class="col-title">
-            <span>Active tasks &amp; threads</span>
-            <span>{{len .Tasks}}</span>
+            <span>Tasks &amp; threads ({{len .Tasks}} / {{.TotalTasks}})</span>
+            <div class="filter-tabs">
+              <a class="filter-tab {{if eq .StateFilter "all"}}active{{end}}" href="/?state=all">all</a>
+              <a class="filter-tab {{if eq .StateFilter "active"}}active{{end}}" href="/?state=active">active</a>
+              <a class="filter-tab {{if eq .StateFilter "completed"}}active{{end}}" href="/?state=completed">completed</a>
+              <a class="filter-tab {{if eq .StateFilter "failed"}}active{{end}}" href="/?state=failed">failed</a>
+            </div>
           </div>
           {{if .Tasks}}
             {{range .Tasks}}
@@ -503,6 +529,7 @@
                 {{if .Task.ParentTaskID}}<span>parent {{.Task.ParentTaskID}}</span>{{end}}
               </div>
               <div class="task-body">{{.Task.InputJSON}}</div>
+              {{if .LastReply}}<div class="task-reply">{{.LastReply}}</div>{{end}}
             </div>
             {{end}}
           {{else}}
