@@ -42,14 +42,20 @@ func TestDashboardRendersFactsAndServesBrandAssets(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "/assets/logo-horizontal-dark.png") || !strings.Contains(body, "/assets/favicon.png") || !strings.Contains(body, "triage-agent") {
+	if !strings.Contains(body, "/assets/logo-horizontal-dark.png") || !strings.Contains(body, "/assets/favicon-32.png") || !strings.Contains(body, "triage-agent") {
 		t.Fatalf("expected branded dashboard HTML, got:\n%s", body)
 	}
 
 	favRec := httptest.NewRecorder()
 	mux.ServeHTTP(favRec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
-	if favRec.Code != http.StatusOK || favRec.Header().Get("Content-Type") != "image/png" || favRec.Body.Len() == 0 {
-		t.Fatalf("expected PNG favicon, got code=%d ct=%q len=%d", favRec.Code, favRec.Header().Get("Content-Type"), favRec.Body.Len())
+	if favRec.Code != http.StatusOK || favRec.Header().Get("Content-Type") != "image/x-icon" || favRec.Body.Len() == 0 {
+		t.Fatalf("expected ICO favicon, got code=%d ct=%q len=%d", favRec.Code, favRec.Header().Get("Content-Type"), favRec.Body.Len())
+	}
+
+	appleRec := httptest.NewRecorder()
+	mux.ServeHTTP(appleRec, httptest.NewRequest(http.MethodGet, "/apple-touch-icon.png", nil))
+	if appleRec.Code != http.StatusOK || appleRec.Header().Get("Content-Type") != "image/png" || appleRec.Body.Len() == 0 {
+		t.Fatalf("expected apple-touch-icon PNG, got code=%d ct=%q len=%d", appleRec.Code, appleRec.Header().Get("Content-Type"), appleRec.Body.Len())
 	}
 
 	logoRec := httptest.NewRecorder()
