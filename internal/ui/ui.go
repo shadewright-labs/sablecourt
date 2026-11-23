@@ -59,6 +59,7 @@ type Dashboard struct {
 	conclavesTmpl   *template.Template
 	conclaveTmpl    *template.Template
 	schedulesTmpl   *template.Template
+	auditTmpl       *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -121,6 +122,10 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
+	auditTmpl, err := template.ParseFS(embeddedFS, "templates/audit.html")
+	if err != nil {
+		return nil, err
+	}
 	subAssets, err := fs.Sub(embeddedFS, "assets")
 	if err != nil {
 		return nil, err
@@ -155,6 +160,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		conclavesTmpl:   conclavesTmpl,
 		conclaveTmpl:    conclaveTmpl,
 		schedulesTmpl:   schedulesTmpl,
+		auditTmpl:       auditTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -169,6 +175,7 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /conclaves", d.handleConclavesPage)
 	mux.HandleFunc("GET /conclaves/{id}", d.handleConclaveDetailPage)
 	mux.HandleFunc("GET /schedules", d.handleSchedulesPage)
+	mux.HandleFunc("GET /audit", d.handleAuditPage)
 	mux.HandleFunc("POST /ui/schedules/{name}/run", d.handleRunSchedule)
 	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
 	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)
