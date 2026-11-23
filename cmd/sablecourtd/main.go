@@ -21,6 +21,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/a2a"
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -319,10 +320,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return bundle
 	}
 
+	conclaveBroker := conclave.NewBroker(conclave.Options{
+		Store:      st,
+		Reconciler: reconciler,
+		GetBundle:  getBundle,
+	})
+	conclaveBroker.RegisterMCPTools(dataActionGate)
+
 	dash, err := ui.NewDashboard(ui.Options{
 		Store:         st,
 		Approvals:     approvalQueue,
 		Reconciler:    reconciler,
+		Conclave:      conclaveBroker,
 		Providers:     provReg,
 		GetBundle:     getBundle,
 		Reload:        reloadFn,
@@ -332,7 +341,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, provReg, dash)
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, conclaveBroker, provReg, dash)
 	if cfg.operatorAuthRequired {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
 		mux = requireOperatorAuth(mux, secretStore)
@@ -384,7 +393,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, conclaveBroker *conclave.Broker, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -709,7 +718,181 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		mux.Handle("/gate/mcp", dataActionGate.MCPHandler())
 		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
+	if conclaveBroker != nil {
+		mux.HandleFunc("GET /api/v1/conclaves", func(w http.ResponseWriter, r *http.Request) {
+			items, err := st.ListConclaves(r.Context())
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, items)
+		})
+		mux.HandleFunc("POST /api/v1/conclaves", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Template string `json:"template"`
+				Title    string `json:"title"`
+				Decree   string `json:"decree"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			sess, err := conclaveBroker.Open(r.Context(), body.Template, body.Title, body.Decree)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, sess)
+		})
+		mux.HandleFunc("GET /api/v1/conclaves/{id}", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			sess, err := st.GetConclave(r.Context(), id)
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "conclave not found"})
+				return
+			}
+			msgs, _ := st.ListConclaveMessages(r.Context(), id, 0)
+			relics, _ := st.ListConclaveRelics(r.Context(), id)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"conclave": sess,
+				"messages": msgs,
+				"relics":   relics,
+			})
+		})
+		mux.HandleFunc("POST /api/v1/conclaves/{id}/decree", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				To   string `json:"to"`
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), "operator", body.To, "decree", body.Body, "")
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, msg)
+		})
+		mux.HandleFunc("POST /api/v1/conclaves/{id}/close", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				State string `json:"state"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if err := conclaveBroker.Close(r.Context(), r.PathValue("id"), domain.ConclaveState(body.State)); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
+		})
+		mux.HandleFunc("POST /gate/conclave/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
+			lease, ok := authenticateGateLease(w, r, st)
+			if !ok {
+				return
+			}
+			role, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName)
+			if err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
+			}
+			var body struct {
+				To   string `json:"to"`
+				Kind string `json:"kind"`
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), role, body.To, body.Kind, body.Body, lease.TaskID)
+			if err != nil {
+				code := http.StatusConflict
+				if errors.Is(err, conclave.ErrMessageDenied) {
+					code = http.StatusForbidden
+				}
+				writeJSON(w, code, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, msg)
+		})
+		mux.HandleFunc("GET /gate/conclave/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
+			lease, ok := authenticateGateLease(w, r, st)
+			if !ok {
+				return
+			}
+			if _, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName); err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
+			}
+			var since int64
+			_, _ = fmt.Sscanf(r.URL.Query().Get("since"), "%d", &since)
+			msgs, err := st.ListConclaveMessages(r.Context(), r.PathValue("id"), since)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, msgs)
+		})
+		mux.HandleFunc("POST /gate/conclave/{id}/relics", func(w http.ResponseWriter, r *http.Request) {
+			lease, ok := authenticateGateLease(w, r, st)
+			if !ok {
+				return
+			}
+			role, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName)
+			if err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
+			}
+			var body struct {
+				Name        string `json:"name"`
+				ContentType string `json:"contentType"`
+				Body        string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), role, body.Name, body.ContentType, body.Body)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, relic)
+		})
+		mux.HandleFunc("GET /gate/conclave/{id}/relics/{name}", func(w http.ResponseWriter, r *http.Request) {
+			lease, ok := authenticateGateLease(w, r, st)
+			if !ok {
+				return
+			}
+			if _, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName); err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+				return
+			}
+			relic, err := st.GetConclaveRelic(r.Context(), r.PathValue("id"), r.PathValue("name"))
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "relic not found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, relic)
+		})
+	}
 	return mux
+}
+
+func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Store) (domain.Lease, bool) {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
+		return domain.Lease{}, false
+	}
+	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+		return domain.Lease{}, false
+	}
+	return lease, true
 }
 
 func discoverManifestsPath() string {

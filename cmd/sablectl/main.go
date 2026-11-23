@@ -596,7 +596,107 @@ func main() {
 	authGitHubCmd.Flags().StringVar(&ghClientID, "client-id", "", "GitHub OAuth App client_id (or set SABLECOURT_GITHUB_CLIENT_ID)")
 	authCmd.AddCommand(authGitHubCmd)
 
-	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	conclaveCmd := &cobra.Command{
+		Use:   "conclave",
+		Short: "Convene and direct multi-agent Conclaves (Vassals, Wards, Decrees, Relics)",
+	}
+	conclaveCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List Conclave sessions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/conclaves")
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var items []domain.ConclaveSession
+			if err := json.Unmarshal(body, &items); err != nil {
+				return err
+			}
+			for _, c := range items {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s  %-14s  %-18s  %s\n", stTitle.Render(c.ID), c.State, c.TemplateName, c.Title)
+			}
+			return nil
+		},
+	})
+	var conclaveTitle, conclaveDecree string
+	conclaveOpenCmd := &cobra.Command{
+		Use:   "open <template>",
+		Short: "Convene a new Conclave from a manifest template",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves", map[string]string{
+				"template": args[0],
+				"title":    conclaveTitle,
+				"decree":   conclaveDecree,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var c domain.ConclaveSession
+			_ = json.Unmarshal(body, &c)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s convened conclave %s (%s)\n", stJade.Render("✓"), stTitle.Render(c.ID), c.Title)
+			return nil
+		},
+	}
+	conclaveOpenCmd.Flags().StringVar(&conclaveTitle, "title", "", "Conclave session title")
+	conclaveOpenCmd.Flags().StringVar(&conclaveDecree, "decree", "", "Optional opening operator Decree")
+	conclaveCmd.AddCommand(conclaveOpenCmd)
+
+	var decreeTo string
+	conclaveDecreeCmd := &cobra.Command{
+		Use:   "decree <conclave-id> <message>",
+		Short: "Issue an operator Decree to direct Vassals or resume a Ward-paused Conclave",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/decree", map[string]string{
+				"to":   decreeTo,
+				"body": args[1],
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s decree issued to @%s in %s\n", stJade.Render("✓"), decreeTo, args[0])
+			return nil
+		},
+	}
+	conclaveDecreeCmd.Flags().StringVar(&decreeTo, "to", "all", "Target Vassal role or all")
+	conclaveCmd.AddCommand(conclaveDecreeCmd)
+
+	conclaveCmd.AddCommand(&cobra.Command{
+		Use:   "close <conclave-id>",
+		Short: "Close a Conclave session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/close", map[string]string{"state": "completed"})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s closed conclave %s\n", stAmber.Render("✓"), args[0])
+			return nil
+		},
+	})
+
+	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())

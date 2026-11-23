@@ -10,6 +10,7 @@ const (
 	KindBudget   = "Budget"
 	KindWorkflow = "Workflow"
 	KindSchedule = "Schedule"
+	KindConclave = "Conclave"
 )
 
 type WorkloadZone string
@@ -280,4 +281,76 @@ type ProviderPrefs struct {
 	DefaultModel  string
 	EnabledModels []string
 	UpdatedAt     time.Time
+}
+
+type ConclaveActivation string
+
+const (
+	ActivationAlwaysOn  ConclaveActivation = "always-on"
+	ActivationOnMention ConclaveActivation = "on-mention"
+)
+
+type ConclaveState string
+
+const (
+	ConclaveStateActive        ConclaveState = "active"
+	ConclaveStateInputRequired ConclaveState = "input-required"
+	ConclaveStateCompleted     ConclaveState = "completed"
+	ConclaveStateCancelled     ConclaveState = "cancelled"
+)
+
+type Conclave struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta   `json:"metadata"`
+	Spec     ConclaveSpec `json:"spec"`
+}
+
+type ConclaveSpec struct {
+	Description string           `json:"description,omitempty"`
+	BudgetRef   string           `json:"budgetRef,omitempty"`
+	Wards       ConclaveWards    `json:"wards,omitempty"`
+	Vassals     []ConclaveVassal `json:"vassals"`
+}
+
+type ConclaveWards struct {
+	MaxMessages int `json:"maxMessages,omitempty"`
+	MaxPingPong int `json:"maxPingPong,omitempty"`
+}
+
+type ConclaveVassal struct {
+	Role       string             `json:"role"`
+	Workload   string             `json:"workload"`
+	Activation ConclaveActivation `json:"activation,omitempty"`
+	CanMessage []string           `json:"canMessage,omitempty"`
+}
+
+type ConclaveSession struct {
+	ID           string
+	TemplateName string
+	Title        string
+	State        ConclaveState
+	WardReason   string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type ConclaveMessage struct {
+	ID         int64
+	ConclaveID string
+	FromRole   string
+	ToRole     string
+	Kind       string // proposal | question | review | blocker | decision | decree | system
+	Body       string
+	TaskID     string
+	CreatedAt  time.Time
+}
+
+type ConclaveRelic struct {
+	ConclaveID  string
+	Name        string
+	AuthorRole  string
+	ContentType string
+	Body        string
+	SHA256      string
+	CreatedAt   time.Time
 }
