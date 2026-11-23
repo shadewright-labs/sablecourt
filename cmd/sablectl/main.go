@@ -554,7 +554,40 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	authCmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Authenticate external providers via OAuth flows",
+	}
+	var ghClientID string
+	authGitHubCmd := &cobra.Command{
+		Use:   "github",
+		Short: "Authenticate GitHub via OAuth Device Flow and store github_token in SecretStore",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if ghClientID == "" {
+				ghClientID = os.Getenv("SABLECOURT_GITHUB_CLIENT_ID")
+			}
+			flow := providers.NewGitHubDeviceFlow(ghClientID)
+			dc, err := flow.Start(context.Background(), "repo")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Open %s and enter code: %s\nWaiting for authorization...\n",
+				stJade.Render(dc.VerificationURI), stTitle.Render(dc.UserCode))
+			tok, err := flow.PollToken(context.Background(), dc.DeviceCode, time.Duration(dc.Interval)*time.Second)
+			if err != nil {
+				return err
+			}
+			if err := newSecretStore().Set(context.Background(), "github_token", tok); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), stJade.Render("✓ stored github_token in SecretStore"))
+			return nil
+		},
+	}
+	authGitHubCmd.Flags().StringVar(&ghClientID, "client-id", "", "GitHub OAuth App client_id (or set SABLECOURT_GITHUB_CLIENT_ID)")
+	authCmd.AddCommand(authGitHubCmd)
+
+	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
