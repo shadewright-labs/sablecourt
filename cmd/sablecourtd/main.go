@@ -61,6 +61,9 @@ func main() {
 		k8sRuntimeClass      string
 		kubeconfigPath       string
 		operatorAuthRequired bool
+		manifestsGitRepo     string
+		manifestsGitBranch   string
+		manifestsGitInterval time.Duration
 	)
 
 	rootCmd := &cobra.Command{
@@ -81,6 +84,9 @@ func main() {
 				k8sRuntimeClass:      k8sRuntimeClass,
 				kubeconfigPath:       kubeconfigPath,
 				operatorAuthRequired: operatorAuthRequired,
+				manifestsGitRepo:     manifestsGitRepo,
+				manifestsGitBranch:   manifestsGitBranch,
+				manifestsGitInterval: manifestsGitInterval,
 			})
 		},
 	}
@@ -88,6 +94,9 @@ func main() {
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
+	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
+	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
+	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
 	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
@@ -122,6 +131,9 @@ type daemonConfig struct {
 	k8sRuntimeClass      string
 	kubeconfigPath       string
 	operatorAuthRequired bool
+	manifestsGitRepo     string
+	manifestsGitBranch   string
+	manifestsGitInterval time.Duration
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -134,6 +146,21 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	repoRoot := cfg.repoRoot
 
 	logger := telemetry.NewLogger()
+
+	var gitSyncer *config.GitSyncer
+	if cfg.manifestsGitRepo != "" {
+		syncDir := manifestsPath
+		if syncDir == "" {
+			syncDir = filepath.Join(os.TempDir(), "sablecourt-git-manifests")
+		}
+		gitSyncer = config.NewGitSyncer(cfg.manifestsGitRepo, cfg.manifestsGitBranch, syncDir)
+		if _, sha, err := gitSyncer.SyncOnce(ctx); err != nil {
+			logger.Warn("initial manifests git sync failed", "repo", cfg.manifestsGitRepo, "error", err)
+		} else {
+			logger.Info("synced manifests from git", "repo", cfg.manifestsGitRepo, "sha", sha[:12])
+			manifestsPath = syncDir
+		}
+	}
 
 	if manifestsPath == "" {
 		manifestsPath = discoverManifestsPath()
@@ -317,6 +344,36 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", b.ManifestDigest[:12])
 		}
 		return nil
+	}
+
+	if gitSyncer != nil {
+		interval := cfg.manifestsGitInterval
+		if interval <= 0 {
+			interval = 60 * time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					changed, sha, err := gitSyncer.SyncOnce(ctx)
+					if err != nil {
+						logger.Warn("manifests git sync failed", "error", err)
+						continue
+					}
+					if changed {
+						if err := reloadFn(); err != nil {
+							logger.Warn("reload after git sync failed", "sha", sha[:12], "error", err)
+						} else {
+							logger.Info("reloaded manifests from git update", "sha", sha[:12])
+						}
+					}
+				}
+			}
+		}()
 	}
 
 	go func() {
@@ -697,6 +754,67 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	})
+	mux.HandleFunc("GET /api/v1/observer/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		tasks, _ := st.ListTasks(r.Context())
+		conclaves, _ := st.ListConclaves(r.Context())
+		pendingApprovals, _ := st.ListApprovals(r.Context(), domain.ApprovalPending)
+		budget, _ := st.TotalBudgetTotals(r.Context())
+
+		type taskSummary struct {
+			ID           string           `json:"id"`
+			Workload     string           `json:"workload"`
+			State        domain.TaskState `json:"state"`
+			UpdatedAt    time.Time        `json:"updatedAt"`
+		}
+		var activeTasks []taskSummary
+		for _, t := range tasks {
+			if t.State == domain.TaskStateWorking || t.State == domain.TaskStateSubmitted || t.State == domain.TaskStateInputRequired || t.State == domain.TaskStateSuspended {
+				activeTasks = append(activeTasks, taskSummary{
+					ID:        t.ID,
+					Workload:  t.WorkloadName,
+					State:     t.State,
+					UpdatedAt: t.UpdatedAt,
+				})
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"source":           "sablecourt",
+			"observedAt":       time.Now().UTC(),
+			"activeTasks":      activeTasks,
+			"conclaves":        conclaves,
+			"pendingApprovals": len(pendingApprovals),
+			"budget":           budget,
+		})
+	})
+	mux.HandleFunc("GET /api/v1/observer/stream", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		emit := func() {
+			tasks, _ := st.ListTasks(r.Context())
+			conclaves, _ := st.ListConclaves(r.Context())
+			pending, _ := st.ListApprovals(r.Context(), domain.ApprovalPending)
+			fp := fmt.Sprintf("%d:%d:%d", len(tasks), len(conclaves), len(pending))
+			_, _ = fmt.Fprintf(w, "event: observer\ndata: %s\n\n", fp)
+			flusher.Flush()
+		}
+		emit()
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				emit()
+			}
+		}
 	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())
@@ -1256,12 +1374,6 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
 			return
 		}
-		want, err := secrets.Get(r.Context(), "operator_bearer_token")
-		if err != nil || strings.TrimSpace(want) == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
-			return
-		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
@@ -1269,6 +1381,23 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 			return
 		}
 		got := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+
+		// Allow read-only observer_bearer_token strictly on observer and Scry endpoints.
+		if r.Method == http.MethodGet && (p == "/api/v1/observer/snapshot" || p == "/api/v1/observer/stream" || (strings.HasPrefix(p, "/api/v1/tasks/") && strings.HasSuffix(p, "/scry"))) {
+			if obsTok, obsErr := secrets.Get(r.Context(), "observer_bearer_token"); obsErr == nil && strings.TrimSpace(obsTok) != "" {
+				if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(obsTok))) == 1 {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		want, err := secrets.Get(r.Context(), "operator_bearer_token")
+		if err != nil || strings.TrimSpace(want) == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
+			return
+		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(want))) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid operator bearer token"})

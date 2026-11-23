@@ -198,4 +198,28 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with valid operator token, got %d", rec.Code)
 	}
+
+	// 3. Read-only observer_bearer_token can access observer snapshot and scry, but is rejected on operator routes.
+	secWithObs := secret.NewMemoryStore(map[string]string{
+		"operator_bearer_token": "op-secret-123",
+		"observer_bearer_token": "obs-readonly-456",
+	})
+	hObs := requireOperatorAuth(okHandler, secWithObs)
+
+	for _, allowed := range []string{"/api/v1/observer/snapshot", "/api/v1/tasks/t1/scry"} {
+		req := httptest.NewRequest(http.MethodGet, allowed, nil)
+		req.Header.Set("Authorization", "Bearer obs-readonly-456")
+		rec = httptest.NewRecorder()
+		hObs.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected observer token to access %s, got %d", allowed, rec.Code)
+		}
+	}
+	reqDenied := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", nil)
+	reqDenied.Header.Set("Authorization", "Bearer obs-readonly-456")
+	rec = httptest.NewRecorder()
+	hObs.ServeHTTP(rec, reqDenied)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected observer token to be denied on POST /api/v1/tasks, got %d", rec.Code)
+	}
 }
