@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,6 +22,8 @@ const DefaultNetworkName = "sablecourt-internal"
 type EngineClient interface {
 	NetworkInspect(ctx context.Context, networkID string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error)
 	NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (client.ImageInspectResult, error)
+	ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 	ContainerCreate(ctx context.Context, options client.ContainerCreateOptions) (client.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerInspect(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error)
@@ -95,11 +98,29 @@ func (a *Adapter) EnsureInternalNetwork(ctx context.Context) error {
 	return nil
 }
 
+func (a *Adapter) EnsureImage(ctx context.Context, imageRef string) error {
+	if _, err := a.Client.ImageInspect(ctx, imageRef); err == nil {
+		return nil
+	}
+	resp, err := a.Client.ImagePull(ctx, imageRef, client.ImagePullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull image %q: %w", imageRef, err)
+	}
+	if resp != nil {
+		defer resp.Close()
+		_, _ = io.Copy(io.Discard, resp)
+	}
+	return nil
+}
+
 func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
 	if spec.Workload.Spec.Runtime.Image == "" {
 		return scruntime.Handle{}, errors.New("docker runtime requires runtime.image")
 	}
 	if err := a.EnsureInternalNetwork(ctx); err != nil {
+		return scruntime.Handle{}, err
+	}
+	if err := a.EnsureImage(ctx, spec.Workload.Spec.Runtime.Image); err != nil {
 		return scruntime.Handle{}, err
 	}
 

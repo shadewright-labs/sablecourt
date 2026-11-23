@@ -34,6 +34,14 @@ func (f *fakeEngine) NetworkCreate(_ context.Context, _ string, options client.N
 	return client.NetworkCreateResult{ID: "net-1"}, nil
 }
 
+func (f *fakeEngine) ImageInspect(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+	return client.ImageInspectResult{}, nil
+}
+
+func (f *fakeEngine) ImagePull(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
+	return nil, nil
+}
+
 func (f *fakeEngine) ContainerCreate(_ context.Context, options client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
 	f.createdOpts = options
 	return client.ContainerCreateResult{ID: "ctr-123"}, nil
