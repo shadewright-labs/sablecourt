@@ -63,4 +63,9 @@ type Store interface {
 	PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error
 	GetConclaveRelic(ctx context.Context, conclaveID, name string) (domain.ConclaveRelic, error)
 	ListConclaveRelics(ctx context.Context, conclaveID string) ([]domain.ConclaveRelic, error)
+
+	CreateDevice(ctx context.Context, d domain.PairedDevice) error
+	GetDevice(ctx context.Context, id string) (domain.PairedDevice, error)
+	ListDevices(ctx context.Context) ([]domain.PairedDevice, error)
+	RevokeDevice(ctx context.Context, id string) error
 }

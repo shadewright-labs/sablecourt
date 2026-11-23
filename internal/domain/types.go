@@ -372,3 +372,12 @@ type ConclaveRelic struct {
 	SHA256      string
 	CreatedAt   time.Time
 }
+
+type PairedDevice struct {
+	ID           string
+	Name         string
+	Platform     string // ios | macos | linux | cli
+	PublicKeyPEM string
+	CreatedAt    time.Time
+	RevokedAt    *time.Time
+}

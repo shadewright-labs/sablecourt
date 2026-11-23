@@ -917,7 +917,90 @@ func main() {
 		},
 	})
 
-	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	pairCmd := &cobra.Command{
+		Use:   "pair",
+		Short: "Generate a single-use pairing code and URI for an iOS or CLI signing device",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/devices/pair/start", map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var res struct {
+				Code      string `json:"code"`
+				ExpiresAt string `json:"expiresAt"`
+				URI       string `json:"uri"`
+			}
+			_ = json.Unmarshal(body, &res)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s pairing code: %s\nURI: %s\nExpires: %s\n",
+				stJade.Render("✓"), stTitle.Render(res.Code), res.URI, stMuted.Render(res.ExpiresAt))
+			return nil
+		},
+	}
+
+	deviceCmd := &cobra.Command{
+		Use:   "device",
+		Short: "List and revoke paired ECDSA P-256 signing devices",
+	}
+	deviceCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List paired signing devices",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/devices")
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var items []domain.PairedDevice
+			if err := json.Unmarshal(body, &items); err != nil {
+				return err
+			}
+			for _, d := range items {
+				status := "active"
+				if d.RevokedAt != nil {
+					status = "revoked"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s  %-8s  %-8s  %s\n", stTitle.Render(d.ID), d.Platform, status, d.Name)
+			}
+			return nil
+		},
+	})
+	deviceCmd.AddCommand(&cobra.Command{
+		Use:   "revoke <device-id>",
+		Short: "Revoke a paired device",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/devices/"+args[0]+"/revoke", map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s revoked device %s\n", stAmber.Render("✓"), args[0])
+			return nil
+		},
+	})
+
+	mcpServerCmd := &cobra.Command{
+		Use:   "mcp-server",
+		Short: "Run Sablecourt as a stdio MCP server for Claude Code, Codex, or IDE agents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMCPServer(cmd.Context(), httpClient)
+		},
+	}
+
+	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())

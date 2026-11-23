@@ -924,8 +924,19 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		var body struct {
 			ExpectedSHA256 string `json:"expectedSha256"`
 			DecidedBy      string `json:"decidedBy"`
+			DeviceID       string `json:"deviceId"`
+			Signature      string `json:"signature"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.DeviceID != "" && body.Signature != "" {
+			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, apr)
+			return
+		}
 		if body.DecidedBy == "" {
 			body.DecidedBy = "operator"
 		}
@@ -935,6 +946,57 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		writeJSON(w, http.StatusOK, apr)
+	})
+	pairingMgr := approval.NewPairingManager(st)
+	mux.HandleFunc("POST /api/v1/devices/pair/start", func(w http.ResponseWriter, r *http.Request) {
+		code, exp, err := pairingMgr.StartPairing(5 * time.Minute)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		pubURL := strings.TrimRight(os.Getenv("SABLECOURT_PUBLIC_URL"), "/")
+		uri := fmt.Sprintf("sablecourt://pair?code=%s", code)
+		if pubURL != "" {
+			uri += "&api=" + pubURL
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"code":      code,
+			"expiresAt": exp,
+			"uri":       uri,
+		})
+	})
+	mux.HandleFunc("POST /api/v1/devices/pair/complete", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Code         string `json:"code"`
+			Name         string `json:"name"`
+			Platform     string `json:"platform"`
+			PublicKeyPEM string `json:"publicKeyPem"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		dev, err := pairingMgr.CompletePairing(r.Context(), body.Code, body.Name, body.Platform, body.PublicKeyPEM)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, dev)
+	})
+	mux.HandleFunc("GET /api/v1/devices", func(w http.ResponseWriter, r *http.Request) {
+		items, err := st.ListDevices(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	})
+	mux.HandleFunc("POST /api/v1/devices/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.RevokeDevice(r.Context(), r.PathValue("id")); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "id": r.PathValue("id")})
 	})
 	mux.HandleFunc("POST /api/v1/approvals/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -1365,6 +1427,7 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 			strings.HasPrefix(p, "/assets/") ||
 			strings.HasPrefix(p, "/gate/") ||
 			p == "/api/v1/hooks/github" ||
+			p == "/api/v1/devices/pair/complete" ||
 			p == "/a2a" {
 			next.ServeHTTP(w, r)
 			return
