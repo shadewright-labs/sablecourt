@@ -74,6 +74,10 @@ func main() {
 func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPath, gateHost, secretFile, repoRoot string) error {
 	logger := telemetry.NewLogger()
 
+	if manifestsPath == "" {
+		manifestsPath = discoverManifestsPath()
+	}
+
 	st, err := sqlite.Open(dbPath)
 	if err != nil {
 		return err
@@ -125,7 +129,9 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 		return err
 	}
 	if bundle != nil {
-		logger.Info("loaded manifests", "workloads", len(bundle.Workloads), "policies", len(bundle.Policies), "budgets", len(bundle.Budgets))
+		logger.Info("loaded manifests", "path", manifestsPath, "workloads", len(bundle.Workloads), "policies", len(bundle.Policies), "budgets", len(bundle.Budgets), "workflows", len(bundle.Workflows))
+	} else {
+		logger.Warn("no manifests loaded; pass --manifests=<path> or create ~/.config/sablecourt/manifests")
 	}
 
 	stores := []secret.SecretStore{secret.NewKeyringStore("sablecourt")}
@@ -445,6 +451,22 @@ func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func()
 		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
 	return mux
+}
+
+func discoverManifestsPath() string {
+	candidates := []string{
+		"manifests",
+		filepath.Join("examples", "local-demo.yaml"),
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "sablecourt", "manifests"))
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
 }
 
 func buildAgentCard(bundle *config.Bundle) map[string]any {
