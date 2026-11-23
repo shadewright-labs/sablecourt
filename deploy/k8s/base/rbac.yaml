@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sablecourtd
+  namespace: sablecourt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sablecourtd-jobs
+  namespace: sablecourt
+rules:
+  # Least privilege: manage batch/v1 Jobs only. Zero Secrets RBAC.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sablecourtd-jobs
+  namespace: sablecourt
+subjects:
+  - kind: ServiceAccount
+    name: sablecourtd
+    namespace: sablecourt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sablecourtd-jobs

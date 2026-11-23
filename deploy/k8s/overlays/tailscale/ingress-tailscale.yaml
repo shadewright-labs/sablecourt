@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sablecourtd-tailscale
+  namespace: sablecourt
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: sablecourtd
+      port:
+        number: 7432
+  tls:
+    - hosts:
+        - sablecourt
