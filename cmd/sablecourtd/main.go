@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +27,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
+	"github.com/shadewright-labs/sablecourt/internal/telemetry"
 	"github.com/shadewright-labs/sablecourt/internal/ui"
 )
 
@@ -37,13 +37,14 @@ func main() {
 		manifestsPath string
 		listenAddr    string
 		secretFile    string
+		repoRoot      string
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "sablecourtd",
 		Short: "Sablecourt local-first control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, secretFile)
+			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, secretFile, repoRoot)
 		},
 	}
 
@@ -51,6 +52,7 @@ func main() {
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
+	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -61,8 +63,8 @@ func main() {
 	}
 }
 
-func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFile string) error {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFile, repoRoot string) error {
+	logger := telemetry.NewLogger()
 
 	st, err := sqlite.Open(dbPath)
 	if err != nil {
@@ -126,6 +128,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		Breaker:   breaker,
 		Approvals: approvalQueue,
 	})
+	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
 
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{
 		domain.ClassCodingAgent: coding.NewAdapter(os.TempDir()),
@@ -166,7 +169,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, modelGate, dataActionGate, approvalQueue, reconciler, dash)
+	mux := newHandler(st, bundle, modelGate, dataActionGate, approvalQueue, reconciler, dash)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -192,13 +195,16 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 	}
 }
 
-func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash http.Handler) http.Handler {
+func newHandler(st store.Store, bundle *config.Bundle, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		mux.Handle("GET /{$}", dash)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, buildAgentCard(bundle))
 	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())
@@ -290,6 +296,41 @@ func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.G
 		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
 	return mux
+}
+
+func buildAgentCard(bundle *config.Bundle) map[string]any {
+	type skill struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Tags        []string `json:"tags,omitempty"`
+	}
+	var skills []skill
+	if bundle != nil {
+		for _, w := range bundle.Workloads {
+			// Sandbox workloads are never advertised externally on the broker Agent Card.
+			if w.Metadata.Zone == domain.ZoneSandbox {
+				continue
+			}
+			skills = append(skills, skill{
+				ID:          w.Metadata.Name,
+				Name:        w.Metadata.Name,
+				Description: w.Spec.AgentCard.Description,
+				Tags:        w.Spec.AgentCard.Skills,
+			})
+		}
+	}
+	return map[string]any{
+		"name":        "Sablecourt Control Plane",
+		"description": "Policy-governed broker for heterogeneous Shadewright Labs workloads.",
+		"version":     "0.1.0",
+		"capabilities": map[string]bool{
+			"streaming":         true,
+			"stateTransition":   true,
+			"humanInTheLoop":    true,
+		},
+		"skills": skills,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
