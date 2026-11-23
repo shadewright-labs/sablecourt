@@ -90,3 +90,25 @@ func (s *Scheduler) Fire(ctx context.Context, sc domain.Schedule) error {
 		return fmt.Errorf("unsupported schedule targetKind %q", sc.Spec.TargetKind)
 	}
 }
+
+// TriggerNow executes a manual operator run of a declared Schedule with a unique idempotency key.
+func (s *Scheduler) TriggerNow(ctx context.Context, sc domain.Schedule) error {
+	if s.reconciler == nil {
+		return nil
+	}
+	idemKey := fmt.Sprintf("sched-manual:%s:%d", sc.Metadata.Name, s.now().UnixNano())
+	switch sc.Spec.TargetKind {
+	case "workload":
+		input := sc.Spec.Input
+		if input == "" {
+			input = "{}"
+		}
+		_, err := s.reconciler.SubmitTask(ctx, sc.Spec.TargetName, idemKey, input)
+		return err
+	case "workflow":
+		_, err := s.reconciler.StartWorkflow(ctx, sc.Spec.TargetName, sc.Spec.Input)
+		return err
+	default:
+		return fmt.Errorf("unsupported schedule targetKind %q", sc.Spec.TargetKind)
+	}
+}

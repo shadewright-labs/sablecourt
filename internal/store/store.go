@@ -46,6 +46,7 @@ type Store interface {
 
 	AppendAudit(ctx context.Context, rec domain.AuditRecord) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error)
+	VerifyAuditChain(ctx context.Context) (int, error)
 
 	SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error
 	LatestCheckpoint(ctx context.Context, taskID string) (string, error)

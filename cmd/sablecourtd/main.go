@@ -360,6 +360,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Store:         st,
 		Approvals:     approvalQueue,
 		Reconciler:    reconciler,
+		Scheduler:     scheduler,
 		Conclave:      conclaveBroker,
 		Providers:     provReg,
 		GetBundle:     getBundle,
@@ -370,7 +371,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, conclaveBroker, attachHub, provReg, dash)
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash)
 	if cfg.operatorAuthRequired {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
 		mux = requireOperatorAuth(mux, secretStore)
@@ -422,7 +423,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -738,6 +739,60 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		writeJSON(w, http.StatusOK, items)
 	})
+	mux.HandleFunc("GET /api/v1/audit/verify", func(w http.ResponseWriter, r *http.Request) {
+		n, err := st.VerifyAuditChain(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"valid": false, "verifiedRows": n, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "verifiedRows": n})
+	})
+	mux.HandleFunc("GET /api/v1/audit/export", func(w http.ResponseWriter, r *http.Request) {
+		items, err := st.ListAudit(r.Context(), 10000)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		for i := len(items) - 1; i >= 0; i-- {
+			_ = enc.Encode(items[i])
+		}
+	})
+	mux.HandleFunc("GET /api/v1/schedules", func(w http.ResponseWriter, r *http.Request) {
+		var list []domain.Schedule
+		if getBundle != nil {
+			if b := getBundle(); b != nil {
+				for _, sc := range b.Schedules {
+					list = append(list, sc)
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, list)
+	})
+	mux.HandleFunc("POST /api/v1/schedules/{name}/run", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if scheduler == nil || getBundle == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scheduler unavailable"})
+			return
+		}
+		b := getBundle()
+		if b == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no manifest bundle loaded"})
+			return
+		}
+		sc, ok := b.Schedules[name]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "schedule not found"})
+			return
+		}
+		if err := scheduler.TriggerNow(r.Context(), sc); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "triggered", "schedule": name})
+	})
 	mux.HandleFunc("GET /api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
 		status := domain.ApprovalStatus(r.URL.Query().Get("status"))
 		items, err := st.ListApprovals(r.Context(), status)
@@ -990,6 +1045,31 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
+		})
+		mux.HandleFunc("POST /api/v1/conclaves/{id}/relics", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Name        string `json:"name"`
+				ContentType string `json:"contentType"`
+				Body        string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), "operator", body.Name, body.ContentType, body.Body)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, relic)
+		})
+		mux.HandleFunc("GET /api/v1/conclaves/{id}/relics/{name}", func(w http.ResponseWriter, r *http.Request) {
+			relic, err := st.GetConclaveRelic(r.Context(), r.PathValue("id"), r.PathValue("name"))
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "relic not found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, relic)
 		})
 		mux.HandleFunc("POST /gate/conclave/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 			lease, ok := authenticateGateLease(w, r, st)

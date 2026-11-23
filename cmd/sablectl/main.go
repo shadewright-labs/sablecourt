@@ -374,6 +374,42 @@ func main() {
 		},
 	})
 
+	auditCmd.AddCommand(&cobra.Command{
+		Use:   "verify",
+		Short: "Verify the tamper-evident SHA-256 hash chain across all audit records",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/audit/verify")
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var res struct {
+				Valid        bool `json:"valid"`
+				VerifiedRows int  `json:"verifiedRows"`
+			}
+			_ = json.Unmarshal(body, &res)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s audit hash chain valid (%d rows verified)\n", stJade.Render("✓"), res.VerifiedRows)
+			return nil
+		},
+	})
+	auditCmd.AddCommand(&cobra.Command{
+		Use:   "export",
+		Short: "Export audit records as JSONL to stdout",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(15 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/audit/export")
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(body)
+			return err
+		},
+	})
+
 	approvalCmd := &cobra.Command{
 		Use:   "approval",
 		Short: "Inspect and decide runtime approval requests",
@@ -752,6 +788,116 @@ func main() {
 			return nil
 		},
 	})
+	conclaveCmd.AddCommand(&cobra.Command{
+		Use:   "watch <conclave-id>",
+		Short: "Watch live Conclave messages in real time",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			cli, base := httpClient(5 * time.Second)
+			streamCli, _ := httpClient(0)
+			var lastSeen int64
+			printNew := func() {
+				body, err := fetchGET(cli, base+"/api/v1/conclaves/"+id)
+				if err != nil {
+					return
+				}
+				var res struct {
+					Messages []domain.ConclaveMessage `json:"messages"`
+				}
+				if err := json.Unmarshal(body, &res); err != nil {
+					return
+				}
+				for _, m := range res.Messages {
+					if m.ID <= lastSeen {
+						continue
+					}
+					lastSeen = m.ID
+					fmt.Fprintf(cmd.OutOrStdout(), "#%d @%s -> @%s (%s): %s\n", m.ID, stJade.Render(m.FromRole), m.ToRole, m.Kind, m.Body)
+				}
+			}
+			printNew()
+			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, base+"/api/v1/conclaves/"+id+"/stream", nil)
+			if err != nil {
+				return err
+			}
+			resp, err := streamCli.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			sc := bufio.NewScanner(resp.Body)
+			for sc.Scan() {
+				if strings.HasPrefix(sc.Text(), "data: ") {
+					printNew()
+				}
+			}
+			return sc.Err()
+		},
+	})
+
+	relicCmd := &cobra.Command{
+		Use:   "relic",
+		Short: "Store and fetch shared Relics inside a Conclave",
+	}
+	var relicBody, relicType string
+	relicPutCmd := &cobra.Command{
+		Use:   "put <conclave-id> <name>",
+		Short: "Store a Relic (reads stdin if --body is omitted)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			content := relicBody
+			if content == "" {
+				raw, err := io.ReadAll(cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+				content = string(raw)
+			}
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/relics", map[string]string{
+				"name":        args[1],
+				"contentType": relicType,
+				"body":        content,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s stored relic %s in %s\n", stJade.Render("✓"), args[1], args[0])
+			return nil
+		},
+	}
+	relicPutCmd.Flags().StringVar(&relicBody, "body", "", "Relic text body (reads stdin when omitted)")
+	relicPutCmd.Flags().StringVar(&relicType, "type", "text/plain", "Relic MIME content type")
+	relicGetCmd := &cobra.Command{
+		Use:   "get <conclave-id> <name>",
+		Short: "Fetch a Relic from a Conclave",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+args[0]+"/relics/"+args[1])
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var r domain.ConclaveRelic
+			if err := json.Unmarshal(body, &r); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), r.Body)
+			return nil
+		},
+	}
+	relicCmd.AddCommand(relicPutCmd, relicGetCmd)
+	conclaveCmd.AddCommand(relicCmd)
+
 	conclaveCmd.AddCommand(&cobra.Command{
 		Use:   "close <conclave-id>",
 		Short: "Close a Conclave session",

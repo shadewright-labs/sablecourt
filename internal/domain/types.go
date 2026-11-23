@@ -1,6 +1,11 @@
 package domain
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+)
 
 const APIVersionV1Alpha1 = "sablecourt.io/v1alpha1"
 
@@ -273,7 +278,20 @@ type AuditRecord struct {
 	Action       string
 	Outcome      string
 	DetailJSON   string
+	PrevHash     string
+	RowHash      string
 	CreatedAt    time.Time
+}
+
+// ComputeAuditRowHash derives a deterministic tamper-evident SHA-256 chain hash for an audit row.
+func ComputeAuditRowHash(prevHash string, rec AuditRecord, createdAtRFC3339 string) string {
+	if prevHash == "" {
+		prevHash = "genesis"
+	}
+	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
+		prevHash, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome, rec.DetailJSON, createdAtRFC3339)
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
 }
 
 type ProviderPrefs struct {

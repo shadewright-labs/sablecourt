@@ -32,6 +32,7 @@ type Options struct {
 	Store           store.Store
 	Approvals       *approval.Queue
 	Reconciler      *controlplane.Reconciler
+	Scheduler       *controlplane.Scheduler
 	Conclave        *conclave.Broker
 	Providers       *providers.Registry
 	GetBundle       func() *config.Bundle
@@ -44,6 +45,7 @@ type Dashboard struct {
 	store           store.Store
 	approvals       *approval.Queue
 	reconciler      *controlplane.Reconciler
+	scheduler       *controlplane.Scheduler
 	conclave        *conclave.Broker
 	providers       *providers.Registry
 	getBundle       func() *config.Bundle
@@ -56,6 +58,7 @@ type Dashboard struct {
 	studioTmpl      *template.Template
 	conclavesTmpl   *template.Template
 	conclaveTmpl    *template.Template
+	schedulesTmpl   *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -114,6 +117,10 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
+	schedulesTmpl, err := template.ParseFS(embeddedFS, "templates/schedules.html")
+	if err != nil {
+		return nil, err
+	}
 	subAssets, err := fs.Sub(embeddedFS, "assets")
 	if err != nil {
 		return nil, err
@@ -134,6 +141,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		store:           opts.Store,
 		approvals:       opts.Approvals,
 		reconciler:      opts.Reconciler,
+		scheduler:       opts.Scheduler,
 		conclave:        opts.Conclave,
 		providers:       opts.Providers,
 		getBundle:       opts.GetBundle,
@@ -146,6 +154,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		studioTmpl:      studioTmpl,
 		conclavesTmpl:   conclavesTmpl,
 		conclaveTmpl:    conclaveTmpl,
+		schedulesTmpl:   schedulesTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -159,6 +168,8 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /studio", d.handleStudioPage)
 	mux.HandleFunc("GET /conclaves", d.handleConclavesPage)
 	mux.HandleFunc("GET /conclaves/{id}", d.handleConclaveDetailPage)
+	mux.HandleFunc("GET /schedules", d.handleSchedulesPage)
+	mux.HandleFunc("POST /ui/schedules/{name}/run", d.handleRunSchedule)
 	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
 	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)
 	mux.HandleFunc("POST /ui/conclaves/{id}/close", d.handleCloseConclave)
