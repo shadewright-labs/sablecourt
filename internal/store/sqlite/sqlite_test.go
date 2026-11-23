@@ -141,4 +141,33 @@ func TestWorkloadTaskApprovalBudgetAndAuditFlow(t *testing.T) {
 	if err != nil || len(auditRows) != 1 {
 		t.Fatalf("ListAudit: len=%d err=%v", len(auditRows), err)
 	}
+
+	now := time.Now().UTC()
+	if err := st.CreateLease(ctx, domain.Lease{
+		TokenSHA256:  "hash-1",
+		TaskID:       "task-1",
+		WorkloadName: "triage-agent",
+		ExpiresAt:    now.Add(time.Hour),
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if _, err := st.GetActiveLeaseByTokenHash(ctx, "hash-1", now); err != nil {
+		t.Fatalf("GetActiveLeaseByTokenHash active: %v", err)
+	}
+	if _, err := st.GetActiveLeaseByTokenHash(ctx, "hash-1", now.Add(2*time.Hour)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for expired lease, got %v", err)
+	}
+	if err := st.RevokeTaskLeases(ctx, "task-1"); err != nil {
+		t.Fatalf("RevokeTaskLeases: %v", err)
+	}
+	if _, err := st.GetActiveLeaseByTokenHash(ctx, "hash-1", now); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for revoked lease, got %v", err)
+	}
+
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	daily, err := st.WorkloadDailyBudgetTotals(ctx, "triage-agent", dayStart)
+	if err != nil || daily.CostMicroUSD != 4500 {
+		t.Fatalf("WorkloadDailyBudgetTotals: %+v err=%v", daily, err)
+	}
 }

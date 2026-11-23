@@ -179,6 +179,15 @@ type TaskEvent struct {
 	CreatedAt time.Time
 }
 
+type Lease struct {
+	TokenSHA256  string
+	TaskID       string
+	WorkloadName string
+	ExpiresAt    time.Time
+	RevokedAt    *time.Time
+	CreatedAt    time.Time
+}
+
 type BudgetEntry struct {
 	ID           int64
 	TaskID       string
