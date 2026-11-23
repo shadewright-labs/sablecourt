@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,6 +64,46 @@ func main() {
 		},
 	})
 
+	approvalCmd := &cobra.Command{
+		Use:   "approval",
+		Short: "Inspect and decide runtime approval requests",
+	}
+	approvalCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List pending approvals from sablecourtd",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printGET(cmd.OutOrStdout(), apiURL+"/api/v1/approvals?status=pending")
+		},
+	})
+
+	var approveDigest string
+	approveCmd := &cobra.Command{
+		Use:   "approve <approval-id>",
+		Short: "Approve a pending request (triggers out-of-band confirmation on daemon)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printPOST(cmd.OutOrStdout(), apiURL+"/api/v1/approvals/"+args[0]+"/approve", map[string]string{
+				"expectedSha256": approveDigest,
+			})
+		},
+	}
+	approveCmd.Flags().StringVar(&approveDigest, "digest", "", "Expected SHA-256 digest of the canonical payload")
+	approvalCmd.AddCommand(approveCmd)
+
+	var denyReason string
+	denyCmd := &cobra.Command{
+		Use:   "deny <approval-id>",
+		Short: "Deny a pending approval request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printPOST(cmd.OutOrStdout(), apiURL+"/api/v1/approvals/"+args[0]+"/deny", map[string]string{
+				"reason": denyReason,
+			})
+		},
+	}
+	denyCmd.Flags().StringVar(&denyReason, "reason", "", "Reason for denial")
+	approvalCmd.AddCommand(denyCmd)
+
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print sablectl version",
@@ -70,7 +112,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, workloadCmd, taskCmd, versionCmd)
+	rootCmd.AddCommand(validateCmd, workloadCmd, taskCmd, approvalCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -81,6 +123,28 @@ func main() {
 func printGET(out io.Writer, url string) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	_, err = out.Write(body)
+	return err
+}
+
+func printPOST(out io.Writer, url string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 65 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

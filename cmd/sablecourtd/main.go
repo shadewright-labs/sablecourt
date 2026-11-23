@@ -14,9 +14,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shadewright-labs/sablecourt/internal/approval"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -101,7 +104,24 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		Bundle:  bundle,
 	})
 
-	mux := newHandler(st, modelGate)
+	var policies []domain.Policy
+	if bundle != nil {
+		for _, p := range bundle.Policies {
+			policies = append(policies, p)
+		}
+	}
+	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	policyEng := policy.NewEngine(policies, breaker)
+	approvalQueue := approval.NewQueue(st, &approval.MacOSDialogApprover{})
+	dataActionGate := mcpgate.New(mcpgate.Options{
+		Store:     st,
+		Bundle:    bundle,
+		Policy:    policyEng,
+		Breaker:   breaker,
+		Approvals: approvalQueue,
+	})
+
+	mux := newHandler(st, modelGate, dataActionGate, approvalQueue)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -127,7 +147,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 	}
 }
 
-func newHandler(st store.Store, modelGate *model.Gate) http.Handler {
+func newHandler(st store.Store, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -148,8 +168,53 @@ func newHandler(st store.Store, modelGate *model.Gate) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, items)
 	})
+	mux.HandleFunc("GET /api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
+		status := domain.ApprovalStatus(r.URL.Query().Get("status"))
+		items, err := st.ListApprovals(r.Context(), status)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	})
+	mux.HandleFunc("POST /api/v1/approvals/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ExpectedSHA256 string `json:"expectedSha256"`
+			DecidedBy      string `json:"decidedBy"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.DecidedBy == "" {
+			body.DecidedBy = "operator"
+		}
+		apr, err := approvals.Approve(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DecidedBy)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, apr)
+	})
+	mux.HandleFunc("POST /api/v1/approvals/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			DecidedBy string `json:"decidedBy"`
+			Reason    string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.DecidedBy == "" {
+			body.DecidedBy = "operator"
+		}
+		apr, err := approvals.Deny(r.Context(), r.PathValue("id"), body.DecidedBy, body.Reason)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, apr)
+	})
 	if modelGate != nil {
 		mux.Handle("/gate/model/", http.StripPrefix("/gate/model", modelGate.Handler()))
+	}
+	if dataActionGate != nil {
+		mux.Handle("/gate/mcp", dataActionGate.MCPHandler())
+		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
 	return mux
 }
