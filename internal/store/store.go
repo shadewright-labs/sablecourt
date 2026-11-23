@@ -30,8 +30,13 @@ type Store interface {
 	GetApproval(ctx context.Context, id string) (domain.Approval, error)
 	DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error
 
+	CreateLease(ctx context.Context, lease domain.Lease) error
+	GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error)
+	RevokeTaskLeases(ctx context.Context, taskID string) error
+
 	RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error
 	TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error)
+	WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error)
 
 	AppendAudit(ctx context.Context, rec domain.AuditRecord) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error)

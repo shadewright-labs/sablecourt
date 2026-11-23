@@ -16,6 +16,8 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
@@ -25,19 +27,21 @@ func main() {
 		dbPath        string
 		manifestsPath string
 		listenAddr    string
+		secretFile    string
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "sablecourtd",
 		Short: "Sablecourt local-first control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr)
+			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, secretFile)
 		},
 	}
 
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
+	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -48,7 +52,7 @@ func main() {
 	}
 }
 
-func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr string) error {
+func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFile string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	st, err := sqlite.Open(dbPath)
@@ -61,8 +65,9 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr string) er
 		return err
 	}
 
+	var bundle *config.Bundle
 	if manifestsPath != "" {
-		bundle, err := config.LoadPath(manifestsPath)
+		bundle, err = config.LoadPath(manifestsPath)
 		if err != nil {
 			return fmt.Errorf("load manifests: %w", err)
 		}
@@ -84,7 +89,19 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr string) er
 		logger.Info("loaded manifests", "workloads", len(bundle.Workloads), "policies", len(bundle.Policies), "budgets", len(bundle.Budgets))
 	}
 
-	mux := newHandler(st)
+	stores := []secret.SecretStore{secret.NewKeyringStore("sablecourt")}
+	if secretFile != "" {
+		stores = append(stores, secret.NewFileStore(secretFile))
+	}
+	secretStore := &secret.ChainStore{Stores: stores}
+
+	modelGate := model.New(model.Options{
+		Store:   st,
+		Secrets: secretStore,
+		Bundle:  bundle,
+	})
+
+	mux := newHandler(st, modelGate)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -110,7 +127,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr string) er
 	}
 }
 
-func newHandler(st store.Store) http.Handler {
+func newHandler(st store.Store, modelGate *model.Gate) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -131,6 +148,9 @@ func newHandler(st store.Store) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, items)
 	})
+	if modelGate != nil {
+		mux.Handle("/gate/model/", http.StripPrefix("/gate/model", modelGate.Handler()))
+	}
 	return mux
 }
 

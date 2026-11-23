@@ -365,6 +365,58 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
+func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName,
+		lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("%w: %v", store.ErrConflict, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error) {
+	var lease domain.Lease
+	var expires, created string
+	var revoked sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at
+		FROM leases
+		WHERE token_sha256 = ?
+	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Lease{}, store.ErrNotFound
+	}
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	lease.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+	lease.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	if revoked.Valid {
+		parsed, err := time.Parse(time.RFC3339Nano, revoked.String)
+		if err == nil {
+			lease.RevokedAt = &parsed
+		}
+		return domain.Lease{}, store.ErrNotFound
+	}
+	if !now.UTC().Before(lease.ExpiresAt) {
+		return domain.Lease{}, store.ErrNotFound
+	}
+	return lease, nil
+}
+
+func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE leases SET revoked_at = ? WHERE task_id = ? AND revoked_at IS NULL
+	`, nowRFC3339(), taskID)
+	return err
+}
+
 func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
@@ -382,6 +434,17 @@ func (s *SQLiteStore) TaskBudgetTotals(ctx context.Context, taskID string) (doma
 		FROM budget_ledger
 		WHERE task_id = ?
 	`, taskID).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	return totals, err
+}
+
+func (s *SQLiteStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error) {
+	var totals domain.BudgetTotals
+	start := dayStartUTC.UTC().Format(time.RFC3339Nano)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		FROM budget_ledger
+		WHERE workload_name = ? AND created_at >= ?
+	`, workloadName, start).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 
