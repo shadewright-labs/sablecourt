@@ -243,7 +243,7 @@ func (s *Service) Speak(ctx context.Context, text, voiceOverride string) ([]byte
 			if voiceName != "" {
 				args = append(args, "-v", voiceName)
 			}
-			args = append(args, clean)
+			args = append(args, "--", clean)
 			cmd := exec.CommandContext(ctx, sayBin, args...)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				return nil, "", fmt.Errorf("macos say failed: %s (%w)", strings.TrimSpace(string(out)), err)

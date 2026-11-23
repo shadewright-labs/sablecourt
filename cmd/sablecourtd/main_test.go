@@ -223,3 +223,44 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 		t.Fatalf("expected observer token to be denied on POST /api/v1/tasks, got %d", rec.Code)
 	}
 }
+
+func TestSecurityHardeningCSRFAndHeaders(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := securityHardeningMiddleware(okHandler)
+
+	// 1. Security headers present on GET.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Header().Get("X-Frame-Options") != "DENY" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing security headers: %+v", rec.Header())
+	}
+
+	// 2. Cross-site Sec-Fetch-Site POST blocked.
+	reqXS := httptest.NewRequest(http.MethodPost, "/ui/tasks", nil)
+	reqXS.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, reqXS)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-site POST, got %d", rec.Code)
+	}
+
+	// 3. Mismatched Origin POST blocked.
+	reqBadOrigin := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7432/api/v1/tasks", nil)
+	reqBadOrigin.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, reqBadOrigin)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for mismatched Origin POST, got %d", rec.Code)
+	}
+
+	// 4. Same-origin POST allowed.
+	reqSame := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7432/api/v1/tasks", nil)
+	reqSame.Header.Set("Origin", "http://127.0.0.1:7432")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, reqSame)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for same-origin POST, got %d", rec.Code)
+	}
+}

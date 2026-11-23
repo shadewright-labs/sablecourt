@@ -47,7 +47,7 @@ func (g *GitSyncer) SyncOnce(ctx context.Context) (bool, string, error) {
 		if err := os.MkdirAll(filepath.Dir(g.LocalDir), 0o700); err != nil {
 			return false, "", fmt.Errorf("mkdir git sync parent: %w", err)
 		}
-		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", g.Branch, g.RepoURL, g.LocalDir)
+		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", g.Branch, "--", g.RepoURL, g.LocalDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return false, "", fmt.Errorf("git clone %q: %s (%w)", g.RepoURL, strings.TrimSpace(string(out)), err)
 		}
