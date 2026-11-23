@@ -66,12 +66,20 @@ func NewFromEnv() (*Adapter, error) {
 }
 
 func discoverDockerSocket() string {
-	candidates := []string{"/var/run/docker.sock"}
+	candidates := []string{
+		"/var/run/docker.sock",
+		"/run/podman/podman.sock",
+	}
+	if uid := os.Getuid(); uid >= 0 {
+		candidates = append(candidates, fmt.Sprintf("/run/user/%d/podman/podman.sock", uid))
+	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, ".docker", "run", "docker.sock"),
 			filepath.Join(home, ".orbstack", "run", "docker.sock"),
 			filepath.Join(home, ".colima", "default", "docker.sock"),
+			filepath.Join(home, ".rd", "docker.sock"),
+			filepath.Join(home, ".local", "share", "containers", "podman", "machine", "podman.sock"),
 		)
 	}
 	for _, c := range candidates {

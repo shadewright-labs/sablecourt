@@ -33,13 +33,14 @@ type UpstreamConfig struct {
 }
 
 type Options struct {
-	Store     store.Store
-	Secrets   secret.SecretStore
-	Bundle    *config.Bundle
-	Upstreams map[string]UpstreamConfig
-	Pricing   map[string]PricePerMillionTokens
-	Client    *http.Client
-	Now       func() time.Time
+	Store      store.Store
+	Secrets    secret.SecretStore
+	Bundle     *config.Bundle
+	Upstreams  map[string]UpstreamConfig
+	GatewayURL string // Optional upstream AI gateway (e.g. Linux Foundation agentgateway or Agent Router)
+	Pricing    map[string]PricePerMillionTokens
+	Client     *http.Client
+	Now        func() time.Time
 }
 
 type Gate struct {
@@ -95,6 +96,15 @@ func New(opts Options) *Gate {
 	upstreams := opts.Upstreams
 	if len(upstreams) == 0 {
 		upstreams = DefaultUpstreams()
+	}
+	if gw := strings.TrimRight(strings.TrimSpace(opts.GatewayURL), "/"); gw != "" {
+		routed := make(map[string]UpstreamConfig, len(upstreams))
+		for k, cfg := range upstreams {
+			cfg.BaseURL = gw
+			cfg.RequireSecret = false
+			routed[k] = cfg
+		}
+		upstreams = routed
 	}
 	client := opts.Client
 	if client == nil {

@@ -1,0 +1,40 @@
+services:
+  sablecourtd:
+    image: ghcr.io/shadewright-labs/sablecourt:0.1.0
+    restart: unless-stopped
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    command:
+      - --mode=local
+      - --listen=127.0.0.1:7432
+      - --db=/var/lib/sablecourt/sablecourt.db
+      - --manifests=/etc/sablecourt/manifests
+      - --secret-file=/run/secrets/sablecourt/secrets.json
+    volumes:
+      - sablecourt-state:/var/lib/sablecourt
+      - ./manifests:/etc/sablecourt/manifests:ro
+      - ./secrets.json:/run/secrets/sablecourt/secrets.json:ro
+      # Mount Docker or rootless Podman socket for container workloads:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: sablecourt
+    restart: unless-stopped
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+
+volumes:
+  sablecourt-state:
+  tailscale-state:

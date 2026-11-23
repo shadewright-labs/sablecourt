@@ -1047,9 +1047,10 @@ func main() {
 	}
 
 	doctorCmd, initCmd, taskDiffCmd, memoryCmd := buildDXCommands(httpClient, &jsonOut)
+	serviceCmd, tsCmd := buildOpsCommands()
 	taskCmd.AddCommand(taskDiffCmd)
 
-	rootCmd.AddCommand(doctorCmd, initCmd, validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, voiceCmd, memoryCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	rootCmd.AddCommand(doctorCmd, initCmd, serviceCmd, tsCmd, validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, voiceCmd, memoryCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
