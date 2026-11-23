@@ -26,6 +26,7 @@ type Options struct {
 	ModelGateURL    string
 	DataGateURL     string
 	StalenessWindow time.Duration
+	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
 }
 
@@ -37,6 +38,7 @@ type Reconciler struct {
 	modelGateURL    string
 	dataGateURL     string
 	stalenessWindow time.Duration
+	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
 
 	mu      sync.Mutex
@@ -209,6 +211,7 @@ func NewReconciler(opts Options) *Reconciler {
 		modelGateURL:    opts.ModelGateURL,
 		dataGateURL:     opts.DataGateURL,
 		stalenessWindow: win,
+		onTaskFailed:    opts.OnTaskFailed,
 		now:             nowFn,
 		handles:         make(map[string]scruntime.Handle),
 	}
@@ -380,6 +383,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		case domain.TaskStateSubmitted:
 			if err := r.launchTask(ctx, task, wl, adapter); err != nil {
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateFailed, "launch_failed", fmt.Sprintf(`{"error":%q}`, err.Error()))
+				if r.onTaskFailed != nil {
+					r.onTaskFailed(task, "launch_failed: "+err.Error())
+				}
 			}
 
 		case domain.TaskStateWorking:
@@ -415,6 +421,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 				r.mu.Lock()
 				delete(r.handles, task.ID)
 				r.mu.Unlock()
+				if r.onTaskFailed != nil {
+					r.onTaskFailed(task, fmt.Sprintf("runtime_failed (exit_code=%d)", obs.ExitCode))
+				}
 			}
 		}
 	}

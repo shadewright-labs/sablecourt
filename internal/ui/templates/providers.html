@@ -258,6 +258,44 @@
       </div>
       {{end}}
     </div>
+
+    <div class="card" style="margin-top:18px;">
+      <div class="card-head">
+        <div class="brand-id">
+          <div>
+            <div class="card-title">Outbound alerts (Slack / Discord / ntfy / webhook)</div>
+            <div class="card-kind">notify_webhook_url</div>
+          </div>
+        </div>
+      </div>
+      <div class="detail">
+        Sends redacted alerts when an Approval is requested, a Conclave Ward pauses a session, or a task fails.
+      </div>
+      <div class="row">
+        <button type="button" id="btn-notify-test" class="btn-primary">Send test alert</button>
+        <span id="notify-test-msg" class="detail" style="margin:0;"></span>
+      </div>
+      <div class="detail" style="margin-top:8px;">
+        Configure via <code>sablectl secret set notify_webhook_url</code> (or add <code>notify_webhook_url</code> to Kubernetes <code>secrets.json</code>).
+      </div>
+    </div>
   </div>
+  <script>
+    (function() {
+      const btn = document.getElementById("btn-notify-test");
+      const msg = document.getElementById("notify-test-msg");
+      if (!btn) return;
+      btn.addEventListener("click", async function() {
+        msg.textContent = "Sending...";
+        const res = await fetch("/api/v1/notify/test", { method: "POST" });
+        if (res.ok) {
+          msg.textContent = "Test alert dispatched.";
+        } else {
+          const data = await res.json().catch(() => ({}));
+          msg.textContent = "Failed: " + (data.error || res.status);
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
