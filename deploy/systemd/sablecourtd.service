@@ -1,0 +1,16 @@
+[Unit]
+Description=Sablecourt local control plane daemon (Ubuntu/Linux)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sablecourtd --mode=local --listen=127.0.0.1:7432 --db=/var/lib/sablecourt/sablecourt.db --manifests=/etc/sablecourt/manifests --secret-file=/etc/sablecourt/secrets.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sablecourt
+
+[Install]
+WantedBy=multi-user.target

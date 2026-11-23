@@ -67,11 +67,13 @@ func main() {
 		manifestsGitBranch   string
 		manifestsGitInterval time.Duration
 		maxConcurrent        int
+		mode                 string
+		modelGatewayURL      string
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "sablecourtd",
-		Short: "Sablecourt local-first control plane daemon",
+		Short: "Sablecourt local-first and enterprise Kubernetes control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon(cmd.Context(), daemonConfig{
 				dbPath:               dbPath,
@@ -91,10 +93,14 @@ func main() {
 				manifestsGitBranch:   manifestsGitBranch,
 				manifestsGitInterval: manifestsGitInterval,
 				maxConcurrent:        maxConcurrent,
+				mode:                 mode,
+				modelGatewayURL:      modelGatewayURL,
 			})
 		},
 	}
 
+	rootCmd.Flags().StringVar(&mode, "mode", "local", "Operating mode: local (macOS/Ubuntu) or enterprise (Kubernetes)")
+	rootCmd.Flags().StringVar(&modelGatewayURL, "model-gateway-url", "", "Optional upstream AI gateway URL (e.g. agentgateway or Agent Router)")
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
@@ -140,9 +146,31 @@ type daemonConfig struct {
 	manifestsGitBranch   string
 	manifestsGitInterval time.Duration
 	maxConcurrent        int
+	mode                 string
+	modelGatewayURL      string
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
+	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
+	if mode == "" || mode == "local" {
+		if envMode := strings.ToLower(strings.TrimSpace(os.Getenv("SABLECOURT_MODE"))); envMode != "" {
+			mode = envMode
+		}
+	}
+	isEnterprise := mode == "enterprise"
+	if isEnterprise {
+		cfg.operatorAuthRequired = true
+		if cfg.runtimeBackend == "" || cfg.runtimeBackend == "docker" {
+			cfg.runtimeBackend = "k8s"
+		}
+		if cfg.listenAddr == "127.0.0.1:7432" {
+			cfg.listenAddr = "0.0.0.0:7432"
+		}
+	}
+	if cfg.modelGatewayURL == "" {
+		cfg.modelGatewayURL = strings.TrimSpace(os.Getenv("SABLECOURT_MODEL_GATEWAY_URL"))
+	}
+
 	dbPath := cfg.dbPath
 	manifestsPath := cfg.manifestsPath
 	listenAddr := cfg.listenAddr
@@ -250,14 +278,22 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	secretStore := &secret.ChainStore{Stores: stores}
 
 	modelGate := model.New(model.Options{
-		Store:   st,
-		Secrets: secretStore,
-		Bundle:  bundle,
+		Store:      st,
+		Secrets:    secretStore,
+		Bundle:     bundle,
+		GatewayURL: cfg.modelGatewayURL,
 	})
+	if cfg.modelGatewayURL != "" {
+		logger.Info("model gate routing through external AI gateway", "url", cfg.modelGatewayURL)
+	}
 
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	notifier := notify.New(notify.Options{Secrets: secretStore})
-	approvalQueue := approval.NewQueue(st, &approval.MacOSDialogApprover{})
+	var oobApprover approval.Approver
+	if !isEnterprise {
+		oobApprover = &approval.MacOSDialogApprover{}
+	}
+	approvalQueue := approval.NewQueue(st, oobApprover)
 	approvalQueue.SetOnRequested(func(apr domain.Approval) {
 		go func() {
 			_ = notifier.Send(context.Background(), notify.Event{
@@ -279,10 +315,16 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 
 	attachHub := attach.NewHub()
-	codingAdapter := coding.NewAdapter(os.TempDir())
-	codingAdapter.AttachHub = attachHub
-	adapters := map[domain.WorkloadClass]scruntime.Adapter{
-		domain.ClassCodingAgent: codingAdapter,
+	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
+	if !isEnterprise {
+		codingAdapter := coding.NewAdapter(os.TempDir())
+		codingAdapter.AttachHub = attachHub
+		adapters[domain.ClassCodingAgent] = codingAdapter
+	} else {
+		logger.Info("enterprise mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		if pgDSN == "" {
+			logger.Warn("enterprise mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
+		}
 	}
 	switch cfg.runtimeBackend {
 	case "k8s":
