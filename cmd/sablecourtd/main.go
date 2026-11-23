@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shadewright-labs/sablecourt/internal/a2a"
 	"github.com/shadewright-labs/sablecourt/internal/approval"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
@@ -37,6 +38,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 	"github.com/shadewright-labs/sablecourt/internal/telemetry"
 	"github.com/shadewright-labs/sablecourt/internal/ui"
+	"github.com/shadewright-labs/sablecourt/internal/webhook"
 )
 
 func main() {
@@ -305,7 +307,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, provReg, dash)
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, provReg, dash)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -353,7 +355,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -362,6 +364,16 @@ func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.Handle("GET /metrics", telemetry.MetricsHandler(st))
+	mux.Handle("POST /api/v1/hooks/github", webhook.GitHubHandler(webhook.GitHubOptions{
+		Secrets:        secrets,
+		Reconciler:     reconciler,
+		TargetWorkload: "triage-agent",
+	}))
+	mux.Handle("POST /a2a", a2a.BrokerHandler(a2a.Options{
+		Store:      st,
+		Reconciler: reconciler,
+		Secrets:    secrets,
+	}))
 	mux.HandleFunc("GET /api/v1/providers", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
 			writeJSON(w, http.StatusOK, []any{})
