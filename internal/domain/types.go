@@ -381,3 +381,11 @@ type PairedDevice struct {
 	CreatedAt    time.Time
 	RevokedAt    *time.Time
 }
+
+type MemoryEntry struct {
+	Namespace string
+	Key       string
+	Value     string
+	Author    string
+	UpdatedAt time.Time
+}

@@ -66,6 +66,7 @@ func main() {
 		manifestsGitRepo     string
 		manifestsGitBranch   string
 		manifestsGitInterval time.Duration
+		maxConcurrent        int
 	)
 
 	rootCmd := &cobra.Command{
@@ -89,6 +90,7 @@ func main() {
 				manifestsGitRepo:     manifestsGitRepo,
 				manifestsGitBranch:   manifestsGitBranch,
 				manifestsGitInterval: manifestsGitInterval,
+				maxConcurrent:        maxConcurrent,
 			})
 		},
 	}
@@ -99,6 +101,7 @@ func main() {
 	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
 	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
+	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum number of concurrently running tasks (0 = unlimited)")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
 	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
@@ -136,6 +139,7 @@ type daemonConfig struct {
 	manifestsGitRepo     string
 	manifestsGitBranch   string
 	manifestsGitInterval time.Duration
+	maxConcurrent        int
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -272,6 +276,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Approvals: approvalQueue,
 	})
 	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 
 	attachHub := attach.NewHub()
 	codingAdapter := coding.NewAdapter(os.TempDir())
@@ -307,12 +312,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:        st,
-		Bundle:       bundle,
-		Policy:       policyEng,
-		Adapters:     adapters,
-		ModelGateURL: "http://" + gateHost + "/gate/model",
-		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		Store:         st,
+		Bundle:        bundle,
+		Policy:        policyEng,
+		Adapters:      adapters,
+		ModelGateURL:  "http://" + gateHost + "/gate/model",
+		DataGateURL:   "http://" + gateHost + "/gate/mcp",
+		MaxConcurrent: cfg.maxConcurrent,
 		OnTaskFailed: func(task domain.Task, reason string) {
 			go func() {
 				_ = notifier.Send(context.Background(), notify.Event{
@@ -889,6 +895,54 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				emit()
 			}
 		}
+	})
+	mux.HandleFunc("GET /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+		ns := strings.TrimSpace(r.URL.Query().Get("namespace"))
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		items, err := st.SearchMemory(r.Context(), ns, q, 100)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	})
+	mux.HandleFunc("POST /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Namespace string `json:"namespace"`
+			Key       string `json:"key"`
+			Value     string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		body.Key = strings.TrimSpace(body.Key)
+		if body.Key == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
+			return
+		}
+		if strings.TrimSpace(body.Namespace) == "" {
+			body.Namespace = "default"
+		}
+		entry := domain.MemoryEntry{
+			Namespace: strings.TrimSpace(body.Namespace),
+			Key:       body.Key,
+			Value:     redact.String(strings.TrimSpace(body.Value)),
+			Author:    "operator",
+			UpdatedAt: time.Now().UTC(),
+		}
+		if err := st.PutMemory(r.Context(), entry); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, entry)
+	})
+	mux.HandleFunc("DELETE /api/v1/memory/{namespace}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DeleteMemory(r.Context(), r.PathValue("namespace"), r.PathValue("key")); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())

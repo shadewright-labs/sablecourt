@@ -68,4 +68,9 @@ type Store interface {
 	GetDevice(ctx context.Context, id string) (domain.PairedDevice, error)
 	ListDevices(ctx context.Context) ([]domain.PairedDevice, error)
 	RevokeDevice(ctx context.Context, id string) error
+
+	PutMemory(ctx context.Context, entry domain.MemoryEntry) error
+	GetMemory(ctx context.Context, namespace, key string) (domain.MemoryEntry, error)
+	SearchMemory(ctx context.Context, namespace, query string, limit int) ([]domain.MemoryEntry, error)
+	DeleteMemory(ctx context.Context, namespace, key string) error
 }
