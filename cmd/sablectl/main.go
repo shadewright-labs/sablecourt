@@ -54,13 +54,41 @@ func main() {
 
 	taskCmd := &cobra.Command{
 		Use:   "task",
-		Short: "Inspect tasks",
+		Short: "Submit and inspect tasks",
 	}
 	taskCmd.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "List tasks from sablecourtd",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printGET(cmd.OutOrStdout(), apiURL+"/api/v1/tasks")
+		},
+	})
+	var taskInput, taskIdem string
+	submitCmd := &cobra.Command{
+		Use:   "submit <workload>",
+		Short: "Submit a new task to sablecourtd",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printPOST(cmd.OutOrStdout(), apiURL+"/api/v1/tasks", map[string]string{
+				"workload":       args[0],
+				"idempotencyKey": taskIdem,
+				"inputJson":      taskInput,
+			})
+		},
+	}
+	submitCmd.Flags().StringVar(&taskInput, "input", "{}", "JSON task input")
+	submitCmd.Flags().StringVar(&taskIdem, "idempotency-key", "", "Optional idempotency key")
+	taskCmd.AddCommand(submitCmd)
+
+	auditCmd := &cobra.Command{
+		Use:   "audit",
+		Short: "Inspect audit log",
+	}
+	auditCmd.AddCommand(&cobra.Command{
+		Use:   "tail",
+		Short: "Show recent audit events from sablecourtd",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printGET(cmd.OutOrStdout(), apiURL+"/api/v1/audit")
 		},
 	})
 
@@ -112,7 +140,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, workloadCmd, taskCmd, approvalCmd, versionCmd)
+	rootCmd.AddCommand(validateCmd, workloadCmd, taskCmd, approvalCmd, auditCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -4,7 +4,7 @@ Sablecourt is an active orchestrator for heterogeneous workloads under Shadewrig
 
 ## Status
 
-v0.1 M1 scaffold. Architecture decisions are recorded in [docs/adr/](docs/adr/README.md) and the v0.1 implementation design is in [docs/design.md](docs/design.md).
+v0.1 vertical slice complete (M1 through M4): manifest loader, SQLite WAL store, Model Gate (OpenAI, Anthropic, Gemini), MCP Data/Action Gate with boundary redaction, pinned-digest out-of-band approval queue, three workload adapters (`docker`, `coding`, `controller`), hub-and-spoke reconciler, and embedded Web UI. Architecture decisions are in [docs/adr/](docs/adr/README.md) and the design is in [docs/design.md](docs/design.md).
 
 ## Quickstart
 
