@@ -530,7 +530,31 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, applyCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	promoteCmd := &cobra.Command{
+		Use:   "promote <workload>",
+		Short: "Create a GitOps promotion branch to graduate a sandbox workload to runtime",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/promote/"+args[0], map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var res struct {
+				Branch string `json:"branch"`
+				Next   string `json:"next"`
+			}
+			_ = json.Unmarshal(body, &res)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s created promotion branch %s\n%s\n", stJade.Render("✓"), stTitle.Render(res.Branch), stMuted.Render(res.Next))
+			return nil
+		},
+	}
+
+	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())

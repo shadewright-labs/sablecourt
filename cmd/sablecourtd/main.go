@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
@@ -168,7 +171,11 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 	}
 
 	if gateHost == "" {
-		gateHost = listenAddr
+		if _, port, err := net.SplitHostPort(listenAddr); err == nil && strings.HasPrefix(listenAddr, "127.0.0.1:") {
+			gateHost = "host.docker.internal:" + port
+		} else {
+			gateHost = listenAddr
+		}
 	}
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:        st,
@@ -498,6 +505,81 @@ func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func()
 			return
 		}
 		writeJSON(w, http.StatusOK, apr)
+	})
+	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
+			return
+		}
+		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+			return
+		}
+		var body struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Content) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
+			return
+		}
+		role := body.Role
+		if role != "agent" && role != "system" {
+			role = "agent"
+		}
+		if err := st.AppendTaskMessage(r.Context(), domain.TaskMessage{
+			TaskID:    lease.TaskID,
+			Role:      role,
+			Content:   redact.String(body.Content),
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "recorded", "taskId": lease.TaskID})
+	})
+	mux.HandleFunc("POST /api/v1/promote/{name}", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		var b *config.Bundle
+		if getBundle != nil {
+			b = getBundle()
+		}
+		if b == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no manifest bundle loaded"})
+			return
+		}
+		wl, ok := b.Workloads[name]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workload not found"})
+			return
+		}
+		if wl.Metadata.Zone != domain.ZoneSandbox {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "workload is already in zone " + string(wl.Metadata.Zone)})
+			return
+		}
+		branch := "sablecourt/promote-" + name
+		cmd := exec.CommandContext(r.Context(), "git", "branch", branch)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
+			return
+		}
+		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			Category:     "gitops",
+			WorkloadName: name,
+			Action:       "sandbox.propose_promotion",
+			Outcome:      "branch_created",
+			DetailJSON:   fmt.Sprintf(`{"branch":%q}`, branch),
+			CreatedAt:    time.Now().UTC(),
+		})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":   "branch_created",
+			"workload": name,
+			"branch":   branch,
+			"next":     "switch zone to runtime on " + branch + " and open a PR for review",
+		})
 	})
 	if modelGate != nil {
 		mux.Handle("/gate/model/", http.StripPrefix("/gate/model", modelGate.Handler()))

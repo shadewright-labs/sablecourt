@@ -125,6 +125,28 @@ spec:
       allowed: false
 ---
 apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: llm-agent
+  zone: runtime
+spec:
+  class: long-lived-agent
+  runtime:
+    type: docker
+    image: sablecourt-agent:0.1.0
+    readOnlyRootfs: true
+  agentCard:
+    description: Built-in LLM runner calling Model Gate and posting replies to the task thread.
+    skills:
+      - llm-chat
+      - analysis
+  grants:
+    modelGate:
+      allowed: true
+      providers: [anthropic, openai, gemini, local]
+      budgetRef: local-daily
+---
+apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
   name: issue-to-pr
