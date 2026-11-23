@@ -25,6 +25,7 @@ type Store interface {
 	ListTasks(ctx context.Context) ([]domain.Task, error)
 	ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error)
 	UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error
+	UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) error
 	RecordHeartbeat(ctx context.Context, taskID string, at time.Time) error
 
 	CreateApproval(ctx context.Context, a domain.Approval) error

@@ -308,6 +308,23 @@ func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, 
 	return tx.Commit()
 }
 
+func (s *SQLiteStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET artifacts_json = ?, updated_at = ? WHERE id = ?
+	`, defaultJSON(artifactsJSON, "[]"), nowRFC3339(), taskID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLiteStore) RecordHeartbeat(ctx context.Context, taskID string, at time.Time) error {
 	ts := formatTime(at)
 	res, err := s.db.ExecContext(ctx, `

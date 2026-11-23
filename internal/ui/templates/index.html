@@ -32,20 +32,24 @@
       line-height: 1.5;
       -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 1160px; margin: 0 auto; padding: 28px 24px 72px; }
+    .shell {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 20px 24px 56px;
+    }
+
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 20px;
       border-bottom: 1px solid var(--border);
-      padding-bottom: 18px;
-      margin-bottom: 24px;
+      padding-bottom: 14px;
+      margin-bottom: 20px;
     }
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .brand img { height: 56px; width: auto; display: block; }
+    .brand img { height: 52px; width: auto; display: block; }
     .header-meta { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
-    .header-links { margin-top: 4px; display: flex; gap: 12px; justify-content: flex-end; }
+    .header-links { margin-top: 4px; display: flex; gap: 14px; justify-content: flex-end; }
     a { color: var(--accent-jade); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
@@ -54,76 +58,119 @@
       font-size: 12px;
       padding: 10px 14px;
       border-radius: 6px;
-      margin-bottom: 20px;
+      margin-bottom: 16px;
       border: 1px solid;
       background: var(--bg-slate);
     }
     .banner-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
     .banner-err { color: var(--status-red); border-color: var(--status-red); }
 
-    .stats {
+    /* 3-column command center layout */
+    .cockpit {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 14px;
-      margin-bottom: 28px;
+      grid-template-columns: 280px minmax(0, 1fr) 340px;
+      gap: 20px;
+      align-items: start;
     }
-    .stat {
-      background: var(--bg-slate);
-      border: 1px solid var(--border);
-      border-top: 2px solid var(--accent-indigo);
-      border-radius: 8px;
-      padding: 14px 16px;
+    @media (max-width: 1180px) {
+      .cockpit { grid-template-columns: 1fr; }
     }
-    .stat-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
-    .stat-value { font-family: var(--serif); font-size: 26px; color: var(--text-bone); margin-top: 4px; }
-    .stat-sub { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
-    h2 { font-family: var(--serif); font-weight: 600; font-size: 20px; margin: 28px 0 12px; }
-    .card {
+    .col-title {
+      font-family: var(--mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin: 0 0 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .panel {
       background: var(--bg-slate);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 16px;
-      margin-bottom: 20px;
-      overflow-x: auto;
+      padding: 14px;
+      margin-bottom: 16px;
     }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-    tr:last-child td { border-bottom: none; }
-    th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.04em; }
-    .mono { font-family: var(--mono); font-size: 12px; }
+    .panel-accent { border-top: 2px solid var(--accent-indigo); }
+    .panel-amber { border-top: 2px solid var(--status-amber); }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .kpi {
+      background: var(--bg-night);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    .kpi-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; color: var(--text-muted); }
+    .kpi-val { font-family: var(--serif); font-size: 20px; color: var(--text-bone); margin-top: 2px; }
+    .kpi-sub { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+
+    .house-item {
+      display: block;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-night);
+      margin-bottom: 8px;
+      color: var(--text-bone);
+    }
+    .house-item:last-child { margin-bottom: 0; }
+    .house-item:hover { border-color: var(--accent-jade); text-decoration: none; }
+    .house-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+    .house-name { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text-bone); }
+    .house-class { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 
     .badge {
       display: inline-block;
       font-family: var(--mono);
-      font-size: 11px;
-      padding: 2px 8px;
+      font-size: 10px;
+      padding: 2px 6px;
       border-radius: 4px;
       border: 1px solid;
       background: var(--bg-night);
+      white-space: nowrap;
     }
     .b-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
     .b-wait { color: var(--status-amber); border-color: var(--status-amber); }
     .b-err { color: var(--status-red); border-color: var(--status-red); }
     .b-muted { color: var(--text-muted); border-color: var(--border); }
 
-    .dispatch-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-    select, input[type="text"] {
+    /* Center workspace */
+    .composer {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .composer-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    select, textarea {
       background: var(--bg-night);
       color: var(--text-bone);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 8px 10px;
+      padding: 9px 11px;
       font-family: var(--mono);
       font-size: 12px;
     }
-    select:focus, input[type="text"]:focus { outline: none; border-color: var(--accent-jade); }
-    input[type="text"] { flex: 1 1 280px; }
+    select:focus, textarea:focus { outline: none; border-color: var(--accent-jade); }
+    textarea { width: 100%; min-height: 68px; resize: vertical; }
 
     button {
       font-family: var(--mono);
       font-size: 12px;
-      padding: 7px 12px;
+      padding: 7px 14px;
       border-radius: 6px;
       border: 1px solid var(--accent-jade);
       background: var(--bg-night);
@@ -131,15 +178,79 @@
       cursor: pointer;
     }
     button:hover { background: var(--bg-elevated); }
-    button.btn-deny { border-color: var(--status-red); color: var(--status-red); }
-    button.btn-approve { border-color: var(--status-amber); color: var(--status-amber); }
+    button.btn-deny { border-color: var(--status-red); color: var(--status-red); padding: 5px 10px; font-size: 11px; }
+    button.btn-approve { border-color: var(--status-amber); color: var(--status-amber); padding: 5px 10px; font-size: 11px; }
+    button.btn-sm { padding: 4px 9px; font-size: 11px; }
+
+    .task-card {
+      background: var(--bg-night);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .task-card:last-child { margin-bottom: 0; }
+    .task-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .task-meta {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .task-body {
+      background: var(--bg-slate);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .task-actions { display: flex; gap: 8px; align-items: center; }
+    .task-actions form { margin: 0; }
+
+    /* Right rail */
+    .apr-card {
+      background: var(--bg-night);
+      border: 1px solid var(--status-amber);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .apr-card:last-child { margin-bottom: 0; }
+    .apr-cap { font-family: var(--mono); font-size: 12px; color: var(--text-bone); font-weight: 600; }
+    .apr-meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin: 4px 0 10px; }
     .actions-inline { display: flex; gap: 8px; }
     .actions-inline form { margin: 0; }
-    .empty { color: var(--text-muted); font-size: 13px; margin: 4px 0; }
+
+    .audit-row {
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .audit-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .audit-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .audit-sub { color: var(--text-muted); margin-top: 2px; word-break: break-all; }
+
+    .empty { color: var(--text-muted); font-size: 12px; font-family: var(--mono); margin: 4px 0; }
 
     footer {
-      margin-top: 44px;
-      padding-top: 16px;
+      margin-top: 32px;
+      padding-top: 14px;
       border-top: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
@@ -149,14 +260,14 @@
       color: var(--text-muted);
     }
     .footer-mark { display: flex; align-items: center; gap: 8px; }
-    .footer-mark img { height: 22px; width: auto; }
+    .footer-mark img { height: 20px; width: auto; }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="shell">
     <header>
       <div class="brand">
-        <img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt - Shadewright Labs">
+        <a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt - Shadewright Labs"></a>
       </div>
       <div class="header-meta">
         <div>OBSERVED {{.ObservedAt}}</div>
@@ -171,58 +282,127 @@
     {{if .Notice}}<div class="banner banner-ok">{{.Notice}}</div>{{end}}
     {{if .ErrMsg}}<div class="banner banner-err">{{.ErrMsg}}</div>{{end}}
 
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-label">Declared workloads</div>
-        <div class="stat-value">{{len .Workloads}}</div>
-        <div class="stat-sub">Git-tracked manifests</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Active tasks</div>
-        <div class="stat-value">{{.ActiveTasks}}</div>
-        <div class="stat-sub">{{len .Tasks}} total recorded</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Pending approvals</div>
-        <div class="stat-value">{{len .Approvals}}</div>
-        <div class="stat-sub">Pinned SHA-256 OOB queue</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Observed model spend</div>
-        <div class="stat-value">${{.TotalCostUSD}}</div>
-        <div class="stat-sub">{{.TotalTokens}} tokens</div>
-      </div>
-    </div>
+    <div class="cockpit">
+      <!-- LEFT RAIL: Houses & Budget -->
+      <aside>
+        <div class="panel panel-accent">
+          <div class="col-title"><span>Control plane</span></div>
+          <div class="kpi-grid">
+            <div class="kpi">
+              <div class="kpi-label">Active</div>
+              <div class="kpi-val">{{.ActiveTasks}}</div>
+              <div class="kpi-sub">{{len .Tasks}} total</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-label">Approvals</div>
+              <div class="kpi-val">{{len .Approvals}}</div>
+              <div class="kpi-sub">pending</div>
+            </div>
+            <div class="kpi" style="grid-column: span 2;">
+              <div class="kpi-label">Observed model spend</div>
+              <div class="kpi-val">${{.TotalCostUSD}}</div>
+              <div class="kpi-sub">{{.TotalTokens}} tokens recorded</div>
+            </div>
+          </div>
+        </div>
 
-    {{if .Workloads}}
-    <h2>Dispatch task</h2>
-    <div class="card">
-      <form class="dispatch-form" method="POST" action="/ui/tasks">
-        <select name="workload" required>
-          {{range .Workloads}}
-          <option value="{{.Name}}">{{.Name}} ({{.Class}} · {{.Zone}})</option>
+        <div class="panel">
+          <div class="col-title">
+            <span>Houses (workloads)</span>
+            <span>{{len .Workloads}}</span>
+          </div>
+          {{if .Workloads}}
+            {{range .Workloads}}
+            <a class="house-item" href="/?workload={{.Name}}">
+              <div class="house-top">
+                <span class="house-name">{{.Name}}</span>
+                <span class="badge {{if eq (printf "%s" .Zone) "sandbox"}}b-wait{{else}}b-ok{{end}}">{{.Zone}}</span>
+              </div>
+              <div class="house-class">{{.Class}}</div>
+            </a>
+            {{end}}
+          {{else}}
+            <p class="empty">No workloads loaded. Start with --manifests.</p>
           {{end}}
-        </select>
-        <input type="text" name="input_json" value="{}" placeholder='{"issue": 1}'>
-        <button type="submit">Submit task</button>
-      </form>
-    </div>
-    {{end}}
+        </div>
+      </aside>
 
-    <h2>Pending approvals ({{len .Approvals}})</h2>
-    <div class="card">
-      {{if .Approvals}}
-      <table>
-        <thead><tr><th>ID</th><th>Workload</th><th>Capability</th><th>Pinned SHA-256</th><th>Expires</th><th>Decision</th></tr></thead>
-        <tbody>
-          {{range .Approvals}}
-          <tr>
-            <td class="mono">{{.ID}}</td>
-            <td class="mono">{{.WorkloadName}}</td>
-            <td class="mono">{{.Capability}}</td>
-            <td class="mono" title="{{.PayloadSHA256}}">{{printf "%.16s" .PayloadSHA256}}...</td>
-            <td class="mono">{{.ExpiresAt.Format "15:04:05Z"}}</td>
-            <td>
+      <!-- CENTER WORKSPACE: Dispatch + Task Stream & Threads -->
+      <main>
+        {{if .Workloads}}
+        <div class="panel panel-accent">
+          <div class="col-title">
+            <span>Dispatch task</span>
+            <span>plain text or JSON</span>
+          </div>
+          <form class="composer" method="POST" action="/ui/tasks">
+            <div class="composer-row">
+              <select name="workload" required>
+                {{range .Workloads}}
+                <option value="{{.Name}}" {{if eq .Name $.SelectedWorkload}}selected{{end}}>{{.Name}} ({{.Class}} · {{.Zone}})</option>
+                {{end}}
+              </select>
+              <button type="submit">Dispatch task</button>
+            </div>
+            <textarea name="input_json" placeholder="Describe the task or paste JSON payload (e.g. Fix timeout in sqlite store)..."></textarea>
+          </form>
+        </div>
+        {{end}}
+
+        <div class="panel">
+          <div class="col-title">
+            <span>Active tasks &amp; threads</span>
+            <span>{{len .Tasks}}</span>
+          </div>
+          {{if .Tasks}}
+            {{range .Tasks}}
+            <div class="task-card">
+              <div class="task-head">
+                <div>
+                  <a href="/tasks/{{.Task.ID}}" style="font-family:var(--mono);font-size:13px;font-weight:600;">{{.Task.ID}}</a>
+                  <span style="font-family:var(--mono);font-size:12px;color:var(--text-muted);margin-left:8px;">{{.Task.WorkloadName}}</span>
+                </div>
+                <div class="task-actions">
+                  <span class="badge {{if eq (printf "%s" .Task.State) "failed"}}b-err{{else if eq (printf "%s" .Task.State) "input-required"}}b-wait{{else if eq (printf "%s" .Task.State) "working"}}b-ok{{else}}b-muted{{end}}">{{.Task.State}}</span>
+                  {{if .Stale}}<span class="badge b-wait">stale</span>{{end}}
+                  {{if .Cancelable}}
+                  <form method="POST" action="/ui/tasks/{{.Task.ID}}/cancel">
+                    <button type="submit" class="btn-deny">Cancel</button>
+                  </form>
+                  {{end}}
+                  <a href="/tasks/{{.Task.ID}}" style="font-family:var(--mono);font-size:11px;">Open &rarr;</a>
+                </div>
+              </div>
+              <div class="task-meta">
+                <span>created {{.Task.CreatedAt.Format "15:04:05Z"}}</span>
+                <span>heartbeat {{if .Task.LastHeartbeatAt}}{{.Task.LastHeartbeatAt.Format "15:04:05Z"}}{{else}}none{{end}}</span>
+                {{if .Task.ParentTaskID}}<span>parent {{.Task.ParentTaskID}}</span>{{end}}
+              </div>
+              <div class="task-body">{{.Task.InputJSON}}</div>
+            </div>
+            {{end}}
+          {{else}}
+            <p class="empty">No tasks dispatched yet. Pick a workload above to start a thread.</p>
+          {{end}}
+        </div>
+      </main>
+
+      <!-- RIGHT RAIL: Tribunal (Approvals + Audit Stream) -->
+      <aside>
+        <div class="panel panel-amber">
+          <div class="col-title">
+            <span>Tribunal · Approvals</span>
+            <span>{{len .Approvals}}</span>
+          </div>
+          {{if .Approvals}}
+            {{range .Approvals}}
+            <div class="apr-card">
+              <div class="apr-cap">{{.Capability}}</div>
+              <div class="apr-meta">
+                <div>{{.WorkloadName}} · {{.ID}}</div>
+                <div title="{{.PayloadSHA256}}">sha256: {{printf "%.16s" .PayloadSHA256}}...</div>
+                <div>expires {{.ExpiresAt.Format "15:04:05Z"}}</div>
+              </div>
               <div class="actions-inline">
                 <form method="POST" action="/ui/approvals/{{.ID}}/approve">
                   <input type="hidden" name="expected_sha256" value="{{.PayloadSHA256}}">
@@ -232,74 +412,33 @@
                   <button type="submit" class="btn-deny">Deny</button>
                 </form>
               </div>
-            </td>
-          </tr>
+            </div>
+            {{end}}
+          {{else}}
+            <p class="empty">No pending approvals.</p>
           {{end}}
-        </tbody>
-      </table>
-      {{else}}<p class="empty">No pending approvals.</p>{{end}}
-    </div>
+        </div>
 
-    <h2>Workloads ({{len .Workloads}})</h2>
-    <div class="card">
-      {{if .Workloads}}
-      <table>
-        <thead><tr><th>Name</th><th>Zone</th><th>Class</th><th>Manifest digest</th></tr></thead>
-        <tbody>
-          {{range .Workloads}}
-          <tr>
-            <td class="mono">{{.Name}}</td>
-            <td><span class="badge {{if eq (printf "%s" .Zone) "sandbox"}}b-wait{{else}}b-ok{{end}}">{{.Zone}}</span></td>
-            <td class="mono">{{.Class}}</td>
-            <td class="mono">{{printf "%.12s" .ManifestDigest}}</td>
-          </tr>
+        <div class="panel">
+          <div class="col-title">
+            <span>Audit stream</span>
+            <span>latest {{len .Audit}}</span>
+          </div>
+          {{if .Audit}}
+            {{range .Audit}}
+            <div class="audit-row">
+              <div class="audit-top">
+                <span>{{.Action}}</span>
+                <span class="badge {{if eq .Outcome "denied"}}b-err{{else if eq .Outcome "pending"}}b-wait{{else}}b-ok{{end}}">{{.Outcome}}</span>
+              </div>
+              <div class="audit-sub">{{.CreatedAt.Format "15:04:05Z"}} · {{.Category}}{{if .WorkloadName}} · {{.WorkloadName}}{{end}}</div>
+            </div>
+            {{end}}
+          {{else}}
+            <p class="empty">No audit events recorded yet.</p>
           {{end}}
-        </tbody>
-      </table>
-      {{else}}<p class="empty">No workloads registered. Start sablecourtd with --manifests.</p>{{end}}
-    </div>
-
-    <h2>Tasks ({{len .Tasks}})</h2>
-    <div class="card">
-      {{if .Tasks}}
-      <table>
-        <thead><tr><th>ID</th><th>Workload</th><th>State</th><th>Parent</th><th>Last heartbeat</th></tr></thead>
-        <tbody>
-          {{range .Tasks}}
-          <tr>
-            <td class="mono"><a href="/tasks/{{.Task.ID}}">{{.Task.ID}}</a></td>
-            <td class="mono">{{.Task.WorkloadName}}</td>
-            <td>
-              <span class="badge {{if eq (printf "%s" .Task.State) "failed"}}b-err{{else if eq (printf "%s" .Task.State) "input-required"}}b-wait{{else if eq (printf "%s" .Task.State) "working"}}b-ok{{else}}b-muted{{end}}">{{.Task.State}}</span>
-              {{if .Stale}}<span class="badge b-wait">stale</span>{{end}}
-            </td>
-            <td class="mono">{{if .Task.ParentTaskID}}{{.Task.ParentTaskID}}{{else}}-{{end}}</td>
-            <td class="mono">{{if .Task.LastHeartbeatAt}}{{.Task.LastHeartbeatAt.Format "15:04:05Z"}}{{else}}none{{end}}</td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-      {{else}}<p class="empty">No tasks submitted.</p>{{end}}
-    </div>
-
-    <h2>Recent audit events ({{len .Audit}})</h2>
-    <div class="card">
-      {{if .Audit}}
-      <table>
-        <thead><tr><th>Time</th><th>Category</th><th>Workload</th><th>Action</th><th>Outcome</th></tr></thead>
-        <tbody>
-          {{range .Audit}}
-          <tr>
-            <td class="mono">{{.CreatedAt.Format "15:04:05Z"}}</td>
-            <td class="mono">{{.Category}}</td>
-            <td class="mono">{{.WorkloadName}}</td>
-            <td class="mono">{{.Action}}</td>
-            <td><span class="badge {{if eq .Outcome "denied"}}b-err{{else if eq .Outcome "pending"}}b-wait{{else}}b-ok{{end}}">{{.Outcome}}</span></td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-      {{else}}<p class="empty">No audit records yet.</p>{{end}}
+        </div>
+      </aside>
     </div>
 
     <footer>

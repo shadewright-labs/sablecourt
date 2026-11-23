@@ -2,11 +2,13 @@ package ui
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
@@ -38,21 +40,23 @@ type Dashboard struct {
 }
 
 type taskRow struct {
-	Task  domain.Task
-	Stale bool
+	Task       domain.Task
+	Stale      bool
+	Cancelable bool
 }
 
 type viewData struct {
-	ObservedAt   string
-	Notice       string
-	ErrMsg       string
-	ActiveTasks  int
-	TotalCostUSD string
-	TotalTokens  int64
-	Workloads    []domain.WorkloadRecord
-	Approvals    []domain.Approval
-	Tasks        []taskRow
-	Audit        []domain.AuditRecord
+	ObservedAt       string
+	Notice           string
+	ErrMsg           string
+	SelectedWorkload string
+	ActiveTasks      int
+	TotalCostUSD     string
+	TotalTokens      int64
+	Workloads        []domain.WorkloadRecord
+	Approvals        []domain.Approval
+	Tasks            []taskRow
+	Audit            []domain.AuditRecord
 }
 
 func NewDashboard(opts Options) (*Dashboard, error) {
@@ -148,25 +152,27 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var rows []taskRow
 	active := 0
 	for _, t := range tasks {
-		if t.State == domain.TaskStateSubmitted || t.State == domain.TaskStateWorking || t.State == domain.TaskStateInputRequired {
+		isActive := t.State == domain.TaskStateSubmitted || t.State == domain.TaskStateWorking || t.State == domain.TaskStateInputRequired
+		if isActive {
 			active++
 		}
 		stale := t.State == domain.TaskStateWorking && (t.LastHeartbeatAt == nil || now.Sub(*t.LastHeartbeatAt) > d.stalenessWindow)
-		rows = append(rows, taskRow{Task: t, Stale: stale})
+		rows = append(rows, taskRow{Task: t, Stale: stale, Cancelable: isActive})
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = d.tmpl.Execute(w, viewData{
-		ObservedAt:   now.Format(time.RFC3339),
-		Notice:       r.URL.Query().Get("notice"),
-		ErrMsg:       r.URL.Query().Get("err"),
-		ActiveTasks:  active,
-		TotalCostUSD: fmt.Sprintf("%.4f", float64(totals.CostMicroUSD)/1_000_000.0),
-		TotalTokens:  totals.InputTokens + totals.OutputTokens,
-		Workloads:    workloads,
-		Approvals:    approvals,
-		Tasks:        rows,
-		Audit:        audit,
+		ObservedAt:       now.Format(time.RFC3339),
+		Notice:           r.URL.Query().Get("notice"),
+		ErrMsg:           r.URL.Query().Get("err"),
+		SelectedWorkload: r.URL.Query().Get("workload"),
+		ActiveTasks:      active,
+		TotalCostUSD:     fmt.Sprintf("%.4f", float64(totals.CostMicroUSD)/1_000_000.0),
+		TotalTokens:      totals.InputTokens + totals.OutputTokens,
+		Workloads:        workloads,
+		Approvals:        approvals,
+		Tasks:            rows,
+		Audit:            audit,
 	})
 }
 
@@ -215,9 +221,15 @@ func (d *Dashboard) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wl := r.FormValue("workload")
-	inputJSON := r.FormValue("input_json")
-	if inputJSON == "" {
-		inputJSON = "{}"
+	rawInput := strings.TrimSpace(r.FormValue("input_json"))
+	inputJSON := "{}"
+	if rawInput != "" {
+		if json.Valid([]byte(rawInput)) {
+			inputJSON = rawInput
+		} else {
+			wrapped, _ := json.Marshal(map[string]string{"prompt": rawInput})
+			inputJSON = string(wrapped)
+		}
 	}
 	task, err := d.reconciler.SubmitTask(r.Context(), wl, "", inputJSON)
 	if err != nil {

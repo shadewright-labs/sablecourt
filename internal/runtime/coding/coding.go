@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -67,6 +68,14 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	cmd.Env = BuildStrippedEnv(spec)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// Capture session output next to the worktree so git status stays clean.
+	logPath := worktreeDir + ".log"
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	}
+
 	if err := cmd.Start(); err != nil {
 		return scruntime.Handle{}, fmt.Errorf("start coding harness %q: %w", cfg.Harness, err)
 	}
@@ -106,18 +115,41 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	if handle.WorkDir == "" {
 		return nil, nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", handle.WorkDir, "status", "--short")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-	return []scruntime.Artifact{
-		{
+	var artifacts []scruntime.Artifact
+
+	if out, err := exec.CommandContext(ctx, "git", "-C", handle.WorkDir, "status", "--short").Output(); err == nil {
+		artifacts = append(artifacts, scruntime.Artifact{
 			Name:        "git-status",
 			ContentType: "text/plain",
-			Text:        strings.TrimSpace(string(out)),
-		},
-	}, nil
+			Text:        redact.String(strings.TrimSpace(string(out))),
+		})
+	}
+
+	if out, err := exec.CommandContext(ctx, "git", "-C", handle.WorkDir, "diff").Output(); err == nil && len(out) > 0 {
+		diffText := string(out)
+		if len(diffText) > 32*1024 {
+			diffText = diffText[:32*1024] + "\n...[truncated]"
+		}
+		artifacts = append(artifacts, scruntime.Artifact{
+			Name:        "git-diff",
+			ContentType: "text/x-diff",
+			Text:        redact.String(diffText),
+		})
+	}
+
+	if logBytes, err := os.ReadFile(handle.WorkDir + ".log"); err == nil && len(logBytes) > 0 {
+		logText := string(logBytes)
+		if len(logText) > 16*1024 {
+			logText = "...[truncated]\n" + logText[len(logText)-16*1024:]
+		}
+		artifacts = append(artifacts, scruntime.Artifact{
+			Name:        "session-log",
+			ContentType: "text/plain",
+			Text:        redact.String(strings.TrimSpace(logText)),
+		})
+	}
+
+	return artifacts, nil
 }
 
 // BuildStrippedEnv constructs a minimal allowlisted environment with zero raw provider keys
