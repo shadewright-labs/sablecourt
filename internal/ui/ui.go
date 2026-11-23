@@ -32,7 +32,8 @@ type Dashboard struct {
 	stalenessWindow time.Duration
 	tmpl            *template.Template
 	assets          http.Handler
-	favicon         []byte
+	faviconICO      []byte
+	appleTouchIcon  []byte
 }
 
 type taskRow struct {
@@ -62,7 +63,11 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
-	fav, err := embeddedFS.ReadFile("assets/favicon.png")
+	favICO, err := embeddedFS.ReadFile("assets/favicon.ico")
+	if err != nil {
+		return nil, err
+	}
+	appleIcon, err := embeddedFS.ReadFile("assets/apple-touch-icon.png")
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +82,8 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		stalenessWindow: win,
 		tmpl:            tmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
-		favicon:         fav,
+		faviconICO:      favICO,
+		appleTouchIcon:  appleIcon,
 	}, nil
 }
 
@@ -85,10 +91,16 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /{$}", d)
 	mux.Handle("GET /assets/", d.assets)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(d.faviconICO)
+	})
+	mux.HandleFunc("GET /apple-touch-icon.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(d.favicon)
+		_, _ = w.Write(d.appleTouchIcon)
 	})
 	mux.HandleFunc("POST /ui/tasks", d.handleSubmitTask)
 	mux.HandleFunc("POST /ui/approvals/{id}/approve", d.handleApprove)
