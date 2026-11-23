@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1258,7 +1259,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		branch := "sablecourt/promote-" + name
-		cmd := exec.CommandContext(r.Context(), "git", "branch", branch)
+		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
@@ -1512,7 +1513,45 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusOK, relic)
 		})
 	}
-	return mux
+	return securityHardeningMiddleware(mux)
+}
+
+func securityHardeningMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1. Security response headers (clickjacking and MIME sniffing protection).
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:")
+
+		// 2. Same-origin CSRF guard for state-changing requests on UI and operator API routes.
+		p := r.URL.Path
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			isNonBrowserAuthRoute := strings.HasPrefix(p, "/gate/") ||
+				p == "/api/v1/hooks/github" ||
+				p == "/a2a" ||
+				p == "/api/v1/devices/pair/complete"
+			if !isNonBrowserAuthRoute {
+				if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-site request blocked"})
+					return
+				}
+				if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && origin != "null" {
+					if u, err := url.Parse(origin); err != nil || !strings.EqualFold(u.Host, r.Host) {
+						writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
+						return
+					}
+				}
+			}
+			// 3. Enforce bounded request body size (2 MiB default; Model Gate and Voice enforce their own larger caps).
+			if !strings.HasPrefix(p, "/gate/model/") && !strings.HasPrefix(p, "/api/v1/voice/") && !strings.HasSuffix(p, "/voice-decree") {
+				r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Store) (domain.Lease, bool) {
