@@ -57,9 +57,11 @@ type Dashboard struct {
 }
 
 type taskRow struct {
-	Task       domain.Task
-	Stale      bool
-	Cancelable bool
+	Task        domain.Task
+	Stale       bool
+	Cancelable  bool
+	Suspendable bool
+	Resumable   bool
 }
 
 type viewData struct {
@@ -151,6 +153,8 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /ui/tasks", d.handleSubmitTask)
 	mux.HandleFunc("POST /ui/tasks/{id}/cancel", d.handleCancelTask)
+	mux.HandleFunc("POST /ui/tasks/{id}/suspend", d.handleSuspendTask)
+	mux.HandleFunc("POST /ui/tasks/{id}/resume", d.handleResumeTask)
 	mux.HandleFunc("POST /ui/tasks/{id}/messages", d.handlePostMessage)
 	mux.HandleFunc("POST /ui/approvals/{id}/approve", d.handleApprove)
 	mux.HandleFunc("POST /ui/approvals/{id}/deny", d.handleDeny)
@@ -201,7 +205,13 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			active++
 		}
 		stale := t.State == domain.TaskStateWorking && (t.LastHeartbeatAt == nil || now.Sub(*t.LastHeartbeatAt) > d.stalenessWindow)
-		rows = append(rows, taskRow{Task: t, Stale: stale, Cancelable: isActive})
+		rows = append(rows, taskRow{
+			Task:        t,
+			Stale:       stale,
+			Cancelable:  isActive,
+			Suspendable: t.State == domain.TaskStateWorking,
+			Resumable:   t.State == domain.TaskStateSuspended,
+		})
 	}
 
 	var provList []providers.ProviderStatus
@@ -293,6 +303,32 @@ func (d *Dashboard) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectNotice(w, r, "Cancelled task "+id)
+}
+
+func (d *Dashboard) handleSuspendTask(w http.ResponseWriter, r *http.Request) {
+	if d.reconciler == nil {
+		redirectErr(w, r, "reconciler not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if err := d.reconciler.SuspendTask(r.Context(), id, "suspended from Web UI"); err != nil {
+		redirectErr(w, r, "Suspend failed: "+err.Error())
+		return
+	}
+	redirectNotice(w, r, "Suspended task "+id+" and saved checkpoint")
+}
+
+func (d *Dashboard) handleResumeTask(w http.ResponseWriter, r *http.Request) {
+	if d.reconciler == nil {
+		redirectErr(w, r, "reconciler not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if err := d.reconciler.ResumeTask(r.Context(), id); err != nil {
+		redirectErr(w, r, "Resume failed: "+err.Error())
+		return
+	}
+	redirectNotice(w, r, "Resumed task "+id+" from checkpoint")
 }
 
 func (d *Dashboard) handleSubmitTask(w http.ResponseWriter, r *http.Request) {

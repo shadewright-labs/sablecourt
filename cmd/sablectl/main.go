@@ -223,6 +223,42 @@ func main() {
 			return nil
 		},
 	})
+	taskCmd.AddCommand(&cobra.Command{
+		Use:   "suspend <task-id>",
+		Short: "Checkpoint and suspend a working task",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/suspend", map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s suspended task %s\n", stAmber.Render("⏸"), args[0])
+			return nil
+		},
+	})
+	taskCmd.AddCommand(&cobra.Command{
+		Use:   "resume <task-id>",
+		Short: "Restore checkpoint and resume a suspended task",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/resume", map[string]string{})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s resumed task %s\n", stJade.Render("▶"), args[0])
+			return nil
+		},
+	})
 
 	budgetCmd := &cobra.Command{
 		Use:   "budget",

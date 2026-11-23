@@ -479,6 +479,16 @@
                 <div class="task-actions">
                   <span class="badge {{if eq (printf "%s" .Task.State) "failed"}}b-err{{else if eq (printf "%s" .Task.State) "input-required"}}b-wait{{else if eq (printf "%s" .Task.State) "working"}}b-ok{{else}}b-muted{{end}}">{{.Task.State}}</span>
                   {{if .Stale}}<span class="badge b-wait">stale</span>{{end}}
+                  {{if .Suspendable}}
+                  <form method="POST" action="/ui/tasks/{{.Task.ID}}/suspend">
+                    <button type="submit" class="btn-approve">Suspend</button>
+                  </form>
+                  {{end}}
+                  {{if .Resumable}}
+                  <form method="POST" action="/ui/tasks/{{.Task.ID}}/resume">
+                    <button type="submit" class="btn-sm">Resume</button>
+                  </form>
+                  {{end}}
                   {{if .Cancelable}}
                   <form method="POST" action="/ui/tasks/{{.Task.ID}}/cancel">
                     <button type="submit" class="btn-deny">Cancel</button>
@@ -594,6 +604,24 @@
       wl.addEventListener("change", syncWorkload);
       syncModels();
       syncWorkload();
+    })();
+
+    (function () {
+      if (typeof EventSource === "undefined") return;
+      let initial = null;
+      const es = new EventSource("/api/v1/stream");
+      es.addEventListener("state", function (ev) {
+        if (initial === null) {
+          initial = ev.data;
+          return;
+        }
+        if (ev.data === initial) return;
+        const active = document.activeElement;
+        if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.tagName === "SELECT")) {
+          return;
+        }
+        window.location.reload();
+      });
     })();
   </script>
 </body>

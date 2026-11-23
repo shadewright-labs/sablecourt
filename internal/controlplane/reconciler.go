@@ -92,6 +92,106 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 	return nil
 }
 
+// SuspendTask checkpoints a running task, revokes its active gate leases, and transitions it to suspended.
+func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) error {
+	task, err := r.store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.State != domain.TaskStateWorking {
+		return fmt.Errorf("%w: task %s is in state %s (must be working)", store.ErrConflict, taskID, task.State)
+	}
+
+	r.mu.Lock()
+	handle, hasHandle := r.handles[taskID]
+	var wl domain.Workload
+	if r.bundle != nil {
+		wl = r.bundle.Workloads[task.WorkloadName]
+	}
+	r.mu.Unlock()
+
+	cp := scruntime.CheckpointRef{ID: "cp-" + taskID, CreatedAt: r.now()}
+	if hasHandle {
+		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
+			if c, err := adapter.Suspend(ctx, handle); err == nil {
+				cp = c
+			}
+			_ = adapter.Stop(ctx, handle)
+		}
+	}
+	if raw, err := json.Marshal(cp); err == nil {
+		_ = r.store.SaveCheckpoint(ctx, taskID, task.WorkloadName, string(raw))
+	}
+	_ = r.store.RevokeTaskLeases(ctx, taskID)
+
+	if reason == "" {
+		reason = "operator_suspended"
+	}
+	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateWorking, domain.TaskStateSuspended, reason, fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
+		return err
+	}
+	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.suspend",
+		Outcome:      "suspended",
+		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, reason),
+		CreatedAt:    r.now(),
+	})
+	return nil
+}
+
+// ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.
+func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) error {
+	task, err := r.store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.State != domain.TaskStateSuspended {
+		return fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, task.State)
+	}
+
+	var cp scruntime.CheckpointRef
+	if refJSON, err := r.store.LatestCheckpoint(ctx, taskID); err == nil {
+		_ = json.Unmarshal([]byte(refJSON), &cp)
+	}
+
+	r.mu.Lock()
+	handle, hasHandle := r.handles[taskID]
+	var wl domain.Workload
+	if r.bundle != nil {
+		wl = r.bundle.Workloads[task.WorkloadName]
+	}
+	r.mu.Unlock()
+
+	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, time.Hour); err != nil {
+		return err
+	}
+	if hasHandle {
+		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
+			if err := adapter.Resume(ctx, handle, cp); err != nil {
+				return fmt.Errorf("resume adapter: %w", err)
+			}
+		}
+	}
+
+	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateSuspended, domain.TaskStateWorking, "operator_resumed", fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
+		return err
+	}
+	_ = r.store.RecordHeartbeat(ctx, taskID, r.now())
+	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.resume",
+		Outcome:      "working",
+		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
+		CreatedAt:    r.now(),
+	})
+	return nil
+}
+
 func NewReconciler(opts Options) *Reconciler {
 	win := opts.StalenessWindow
 	if win <= 0 {
