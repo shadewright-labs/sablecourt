@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
@@ -33,7 +35,13 @@ type Adapter struct {
 var _ scruntime.Adapter = (*Adapter)(nil)
 
 func NewFromEnv() (*Adapter, error) {
-	cli, err := client.New(client.FromEnv)
+	opts := []client.Opt{client.FromEnv}
+	if os.Getenv("DOCKER_HOST") == "" {
+		if sock := discoverDockerSocket(); sock != "" {
+			opts = append(opts, client.WithHost("unix://"+sock))
+		}
+	}
+	cli, err := client.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create moby client: %w", err)
 	}
@@ -41,6 +49,23 @@ func NewFromEnv() (*Adapter, error) {
 		Client:      cli,
 		NetworkName: DefaultNetworkName,
 	}, nil
+}
+
+func discoverDockerSocket() string {
+	candidates := []string{"/var/run/docker.sock"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".docker", "run", "docker.sock"),
+			filepath.Join(home, ".orbstack", "run", "docker.sock"),
+			filepath.Join(home, ".colima", "default", "docker.sock"),
+		)
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
 }
 
 func NewAdapter(cli EngineClient, networkName string) *Adapter {
