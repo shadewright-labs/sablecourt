@@ -60,7 +60,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	dataGate := mcpgate.New(mcpgate.Options{Store: st, Bundle: bundle, Policy: policyEng, Breaker: breaker, Approvals: approvals})
 	mcpgate.RegisterBuiltinGitOps(dataGate, t.TempDir(), nil)
 	reconciler := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle, Policy: policyEng})
-	dash, err := ui.NewDashboard(st)
+	dash, err := ui.NewDashboard(ui.Options{Store: st, Approvals: approvals, Reconciler: reconciler})
 	if err != nil {
 		t.Fatalf("NewDashboard: %v", err)
 	}

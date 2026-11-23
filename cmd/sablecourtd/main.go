@@ -164,7 +164,11 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		}
 	}()
 
-	dash, err := ui.NewDashboard(st)
+	dash, err := ui.NewDashboard(ui.Options{
+		Store:      st,
+		Approvals:  approvalQueue,
+		Reconciler: reconciler,
+	})
 	if err != nil {
 		return fmt.Errorf("init web ui: %w", err)
 	}
@@ -195,10 +199,10 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 	}
 }
 
-func newHandler(st store.Store, bundle *config.Bundle, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash http.Handler) http.Handler {
+func newHandler(st store.Store, bundle *config.Bundle, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
-		mux.Handle("GET /{$}", dash)
+		dash.RegisterRoutes(mux)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
