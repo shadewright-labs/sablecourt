@@ -100,7 +100,7 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVar(&mode, "mode", "local", "Operating mode: local (macOS/Ubuntu) or enterprise (Kubernetes)")
+	rootCmd.Flags().StringVar(&mode, "mode", "sanctum", "Operating mode: sanctum (local macOS/Ubuntu) or citadel (Kubernetes)")
 	rootCmd.Flags().StringVar(&modelGatewayURL, "model-gateway-url", "", "Optional upstream AI gateway URL (e.g. agentgateway or Agent Router)")
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
@@ -153,13 +153,13 @@ type daemonConfig struct {
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
-	if mode == "" || mode == "local" {
+	if mode == "" || mode == "sanctum" || mode == "local" {
 		if envMode := strings.ToLower(strings.TrimSpace(os.Getenv("SABLECOURT_MODE"))); envMode != "" {
 			mode = envMode
 		}
 	}
-	isEnterprise := mode == "enterprise"
-	if isEnterprise {
+	isCitadel := mode == "citadel" || mode == "enterprise"
+	if isCitadel {
 		cfg.operatorAuthRequired = true
 		if cfg.runtimeBackend == "" || cfg.runtimeBackend == "docker" {
 			cfg.runtimeBackend = "k8s"
@@ -291,7 +291,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	notifier := notify.New(notify.Options{Secrets: secretStore})
 	var oobApprover approval.Approver
-	if !isEnterprise {
+	if !isCitadel {
 		oobApprover = &approval.MacOSDialogApprover{}
 	}
 	approvalQueue := approval.NewQueue(st, oobApprover)
@@ -317,14 +317,14 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	if !isEnterprise {
+	if !isCitadel {
 		codingAdapter := coding.NewAdapter(os.TempDir())
 		codingAdapter.AttachHub = attachHub
 		adapters[domain.ClassCodingAgent] = codingAdapter
 	} else {
-		logger.Info("enterprise mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
-			logger.Warn("enterprise mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
+			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
 	switch cfg.runtimeBackend {

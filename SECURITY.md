@@ -10,7 +10,7 @@ Sablecourt is designed as a policy-governed control plane that isolates untruste
 - All Model Gate, MCP, Conclave, Relic, Court Memory, Scry, Voice, and outbound notification boundaries apply linear-time RE2 secret redaction (`internal/redact`).
 - Every audit record is linked into a tamper-evident SHA-256 hash chain verifiable via `sablectl audit verify` and `/audit`.
 - Browser state-changing requests enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and bounded request body limits.
-- In `--mode=enterprise`, `sablecourtd` enforces fail-closed bearer authentication (`--operator-auth-required=true`), disables host-level process execution, and requires cryptographic ECDSA P-256 device signatures for approvals.
+- In `--mode=citadel`, `sablecourtd` enforces fail-closed bearer authentication (`--operator-auth-required=true`), disables host-level process execution, and requires cryptographic ECDSA P-256 device signatures for approvals.
 
 ## Reporting a vulnerability
 

@@ -55,7 +55,7 @@ func buildOpsCommands() (*cobra.Command, *cobra.Command) {
   <key>ProgramArguments</key>
   <array>
     <string>%s</string>
-    <string>--mode=local</string>
+    <string>--mode=sanctum</string>
     <string>--listen=%s</string>
     <string>--db=%s</string>
     <string>--manifests=%s</string>
@@ -89,7 +89,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s --mode=local --listen=%s --db=%s --manifests=%s
+ExecStart=%s --mode=sanctum --listen=%s --db=%s --manifests=%s
 Restart=on-failure
 RestartSec=3
 
