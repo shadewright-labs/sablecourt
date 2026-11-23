@@ -248,6 +248,33 @@ func (s *SQLiteStore) ListTasks(ctx context.Context) ([]domain.Task, error) {
 	return out, rows.Err()
 }
 
+func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, task_id, from_state, to_state, reason, fact_json, created_at
+		FROM task_events
+		WHERE task_id = ?
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.TaskEvent
+	for rows.Next() {
+		var ev domain.TaskEvent
+		var from, to, created string
+		if err := rows.Scan(&ev.ID, &ev.TaskID, &from, &to, &ev.Reason, &ev.FactJSON, &created); err != nil {
+			return nil, err
+		}
+		ev.FromState = domain.TaskState(from)
+		ev.ToState = domain.TaskState(to)
+		ev.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

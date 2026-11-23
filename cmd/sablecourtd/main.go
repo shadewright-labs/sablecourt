@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +39,8 @@ func main() {
 		dbPath        string
 		manifestsPath string
 		listenAddr    string
+		socketPath    string
+		gateHost      string
 		secretFile    string
 		repoRoot      string
 	)
@@ -44,13 +49,15 @@ func main() {
 		Use:   "sablecourtd",
 		Short: "Sablecourt local-first control plane daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, secretFile, repoRoot)
+			return runDaemon(cmd.Context(), dbPath, manifestsPath, listenAddr, socketPath, gateHost, secretFile, repoRoot)
 		},
 	}
 
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
+	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
+	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
 
@@ -63,7 +70,7 @@ func main() {
 	}
 }
 
-func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFile, repoRoot string) error {
+func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPath, gateHost, secretFile, repoRoot string) error {
 	logger := telemetry.NewLogger()
 
 	st, err := sqlite.Open(dbPath)
@@ -76,27 +83,47 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		return err
 	}
 
-	var bundle *config.Bundle
-	if manifestsPath != "" {
-		bundle, err = config.LoadPath(manifestsPath)
-		if err != nil {
-			return fmt.Errorf("load manifests: %w", err)
+	var (
+		bundleMu sync.RWMutex
+		bundle   *config.Bundle
+	)
+	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
+		if manifestsPath == "" {
+			return nil, policy.NewEngine(nil, nil), nil
 		}
-		for _, w := range bundle.Workloads {
+		b, err := config.LoadPath(manifestsPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load manifests: %w", err)
+		}
+		for _, w := range b.Workloads {
 			cardBytes, err := json.Marshal(w.Spec.AgentCard)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
 				Name:           w.Metadata.Name,
 				Zone:           w.Metadata.Zone,
 				Class:          w.Spec.Class,
-				ManifestDigest: bundle.ManifestDigest,
+				ManifestDigest: b.ManifestDigest,
 				AgentCardJSON:  string(cardBytes),
 			}); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
+		var policies []domain.Policy
+		for _, p := range b.Policies {
+			policies = append(policies, p)
+		}
+		breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+		return b, policy.NewEngine(policies, breaker), nil
+	}
+
+	var policyEng *policy.Engine
+	bundle, policyEng, err = loadAndSync()
+	if err != nil {
+		return err
+	}
+	if bundle != nil {
 		logger.Info("loaded manifests", "workloads", len(bundle.Workloads), "policies", len(bundle.Policies), "budgets", len(bundle.Budgets))
 	}
 
@@ -112,14 +139,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		Bundle:  bundle,
 	})
 
-	var policies []domain.Policy
-	if bundle != nil {
-		for _, p := range bundle.Policies {
-			policies = append(policies, p)
-		}
-	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-	policyEng := policy.NewEngine(policies, breaker)
 	approvalQueue := approval.NewQueue(st, &approval.MacOSDialogApprover{})
 	dataActionGate := mcpgate.New(mcpgate.Options{
 		Store:     st,
@@ -140,14 +160,34 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		logger.Warn("docker runtime unavailable", "error", err)
 	}
 
+	if gateHost == "" {
+		gateHost = listenAddr
+	}
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:        st,
 		Bundle:       bundle,
 		Policy:       policyEng,
 		Adapters:     adapters,
-		ModelGateURL: "http://" + listenAddr + "/gate/model",
-		DataGateURL:  "http://" + listenAddr + "/gate/mcp",
+		ModelGateURL: "http://" + gateHost + "/gate/model",
+		DataGateURL:  "http://" + gateHost + "/gate/mcp",
 	})
+
+	reloadFn := func() error {
+		b, pol, err := loadAndSync()
+		if err != nil {
+			return err
+		}
+		bundleMu.Lock()
+		bundle = b
+		bundleMu.Unlock()
+		modelGate.SetBundle(b)
+		dataActionGate.Reload(b, pol)
+		reconciler.Reload(b, pol)
+		if b != nil {
+			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "digest", b.ManifestDigest[:12])
+		}
+		return nil
+	}
 
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -157,7 +197,10 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if bundle != nil {
+				bundleMu.RLock()
+				hasBundle := bundle != nil
+				bundleMu.RUnlock()
+				if hasBundle {
 					_ = reconciler.ReconcileOnce(ctx)
 				}
 			}
@@ -173,11 +216,35 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, bundle, modelGate, dataActionGate, approvalQueue, reconciler, dash)
+	getBundle := func() *config.Bundle {
+		bundleMu.RLock()
+		defer bundleMu.RUnlock()
+		return bundle
+	}
+	mux := newHandler(st, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, dash)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	var unixSrv *http.Server
+	if socketPath != "" {
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			return fmt.Errorf("mkdir socket dir: %w", err)
+		}
+		_ = os.Remove(socketPath)
+		uln, err := net.Listen("unix", socketPath)
+		if err != nil {
+			return fmt.Errorf("listen unix socket %q: %w", socketPath, err)
+		}
+		_ = os.Chmod(socketPath, 0o600)
+		defer os.Remove(socketPath)
+		unixSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			logger.Info("sablecourtd unix socket listening", "path", socketPath)
+			_ = unixSrv.Serve(uln)
+		}()
 	}
 
 	errCh := make(chan error, 1)
@@ -193,13 +260,16 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, secretFil
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if unixSrv != nil {
+			_ = unixSrv.Shutdown(shutdownCtx)
+		}
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}
 }
 
-func newHandler(st store.Store, bundle *config.Bundle, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -208,7 +278,53 @@ func newHandler(st store.Store, bundle *config.Bundle, modelGate *model.Gate, da
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, buildAgentCard(bundle))
+		var b *config.Bundle
+		if getBundle != nil {
+			b = getBundle()
+		}
+		writeJSON(w, http.StatusOK, buildAgentCard(b))
+	})
+	mux.HandleFunc("POST /api/v1/reload", func(w http.ResponseWriter, r *http.Request) {
+		if reloadFn == nil {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "reload not configured"})
+			return
+		}
+		if err := reloadFn(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+	})
+	mux.HandleFunc("GET /api/v1/budget", func(w http.ResponseWriter, r *http.Request) {
+		totals, err := st.TotalBudgetTotals(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, totals)
+	})
+	mux.HandleFunc("GET /api/v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		task, err := st.GetTask(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		events, _ := st.ListTaskEvents(r.Context(), id)
+		budget, _ := st.TaskBudgetTotals(r.Context(), id)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"task":   task,
+			"events": events,
+			"budget": budget,
+		})
+	})
+	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := reconciler.CancelTask(r.Context(), id, "api_cancelled"); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "id": id})
 	})
 	mux.HandleFunc("GET /api/v1/workloads", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListWorkloads(r.Context())

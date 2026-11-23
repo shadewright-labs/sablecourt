@@ -42,6 +42,55 @@ type Reconciler struct {
 	handles map[string]scruntime.Handle
 }
 
+func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bundle = bundle
+	r.policy = pol
+}
+
+func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) error {
+	task, err := r.store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.State == domain.TaskStateCompleted || task.State == domain.TaskStateFailed || task.State == domain.TaskStateCancelled {
+		return store.ErrConflict
+	}
+
+	r.mu.Lock()
+	handle, hasHandle := r.handles[taskID]
+	delete(r.handles, taskID)
+	var wl domain.Workload
+	if r.bundle != nil {
+		wl = r.bundle.Workloads[task.WorkloadName]
+	}
+	r.mu.Unlock()
+
+	if hasHandle {
+		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
+			_ = adapter.Stop(ctx, handle)
+		}
+	}
+	_ = r.store.RevokeTaskLeases(ctx, taskID)
+	if reason == "" {
+		reason = "operator_cancelled"
+	}
+	if err := r.store.UpdateTaskState(ctx, taskID, task.State, domain.TaskStateCancelled, reason, `{}`); err != nil {
+		return err
+	}
+	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.cancel",
+		Outcome:      "cancelled",
+		DetailJSON:   fmt.Sprintf(`{"reason":%q}`, reason),
+		CreatedAt:    r.now(),
+	})
+	return nil
+}
+
 func NewReconciler(opts Options) *Reconciler {
 	win := opts.StalenessWindow
 	if win <= 0 {

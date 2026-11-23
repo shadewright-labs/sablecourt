@@ -31,6 +31,7 @@ type Dashboard struct {
 	reconciler      *controlplane.Reconciler
 	stalenessWindow time.Duration
 	tmpl            *template.Template
+	taskTmpl        *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -59,6 +60,10 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
+	taskTmpl, err := template.ParseFS(embeddedFS, "templates/task.html")
+	if err != nil {
+		return nil, err
+	}
 	subAssets, err := fs.Sub(embeddedFS, "assets")
 	if err != nil {
 		return nil, err
@@ -81,6 +86,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		reconciler:      opts.Reconciler,
 		stalenessWindow: win,
 		tmpl:            tmpl,
+		taskTmpl:        taskTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -89,6 +95,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 
 func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /{$}", d)
+	mux.HandleFunc("GET /tasks/{id}", d.handleTaskDetail)
 	mux.Handle("GET /assets/", d.assets)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")
@@ -103,6 +110,7 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 		_, _ = w.Write(d.appleTouchIcon)
 	})
 	mux.HandleFunc("POST /ui/tasks", d.handleSubmitTask)
+	mux.HandleFunc("POST /ui/tasks/{id}/cancel", d.handleCancelTask)
 	mux.HandleFunc("POST /ui/approvals/{id}/approve", d.handleApprove)
 	mux.HandleFunc("POST /ui/approvals/{id}/deny", d.handleDeny)
 }
@@ -160,6 +168,41 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tasks:        rows,
 		Audit:        audit,
 	})
+}
+
+func (d *Dashboard) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	task, err := d.store.GetTask(ctx, id)
+	if err != nil {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+	events, _ := d.store.ListTaskEvents(ctx, id)
+	budget, _ := d.store.TaskBudgetTotals(ctx, id)
+	cancelable := task.State == domain.TaskStateSubmitted || task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = d.taskTmpl.Execute(w, map[string]any{
+		"Task":       task,
+		"Events":     events,
+		"Budget":     budget,
+		"CostUSD":    fmt.Sprintf("%.4f", float64(budget.CostMicroUSD)/1_000_000.0),
+		"Cancelable": cancelable,
+	})
+}
+
+func (d *Dashboard) handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	if d.reconciler == nil {
+		redirectErr(w, r, "reconciler not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if err := d.reconciler.CancelTask(r.Context(), id, "cancelled from Web UI"); err != nil {
+		redirectErr(w, r, "Cancel failed: "+err.Error())
+		return
+	}
+	redirectNotice(w, r, "Cancelled task "+id)
 }
 
 func (d *Dashboard) handleSubmitTask(w http.ResponseWriter, r *http.Request) {

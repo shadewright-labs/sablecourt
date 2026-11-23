@@ -267,7 +267,7 @@
         <tbody>
           {{range .Tasks}}
           <tr>
-            <td class="mono">{{.Task.ID}}</td>
+            <td class="mono"><a href="/tasks/{{.Task.ID}}">{{.Task.ID}}</a></td>
             <td class="mono">{{.Task.WorkloadName}}</td>
             <td>
               <span class="badge {{if eq (printf "%s" .Task.State) "failed"}}b-err{{else if eq (printf "%s" .Task.State) "input-required"}}b-wait{{else if eq (printf "%s" .Task.State) "working"}}b-ok{{else}}b-muted{{end}}">{{.Task.State}}</span>

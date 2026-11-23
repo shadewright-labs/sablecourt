@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
@@ -42,6 +43,7 @@ type Options struct {
 }
 
 type Gate struct {
+	mu        sync.RWMutex
 	store     store.Store
 	secrets   secret.SecretStore
 	bundle    *config.Bundle
@@ -49,6 +51,18 @@ type Gate struct {
 	pricing   map[string]PricePerMillionTokens
 	client    *http.Client
 	now       func() time.Time
+}
+
+func (g *Gate) SetBundle(b *config.Bundle) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.bundle = b
+}
+
+func (g *Gate) currentBundle() *config.Bundle {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.bundle
 }
 
 func DefaultUpstreams() map[string]UpstreamConfig {
@@ -158,11 +172,12 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if g.bundle == nil {
+	bundle := g.currentBundle()
+	if bundle == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no workload bundle loaded")
 		return
 	}
-	workload, exists := g.bundle.Workloads[lease.WorkloadName]
+	workload, exists := bundle.Workloads[lease.WorkloadName]
 	if !exists {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"unknown_workload"}`)
 		writeErr(w, http.StatusForbidden, "workload not declared")
@@ -181,7 +196,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	budget, ok := g.bundle.Budgets[workload.Spec.Grants.ModelGate.BudgetRef]
+	budget, ok := bundle.Budgets[workload.Spec.Grants.ModelGate.BudgetRef]
 	if !ok {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"missing_budget"}`)
 		writeErr(w, http.StatusForbidden, "workload budget not found")
