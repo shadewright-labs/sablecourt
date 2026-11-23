@@ -10,10 +10,13 @@ metadata:
   name: sablecourtd-jobs
   namespace: sablecourt
 rules:
-  # Least privilege: manage batch/v1 Jobs only. Zero Secrets RBAC.
+  # Least privilege: manage batch/v1 Jobs and stream Pod logs for Scry. Zero Secrets RBAC.
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
