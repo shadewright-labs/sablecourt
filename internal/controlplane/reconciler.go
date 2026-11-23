@@ -26,6 +26,7 @@ type Options struct {
 	ModelGateURL    string
 	DataGateURL     string
 	StalenessWindow time.Duration
+	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
 }
@@ -38,6 +39,7 @@ type Reconciler struct {
 	modelGateURL    string
 	dataGateURL     string
 	stalenessWindow time.Duration
+	maxConcurrent   int
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
 
@@ -211,6 +213,7 @@ func NewReconciler(opts Options) *Reconciler {
 		modelGateURL:    opts.ModelGateURL,
 		dataGateURL:     opts.DataGateURL,
 		stalenessWindow: win,
+		maxConcurrent:   opts.MaxConcurrent,
 		onTaskFailed:    opts.OnTaskFailed,
 		now:             nowFn,
 		handles:         make(map[string]scruntime.Handle),
@@ -369,6 +372,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		return err
 	}
 
+	activeWorking := 0
+	for _, t := range tasks {
+		if t.State == domain.TaskStateWorking {
+			activeWorking++
+		}
+	}
+
 	for _, task := range tasks {
 		wl, ok := r.bundle.Workloads[task.WorkloadName]
 		if !ok {
@@ -381,11 +391,16 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 
 		switch task.State {
 		case domain.TaskStateSubmitted:
+			if r.maxConcurrent > 0 && activeWorking >= r.maxConcurrent {
+				continue
+			}
 			if err := r.launchTask(ctx, task, wl, adapter); err != nil {
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateFailed, "launch_failed", fmt.Sprintf(`{"error":%q}`, err.Error()))
 				if r.onTaskFailed != nil {
 					r.onTaskFailed(task, "launch_failed: "+err.Error())
 				}
+			} else {
+				activeWorking++
 			}
 
 		case domain.TaskStateWorking:
