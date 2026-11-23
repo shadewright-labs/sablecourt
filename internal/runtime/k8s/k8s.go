@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
+	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -151,6 +153,46 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		podSpec.RuntimeClassName = &rc
 	}
 
+	// Persistent Deployment mode for long-lived agents/controllers when runtime.type == "k8s-deployment".
+	if spec.Workload.Spec.Runtime.Type == "k8s-deployment" || (spec.Workload.Spec.Runtime.Type == "deployment" && spec.Workload.Spec.Class != domain.ClassCodingAgent) {
+		podSpec.RestartPolicy = corev1.RestartPolicyAlways
+		replicas := int32(1)
+		depName := sanitizeK8sName("sc-dep-" + spec.TaskID)
+		matchLabels := map[string]string{
+			"app.kubernetes.io/managed-by": "sablecourt",
+			"sablecourt.io/deployment":     depName,
+			"sablecourt.io/workload":       sanitizeK8sName(spec.Workload.Metadata.Name),
+			"sablecourt.io/zone":           string(spec.Workload.Metadata.Zone),
+		}
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      depName,
+				Namespace: a.namespace,
+				Labels:    matchLabels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"sablecourt.io/deployment": depName}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: matchLabels},
+					Spec:       podSpec,
+				},
+			},
+		}
+		created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, dep, metav1.CreateOptions{})
+		if err != nil {
+			return scruntime.Handle{}, fmt.Errorf("create kubernetes deployment: %w", err)
+		}
+		if a.attachHub != nil {
+			a.attachHub.Register(spec.TaskID, nil)
+			go a.streamPodLogsBySelector(spec.TaskID, "sablecourt.io/deployment="+created.Name)
+		}
+		return scruntime.Handle{
+			AdapterName: "k8s",
+			ExternalID:  "deploy/" + created.Name,
+		}, nil
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -193,6 +235,10 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 }
 
 func (a *Adapter) streamPodLogs(taskID, jobName string) {
+	a.streamPodLogsBySelector(taskID, "job-name="+jobName)
+}
+
+func (a *Adapter) streamPodLogsBySelector(taskID, selector string) {
 	defer a.attachHub.Close(taskID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -200,7 +246,7 @@ func (a *Adapter) streamPodLogs(taskID, jobName string) {
 	var podName string
 	for i := 0; i < 60; i++ {
 		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "job-name=" + jobName,
+			LabelSelector: selector,
 		})
 		if err == nil && len(pods.Items) > 0 && pods.Items[0].Status.Phase != corev1.PodPending {
 			podName = pods.Items[0].Name
@@ -267,6 +313,17 @@ func (a *Adapter) streamPodLogs(taskID, jobName string) {
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
+	if depName, isDeploy := strings.CutPrefix(handle.ExternalID, "deploy/"); isDeploy {
+		dep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, depName, metav1.GetOptions{})
+		if err != nil {
+			return scruntime.Observation{}, fmt.Errorf("get kubernetes deployment %s: %w", depName, err)
+		}
+		obs := scruntime.Observation{ObservedAt: time.Now().UTC(), State: scruntime.StateRunning}
+		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0 {
+			obs.State = scruntime.StateSuspended
+		}
+		return obs, nil
+	}
 	job, err := a.client.BatchV1().Jobs(a.namespace).Get(ctx, handle.ExternalID, metav1.GetOptions{})
 	if err != nil {
 		return scruntime.Observation{}, fmt.Errorf("get kubernetes job %s: %w", handle.ExternalID, err)
@@ -288,6 +345,18 @@ func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scrunti
 }
 
 func (a *Adapter) Suspend(ctx context.Context, handle scruntime.Handle) (scruntime.CheckpointRef, error) {
+	if depName, isDeploy := strings.CutPrefix(handle.ExternalID, "deploy/"); isDeploy {
+		dep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, depName, metav1.GetOptions{})
+		if err != nil {
+			return scruntime.CheckpointRef{}, err
+		}
+		zero := int32(0)
+		dep.Spec.Replicas = &zero
+		if _, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+			return scruntime.CheckpointRef{}, err
+		}
+		return scruntime.CheckpointRef{ID: "k8s-cp-" + depName, CreatedAt: time.Now().UTC()}, nil
+	}
 	job, err := a.client.BatchV1().Jobs(a.namespace).Get(ctx, handle.ExternalID, metav1.GetOptions{})
 	if err != nil {
 		return scruntime.CheckpointRef{}, err
@@ -304,6 +373,16 @@ func (a *Adapter) Suspend(ctx context.Context, handle scruntime.Handle) (scrunti
 }
 
 func (a *Adapter) Resume(ctx context.Context, handle scruntime.Handle, _ scruntime.CheckpointRef) error {
+	if depName, isDeploy := strings.CutPrefix(handle.ExternalID, "deploy/"); isDeploy {
+		dep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, depName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		one := int32(1)
+		dep.Spec.Replicas = &one
+		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, dep, metav1.UpdateOptions{})
+		return err
+	}
 	job, err := a.client.BatchV1().Jobs(a.namespace).Get(ctx, handle.ExternalID, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -316,6 +395,11 @@ func (a *Adapter) Resume(ctx context.Context, handle scruntime.Handle, _ scrunti
 
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	policy := metav1.DeletePropagationBackground
+	if depName, isDeploy := strings.CutPrefix(handle.ExternalID, "deploy/"); isDeploy {
+		return a.client.AppsV1().Deployments(a.namespace).Delete(ctx, depName, metav1.DeleteOptions{
+			PropagationPolicy: &policy,
+		})
+	}
 	return a.client.BatchV1().Jobs(a.namespace).Delete(ctx, handle.ExternalID, metav1.DeleteOptions{
 		PropagationPolicy: &policy,
 	})

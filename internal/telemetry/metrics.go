@@ -19,6 +19,7 @@ func MetricsHandler(st store.Store) http.Handler {
 			return
 		}
 		tasks, _ := st.ListTasks(ctx)
+		conclaves, _ := st.ListConclaves(ctx)
 		pendingApprovals, _ := st.ListApprovals(ctx, domain.ApprovalPending)
 		budget, _ := st.TotalBudgetTotals(ctx)
 		audits, _ := st.ListAudit(ctx, 500)
@@ -65,11 +66,38 @@ func MetricsHandler(st store.Store) http.Handler {
 		fmt.Fprintln(w, "# TYPE sablecourt_budget_cost_microusd_total counter")
 		fmt.Fprintf(w, "sablecourt_budget_cost_microusd_total %d\n", budget.CostMicroUSD)
 
+		// Conclaves by state
+		conclaveCounts := make(map[string]int)
+		for _, c := range conclaves {
+			conclaveCounts[string(c.State)]++
+		}
+		fmt.Fprintln(w, "# HELP sablecourt_conclaves_total Multi-agent Conclave rooms by state.")
+		fmt.Fprintln(w, "# TYPE sablecourt_conclaves_total gauge")
+		for _, s := range sortedKeys(conclaveCounts) {
+			fmt.Fprintf(w, "sablecourt_conclaves_total{state=%q} %d\n", s, conclaveCounts[s])
+		}
+
 		// Recent audit outcomes
 		outcomeCounts := make(map[string]int)
+		wardTrips := 0
+		fallbacks := 0
 		for _, a := range audits {
 			outcomeCounts[a.Outcome]++
+			if a.Action == "conclave.ward_tripped" {
+				wardTrips++
+			}
+			if a.Action == "model.fallback" {
+				fallbacks++
+			}
 		}
+		fmt.Fprintln(w, "# HELP sablecourt_conclave_ward_trips_recent Conclave Ward breaker trips in recent audit window.")
+		fmt.Fprintln(w, "# TYPE sablecourt_conclave_ward_trips_recent gauge")
+		fmt.Fprintf(w, "sablecourt_conclave_ward_trips_recent %d\n", wardTrips)
+
+		fmt.Fprintln(w, "# HELP sablecourt_model_fallbacks_recent Model Gate fallback transitions in recent audit window.")
+		fmt.Fprintln(w, "# TYPE sablecourt_model_fallbacks_recent gauge")
+		fmt.Fprintf(w, "sablecourt_model_fallbacks_recent %d\n", fallbacks)
+
 		fmt.Fprintln(w, "# HELP sablecourt_audit_events_recent Recent audit events by outcome (last 500).")
 		fmt.Fprintln(w, "# TYPE sablecourt_audit_events_recent gauge")
 		for _, o := range sortedKeys(outcomeCounts) {

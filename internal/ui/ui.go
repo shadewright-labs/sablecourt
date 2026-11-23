@@ -60,6 +60,7 @@ type Dashboard struct {
 	conclaveTmpl    *template.Template
 	schedulesTmpl   *template.Template
 	auditTmpl       *template.Template
+	memoryTmpl      *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -126,6 +127,10 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
+	memoryTmpl, err := template.ParseFS(embeddedFS, "templates/memory.html")
+	if err != nil {
+		return nil, err
+	}
 	subAssets, err := fs.Sub(embeddedFS, "assets")
 	if err != nil {
 		return nil, err
@@ -161,6 +166,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		conclaveTmpl:    conclaveTmpl,
 		schedulesTmpl:   schedulesTmpl,
 		auditTmpl:       auditTmpl,
+		memoryTmpl:      memoryTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -176,6 +182,11 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /conclaves/{id}", d.handleConclaveDetailPage)
 	mux.HandleFunc("GET /schedules", d.handleSchedulesPage)
 	mux.HandleFunc("GET /audit", d.handleAuditPage)
+	mux.HandleFunc("GET /memory", d.handleMemoryPage)
+	mux.HandleFunc("POST /ui/memory/set", d.handleSetMemory)
+	mux.HandleFunc("POST /ui/memory/delete", d.handleDeleteMemory)
+	mux.HandleFunc("POST /ui/tasks/{id}/retry", d.handleRetryTask)
+	mux.HandleFunc("POST /ui/conclaves/{id}/relics", d.handleConclaveUploadRelic)
 	mux.HandleFunc("POST /ui/schedules/{name}/run", d.handleRunSchedule)
 	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
 	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)

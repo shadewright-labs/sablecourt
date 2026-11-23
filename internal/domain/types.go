@@ -104,10 +104,23 @@ type AgentCard struct {
 }
 
 type GrantSet struct {
-	ModelGate  ModelGateGrant `json:"modelGate"`
-	MCPTools   []string       `json:"mcpTools,omitempty"`
-	Actions    []string       `json:"actions,omitempty"`
-	DelegateTo []string       `json:"delegateTo,omitempty"`
+	ModelGate  ModelGateGrant      `json:"modelGate"`
+	MCPTools   []string            `json:"mcpTools,omitempty"`
+	MCPServers []UpstreamMCPServer `json:"mcpServers,omitempty"`
+	Actions    []string            `json:"actions,omitempty"`
+	DelegateTo []string            `json:"delegateTo,omitempty"`
+}
+
+// UpstreamMCPServer declares a remote MCP Streamable HTTP server proxied through
+// Sablecourt's Data & Action Gate so credentials stay inside sablecourtd's SecretStore
+// and every tool call passes through Policy Engine + Approval Queue + Redactor.
+type UpstreamMCPServer struct {
+	Name          string   `json:"name"`
+	URL           string   `json:"url"`
+	SecretName    string   `json:"secretName,omitempty"`
+	AuthHeader    string   `json:"authHeader,omitempty"` // default: Authorization
+	AuthPrefix    string   `json:"authPrefix,omitempty"` // default: "Bearer "
+	AllowedTools  []string `json:"allowedTools,omitempty"`
 }
 
 type ModelGateGrant struct {
