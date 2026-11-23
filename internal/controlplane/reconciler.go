@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -257,12 +258,14 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			// DERIVE / ACT
 			switch obs.State {
 			case scruntime.StateCompleted:
+				r.persistArtifacts(ctx, task.ID, adapter, handle)
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateCompleted, "runtime_completed", `{}`)
 				_ = r.store.RevokeTaskLeases(ctx, task.ID)
 				r.mu.Lock()
 				delete(r.handles, task.ID)
 				r.mu.Unlock()
 			case scruntime.StateFailed:
+				r.persistArtifacts(ctx, task.ID, adapter, handle)
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateFailed, "runtime_failed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode))
 				_ = r.store.RevokeTaskLeases(ctx, task.ID)
 				r.mu.Lock()
@@ -308,6 +311,16 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 	_ = r.store.RecordHeartbeat(ctx, task.ID, r.now())
 	return nil
+}
+
+func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) {
+	arts, err := adapter.CollectArtifacts(ctx, handle)
+	if err != nil || len(arts) == 0 {
+		return
+	}
+	if raw, err := json.Marshal(arts); err == nil {
+		_ = r.store.UpdateTaskArtifacts(ctx, taskID, string(raw))
+	}
 }
 
 func newTaskID() (string, error) {
