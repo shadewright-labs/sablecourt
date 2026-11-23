@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sablecourt · {{.Session.Title}}</title>
+  <link rel="icon" href="/favicon.ico?v=2" sizes="any">
+  <style>
+    :root {
+      --bg-night: #08060E;
+      --bg-slate: #111422;
+      --accent-indigo: #4C1D95;
+      --text-bone: #EFE9DC;
+      --text-muted: #B9B2A6;
+      --accent-jade: #2DD4BF;
+      --status-amber: #F0B86A;
+      --status-red: #F87171;
+      --border: #25203A;
+      --serif: "Iowan Old Style", Georgia, serif;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg-night); color: var(--text-bone); font-family: var(--sans); line-height: 1.5; }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 20px 24px 56px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 20px; }
+    .brand img { height: 48px; width: auto; display: block; }
+    .nav { display: flex; gap: 8px; }
+    .btn-nav { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-slate); color: var(--text-bone); font-size: 12px; text-decoration: none; }
+    .btn-nav:hover { border-color: var(--accent-jade); color: #fff; }
+    .layout { display: grid; grid-template-columns: 300px 1fr 320px; gap: 18px; align-items: start; }
+    @media (max-width: 1120px) { .layout { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-slate); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .panel-accent { border-top: 2px solid var(--accent-indigo); }
+    h1, h2 { font-family: var(--serif); font-weight: 500; margin: 0 0 10px; }
+    h1 { font-size: 20px; }
+    h2 { font-size: 15px; }
+    .meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+    .badge { font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 99px; border: 1px solid var(--border); }
+    .b-active { color: var(--accent-jade); border-color: rgba(45,212,191,0.4); }
+    .b-paused { color: var(--status-amber); border-color: rgba(240,184,106,0.4); }
+    .b-closed { color: var(--text-muted); }
+    .vassal { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(8,6,14,0.45); margin-bottom: 8px; }
+    .msg { padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: rgba(8,6,14,0.45); margin-bottom: 10px; }
+    .msg-decree { border-color: rgba(45,212,191,0.5); background: rgba(45,212,191,0.06); }
+    .msg-system { border-color: rgba(240,184,106,0.5); background: rgba(240,184,106,0.06); }
+    .msg-head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
+    .msg-body { white-space: pre-wrap; font-size: 13px; }
+    label { display: block; font-size: 12px; color: var(--text-muted); margin: 8px 0 4px; }
+    select, textarea { width: 100%; background: var(--bg-night); color: var(--text-bone); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--sans); font-size: 13px; }
+    textarea { min-height: 76px; resize: vertical; }
+    button { margin-top: 10px; background: var(--accent-jade); color: var(--bg-night); border: none; border-radius: 6px; padding: 8px 14px; font-weight: 600; cursor: pointer; }
+    .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+    .relic { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(8,6,14,0.45); margin-bottom: 8px; }
+    pre { margin: 6px 0 0; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-word; color: var(--text-muted); max-height: 180px; overflow: auto; }
+    .banner { font-family: var(--mono); font-size: 12px; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; border: 1px solid; }
+    .banner-ok { background: rgba(45, 212, 191, 0.08); border-color: var(--accent-jade); color: var(--accent-jade); }
+    .banner-err { background: rgba(248, 113, 113, 0.08); border-color: var(--status-red); color: var(--status-red); }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand"><a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt"></a></div>
+      <div class="nav">
+        <a class="btn-nav" href="/">Cockpit</a>
+        <a class="btn-nav" href="/conclaves">Conclaves</a>
+        <a class="btn-nav" href="/conclaves/{{.Session.ID}}">Refresh</a>
+      </div>
+    </header>
+
+    {{if .Notice}}<div class="banner banner-ok">{{.Notice}}</div>{{end}}
+    {{if .ErrMsg}}<div class="banner banner-err">{{.ErrMsg}}</div>{{end}}
+
+    <div class="layout">
+      <aside class="panel panel-accent">
+        <h2>Vassals</h2>
+        <div class="meta" style="margin-bottom:10px;">
+          {{.Session.ID}}<br>
+          state: <span class="badge {{if eq (printf "%s" .Session.State) "active"}}b-active{{else if eq (printf "%s" .Session.State) "input-required"}}b-paused{{else}}b-closed{{end}}">{{.Session.State}}</span>
+          {{if .Session.WardReason}}<br>ward: {{.Session.WardReason}}{{end}}
+        </div>
+        {{if .Template}}
+          {{range .Template.Spec.Vassals}}
+          <div class="vassal">
+            <div><strong>@{{.Role}}</strong> <span class="badge">{{.Activation}}</span></div>
+            <div class="meta">workload: {{.Workload}}</div>
+          </div>
+          {{end}}
+          <div class="meta" style="margin-top:10px;">
+            Wards: maxMessages={{.Template.Spec.Wards.MaxMessages}}, maxPingPong={{.Template.Spec.Wards.MaxPingPong}}
+          </div>
+        {{end}}
+        <form method="POST" action="/ui/conclaves/{{.Session.ID}}/close" style="margin-top:14px;">
+          <input type="hidden" name="state" value="completed">
+          <button type="submit" class="btn-ghost">Close Conclave</button>
+        </form>
+      </aside>
+
+      <main class="panel">
+        <h1>{{.Session.Title}}</h1>
+        {{if .Messages}}
+          {{range .Messages}}
+          <div class="msg {{if eq .Kind "decree"}}msg-decree{{else if eq .FromRole "system"}}msg-system{{end}}">
+            <div class="msg-head">
+              <span><strong>@{{.FromRole}}</strong> -&gt; @{{.ToRole}} ({{.Kind}})</span>
+              <span>#{{.ID}}</span>
+            </div>
+            <div class="msg-body">{{.Body}}</div>
+          </div>
+          {{end}}
+        {{else}}
+          <p class="meta">No messages yet. Issue an operator Decree below to direct the Vassals.</p>
+        {{end}}
+
+        <form method="POST" action="/ui/conclaves/{{.Session.ID}}/decree" style="margin-top:16px;">
+          <label for="to">Issue operator Decree to</label>
+          <select id="to" name="to">
+            <option value="all">@all (broadcast and wake on-mention Vassals)</option>
+            {{if .Template}}
+              {{range .Template.Spec.Vassals}}
+              <option value="{{.Role}}">@{{.Role}} ({{.Workload}})</option>
+              {{end}}
+            {{end}}
+          </select>
+          <label for="body">Decree</label>
+          <textarea id="body" name="body" placeholder="Direct the Conclave or resume after a Ward pause..." required></textarea>
+          <button type="submit">Issue Decree</button>
+        </form>
+      </main>
+
+      <aside class="panel">
+        <h2>Relics ({{len .Relics}})</h2>
+        {{if .Relics}}
+          {{range .Relics}}
+          <div class="relic">
+            <div><strong>{{.Name}}</strong></div>
+            <div class="meta">by @{{.AuthorRole}} · {{.ContentType}}</div>
+            <pre>{{.Body}}</pre>
+          </div>
+          {{end}}
+        {{else}}
+          <p class="meta">No Relics stored yet. Vassals publish diffs, logs, and reports via conclave.relic_put.</p>
+        {{end}}
+      </aside>
+    </div>
+  </div>
+</body>
+</html>

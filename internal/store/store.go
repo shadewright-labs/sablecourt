@@ -52,4 +52,14 @@ type Store interface {
 
 	UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error
 	ListProviderPrefs(ctx context.Context) (map[string]domain.ProviderPrefs, error)
+
+	CreateConclave(ctx context.Context, c domain.ConclaveSession) error
+	GetConclave(ctx context.Context, id string) (domain.ConclaveSession, error)
+	ListConclaves(ctx context.Context) ([]domain.ConclaveSession, error)
+	UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error
+	AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error)
+	ListConclaveMessages(ctx context.Context, conclaveID string, sinceID int64) ([]domain.ConclaveMessage, error)
+	PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error
+	GetConclaveRelic(ctx context.Context, conclaveID, name string) (domain.ConclaveRelic, error)
+	ListConclaveRelics(ctx context.Context, conclaveID string) ([]domain.ConclaveRelic, error)
 }

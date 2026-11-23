@@ -80,6 +80,10 @@ spec:
       budgetRef: local-daily
     mcpTools:
       - sablecourt.list_workloads
+      - conclave.post
+      - conclave.read
+      - conclave.relic_put
+      - conclave.relic_get
     actions:
       - git.create_branch
       - git.open_pr
@@ -178,3 +182,27 @@ spec:
   targetName: health-controller
   input: '{"check":"periodic"}'
   enabled: false
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Conclave
+metadata:
+  name: feature-conclave
+spec:
+  description: Multi-agent war room uniting coding-agent, triage-agent, and deterministic health controller under Wards.
+  budgetRef: local-daily
+  wards:
+    maxMessages: 40
+    maxPingPong: 4
+  vassals:
+    - role: coder
+      workload: go-coder
+      activation: always-on
+      canMessage: [triage, verifier, operator]
+    - role: triage
+      workload: triage-agent
+      activation: on-mention
+      canMessage: [coder, verifier, operator]
+    - role: verifier
+      workload: health-controller
+      activation: on-mention
+      canMessage: [all]

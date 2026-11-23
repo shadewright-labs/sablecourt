@@ -24,6 +24,7 @@ type Bundle struct {
 	Budgets        map[string]domain.Budget
 	Workflows      map[string]domain.Workflow
 	Schedules      map[string]domain.Schedule
+	Conclaves      map[string]domain.Conclave
 	ManifestDigest string
 }
 
@@ -67,6 +68,7 @@ func LoadPath(path string) (*Bundle, error) {
 		Budgets:   make(map[string]domain.Budget),
 		Workflows: make(map[string]domain.Workflow),
 		Schedules: make(map[string]domain.Schedule),
+		Conclaves: make(map[string]domain.Conclave),
 	}
 
 	for _, file := range files {
@@ -172,6 +174,24 @@ func parseDocuments(source string, raw []byte, bundle *Bundle) error {
 			}
 			bundle.Schedules[sc.Metadata.Name] = sc
 
+		case domain.KindConclave:
+			var cc domain.Conclave
+			if err := yaml.UnmarshalStrict(doc, &cc); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Conclave: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(cc.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Conclave metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Conclaves[cc.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Conclave %q", source, idx+1, cc.Metadata.Name)
+			}
+			for i := range cc.Spec.Vassals {
+				if cc.Spec.Vassals[i].Activation == "" {
+					cc.Spec.Vassals[i].Activation = domain.ActivationOnMention
+				}
+			}
+			bundle.Conclaves[cc.Metadata.Name] = cc
+
 		default:
 			return fmt.Errorf("%s (doc %d): unsupported kind %q", source, idx+1, meta.Kind)
 		}
@@ -266,6 +286,67 @@ func validateBundle(bundle *Bundle) error {
 			}
 		default:
 			return fmt.Errorf("schedule %q: targetKind must be workload or workflow (got %q)", name, sc.Spec.TargetKind)
+		}
+	}
+
+	for name, cc := range bundle.Conclaves {
+		if err := validateConclave(name, cc, bundle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateConclave(name string, cc domain.Conclave, bundle *Bundle) error {
+	if len(cc.Spec.Vassals) == 0 {
+		return fmt.Errorf("conclave %q: at least one vassal is required", name)
+	}
+	if cc.Spec.BudgetRef != "" {
+		if _, ok := bundle.Budgets[cc.Spec.BudgetRef]; !ok {
+			return fmt.Errorf("conclave %q: referenced budget %q not found", name, cc.Spec.BudgetRef)
+		}
+	}
+	if cc.Spec.Wards.MaxMessages < 0 || cc.Spec.Wards.MaxPingPong < 0 {
+		return fmt.Errorf("conclave %q: ward limits must be non-negative", name)
+	}
+	roles := make(map[string]domain.Workload, len(cc.Spec.Vassals))
+	for i, v := range cc.Spec.Vassals {
+		role := strings.TrimSpace(v.Role)
+		if role == "" || role == "operator" || role == "all" || role == "system" {
+			return fmt.Errorf("conclave %q vassal %d: invalid role %q", name, i, v.Role)
+		}
+		if _, dup := roles[role]; dup {
+			return fmt.Errorf("conclave %q: duplicate vassal role %q", name, role)
+		}
+		wl, ok := bundle.Workloads[v.Workload]
+		if !ok {
+			return fmt.Errorf("conclave %q vassal %q: workload %q not found", name, role, v.Workload)
+		}
+		if v.Activation != domain.ActivationAlwaysOn && v.Activation != domain.ActivationOnMention {
+			return fmt.Errorf("conclave %q vassal %q: invalid activation %q", name, role, v.Activation)
+		}
+		roles[role] = wl
+	}
+	for _, v := range cc.Spec.Vassals {
+		srcWL := roles[v.Role]
+		for _, target := range v.CanMessage {
+			if target == "operator" || target == "all" {
+				if target == "all" && srcWL.Metadata.Zone == domain.ZoneSandbox {
+					for _, other := range cc.Spec.Vassals {
+						if roles[other.Role].Metadata.Zone == domain.ZoneRuntime {
+							return fmt.Errorf("conclave %q vassal %q: sandbox workload cannot message runtime vassal %q via all", name, v.Role, other.Role)
+						}
+					}
+				}
+				continue
+			}
+			dstWL, ok := roles[target]
+			if !ok {
+				return fmt.Errorf("conclave %q vassal %q: canMessage target %q not found", name, v.Role, target)
+			}
+			if srcWL.Metadata.Zone == domain.ZoneSandbox && dstWL.Metadata.Zone == domain.ZoneRuntime {
+				return fmt.Errorf("conclave %q vassal %q: sandbox workload cannot message runtime vassal %q", name, v.Role, target)
+			}
 		}
 	}
 	return nil

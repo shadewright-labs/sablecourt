@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -31,6 +32,7 @@ type Options struct {
 	Store           store.Store
 	Approvals       *approval.Queue
 	Reconciler      *controlplane.Reconciler
+	Conclave        *conclave.Broker
 	Providers       *providers.Registry
 	GetBundle       func() *config.Bundle
 	Reload          func() error
@@ -42,6 +44,7 @@ type Dashboard struct {
 	store           store.Store
 	approvals       *approval.Queue
 	reconciler      *controlplane.Reconciler
+	conclave        *conclave.Broker
 	providers       *providers.Registry
 	getBundle       func() *config.Bundle
 	reload          func() error
@@ -51,6 +54,8 @@ type Dashboard struct {
 	taskTmpl        *template.Template
 	providersTmpl   *template.Template
 	studioTmpl      *template.Template
+	conclavesTmpl   *template.Template
+	conclaveTmpl    *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -101,6 +106,14 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	if err != nil {
 		return nil, err
 	}
+	conclavesTmpl, err := template.ParseFS(embeddedFS, "templates/conclaves.html")
+	if err != nil {
+		return nil, err
+	}
+	conclaveTmpl, err := template.ParseFS(embeddedFS, "templates/conclave.html")
+	if err != nil {
+		return nil, err
+	}
 	subAssets, err := fs.Sub(embeddedFS, "assets")
 	if err != nil {
 		return nil, err
@@ -121,6 +134,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		store:           opts.Store,
 		approvals:       opts.Approvals,
 		reconciler:      opts.Reconciler,
+		conclave:        opts.Conclave,
 		providers:       opts.Providers,
 		getBundle:       opts.GetBundle,
 		reload:          opts.Reload,
@@ -130,6 +144,8 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		taskTmpl:        taskTmpl,
 		providersTmpl:   providersTmpl,
 		studioTmpl:      studioTmpl,
+		conclavesTmpl:   conclavesTmpl,
+		conclaveTmpl:    conclaveTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -141,6 +157,11 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /tasks/{id}", d.handleTaskDetail)
 	mux.HandleFunc("GET /providers", d.handleProvidersPage)
 	mux.HandleFunc("GET /studio", d.handleStudioPage)
+	mux.HandleFunc("GET /conclaves", d.handleConclavesPage)
+	mux.HandleFunc("GET /conclaves/{id}", d.handleConclaveDetailPage)
+	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
+	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)
+	mux.HandleFunc("POST /ui/conclaves/{id}/close", d.handleCloseConclave)
 	mux.Handle("GET /assets/", d.assets)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")

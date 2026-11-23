@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -60,12 +61,13 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	dataGate := mcpgate.New(mcpgate.Options{Store: st, Bundle: bundle, Policy: policyEng, Breaker: breaker, Approvals: approvals})
 	mcpgate.RegisterBuiltinGitOps(dataGate, t.TempDir(), nil)
 	reconciler := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle, Policy: policyEng})
-	dash, err := ui.NewDashboard(ui.Options{Store: st, Approvals: approvals, Reconciler: reconciler})
+	conclaveBroker := conclave.NewBroker(conclave.Options{Store: st, Reconciler: reconciler, GetBundle: func() *config.Bundle { return bundle }})
+	dash, err := ui.NewDashboard(ui.Options{Store: st, Approvals: approvals, Reconciler: reconciler, Conclave: conclaveBroker, GetBundle: func() *config.Bundle { return bundle }})
 	if err != nil {
 		t.Fatalf("NewDashboard: %v", err)
 	}
 
-	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, nil, dash)
+	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, conclaveBroker, nil, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
@@ -128,6 +130,22 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "triage-agent") {
 		t.Fatalf("Web UI failed: code=%d", rec.Code)
+	}
+
+	// 8. Conclave API open + Decree + Web UI /conclaves
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/conclaves", strings.NewReader(`{"template":"feature-conclave","title":"Smoke conclave","decree":"Begin triage"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/conclaves expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess domain.ConclaveSession
+	if err := json.Unmarshal(rec.Body.Bytes(), &sess); err != nil || sess.ID == "" {
+		t.Fatalf("decode conclave session: %v (%s)", err, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/conclaves/"+sess.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Smoke conclave") {
+		t.Fatalf("GET /conclaves/{id} failed: code=%d", rec.Code)
 	}
 }
 
