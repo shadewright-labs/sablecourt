@@ -123,3 +123,25 @@ spec:
   grants:
     modelGate:
       allowed: false
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workflow
+metadata:
+  name: issue-to-pr
+  zone: runtime
+spec:
+  description: Triage an issue, implement a fix in an isolated worktree, and run deterministic health checks.
+  steps:
+    - name: triage
+      workload: triage-agent
+      provider: anthropic
+      model: claude-sonnet-4-5
+      prompt: Analyze the issue and produce a bounded fix plan.
+    - name: implement
+      workload: go-coder
+      provider: anthropic
+      model: claude-sonnet-4-5
+      prompt: Apply the fix plan inside the worktree and run go test -race.
+    - name: verify
+      workload: health-controller
+      prompt: Run deterministic verification checks with zero LLM calls.

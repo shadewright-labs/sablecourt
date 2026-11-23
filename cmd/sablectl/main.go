@@ -89,21 +89,37 @@ func main() {
 			return printGET(cmd.OutOrStdout(), apiURL+"/api/v1/tasks")
 		},
 	})
-	var taskInput, taskIdem string
+	var taskInput, taskIdem, taskProvider, taskModel string
 	submitCmd := &cobra.Command{
 		Use:   "submit <workload>",
 		Short: "Submit a new task to sablecourtd",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return printPOST(cmd.OutOrStdout(), apiURL+"/api/v1/tasks", map[string]string{
+			payload := make(map[string]any)
+			if strings.TrimSpace(taskInput) != "" {
+				if err := json.Unmarshal([]byte(taskInput), &payload); err != nil {
+					payload = map[string]any{"prompt": taskInput}
+				}
+			}
+			if taskProvider != "" {
+				payload["provider"] = taskProvider
+			}
+			if taskModel != "" {
+				payload["model"] = taskModel
+			}
+			rawInput, _ := json.Marshal(payload)
+			cli, base := httpClient(10 * time.Second)
+			return doPOST(cli, cmd.OutOrStdout(), base+"/api/v1/tasks", map[string]string{
 				"workload":       args[0],
 				"idempotencyKey": taskIdem,
-				"inputJson":      taskInput,
+				"inputJson":      string(rawInput),
 			})
 		},
 	}
-	submitCmd.Flags().StringVar(&taskInput, "input", "{}", "JSON task input")
+	submitCmd.Flags().StringVar(&taskInput, "input", "{}", "JSON task input or plain prompt text")
 	submitCmd.Flags().StringVar(&taskIdem, "idempotency-key", "", "Optional idempotency key")
+	submitCmd.Flags().StringVar(&taskProvider, "provider", "", "Optional LLM provider (openai, anthropic, gemini, local)")
+	submitCmd.Flags().StringVar(&taskModel, "model", "", "Optional model ID")
 	taskCmd.AddCommand(submitCmd)
 	taskCmd.AddCommand(&cobra.Command{
 		Use:   "inspect <task-id>",
@@ -276,7 +292,29 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, applyCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, secretCmd, versionCmd)
+	providerCmd := &cobra.Command{
+		Use:   "provider",
+		Short: "Inspect connected LLM providers and sync available models",
+	}
+	providerCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List provider connection status and cached models",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			return doGET(cli, cmd.OutOrStdout(), base+"/api/v1/providers")
+		},
+	})
+	providerCmd.AddCommand(&cobra.Command{
+		Use:   "sync <provider-id>",
+		Short: "Query upstream /models endpoint and refresh cached model list",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(15 * time.Second)
+			return doPOST(cli, cmd.OutOrStdout(), base+"/api/v1/providers/"+args[0]+"/sync", map[string]string{})
+		},
+	})
+
+	rootCmd.AddCommand(validateCmd, applyCmd, workloadCmd, taskCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

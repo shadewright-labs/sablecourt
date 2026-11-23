@@ -21,6 +21,7 @@ type Bundle struct {
 	Workloads      map[string]domain.Workload
 	Policies       map[string]domain.Policy
 	Budgets        map[string]domain.Budget
+	Workflows      map[string]domain.Workflow
 	ManifestDigest string
 }
 
@@ -62,6 +63,7 @@ func LoadPath(path string) (*Bundle, error) {
 		Workloads: make(map[string]domain.Workload),
 		Policies:  make(map[string]domain.Policy),
 		Budgets:   make(map[string]domain.Budget),
+		Workflows: make(map[string]domain.Workflow),
 	}
 
 	for _, file := range files {
@@ -141,6 +143,19 @@ func parseDocuments(source string, raw []byte, bundle *Bundle) error {
 			}
 			bundle.Budgets[b.Metadata.Name] = b
 
+		case domain.KindWorkflow:
+			var wf domain.Workflow
+			if err := yaml.UnmarshalStrict(doc, &wf); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Workflow: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(wf.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Workflow metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Workflows[wf.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Workflow %q", source, idx+1, wf.Metadata.Name)
+			}
+			bundle.Workflows[wf.Metadata.Name] = wf
+
 		default:
 			return fmt.Errorf("%s (doc %d): unsupported kind %q", source, idx+1, meta.Kind)
 		}
@@ -196,6 +211,27 @@ func validateBundle(bundle *Bundle) error {
 	for name, w := range bundle.Workloads {
 		if err := validateWorkload(name, w, bundle); err != nil {
 			return err
+		}
+	}
+
+	for name, wf := range bundle.Workflows {
+		if wf.Metadata.Zone != "" && wf.Metadata.Zone != domain.ZoneRuntime && wf.Metadata.Zone != domain.ZoneSandbox {
+			return fmt.Errorf("workflow %q: invalid zone %q", name, wf.Metadata.Zone)
+		}
+		if len(wf.Spec.Steps) == 0 {
+			return fmt.Errorf("workflow %q: at least one step is required", name)
+		}
+		for i, step := range wf.Spec.Steps {
+			if strings.TrimSpace(step.Name) == "" {
+				return fmt.Errorf("workflow %q step %d: name is required", name, i)
+			}
+			wl, ok := bundle.Workloads[step.Workload]
+			if !ok {
+				return fmt.Errorf("workflow %q step %q: workload %q not found", name, step.Name, step.Workload)
+			}
+			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
+				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
+			}
 		}
 	}
 	return nil

@@ -8,12 +8,19 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/shadewright-labs/sablecourt/internal/approval"
+	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -24,6 +31,10 @@ type Options struct {
 	Store           store.Store
 	Approvals       *approval.Queue
 	Reconciler      *controlplane.Reconciler
+	Providers       *providers.Registry
+	GetBundle       func() *config.Bundle
+	Reload          func() error
+	ManifestsPath   string
 	StalenessWindow time.Duration
 }
 
@@ -31,9 +42,15 @@ type Dashboard struct {
 	store           store.Store
 	approvals       *approval.Queue
 	reconciler      *controlplane.Reconciler
+	providers       *providers.Registry
+	getBundle       func() *config.Bundle
+	reload          func() error
+	manifestsPath   string
 	stalenessWindow time.Duration
 	tmpl            *template.Template
 	taskTmpl        *template.Template
+	providersTmpl   *template.Template
+	studioTmpl      *template.Template
 	assets          http.Handler
 	faviconICO      []byte
 	appleTouchIcon  []byte
@@ -57,6 +74,8 @@ type viewData struct {
 	Approvals        []domain.Approval
 	Tasks            []taskRow
 	Audit            []domain.AuditRecord
+	Providers        []providers.ProviderStatus
+	ModelsByProvider template.JS
 }
 
 func NewDashboard(opts Options) (*Dashboard, error) {
@@ -65,6 +84,14 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		return nil, err
 	}
 	taskTmpl, err := template.ParseFS(embeddedFS, "templates/task.html")
+	if err != nil {
+		return nil, err
+	}
+	providersTmpl, err := template.ParseFS(embeddedFS, "templates/providers.html")
+	if err != nil {
+		return nil, err
+	}
+	studioTmpl, err := template.ParseFS(embeddedFS, "templates/studio.html")
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +115,15 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		store:           opts.Store,
 		approvals:       opts.Approvals,
 		reconciler:      opts.Reconciler,
+		providers:       opts.Providers,
+		getBundle:       opts.GetBundle,
+		reload:          opts.Reload,
+		manifestsPath:   opts.ManifestsPath,
 		stalenessWindow: win,
 		tmpl:            tmpl,
 		taskTmpl:        taskTmpl,
+		providersTmpl:   providersTmpl,
+		studioTmpl:      studioTmpl,
 		assets:          http.StripPrefix("/assets/", http.FileServer(http.FS(subAssets))),
 		faviconICO:      favICO,
 		appleTouchIcon:  appleIcon,
@@ -100,6 +133,8 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /{$}", d)
 	mux.HandleFunc("GET /tasks/{id}", d.handleTaskDetail)
+	mux.HandleFunc("GET /providers", d.handleProvidersPage)
+	mux.HandleFunc("GET /studio", d.handleStudioPage)
 	mux.Handle("GET /assets/", d.assets)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")
@@ -117,6 +152,12 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/tasks/{id}/cancel", d.handleCancelTask)
 	mux.HandleFunc("POST /ui/approvals/{id}/approve", d.handleApprove)
 	mux.HandleFunc("POST /ui/approvals/{id}/deny", d.handleDeny)
+	mux.HandleFunc("POST /ui/providers/{id}/connect", d.handleProviderConnect)
+	mux.HandleFunc("POST /ui/providers/{id}/disconnect", d.handleProviderDisconnect)
+	mux.HandleFunc("POST /ui/providers/{id}/sync", d.handleProviderSync)
+	mux.HandleFunc("POST /ui/studio/agent", d.handleCreateAgent)
+	mux.HandleFunc("POST /ui/studio/workflow", d.handleCreateWorkflow)
+	mux.HandleFunc("POST /ui/workflows/{name}/run", d.handleRunWorkflow)
 }
 
 func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +201,21 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, taskRow{Task: t, Stale: stale, Cancelable: isActive})
 	}
 
+	var provList []providers.ProviderStatus
+	modelsMap := make(map[string][]string)
+	if d.providers != nil {
+		for _, p := range d.providers.List(ctx) {
+			if p.Kind == "cli" {
+				continue
+			}
+			provList = append(provList, p)
+			for _, m := range p.Models {
+				modelsMap[p.ID] = append(modelsMap[p.ID], m.ID)
+			}
+		}
+	}
+	modelsJSON, _ := json.Marshal(modelsMap)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = d.tmpl.Execute(w, viewData{
 		ObservedAt:       now.Format(time.RFC3339),
@@ -173,6 +229,8 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Approvals:        approvals,
 		Tasks:            rows,
 		Audit:            audit,
+		Providers:        provList,
+		ModelsByProvider: template.JS(modelsJSON),
 	})
 }
 
@@ -221,17 +279,23 @@ func (d *Dashboard) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wl := r.FormValue("workload")
+	provider := strings.TrimSpace(r.FormValue("provider"))
+	modelName := strings.TrimSpace(r.FormValue("model"))
 	rawInput := strings.TrimSpace(r.FormValue("input_json"))
-	inputJSON := "{}"
+	payload := make(map[string]any)
 	if rawInput != "" {
-		if json.Valid([]byte(rawInput)) {
-			inputJSON = rawInput
-		} else {
-			wrapped, _ := json.Marshal(map[string]string{"prompt": rawInput})
-			inputJSON = string(wrapped)
+		if err := json.Unmarshal([]byte(rawInput), &payload); err != nil {
+			payload = map[string]any{"prompt": rawInput}
 		}
 	}
-	task, err := d.reconciler.SubmitTask(r.Context(), wl, "", inputJSON)
+	if provider != "" {
+		payload["provider"] = provider
+	}
+	if modelName != "" {
+		payload["model"] = modelName
+	}
+	inputBytes, _ := json.Marshal(payload)
+	task, err := d.reconciler.SubmitTask(r.Context(), wl, "", string(inputBytes))
 	if err != nil {
 		redirectErr(w, r, err.Error())
 		return
@@ -265,6 +329,243 @@ func (d *Dashboard) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectNotice(w, r, "Denied "+id)
+}
+
+func (d *Dashboard) handleProvidersPage(w http.ResponseWriter, r *http.Request) {
+	var list []providers.ProviderStatus
+	if d.providers != nil {
+		list = d.providers.List(r.Context())
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = d.providersTmpl.Execute(w, map[string]any{
+		"Providers": list,
+		"Notice":    r.URL.Query().Get("notice"),
+		"ErrMsg":    r.URL.Query().Get("err"),
+	})
+}
+
+func (d *Dashboard) handleProviderConnect(w http.ResponseWriter, r *http.Request) {
+	if d.providers == nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape("provider registry unavailable"), http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := r.PathValue("id")
+	if err := d.providers.Connect(r.Context(), id, r.FormValue("api_key")); err != nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/providers?notice="+url.QueryEscape("Saved key for "+id+" in SecretStore"), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleProviderDisconnect(w http.ResponseWriter, r *http.Request) {
+	if d.providers == nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape("provider registry unavailable"), http.StatusSeeOther)
+		return
+	}
+	id := r.PathValue("id")
+	if err := d.providers.Disconnect(r.Context(), id); err != nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/providers?notice="+url.QueryEscape("Removed key for "+id), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleProviderSync(w http.ResponseWriter, r *http.Request) {
+	if d.providers == nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape("provider registry unavailable"), http.StatusSeeOther)
+		return
+	}
+	id := r.PathValue("id")
+	models, err := d.providers.SyncModels(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape("Sync "+id+" failed: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/providers?notice="+url.QueryEscape(fmt.Sprintf("Synced %d models from %s", len(models), id)), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleStudioPage(w http.ResponseWriter, r *http.Request) {
+	workloads, _ := d.store.ListWorkloads(r.Context())
+	var workflows []domain.Workflow
+	if d.getBundle != nil {
+		if b := d.getBundle(); b != nil {
+			for _, wf := range b.Workflows {
+				workflows = append(workflows, wf)
+			}
+		}
+	}
+	sort.Slice(workflows, func(i, j int) bool { return workflows[i].Metadata.Name < workflows[j].Metadata.Name })
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = d.studioTmpl.Execute(w, map[string]any{
+		"Workloads": workloads,
+		"Workflows": workflows,
+		"Notice":    r.URL.Query().Get("notice"),
+		"ErrMsg":    r.URL.Query().Get("err"),
+	})
+}
+
+func (d *Dashboard) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("name"))
+	class := domain.WorkloadClass(strings.TrimSpace(r.FormValue("class")))
+	desc := strings.TrimSpace(r.FormValue("description"))
+	target := strings.TrimSpace(r.FormValue("runtime_target"))
+	rawProvs := strings.TrimSpace(r.FormValue("providers"))
+
+	if name == "" || desc == "" {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("name and description are required"), http.StatusSeeOther)
+		return
+	}
+
+	budgetRef := d.defaultBudgetRef()
+	wl := domain.Workload{
+		TypeMeta: domain.TypeMeta{APIVersion: domain.APIVersionV1Alpha1, Kind: domain.KindWorkload},
+		Metadata: domain.ObjectMeta{Name: name, Zone: domain.ZoneSandbox},
+		Spec: domain.WorkloadSpec{
+			Class:     class,
+			AgentCard: domain.AgentCard{Description: desc},
+		},
+	}
+
+	if class == domain.ClassCodingAgent {
+		harness := target
+		if harness != "claude" && harness != "codex" {
+			harness = "claude"
+		}
+		wl.Spec.Runtime = domain.RuntimeConfig{Type: "worktree-cli"}
+		wl.Spec.Coding = &domain.CodingConfig{Harness: harness, RepoPath: ".", Sandbox: "seatbelt"}
+	} else {
+		img := target
+		if img == "" {
+			img = "alpine:3.21"
+		}
+		wl.Spec.Runtime = domain.RuntimeConfig{Type: "docker", Image: img, ReadOnlyRootfs: true}
+	}
+
+	if class != domain.ClassDeterministicController && budgetRef != "" {
+		var provs []string
+		for _, p := range strings.Split(rawProvs, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				provs = append(provs, s)
+			}
+		}
+		wl.Spec.Grants.ModelGate = domain.ModelGateGrant{
+			Allowed:   true,
+			Providers: provs,
+			BudgetRef: budgetRef,
+		}
+	}
+
+	if err := d.appendManifestDoc(wl); err != nil {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/studio?notice="+url.QueryEscape("Saved sandbox agent "+name+" and reloaded manifests"), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("name"))
+	desc := strings.TrimSpace(r.FormValue("description"))
+	if name == "" {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("workflow name is required"), http.StatusSeeOther)
+		return
+	}
+
+	var steps []domain.WorkflowStep
+	for _, prefix := range []string{"step1", "step2"} {
+		sName := strings.TrimSpace(r.FormValue(prefix + "_name"))
+		sWL := strings.TrimSpace(r.FormValue(prefix + "_workload"))
+		if sName == "" || sWL == "" {
+			continue
+		}
+		steps = append(steps, domain.WorkflowStep{
+			Name:     sName,
+			Workload: sWL,
+			Model:    strings.TrimSpace(r.FormValue(prefix + "_model")),
+			Prompt:   strings.TrimSpace(r.FormValue(prefix + "_prompt")),
+		})
+	}
+	if len(steps) == 0 {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("at least one workflow step is required"), http.StatusSeeOther)
+		return
+	}
+
+	wf := domain.Workflow{
+		TypeMeta: domain.TypeMeta{APIVersion: domain.APIVersionV1Alpha1, Kind: domain.KindWorkflow},
+		Metadata: domain.ObjectMeta{Name: name, Zone: domain.ZoneSandbox},
+		Spec:     domain.WorkflowSpec{Description: desc, Steps: steps},
+	}
+	if err := d.appendManifestDoc(wf); err != nil {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/studio?notice="+url.QueryEscape("Saved sandbox workflow "+name+" and reloaded manifests"), http.StatusSeeOther)
+}
+
+func (d *Dashboard) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
+	if d.reconciler == nil {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape("reconciler unavailable"), http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	wfName := r.PathValue("name")
+	task, err := d.reconciler.StartWorkflow(r.Context(), wfName, strings.TrimSpace(r.FormValue("input")))
+	if err != nil {
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	redirectNotice(w, r, fmt.Sprintf("Started workflow %s (step 1 task %s)", wfName, task.ID))
+}
+
+func (d *Dashboard) defaultBudgetRef() string {
+	if d.getBundle == nil {
+		return ""
+	}
+	b := d.getBundle()
+	if b == nil {
+		return ""
+	}
+	for name := range b.Budgets {
+		return name
+	}
+	return ""
+}
+
+func (d *Dashboard) appendManifestDoc(doc any) error {
+	if d.manifestsPath == "" {
+		return fmt.Errorf("sablecourtd was started without --manifests; cannot persist YAML")
+	}
+	raw, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(d.manifestsPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		outFile := filepath.Join(d.manifestsPath, fmt.Sprintf("studio-%d.yaml", time.Now().Unix()))
+		if err := os.WriteFile(outFile, raw, 0o600); err != nil {
+			return err
+		}
+	} else {
+		f, err := os.OpenFile(d.manifestsPath, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		if _, err := f.WriteString("\n---\n" + string(raw)); err != nil {
+			_ = f.Close()
+			return err
+		}
+		_ = f.Close()
+	}
+	if d.reload != nil {
+		return d.reload()
+	}
+	return nil
 }
 
 func redirectNotice(w http.ResponseWriter, r *http.Request, msg string) {

@@ -152,6 +152,41 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 	return task, nil
 }
 
+// StartWorkflow dispatches the first step of a declared Workflow and records workflow metadata
+// so ReconcileOnce can advance subsequent steps upon completion.
+func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput string) (domain.Task, error) {
+	r.mu.Lock()
+	b := r.bundle
+	r.mu.Unlock()
+	if b == nil {
+		return domain.Task{}, errors.New("no manifest bundle loaded")
+	}
+	wf, ok := b.Workflows[workflowName]
+	if !ok {
+		return domain.Task{}, fmt.Errorf("unknown workflow %q", workflowName)
+	}
+	if len(wf.Spec.Steps) == 0 {
+		return domain.Task{}, fmt.Errorf("workflow %q has no steps", workflowName)
+	}
+
+	step := wf.Spec.Steps[0]
+	payload := map[string]any{
+		"workflow":   workflowName,
+		"step":       step.Name,
+		"step_index": 0,
+		"prompt":     step.Prompt,
+		"input":      userInput,
+	}
+	if step.Provider != "" {
+		payload["provider"] = step.Provider
+	}
+	if step.Model != "" {
+		payload["model"] = step.Model
+	}
+	raw, _ := json.Marshal(payload)
+	return r.SubmitTask(ctx, step.Workload, "", string(raw))
+}
+
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
 // and pass deterministic policy before the control plane dispatches the child task.
 func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetWorkload, idempotencyKey, inputJSON, subBudgetJSON string) (domain.Task, error) {
