@@ -1,0 +1,272 @@
+package config
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"sigs.k8s.io/yaml"
+
+	"github.com/shadewright-labs/sablecourt/internal/domain"
+)
+
+type Bundle struct {
+	Workloads      map[string]domain.Workload
+	Policies       map[string]domain.Policy
+	Budgets        map[string]domain.Budget
+	ManifestDigest string
+}
+
+func LoadPath(path string) (*Bundle, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat manifest path %q: %w", path, err)
+	}
+
+	var files []string
+	if info.IsDir() {
+		err = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			ext := strings.ToLower(filepath.Ext(p))
+			if ext == ".yaml" || ext == ".yml" {
+				files = append(files, p)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk manifest dir %q: %w", path, err)
+		}
+		sort.Strings(files)
+	} else {
+		files = []string{path}
+	}
+
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no YAML manifest files found in %q", path)
+	}
+
+	hasher := sha256.New()
+	bundle := &Bundle{
+		Workloads: make(map[string]domain.Workload),
+		Policies:  make(map[string]domain.Policy),
+		Budgets:   make(map[string]domain.Budget),
+	}
+
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("read %q: %w", file, err)
+		}
+		hasher.Write([]byte(filepath.Base(file)))
+		hasher.Write([]byte{0})
+		hasher.Write(raw)
+		hasher.Write([]byte{0})
+
+		if err := parseDocuments(file, raw, bundle); err != nil {
+			return nil, err
+		}
+	}
+
+	bundle.ManifestDigest = hex.EncodeToString(hasher.Sum(nil))
+	if err := validateBundle(bundle); err != nil {
+		return nil, err
+	}
+	return bundle, nil
+}
+
+func parseDocuments(source string, raw []byte, bundle *Bundle) error {
+	docs := splitYAMLDocuments(raw)
+	for idx, doc := range docs {
+		if len(bytes.TrimSpace(doc)) == 0 {
+			continue
+		}
+
+		var meta domain.TypeMeta
+		if err := yaml.Unmarshal(doc, &meta); err != nil {
+			return fmt.Errorf("%s (doc %d): parse type header: %w", source, idx+1, err)
+		}
+		if meta.APIVersion != domain.APIVersionV1Alpha1 {
+			return fmt.Errorf("%s (doc %d): unsupported apiVersion %q (expected %q)", source, idx+1, meta.APIVersion, domain.APIVersionV1Alpha1)
+		}
+
+		switch meta.Kind {
+		case domain.KindWorkload:
+			var w domain.Workload
+			if err := yaml.UnmarshalStrict(doc, &w); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Workload: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(w.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Workload metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Workloads[w.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Workload %q", source, idx+1, w.Metadata.Name)
+			}
+			bundle.Workloads[w.Metadata.Name] = w
+
+		case domain.KindPolicy:
+			var p domain.Policy
+			if err := yaml.UnmarshalStrict(doc, &p); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Policy: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(p.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Policy metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Policies[p.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Policy %q", source, idx+1, p.Metadata.Name)
+			}
+			bundle.Policies[p.Metadata.Name] = p
+
+		case domain.KindBudget:
+			var b domain.Budget
+			if err := yaml.UnmarshalStrict(doc, &b); err != nil {
+				return fmt.Errorf("%s (doc %d): decode Budget: %w", source, idx+1, err)
+			}
+			if strings.TrimSpace(b.Metadata.Name) == "" {
+				return fmt.Errorf("%s (doc %d): Budget metadata.name is required", source, idx+1)
+			}
+			if _, exists := bundle.Budgets[b.Metadata.Name]; exists {
+				return fmt.Errorf("%s (doc %d): duplicate Budget %q", source, idx+1, b.Metadata.Name)
+			}
+			bundle.Budgets[b.Metadata.Name] = b
+
+		default:
+			return fmt.Errorf("%s (doc %d): unsupported kind %q", source, idx+1, meta.Kind)
+		}
+	}
+	return nil
+}
+
+func splitYAMLDocuments(raw []byte) [][]byte {
+	lines := bytes.Split(raw, []byte("\n"))
+	var docs [][]byte
+	var current [][]byte
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.Equal(trimmed, []byte("---")) {
+			if len(current) > 0 {
+				docs = append(docs, bytes.Join(current, []byte("\n")))
+				current = nil
+			}
+			continue
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		docs = append(docs, bytes.Join(current, []byte("\n")))
+	}
+	return docs
+}
+
+func validateBundle(bundle *Bundle) error {
+	for name, b := range bundle.Budgets {
+		if b.Spec.PerTask.MaxInputTokens < 0 || b.Spec.PerTask.MaxOutputTokens < 0 || b.Spec.PerTask.MaxCostUSD < 0 || b.Spec.Daily.MaxCostUSD < 0 {
+			return fmt.Errorf("budget %q: limits must be non-negative", name)
+		}
+		if b.Spec.PerTask.MaxInputTokens == 0 && b.Spec.PerTask.MaxOutputTokens == 0 && b.Spec.PerTask.MaxCostUSD == 0 && b.Spec.Daily.MaxCostUSD == 0 {
+			return fmt.Errorf("budget %q: at least one limit must be positive", name)
+		}
+	}
+
+	for name, p := range bundle.Policies {
+		if p.Spec.DefaultEffect != domain.EffectDeny {
+			return fmt.Errorf("policy %q: defaultEffect must be %q (got %q)", name, domain.EffectDeny, p.Spec.DefaultEffect)
+		}
+		for i, r := range p.Spec.Rules {
+			if strings.TrimSpace(r.Workload) == "" || strings.TrimSpace(r.Capability) == "" {
+				return fmt.Errorf("policy %q rule %d: workload and capability are required", name, i)
+			}
+			if !isValidEffect(r.Effect) {
+				return fmt.Errorf("policy %q rule %d: invalid effect %q", name, i, r.Effect)
+			}
+		}
+	}
+
+	for name, w := range bundle.Workloads {
+		if err := validateWorkload(name, w, bundle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
+	if w.Metadata.Zone != domain.ZoneRuntime && w.Metadata.Zone != domain.ZoneSandbox {
+		return fmt.Errorf("workload %q: metadata.zone must be %q or %q (got %q)", name, domain.ZoneRuntime, domain.ZoneSandbox, w.Metadata.Zone)
+	}
+
+	switch w.Spec.Class {
+	case domain.ClassCodingAgent:
+		if w.Spec.Coding == nil {
+			return fmt.Errorf("workload %q: coding config is required for class %q", name, w.Spec.Class)
+		}
+		if w.Spec.Coding.Harness != "claude" && w.Spec.Coding.Harness != "codex" {
+			return fmt.Errorf("workload %q: unsupported coding harness %q", name, w.Spec.Coding.Harness)
+		}
+		if strings.TrimSpace(w.Spec.Coding.RepoPath) == "" {
+			return fmt.Errorf("workload %q: coding.repoPath is required", name)
+		}
+	case domain.ClassLongLivedAgent:
+		if w.Spec.Coding != nil {
+			return fmt.Errorf("workload %q: coding config is only valid for class %q", name, domain.ClassCodingAgent)
+		}
+	case domain.ClassDeterministicController:
+		if w.Spec.Coding != nil {
+			return fmt.Errorf("workload %q: coding config is only valid for class %q", name, domain.ClassCodingAgent)
+		}
+		if w.Spec.Grants.ModelGate.Allowed {
+			return fmt.Errorf("workload %q: deterministic-controller must not hold a Model Gate grant", name)
+		}
+	default:
+		return fmt.Errorf("workload %q: invalid class %q", name, w.Spec.Class)
+	}
+
+	if w.Spec.Runtime.Type != "docker" && w.Spec.Runtime.Type != "worktree-cli" {
+		return fmt.Errorf("workload %q: runtime.type must be docker or worktree-cli (got %q)", name, w.Spec.Runtime.Type)
+	}
+	if w.Spec.Runtime.Type == "docker" && strings.TrimSpace(w.Spec.Runtime.Image) == "" {
+		return fmt.Errorf("workload %q: runtime.image is required for docker runtime", name)
+	}
+
+	if w.Metadata.Zone == domain.ZoneSandbox {
+		if len(w.Spec.Grants.Actions) > 0 || len(w.Spec.Grants.DelegateTo) > 0 {
+			return errors.New("workload " + name + ": sandbox zone workloads cannot hold mutating actions or delegation grants")
+		}
+	}
+
+	if w.Spec.Grants.ModelGate.Allowed {
+		ref := strings.TrimSpace(w.Spec.Grants.ModelGate.BudgetRef)
+		if ref == "" {
+			return fmt.Errorf("workload %q: grants.modelGate.budgetRef is required when modelGate.allowed is true", name)
+		}
+		if _, ok := bundle.Budgets[ref]; !ok {
+			return fmt.Errorf("workload %q: referenced budget %q not found", name, ref)
+		}
+	}
+
+	for _, target := range w.Spec.Grants.DelegateTo {
+		if target == name {
+			return fmt.Errorf("workload %q: cannot delegate to itself", name)
+		}
+		if _, ok := bundle.Workloads[target]; !ok {
+			return fmt.Errorf("workload %q: delegateTo target %q not found", name, target)
+		}
+	}
+
+	return nil
+}
+
+func isValidEffect(e domain.PolicyEffect) bool {
+	return e == domain.EffectAllow || e == domain.EffectApprove || e == domain.EffectDeny
+}

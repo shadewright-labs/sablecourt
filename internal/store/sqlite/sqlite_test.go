@@ -1,0 +1,144 @@
+package sqlite
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
+)
+
+func openTestStore(t *testing.T) *SQLiteStore {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "sablecourt.db")
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return st
+}
+
+func TestMigrateIdempotentAndWALMode(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("second migrate failed: %v", err)
+	}
+
+	var mode string
+	if err := st.db.QueryRow(`PRAGMA journal_mode;`).Scan(&mode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Fatalf("expected wal mode, got %q", mode)
+	}
+}
+
+func TestWorkloadTaskApprovalBudgetAndAuditFlow(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
+		Name:           "triage-agent",
+		Zone:           domain.ZoneRuntime,
+		Class:          domain.ClassLongLivedAgent,
+		ManifestDigest: "abc123",
+		AgentCardJSON:  `{"description":"Triages issues"}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertWorkload: %v", err)
+	}
+
+	workloads, err := st.ListWorkloads(ctx)
+	if err != nil || len(workloads) != 1 {
+		t.Fatalf("ListWorkloads: len=%d err=%v", len(workloads), err)
+	}
+
+	task := domain.Task{
+		ID:             "task-1",
+		IdempotencyKey: "idem-1",
+		WorkloadName:   "triage-agent",
+		State:          domain.TaskStateSubmitted,
+	}
+	if err := st.CreateTask(ctx, task); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := st.CreateTask(ctx, task); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected ErrConflict on duplicate idempotency key, got %v", err)
+	}
+
+	if err := st.UpdateTaskState(ctx, "task-1", domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatched", `{}`); err != nil {
+		t.Fatalf("UpdateTaskState: %v", err)
+	}
+	if err := st.RecordHeartbeat(ctx, "task-1", time.Now().UTC()); err != nil {
+		t.Fatalf("RecordHeartbeat: %v", err)
+	}
+
+	got, err := st.GetTask(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != domain.TaskStateWorking || got.LastHeartbeatAt == nil {
+		t.Fatalf("unexpected task state=%q hb=%v", got.State, got.LastHeartbeatAt)
+	}
+
+	err = st.CreateApproval(ctx, domain.Approval{
+		ID:                   "apr-1",
+		TaskID:               "task-1",
+		WorkloadName:         "triage-agent",
+		Capability:           "action:git.open_pr",
+		PayloadCanonicalJSON: `{"branch":"sablecourt/task-1"}`,
+		PayloadSHA256:        "deadbeef",
+		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateApproval: %v", err)
+	}
+
+	if err := st.DecideApproval(ctx, "apr-1", "wrong-digest", domain.ApprovalApproved, "operator", `{}`); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected ErrConflict on wrong digest, got %v", err)
+	}
+	if err := st.DecideApproval(ctx, "apr-1", "deadbeef", domain.ApprovalApproved, "operator", `{"method":"oob"}`); err != nil {
+		t.Fatalf("DecideApproval: %v", err)
+	}
+
+	if err := st.RecordBudgetUsage(ctx, domain.BudgetEntry{
+		TaskID:       "task-1",
+		WorkloadName: "triage-agent",
+		Provider:     "gemini",
+		Model:        "gemini-2.5-pro",
+		InputTokens:  1200,
+		OutputTokens: 300,
+		CostMicroUSD: 4500,
+	}); err != nil {
+		t.Fatalf("RecordBudgetUsage: %v", err)
+	}
+
+	totals, err := st.TaskBudgetTotals(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("TaskBudgetTotals: %v", err)
+	}
+	if totals.InputTokens != 1200 || totals.OutputTokens != 300 || totals.CostMicroUSD != 4500 {
+		t.Fatalf("unexpected totals: %+v", totals)
+	}
+
+	if err := st.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "policy",
+		TaskID:       "task-1",
+		WorkloadName: "triage-agent",
+		Action:       "action:git.open_pr",
+		Outcome:      "approved",
+	}); err != nil {
+		t.Fatalf("AppendAudit: %v", err)
+	}
+	auditRows, err := st.ListAudit(ctx, 10)
+	if err != nil || len(auditRows) != 1 {
+		t.Fatalf("ListAudit: len=%d err=%v", len(auditRows), err)
+	}
+}

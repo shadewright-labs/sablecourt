@@ -1,0 +1,201 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writeTempManifest(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifests.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write temp manifest: %v", err)
+	}
+	return path
+}
+
+func TestLoadPathValidBundle(t *testing.T) {
+	path := writeTempManifest(t, `
+apiVersion: sablecourt.io/v1alpha1
+kind: Budget
+metadata:
+  name: triage-daily
+spec:
+  perTask:
+    maxInputTokens: 200000
+    maxOutputTokens: 40000
+    maxCostUSD: 2.50
+  daily:
+    maxCostUSD: 15.00
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Policy
+metadata:
+  name: default-policy
+spec:
+  defaultEffect: deny
+  rules:
+    - workload: triage-agent
+      capability: mcp:github.get_issue
+      effect: allow
+    - workload: triage-agent
+      capability: action:git.open_pr
+      effect: approve
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: go-coder
+  zone: runtime
+spec:
+  class: coding-agent
+  runtime:
+    type: worktree-cli
+  coding:
+    harness: claude
+    repoPath: /tmp/repo
+    sandbox: seatbelt
+  agentCard:
+    description: Edits Go code in an isolated worktree.
+  grants:
+    modelGate:
+      allowed: true
+      providers: [anthropic]
+      budgetRef: triage-daily
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: triage-agent
+  zone: runtime
+spec:
+  class: long-lived-agent
+  runtime:
+    type: docker
+    image: ghcr.io/shadewright-labs/triage:0.1.0
+    readOnlyRootfs: true
+  agentCard:
+    description: Triages issues.
+  grants:
+    modelGate:
+      allowed: true
+      providers: [anthropic, openai, gemini]
+      budgetRef: triage-daily
+    mcpTools: [github.get_issue]
+    actions: [git.open_pr]
+    delegateTo: [go-coder]
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: health-controller
+  zone: runtime
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: ghcr.io/shadewright-labs/health-ctrl:0.1.0
+  agentCard:
+    description: Deterministic health check loop.
+  grants:
+    modelGate:
+      allowed: false
+`)
+
+	bundle, err := LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath failed: %v", err)
+	}
+	if len(bundle.Workloads) != 3 {
+		t.Fatalf("expected 3 workloads, got %d", len(bundle.Workloads))
+	}
+	if len(bundle.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(bundle.Policies))
+	}
+	if len(bundle.Budgets) != 1 {
+		t.Fatalf("expected 1 budget, got %d", len(bundle.Budgets))
+	}
+	if bundle.ManifestDigest == "" {
+		t.Fatal("expected non-empty manifest digest")
+	}
+}
+
+func TestLoadPathRejectsDeterministicControllerWithModelGrant(t *testing.T) {
+	path := writeTempManifest(t, `
+apiVersion: sablecourt.io/v1alpha1
+kind: Budget
+metadata:
+  name: b1
+spec:
+  daily:
+    maxCostUSD: 5.0
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: bad-ctrl
+  zone: runtime
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: alpine:3.21
+  agentCard:
+    description: Should fail.
+  grants:
+    modelGate:
+      allowed: true
+      budgetRef: b1
+`)
+
+	_, err := LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "deterministic-controller must not hold a Model Gate grant") {
+		t.Fatalf("expected deterministic-controller error, got: %v", err)
+	}
+}
+
+func TestLoadPathRejectsSandboxMutatingGrants(t *testing.T) {
+	path := writeTempManifest(t, `
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: sbx-agent
+  zone: sandbox
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: alpine:3.21
+  agentCard:
+    description: Sandbox workload.
+  grants:
+    modelGate:
+      allowed: false
+    actions: [git.open_pr]
+`)
+
+	_, err := LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "sandbox zone workloads cannot hold mutating actions") {
+		t.Fatalf("expected sandbox grant error, got: %v", err)
+	}
+}
+
+func TestLoadPathRejectsUnknownFields(t *testing.T) {
+	path := writeTempManifest(t, `
+apiVersion: sablecourt.io/v1alpha1
+kind: Budget
+metadata:
+  name: b1
+spec:
+  daily:
+    maxCostUSD: 10.0
+  unexpectedField: true
+`)
+
+	if _, err := LoadPath(path); err == nil {
+		t.Fatal("expected unknown field error, got nil")
+	}
+}
