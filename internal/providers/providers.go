@@ -169,6 +169,7 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 	for _, cliDef := range []struct{ id, label, bin string }{
 		{"cli:claude", "Claude Code CLI (claude)", "claude"},
 		{"cli:codex", "Codex CLI (codex)", "codex"},
+		{"cli:agy", "Antigravity CLI (agy)", "agy"},
 	} {
 		st := ProviderStatus{
 			ID:          cliDef.id,
