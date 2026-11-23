@@ -38,6 +38,7 @@ type Store interface {
 	RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error
 	TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error)
 	WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error)
+	TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error)
 
 	AppendAudit(ctx context.Context, rec domain.AuditRecord) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error)

@@ -492,6 +492,15 @@ func (s *SQLiteStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadNam
 	return totals, err
 }
 
+func (s *SQLiteStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error) {
+	var totals domain.BudgetTotals
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		FROM budget_ledger
+	`).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	return totals, err
+}
+
 func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (category, task_id, workload_name, action, outcome, detail_json, created_at)
