@@ -73,6 +73,13 @@ func New(opts Options) *Gate {
 	}
 }
 
+func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.bundle = bundle
+	g.policy = pol
+}
+
 func (g *Gate) RegisterTool(def ToolDef) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

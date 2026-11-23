@@ -98,6 +98,9 @@ func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 	if !slices.Contains(hc.SecurityOpt, "no-new-privileges:true") {
 		t.Fatalf("expected no-new-privileges:true, got %v", hc.SecurityOpt)
 	}
+	if !slices.Contains(hc.ExtraHosts, "host.docker.internal:host-gateway") {
+		t.Fatalf("expected host.docker.internal:host-gateway ExtraHost, got %v", hc.ExtraHosts)
+	}
 
 	obs, err := adapter.Observe(ctx, handle)
 	if err != nil || obs.State != scruntime.StateCompleted {

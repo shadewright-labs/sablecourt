@@ -83,6 +83,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		"SABLECOURT_TASK_ID=" + spec.TaskID,
 		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
 	}
+	if spec.InputJSON != "" {
+		env = append(env, "SABLECOURT_INPUT_JSON="+spec.InputJSON)
+	}
 	if spec.DataGateURL != "" {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)
 	}
@@ -104,6 +107,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		ReadonlyRootfs: spec.Workload.Spec.Runtime.ReadOnlyRootfs,
 		CapDrop:        []string{"ALL"},
 		SecurityOpt:    []string{"no-new-privileges:true"},
+		ExtraHosts:     []string{"host.docker.internal:host-gateway"},
 	}
 
 	netCfg := &network.NetworkingConfig{

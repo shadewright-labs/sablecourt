@@ -65,7 +65,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 		t.Fatalf("NewDashboard: %v", err)
 	}
 
-	h := newHandler(st, bundle, modelGate, dataGate, approvals, reconciler, dash)
+	h := newHandler(st, func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
@@ -91,8 +91,39 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("POST /api/v1/tasks expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
+	var created domain.Task
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("decode created task: %v (%s)", err, rec.Body.String())
+	}
 
-	// 4. Web UI renders workloads and submitted task
+	// 4. GET /tasks/{id} detail page and GET /api/v1/tasks/{id}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tasks/"+created.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
+		t.Fatalf("task detail page failed: code=%d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+created.ID, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
+		t.Fatalf("GET /api/v1/tasks/{id} failed: code=%d", rec.Code)
+	}
+
+	// 5. POST /api/v1/tasks/{id}/cancel
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/tasks/"+created.ID+"/cancel", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel task failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 6. GET /api/v1/budget
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/budget", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/budget failed: code=%d", rec.Code)
+	}
+
+	// 7. Web UI renders workloads and cancelled task
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "triage-agent") {
