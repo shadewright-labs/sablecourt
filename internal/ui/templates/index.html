@@ -330,6 +330,14 @@
           <span class="dot-live"></span>
           <span>{{.ObservedAt}}</span>
         </span>
+        <a class="icon-btn" href="/studio" title="Define agents and fixed workflows">
+          <svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span>Studio</span>
+        </a>
+        <a class="icon-btn" href="/providers" title="Connect LLM providers and sync models">
+          <svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="4"/></svg>
+          <span>Providers</span>
+        </a>
         <a class="icon-btn" href="/" title="Refresh observed facts">
           <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
           <span>Refresh</span>
@@ -403,11 +411,22 @@
           </div>
           <form class="composer" method="POST" action="/ui/tasks">
             <div class="composer-row">
-              <select name="workload" required>
+              <select id="wl-select" name="workload" required>
                 {{range .Workloads}}
-                <option value="{{.Name}}" {{if eq .Name $.SelectedWorkload}}selected{{end}}>{{.Name}} ({{.Class}} · {{.Zone}})</option>
+                <option value="{{.Name}}" data-class="{{.Class}}" {{if eq .Name $.SelectedWorkload}}selected{{end}}>{{.Name}} ({{.Class}} · {{.Zone}})</option>
                 {{end}}
               </select>
+              {{if .Providers}}
+              <select id="prov-select" name="provider" title="LLM provider">
+                <option value="">default provider</option>
+                {{range .Providers}}
+                <option value="{{.ID}}">{{.DisplayName}}{{if .Connected}} ✓{{end}}</option>
+                {{end}}
+              </select>
+              <select id="model-select" name="model" title="Model">
+                <option value="">default model</option>
+              </select>
+              {{end}}
               <button type="submit">Dispatch task</button>
             </div>
             <textarea name="input_json" placeholder="Describe the task or paste JSON payload (e.g. Fix timeout in sqlite store)..."></textarea>
@@ -515,5 +534,35 @@
       <span>127.0.0.1 local control plane · evidence over inference</span>
     </footer>
   </div>
+  <script>
+    (function () {
+      const modelsByProvider = {{if .ModelsByProvider}}{{.ModelsByProvider}}{{else}}{}{{end}};
+      const wl = document.getElementById("wl-select");
+      const prov = document.getElementById("prov-select");
+      const mod = document.getElementById("model-select");
+      if (!wl || !prov || !mod) return;
+      function syncModels() {
+        const list = modelsByProvider[prov.value] || [];
+        mod.innerHTML = '<option value="">default model</option>';
+        for (const id of list) {
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = id;
+          mod.appendChild(opt);
+        }
+      }
+      function syncWorkload() {
+        const opt = wl.options[wl.selectedIndex];
+        const isDet = opt && opt.dataset.class === "deterministic-controller";
+        prov.disabled = isDet;
+        mod.disabled = isDet;
+        if (isDet) { prov.value = ""; syncModels(); }
+      }
+      prov.addEventListener("change", syncModels);
+      wl.addEventListener("change", syncWorkload);
+      syncModels();
+      syncWorkload();
+    })();
+  </script>
 </body>
 </html>

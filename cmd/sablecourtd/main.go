@@ -23,6 +23,7 @@ import (
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/providers"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
@@ -207,21 +208,30 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 		}
 	}()
 
-	dash, err := ui.NewDashboard(ui.Options{
-		Store:      st,
-		Approvals:  approvalQueue,
-		Reconciler: reconciler,
+	provReg := providers.NewRegistry(providers.Options{
+		Secrets: secretStore,
 	})
-	if err != nil {
-		return fmt.Errorf("init web ui: %w", err)
-	}
 
 	getBundle := func() *config.Bundle {
 		bundleMu.RLock()
 		defer bundleMu.RUnlock()
 		return bundle
 	}
-	mux := newHandler(st, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, dash)
+
+	dash, err := ui.NewDashboard(ui.Options{
+		Store:         st,
+		Approvals:     approvalQueue,
+		Reconciler:    reconciler,
+		Providers:     provReg,
+		GetBundle:     getBundle,
+		Reload:        reloadFn,
+		ManifestsPath: manifestsPath,
+	})
+	if err != nil {
+		return fmt.Errorf("init web ui: %w", err)
+	}
+
+	mux := newHandler(st, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, provReg, dash)
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
@@ -269,13 +279,32 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 	}
 }
 
-func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, dash *ui.Dashboard) http.Handler {
+func newHandler(st store.Store, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /api/v1/providers", func(w http.ResponseWriter, r *http.Request) {
+		if provReg == nil {
+			writeJSON(w, http.StatusOK, []any{})
+			return
+		}
+		writeJSON(w, http.StatusOK, provReg.List(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/providers/{id}/sync", func(w http.ResponseWriter, r *http.Request) {
+		if provReg == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "provider registry unavailable"})
+			return
+		}
+		models, err := provReg.SyncModels(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, models)
 	})
 	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
 		var b *config.Bundle

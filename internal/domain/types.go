@@ -8,6 +8,7 @@ const (
 	KindWorkload = "Workload"
 	KindPolicy   = "Policy"
 	KindBudget   = "Budget"
+	KindWorkflow = "Workflow"
 )
 
 type WorkloadZone string
@@ -144,6 +145,25 @@ type PerTaskBudget struct {
 
 type DailyBudget struct {
 	MaxCostUSD float64 `json:"maxCostUSD,omitempty"`
+}
+
+type Workflow struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta   `json:"metadata"`
+	Spec     WorkflowSpec `json:"spec"`
+}
+
+type WorkflowSpec struct {
+	Description string         `json:"description,omitempty"`
+	Steps       []WorkflowStep `json:"steps"`
+}
+
+type WorkflowStep struct {
+	Name     string `json:"name"`
+	Workload string `json:"workload"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
 }
 
 type WorkloadRecord struct {
