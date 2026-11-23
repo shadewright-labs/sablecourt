@@ -215,6 +215,7 @@ func runDaemon(ctx context.Context, dbPath, manifestsPath, listenAddr, socketPat
 	}()
 
 	provReg := providers.NewRegistry(providers.Options{
+		Store:   st,
 		Secrets: secretStore,
 	})
 

@@ -259,3 +259,10 @@ type AuditRecord struct {
 	DetailJSON   string
 	CreatedAt    time.Time
 }
+
+type ProviderPrefs struct {
+	ProviderID    string
+	DefaultModel  string
+	EnabledModels []string
+	UpdatedAt     time.Time
+}

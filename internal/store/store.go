@@ -46,4 +46,7 @@ type Store interface {
 
 	AppendAudit(ctx context.Context, rec domain.AuditRecord) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error)
+
+	UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error
+	ListProviderPrefs(ctx context.Context) (map[string]domain.ProviderPrefs, error)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -611,6 +612,46 @@ func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditR
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error {
+	raw, err := json.Marshal(prefs.EnabledModels)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO provider_prefs (provider_id, default_model, enabled_models_json, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(provider_id) DO UPDATE SET
+			default_model = excluded.default_model,
+			enabled_models_json = excluded.enabled_models_json,
+			updated_at = excluded.updated_at
+	`, prefs.ProviderID, prefs.DefaultModel, string(raw), formatTime(prefs.UpdatedAt))
+	return err
+}
+
+func (s *SQLiteStore) ListProviderPrefs(ctx context.Context) (map[string]domain.ProviderPrefs, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT provider_id, default_model, enabled_models_json, updated_at
+		FROM provider_prefs
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]domain.ProviderPrefs)
+	for rows.Next() {
+		var p domain.ProviderPrefs
+		var raw, updated string
+		if err := rows.Scan(&p.ProviderID, &p.DefaultModel, &raw, &updated); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(raw), &p.EnabledModels)
+		p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		out[p.ProviderID] = p
 	}
 	return out, rows.Err()
 }
