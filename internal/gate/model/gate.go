@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -476,6 +477,11 @@ func copySafeRequestHeaders(dst, src http.Header) {
 }
 
 func injectUpstreamAuth(h http.Header, provider, key, anthropicVer string) {
+	// Strip any prior provider auth headers before injecting the active provider's credential
+	// so fallback transitions (e.g. openai -> local) can never leak another provider's key.
+	h.Del("Authorization")
+	h.Del("x-api-key")
+	h.Del("x-goog-api-key")
 	switch provider {
 	case "openai", "local":
 		if key != "" {
@@ -507,14 +513,44 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func joinUpstreamURL(baseURL, path, rawQuery string) (string, error) {
+func joinUpstreamURL(baseURL, reqPath, rawQuery string) (string, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", err
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + path
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("unsupported upstream scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("upstream base URL missing host")
+	}
+	if strings.ContainsAny(reqPath, "\\\r\n") || strings.Contains(reqPath, "@") || strings.Contains(reqPath, "://") {
+		return "", errors.New("invalid upstream path characters")
+	}
+	unescaped, err := url.PathUnescape(reqPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid escaped path: %w", err)
+	}
+	if strings.Contains(unescaped, "..") || strings.ContainsAny(unescaped, "\\\r\n") {
+		return "", errors.New("path traversal not allowed in upstream path")
+	}
+	cleanReq := path.Clean("/" + reqPath)
+	if !strings.HasPrefix(cleanReq, "/") || strings.Contains(cleanReq, "..") {
+		return "", errors.New("invalid cleaned upstream path")
+	}
+	baseHost := u.Host
+	baseScheme := u.Scheme
+	u.Path = strings.TrimRight(u.Path, "/") + cleanReq
+	u.RawPath = ""
 	u.RawQuery = rawQuery
-	return u.String(), nil
+	u.Fragment = ""
+
+	finalURL := u.String()
+	parsed, err := url.Parse(finalURL)
+	if err != nil || parsed.Host != baseHost || parsed.Scheme != baseScheme {
+		return "", errors.New("upstream URL host or scheme mismatch")
+	}
+	return finalURL, nil
 }
 
 func extractRequestModel(provider, upstreamPath string, body []byte) string {

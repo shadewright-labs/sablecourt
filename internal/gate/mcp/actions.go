@@ -121,9 +121,13 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		if repoRoot == "" {
 			return nil, errors.New("repo root not configured for git.create_branch")
 		}
-		args := []string{"-C", repoRoot, "branch", in.Branch}
-		if strings.TrimSpace(in.Base) != "" {
-			args = append(args, in.Base)
+		base := strings.TrimSpace(in.Base)
+		if strings.HasPrefix(base, "-") || strings.Contains(base, "..") || strings.ContainsAny(base, " \t\r\n") {
+			return nil, errors.New("invalid base ref for git.create_branch")
+		}
+		args := []string{"-C", repoRoot, "branch", "--", in.Branch}
+		if base != "" {
+			args = append(args, base)
 		}
 		cmd := exec.CommandContext(ctx, "git", args...)
 		out, err := cmd.CombinedOutput()

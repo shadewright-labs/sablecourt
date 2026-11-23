@@ -41,6 +41,9 @@ func (g *GitSyncer) SyncOnce(ctx context.Context) (bool, string, error) {
 	if g.RepoURL == "" || g.LocalDir == "" {
 		return false, "", fmt.Errorf("git sync requires repo URL and local directory")
 	}
+	if strings.HasPrefix(g.Branch, "-") || strings.HasPrefix(g.RepoURL, "-") {
+		return false, "", fmt.Errorf("git sync branch and repo URL must not start with '-'")
+	}
 
 	gitDir := filepath.Join(g.LocalDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -52,7 +55,7 @@ func (g *GitSyncer) SyncOnce(ctx context.Context) (bool, string, error) {
 			return false, "", fmt.Errorf("git clone %q: %s (%w)", g.RepoURL, strings.TrimSpace(string(out)), err)
 		}
 	} else {
-		fetch := exec.CommandContext(ctx, "git", "-C", g.LocalDir, "fetch", "--depth=1", "origin", g.Branch)
+		fetch := exec.CommandContext(ctx, "git", "-C", g.LocalDir, "fetch", "--depth=1", "--", "origin", g.Branch)
 		if out, err := fetch.CombinedOutput(); err != nil {
 			return false, "", fmt.Errorf("git fetch: %s (%w)", strings.TrimSpace(string(out)), err)
 		}
