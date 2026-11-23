@@ -65,7 +65,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 		t.Fatalf("NewDashboard: %v", err)
 	}
 
-	h := newHandler(st, func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, nil, dash)
+	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, nil, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
