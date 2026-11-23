@@ -284,6 +284,16 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Adapters:     adapters,
 		ModelGateURL: "http://" + gateHost + "/gate/model",
 		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		OnTaskFailed: func(task domain.Task, reason string) {
+			go func() {
+				_ = notifier.Send(context.Background(), notify.Event{
+					Type:   "task.failed",
+					Title:  fmt.Sprintf("Task failed: %s (%s)", task.WorkloadName, task.ID),
+					Detail: reason,
+					Path:   "/tasks/" + task.ID,
+				})
+			}()
+		},
 	})
 	scheduler := controlplane.NewScheduler(reconciler)
 	if err := scheduler.Reload(ctx, bundle); err != nil {

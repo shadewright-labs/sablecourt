@@ -713,6 +713,46 @@ func main() {
 	conclaveCmd.AddCommand(conclaveDecreeCmd)
 
 	conclaveCmd.AddCommand(&cobra.Command{
+		Use:   "inspect <conclave-id>",
+		Short: "Inspect a Conclave session, message log, and Relics",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+args[0])
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			var res struct {
+				Conclave domain.ConclaveSession   `json:"conclave"`
+				Messages []domain.ConclaveMessage `json:"messages"`
+				Relics   []domain.ConclaveRelic   `json:"relics"`
+			}
+			if err := json.Unmarshal(body, &res); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%s  %s  state=%s  template=%s\n", stTitle.Render(res.Conclave.ID), res.Conclave.Title, res.Conclave.State, res.Conclave.TemplateName)
+			if res.Conclave.WardReason != "" {
+				fmt.Fprintf(out, "%s ward: %s\n", stAmber.Render("!"), res.Conclave.WardReason)
+			}
+			fmt.Fprintln(out, stMuted.Render("\nMessages:"))
+			for _, m := range res.Messages {
+				fmt.Fprintf(out, "  #%d @%s -> @%s (%s): %s\n", m.ID, m.FromRole, m.ToRole, m.Kind, m.Body)
+			}
+			if len(res.Relics) > 0 {
+				fmt.Fprintln(out, stMuted.Render("\nRelics:"))
+				for _, r := range res.Relics {
+					fmt.Fprintf(out, "  %s (by @%s, %s, sha256=%s)\n", stJade.Render(r.Name), r.AuthorRole, r.ContentType, r.SHA256[:12])
+				}
+			}
+			return nil
+		},
+	})
+	conclaveCmd.AddCommand(&cobra.Command{
 		Use:   "close <conclave-id>",
 		Short: "Close a Conclave session",
 		Args:  cobra.ExactArgs(1),
