@@ -992,6 +992,52 @@ func main() {
 		},
 	})
 
+	voiceCmd := &cobra.Command{
+		Use:   "voice",
+		Short: "Local-first Speech-to-Text and Text-to-Speech commands",
+	}
+	voiceCmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show configured local STT and TTS backends",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(5 * time.Second)
+			body, err := fetchGET(cli, base+"/api/v1/voice/status")
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(body)
+			return err
+		},
+	})
+	var speakOut, speakVoice string
+	voiceSpeakCmd := &cobra.Command{
+		Use:   "speak <text>",
+		Short: "Synthesize speech audio via local TTS (Kokoro/Piper or macOS say)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cli, base := httpClient(30 * time.Second)
+			audio, err := fetchPOST(cli, base+"/api/v1/voice/speak", map[string]string{
+				"text":  args[0],
+				"voice": speakVoice,
+			})
+			if err != nil {
+				return err
+			}
+			if speakOut != "" {
+				if err := os.WriteFile(speakOut, audio, 0o600); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s wrote %d bytes to %s\n", stJade.Render("✓"), len(audio), speakOut)
+				return nil
+			}
+			_, err = cmd.OutOrStdout().Write(audio)
+			return err
+		},
+	}
+	voiceSpeakCmd.Flags().StringVar(&speakOut, "out", "", "Output audio file path (e.g. reply.wav)")
+	voiceSpeakCmd.Flags().StringVar(&speakVoice, "voice", "", "Optional TTS voice name (e.g. Zosia, Samantha, af_heart)")
+	voiceCmd.AddCommand(voiceSpeakCmd)
+
 	mcpServerCmd := &cobra.Command{
 		Use:   "mcp-server",
 		Short: "Run Sablecourt as a stdio MCP server for Claude Code, Codex, or IDE agents",
@@ -1000,7 +1046,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	rootCmd.AddCommand(validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, voiceCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())

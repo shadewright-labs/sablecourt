@@ -104,7 +104,10 @@
           <div class="msg {{if eq .Kind "decree"}}msg-decree{{else if eq .FromRole "system"}}msg-system{{end}}">
             <div class="msg-head">
               <span><strong>@{{.FromRole}}</strong> -&gt; @{{.ToRole}} ({{.Kind}})</span>
-              <span>#{{.ID}}</span>
+              <span>
+                <button type="button" class="btn-ghost btn-speak" data-text="{{.Body}}" style="margin:0 8px 0 0; padding:2px 7px; font-size:11px;">Speak</button>
+                #{{.ID}}
+              </span>
             </div>
             <div class="msg-body">{{.Body}}</div>
           </div>
@@ -125,7 +128,11 @@
           </select>
           <label for="body">Decree</label>
           <textarea id="body" name="body" placeholder="Direct the Conclave or resume after a Ward pause..." required></textarea>
-          <button type="submit">Issue Decree</button>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button type="submit">Issue Decree</button>
+            <button type="button" id="btn-voice-decree" class="btn-ghost">Voice Decree (local STT)</button>
+            <span id="voice-status" class="meta"></span>
+          </div>
         </form>
       </main>
 
@@ -162,6 +169,70 @@
           }
         }
       });
+
+      document.querySelectorAll(".btn-speak").forEach(function(btn) {
+        btn.addEventListener("click", async function() {
+          const text = btn.getAttribute("data-text") || "";
+          if (!text) return;
+          btn.textContent = "...";
+          try {
+            const res = await fetch("/api/v1/voice/speak", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({text: text})
+            });
+            if (res.ok) {
+              const blob = await res.blob();
+              const audio = new Audio(URL.createObjectURL(blob));
+              audio.play();
+            }
+          } finally {
+            btn.textContent = "Speak";
+          }
+        });
+      });
+
+      const voiceBtn = document.getElementById("btn-voice-decree");
+      const voiceStatus = document.getElementById("voice-status");
+      let recorder = null;
+      let chunks = [];
+      if (voiceBtn && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        voiceBtn.addEventListener("click", async function() {
+          if (recorder && recorder.state === "recording") {
+            recorder.stop();
+            voiceBtn.textContent = "Voice Decree (local STT)";
+            voiceStatus.textContent = "Transcribing locally...";
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            chunks = [];
+            recorder = new MediaRecorder(stream);
+            recorder.ondataavailable = function(ev) { if (ev.data.size > 0) chunks.push(ev.data); };
+            recorder.onstop = async function() {
+              stream.getTracks().forEach(t => t.stop());
+              const blob = new Blob(chunks, { type: "audio/webm" });
+              const fd = new FormData();
+              fd.append("file", blob, "decree.webm");
+              const res = await fetch("/api/v1/voice/transcribe", { method: "POST", body: fd });
+              if (res.ok) {
+                const data = await res.json();
+                bodyEl.value = (bodyEl.value ? bodyEl.value + " " : "") + data.text;
+                voiceStatus.textContent = "Transcribed locally.";
+                bodyEl.focus();
+              } else {
+                const err = await res.json().catch(() => ({}));
+                voiceStatus.textContent = "STT error: " + (err.error || res.status);
+              }
+            };
+            recorder.start();
+            voiceBtn.textContent = "Stop recording";
+            voiceStatus.textContent = "Listening...";
+          } catch (e) {
+            voiceStatus.textContent = "Mic error: " + e.message;
+          }
+        });
+      }
     })();
   </script>
 </body>
