@@ -162,69 +162,19 @@ func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
 }
 
 func (s *PostgresStore) GetTask(ctx context.Context, id string) (domain.Task, error) {
-	var t domain.Task
-	var state, created, updated string
-	var hb sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, parent_task_id, idempotency_key, workload_name, state,
-		       input_json, artifacts_json, budget_ceiling_json, last_heartbeat_at,
-		       created_at, updated_at
-		FROM tasks WHERE id = $1
-	`, id).Scan(
-		&t.ID, &t.ParentTaskID, &t.IdempotencyKey, &t.WorkloadName, &state,
-		&t.InputJSON, &t.ArtifactsJSON, &t.BudgetCeilingJSON, &hb, &created, &updated,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Task{}, store.ErrNotFound
-	}
-	if err != nil {
-		return domain.Task{}, err
-	}
-	t.State = domain.TaskState(state)
-	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	if hb.Valid {
-		if parsed, err := time.Parse(time.RFC3339Nano, hb.String); err == nil {
-			t.LastHeartbeatAt = &parsed
-		}
-	}
-	return t, nil
+	return store.GetTask(ctx, s.db, id)
+}
+
+func (s *PostgresStore) GetTaskByIdempotencyKey(ctx context.Context, key string) (domain.Task, error) {
+	return store.GetTaskByIdempotencyKey(ctx, s.db, key)
 }
 
 func (s *PostgresStore) ListTasks(ctx context.Context) ([]domain.Task, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, parent_task_id, idempotency_key, workload_name, state,
-		       input_json, artifacts_json, budget_ceiling_json, last_heartbeat_at,
-		       created_at, updated_at
-		FROM tasks ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	return store.ListTasks(ctx, s.db)
+}
 
-	var out []domain.Task
-	for rows.Next() {
-		var t domain.Task
-		var state, created, updated string
-		var hb sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.ParentTaskID, &t.IdempotencyKey, &t.WorkloadName, &state,
-			&t.InputJSON, &t.ArtifactsJSON, &t.BudgetCeilingJSON, &hb, &created, &updated,
-		); err != nil {
-			return nil, err
-		}
-		t.State = domain.TaskState(state)
-		t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-		if hb.Valid {
-			if parsed, err := time.Parse(time.RFC3339Nano, hb.String); err == nil {
-				t.LastHeartbeatAt = &parsed
-			}
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+func (s *PostgresStore) ListReconcileTasks(ctx context.Context, handleIDs []string) ([]domain.Task, error) {
+	return store.ListReconcileTasks(ctx, s.db, handleIDs, "SELECT json_array_elements_text($1::json)")
 }
 
 func (s *PostgresStore) ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error) {
@@ -290,8 +240,8 @@ func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from
 	}
 	now := nowRFC3339()
 	res, err := tx.ExecContext(ctx, `
-		UPDATE tasks SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4
-	`, string(to), now, taskID, string(from))
+		UPDATE tasks SET state = $1, updated_at = $2, exit_pending = $3 WHERE id = $4 AND state = $5
+	`, string(to), now, reason == "runtime_exit_observed" && (to == domain.TaskStateCompleted || to == domain.TaskStateFailed), taskID, string(from))
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -470,6 +420,10 @@ func (s *PostgresStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA2
 		return domain.Lease{}, store.ErrNotFound
 	}
 	return lease, nil
+}
+
+func (s *PostgresStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
 }
 
 func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) error {

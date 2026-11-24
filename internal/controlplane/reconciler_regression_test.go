@@ -96,11 +96,40 @@ func requireState(t *testing.T, st store.Store, id string, want domain.TaskState
 		t.Fatalf("state = %s, want %s", got.State, want)
 	}
 }
+func waitForLaunches(t *testing.T, r *Reconciler) error {
+	t.Helper()
+	r.mu.Lock()
+	pending := make([]chan struct{}, 0, len(r.launching))
+	for _, reservation := range r.launching {
+		pending = append(pending, reservation.done)
+	}
+	r.mu.Unlock()
+	for _, done := range pending {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("launch did not finish")
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	err := r.launchErrors
+	r.launchErrors = nil
+	return err
+}
+
 func reconcile(t *testing.T, r *Reconciler) {
 	t.Helper()
-	if err := r.ReconcileOnce(context.Background()); err != nil {
+	if err := errors.Join(r.ReconcileOnce(context.Background()), waitForLaunches(t, r)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func launchForTest(ctx context.Context, r *Reconciler, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) error {
+	if !r.claimLaunch(task.ID) {
+		return store.ErrConflict
+	}
+	return r.launchTask(ctx, task, wl, adapter)
 }
 func TestApprovalTaskProgress(t *testing.T) {
 	for _, tc := range []struct {
@@ -320,7 +349,7 @@ func TestCancelDuringLaunch(t *testing.T) {
 			}
 			cancelErr := r.CancelTask(ctx, task.ID, "cancel during launch")
 			close(a.release)
-			if err := <-done; err != nil {
+			if err := errors.Join(<-done, waitForLaunches(t, r)); err != nil {
 				t.Fatal(err)
 			}
 			if cancelErr != nil {
@@ -344,7 +373,7 @@ func TestLostLaunchClaim(t *testing.T) {
 			if err := st.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, state, "competing_claim", "{}"); err != nil {
 				t.Fatal(err)
 			}
-			err := r.launchTask(ctx, task, r.bundle.Workloads["worker"], a)
+			err := launchForTest(ctx, r, task, r.bundle.Workloads["worker"], a)
 			if !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("claim error = %v", err)
 			}
@@ -413,6 +442,9 @@ func TestReloadConcurrentReaders(t *testing.T) {
 				}
 			}
 			<-done
+			if err := waitForLaunches(t, r); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -495,7 +527,7 @@ func TestRetryWaitsForCleanup(t *testing.T) {
 			_, retryErr := r.RetryTaskWithHandoff(ctx, task.ID, false, "")
 			if done != nil {
 				close(a.release)
-				if err := <-done; err != nil {
+				if err := errors.Join(<-done, waitForLaunches(t, r)); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -593,7 +625,7 @@ func TestLaunchInputPacket(t *testing.T) {
 					t.Errorf("launch panicked: %v", err)
 				}
 			}()
-			if err := r.launchTask(context.Background(), task, wl, a); err != nil {
+			if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
 				t.Fatal(err)
 			}
 			var payload map[string]string
@@ -649,8 +681,8 @@ func TestTerminalFollowupAfterRestart(t *testing.T) {
 			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
 				t.Fatal(err)
 			}
-			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker"}, {Workload: "worker"}}}}}
-			task, err := r.SubmitTask(ctx, "worker", "flow", `{"workflow":"flow","auto_remediate":true}`)
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker", MaxRetries: 1}, {Workload: "worker"}}}}}
+			task, err := r.StartWorkflow(ctx, "flow", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -682,7 +714,7 @@ func (s heartbeatDuringApproval) RecordHeartbeat(ctx context.Context, id string,
 func TestLaunchFailureDuringApproval(t *testing.T) {
 	r, st, a, task := regressionFixture(t)
 	r.store = heartbeatDuringApproval{st}
-	if err := r.ReconcileOnce(context.Background()); err == nil {
+	if err := errors.Join(r.ReconcileOnce(context.Background()), waitForLaunches(t, r)); err == nil {
 		t.Error("heartbeat failure was hidden")
 	}
 	requireState(t, st, task.ID, domain.TaskStateInputRequired)

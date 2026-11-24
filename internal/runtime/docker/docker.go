@@ -200,6 +200,11 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return scruntime.Handle{}, fmt.Errorf("create container: %w", err)
 	}
 
+	handle := scruntime.Handle{
+		AdapterName: "docker",
+		ExternalID:  created.ID,
+		WorkDir:     spec.WorkDir,
+	}
 	var stdinCloser io.WriteCloser
 	if a.AttachHub != nil {
 		if att, ok := a.Client.(containerAttacher); ok {
@@ -216,7 +221,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		if stdinCloser != nil {
 			_ = stdinCloser.Close()
 		}
-		return scruntime.Handle{}, fmt.Errorf("start container %s: %w", created.ID, err)
+		return handle, fmt.Errorf("start container %s: %w", created.ID, err)
 	}
 
 	if a.AttachHub != nil {
@@ -228,11 +233,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		}
 	}
 
-	return scruntime.Handle{
-		AdapterName: "docker",
-		ExternalID:  created.ID,
-		WorkDir:     spec.WorkDir,
-	}, nil
+	return handle, nil
 }
 
 func (a *Adapter) streamLogs(taskID, containerID string, ls logStreamer) {
@@ -310,12 +311,14 @@ func (a *Adapter) Resume(ctx context.Context, handle scruntime.Handle, _ scrunti
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	timeout := 10
 	_, err := a.Client.ContainerStop(ctx, handle.ExternalID, client.ContainerStopOptions{Timeout: &timeout})
-	_, _ = a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
-	return err
+	_, removeErr := a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
+	var missing interface{ NotFound() }
+	if removeErr == nil || errors.As(removeErr, &missing) {
+		return nil
+	}
+	return errors.Join(err, removeErr)
 }
 
 func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle) ([]scruntime.Artifact, error) {
-	// Clean up exited container after final observation to avoid accumulating stopped containers.
-	_, _ = a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
 	return nil, nil
 }
