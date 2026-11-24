@@ -76,6 +76,9 @@ func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, stat
 }
 
 func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg); handled {
+		return id, err
+	}
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO conclave_messages (conclave_id, from_role, to_role, kind, body, task_id, created_at)

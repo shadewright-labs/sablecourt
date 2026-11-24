@@ -78,6 +78,9 @@ func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state 
 }
 
 func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg); handled {
+		return id, err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO conclave_messages (conclave_id, from_role, to_role, kind, body, task_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
