@@ -10,9 +10,25 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const seatbeltExecutable = "/usr/bin/sandbox-exec"
+
+// CheckSandbox reports whether the current platform has a working OS sandbox
+// for host coding harnesses. It fails closed whenever confinement cannot be
+// enforced.
+func CheckSandbox(ctx context.Context) error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("no working coding sandbox on %s", runtime.GOOS)
+	}
+	if _, err := exec.LookPath(seatbeltExecutable); err != nil {
+		return fmt.Errorf("Seatbelt executable unavailable: %w", err)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return checkSeatbelt(probeCtx, seatbeltProbeProfile(), "/")
+}
 
 func (a *Adapter) validateSandbox(sandbox string, readOnly bool) error {
 	switch sandbox {
@@ -39,10 +55,39 @@ func checkSeatbelt(ctx context.Context, profile, dir string) error {
 	bin, args := seatbeltCommand(profile, "/usr/bin/true", nil)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir, cmd.Env = dir, []string{"PATH=/usr/bin:/bin"}
-	if err := cmd.Run(); err != nil {
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("apply Seatbelt sandbox at %q: %w (%s)", bin, err, msg)
+		}
 		return fmt.Errorf("apply Seatbelt sandbox at %q: %w", bin, err)
 	}
 	return nil
+}
+
+func seatbeltProbeProfile() string {
+	var profile strings.Builder
+	profile.WriteString("(version 1)\n(deny default)\n")
+	allowSeatbeltRuntime(&profile)
+	return profile.String()
+}
+
+func allowSeatbeltRuntime(profile *strings.Builder) {
+	// Dyld's libignition opens "/" before it can find the shared cache.
+	// On newer macOS the cache is inside the OS cryptex.
+	profile.WriteString("(allow file-read* file-test-existence (literal \"/\"))\n")
+	for _, path := range []string{"/usr/lib", "/System/Library", "/System/Cryptexes/OS",
+		"/System/Volumes/Preboot/Cryptexes/OS"} {
+		if real, err := resolvedPath(path); err == nil {
+			fmt.Fprintf(profile, "(allow file-read* file-test-existence file-map-executable (subpath %q))\n", real)
+			allowParentMetadata(profile, real)
+		}
+	}
+	for _, path := range []string{"/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/System/Library",
+		"/Library/Developer/CommandLineTools/usr"} {
+		if real, err := resolvedPath(path); err == nil {
+			fmt.Fprintf(profile, "(allow file-read* file-test-existence process-exec (subpath %q))\n", real)
+		}
+	}
 }
 
 func seatbeltProfile(work, scratch, bin string, state *worktreeState, readOnly bool) (string, error) {
@@ -51,22 +96,7 @@ func seatbeltProfile(work, scratch, bin string, state *worktreeState, readOnly b
 	profile.WriteString("(allow process-fork sysctl-read network-outbound)\n")
 	profile.WriteString("(allow signal (target self))\n")
 
-	// Dyld's libignition opens "/" before it can find the shared cache.
-	// On newer macOS the cache is inside the OS cryptex.
-	profile.WriteString("(allow file-read* file-test-existence (literal \"/\"))\n")
-	for _, path := range []string{"/usr/lib", "/System/Library", "/System/Cryptexes/OS",
-		"/System/Volumes/Preboot/Cryptexes/OS"} {
-		if real, err := resolvedPath(path); err == nil {
-			fmt.Fprintf(&profile, "(allow file-read* file-test-existence file-map-executable (subpath %q))\n", real)
-			allowParentMetadata(&profile, real)
-		}
-	}
-	for _, path := range []string{"/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/System/Library",
-		"/Library/Developer/CommandLineTools/usr"} {
-		if real, err := resolvedPath(path); err == nil {
-			fmt.Fprintf(&profile, "(allow file-read* file-test-existence process-exec (subpath %q))\n", real)
-		}
-	}
+	allowSeatbeltRuntime(&profile)
 	for _, path := range []string{"/dev/urandom", "/dev/random", "/etc/localtime", "/etc/hosts", "/etc/resolv.conf"} {
 		if real, err := resolvedPath(path); err == nil {
 			fmt.Fprintf(&profile, "(allow file-read* file-test-existence (literal %q))\n", real)
