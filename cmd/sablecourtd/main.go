@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -167,6 +168,25 @@ func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *
 	adapter.BranchRetention = retention
 	adapter.AttachHub = hub
 	return adapter
+}
+
+func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, hub *attach.Hub, dbPath string, retention time.Duration, checkSandbox func() error, logger *slog.Logger) {
+	if isCitadel {
+		return
+	}
+	if checkSandbox == nil {
+		if logger != nil {
+			logger.Warn("host coding adapter disabled: sandbox availability check unavailable")
+		}
+		return
+	}
+	if err := checkSandbox(); err != nil {
+		if logger != nil {
+			logger.Warn("host coding adapter disabled: no working sandbox on this platform", "error", err)
+		}
+		return
+	}
+	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -351,8 +371,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	// Host harnesses need read isolation from the operator state before registration.
-	logger.Info("host coding adapter disabled until operator state is isolated")
+	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
+		return coding.CheckSandbox(ctx)
+	}, logger)
 	if isCitadel {
 		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
