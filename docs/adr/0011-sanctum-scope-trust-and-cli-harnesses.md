@@ -1,7 +1,7 @@
 # ADR-0011: Sanctum scope, trust, and CLI harnesses
 
 - Date: 2026-11-24
-- Status: Proposed
+- Status: Accepted (2026-11-24, by the owner; to be revised from what the first test runs show)
 
 ## Context
 
