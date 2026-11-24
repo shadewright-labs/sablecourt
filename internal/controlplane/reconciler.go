@@ -15,8 +15,15 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+)
+
+const (
+	maxParallelLaunches = 4
+	adapterCallTimeout  = 15 * time.Second
+	adapterStartTimeout = 30 * time.Second
 )
 
 type Options struct {
@@ -30,6 +37,11 @@ type Options struct {
 	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
+}
+
+type launchReservation struct {
+	done    chan struct{}
+	tokenMu sync.Mutex
 }
 
 type Reconciler struct {
@@ -48,7 +60,10 @@ type Reconciler struct {
 	mu             sync.Mutex
 	handles        map[string]scruntime.Handle
 	handleAdapters map[string]scruntime.Adapter
-	launching      map[string]bool
+	partialStarts  map[string]bool
+	launching      map[string]*launchReservation
+	launchErrors   error
+	stopping       map[string]bool
 }
 
 func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
@@ -59,27 +74,31 @@ func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
 }
 
 func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) error {
-	// Serialize cancellation with publication of a newly started handle.
-	r.mu.Lock()
 	task, err := r.store.GetTask(ctx, taskID)
 	if err != nil {
-		r.mu.Unlock()
 		return err
 	}
 	if terminalTaskState(task.State) {
-		r.mu.Unlock()
 		return store.ErrConflict
 	}
 	if reason == "" {
 		reason = "operator_cancelled"
 	}
-	err = r.store.UpdateTaskState(ctx, taskID, task.State, domain.TaskStateCancelled, reason, `{}`)
-	r.mu.Unlock()
-	if err != nil {
+	if err := r.store.UpdateTaskState(ctx, taskID, task.State, domain.TaskStateCancelled, reason, `{}`); err != nil {
 		return err
 	}
 	cleanupCtx := context.WithoutCancel(ctx)
-	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, taskID), r.stopTask(cleanupCtx, taskID))
+	r.mu.Lock()
+	reservation := r.launching[taskID]
+	r.mu.Unlock()
+	if reservation != nil {
+		reservation.tokenMu.Lock()
+	}
+	leaseErr := r.store.RevokeTaskLeases(cleanupCtx, taskID)
+	if reservation != nil {
+		reservation.tokenMu.Unlock()
+	}
+	cleanupErr := errors.Join(leaseErr, r.stopTask(cleanupCtx, taskID))
 	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
 		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
@@ -94,20 +113,32 @@ func terminalTaskState(state domain.TaskState) bool {
 // stopTask retains the handle if stopping fails so a later pass can retry cleanup.
 func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	handle, ok := r.handles[taskID]
+	adapter := r.handleAdapters[taskID]
 	if !ok {
+		r.mu.Unlock()
 		return nil
 	}
-	adapter := r.handleAdapters[taskID]
-	if adapter == nil {
-		return errors.New("runtime adapter unavailable for cleanup")
+	if adapter == nil || r.stopping[taskID] {
+		r.mu.Unlock()
+		return errors.New("runtime cleanup unavailable or already in progress")
 	}
-	if err := adapter.Stop(ctx, handle); err != nil {
-		return fmt.Errorf("stop task: %w", err)
+	r.stopping[taskID] = true
+	r.mu.Unlock()
+
+	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+	err := adapter.Stop(callCtx, handle)
+	cancel()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stopping, taskID)
+	if err != nil {
+		return errors.New("runtime stop failed")
 	}
 	delete(r.handles, taskID)
 	delete(r.handleAdapters, taskID)
+	delete(r.partialStarts, taskID)
 	return nil
 }
 
@@ -122,21 +153,25 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 	}
 
 	r.mu.Lock()
-	handle, hasHandle := r.handles[taskID]
-	var wl domain.Workload
-	if r.bundle != nil {
-		wl = r.bundle.Workloads[task.WorkloadName]
+	if r.launching[taskID] != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: task launch is in progress", store.ErrConflict)
 	}
+	handle, hasHandle := r.handles[taskID]
+	adapter := r.handleAdapters[taskID]
 	r.mu.Unlock()
 
 	cp := scruntime.CheckpointRef{ID: "cp-" + taskID, CreatedAt: r.now()}
-	if hasHandle {
-		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
-			if c, err := adapter.Suspend(ctx, handle); err == nil {
-				cp = c
-			}
-			_ = adapter.Stop(ctx, handle)
+	if hasHandle && adapter != nil {
+		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+		c, err := adapter.Suspend(callCtx, handle)
+		cancel()
+		if err == nil {
+			cp = c
 		}
+		callCtx, cancel = context.WithTimeout(ctx, adapterCallTimeout)
+		_ = adapter.Stop(callCtx, handle)
+		cancel()
 	}
 	if raw, err := json.Marshal(cp); err == nil {
 		_ = r.store.SaveCheckpoint(ctx, taskID, task.WorkloadName, string(raw))
@@ -178,20 +213,18 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) error {
 
 	r.mu.Lock()
 	handle, hasHandle := r.handles[taskID]
-	var wl domain.Workload
-	if r.bundle != nil {
-		wl = r.bundle.Workloads[task.WorkloadName]
-	}
+	adapter := r.handleAdapters[taskID]
 	r.mu.Unlock()
 
 	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, time.Hour); err != nil {
 		return err
 	}
-	if hasHandle {
-		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
-			if err := adapter.Resume(ctx, handle, cp); err != nil {
-				return fmt.Errorf("resume adapter: %w", err)
-			}
+	if hasHandle && adapter != nil {
+		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+		err := adapter.Resume(callCtx, handle, cp)
+		cancel()
+		if err != nil {
+			return errors.New("runtime resume failed")
 		}
 	}
 
@@ -233,7 +266,9 @@ func NewReconciler(opts Options) *Reconciler {
 		now:             nowFn,
 		handles:         make(map[string]scruntime.Handle),
 		handleAdapters:  make(map[string]scruntime.Adapter),
-		launching:       make(map[string]bool),
+		partialStarts:   make(map[string]bool),
+		launching:       make(map[string]*launchReservation),
+		stopping:        make(map[string]bool),
 	}
 }
 
@@ -315,11 +350,21 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 		return domain.Task{}, fmt.Errorf("workflow %q has no steps", workflowName)
 	}
 
+	for _, step := range wf.Spec.Steps {
+		if step.Tier == "" {
+			continue
+		}
+		wl, ok := b.Workloads[step.Workload]
+		if !ok {
+			return domain.Task{}, fmt.Errorf("workflow step %q has no configured workload", step.Name)
+		}
+		if _, _, err := resolveTierRoute(ctx, r.store, wl, step.Tier, step.Provider, step.Model); err != nil {
+			return domain.Task{}, fmt.Errorf("workflow step %q: %w", step.Name, err)
+		}
+	}
+
 	step := wf.Spec.Steps[0]
 	prov, mod := step.Provider, step.Model
-	if step.Tier != "" && prov == "" && mod == "" {
-		prov, mod = contextpack.ResolveTier(ctx, r.store, step.Tier)
-	}
 	payload := map[string]any{
 		"workflow":   workflowName,
 		"step":       step.Name,
@@ -361,7 +406,7 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	_, hasHandle := r.handles[orig.ID]
 	launching := r.launching[orig.ID]
 	r.mu.Unlock()
-	if hasHandle || launching {
+	if hasHandle || launching != nil {
 		return domain.Task{}, fmt.Errorf("%w: runtime cleanup is pending", store.ErrConflict)
 	}
 	payload := make(map[string]any)
@@ -474,9 +519,9 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 	return child, nil
 }
 
-// ReconcileOnce runs one pass of OBSERVE -> UPDATE -> DERIVE/ACT over all active tasks.
+// ReconcileOnce observes tasks and queues bounded launches.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
-	// A second pass must not mistake a launch in progress for a lost runtime.
+	// Only one pass at a time can observe and reserve task slots.
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
 	tasks, err := r.store.ListTasks(ctx)
@@ -485,6 +530,8 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	bundle := r.bundle
+	passErr := r.launchErrors
+	r.launchErrors = nil
 	r.mu.Unlock()
 	activeWorking := 0
 	for _, task := range tasks {
@@ -492,8 +539,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			activeWorking++
 		}
 	}
-	var passErr error
 	for _, task := range tasks {
+		r.mu.Lock()
+		launching := r.launching[task.ID] != nil
+		r.mu.Unlock()
+		if launching {
+			continue
+		}
 		if terminalTaskState(task.State) {
 			passErr = errors.Join(passErr, r.reconcileTerminal(context.WithoutCancel(ctx), task))
 			continue
@@ -519,12 +571,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			if r.maxConcurrent > 0 && activeWorking >= r.maxConcurrent {
 				continue
 			}
-			if err := r.launchTask(ctx, task, wl, adapter); err != nil {
-				if !errors.Is(err, store.ErrConflict) {
-					passErr = errors.Join(passErr, err)
-				}
-			} else {
+			claimed, err := r.claimLaunch(ctx, task.ID)
+			if err != nil && !errors.Is(err, store.ErrConflict) {
+				passErr = errors.Join(passErr, err)
+			}
+			if claimed {
 				activeWorking++
+				go r.launchTask(ctx, task, wl, adapter)
 			}
 			continue
 		}
@@ -596,11 +649,20 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 	r.mu.Lock()
 	handle, hasHandle := r.handles[task.ID]
 	adapter := r.handleAdapters[task.ID]
+	partialStart := r.partialStarts[task.ID]
 	r.mu.Unlock()
+	if partialStart {
+		return r.failTask(ctx, task, "launch_failed", `{}`)
+	}
 	if !hasHandle || adapter == nil {
 		return r.failTask(ctx, task, "runtime_handle_missing", `{}`)
 	}
-	obs, observeErr := adapter.Observe(ctx, handle)
+	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+	obs, observeErr := adapter.Observe(callCtx, handle)
+	if callCtx.Err() != nil {
+		observeErr = callCtx.Err()
+	}
+	cancel()
 	events, err := r.store.ListTaskEvents(ctx, task.ID)
 	if err != nil {
 		return err
@@ -634,7 +696,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 	}
 	switch obs.State {
 	case scruntime.StateCompleted, scruntime.StateFailed:
-		r.persistArtifacts(ctx, task.ID, adapter, handle)
+		if err := r.persistArtifacts(ctx, task.ID, adapter, handle); err != nil {
+			return errors.Join(err, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
+		}
 		target := domain.TaskStateCompleted
 		if obs.State == scruntime.StateFailed {
 			target = domain.TaskStateFailed
@@ -683,64 +747,55 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 	return nil
 }
 
-func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
-	// Claim durably before issuing any runtime side effects.
+func (r *Reconciler) claimLaunch(ctx context.Context, taskID string) (bool, error) {
 	r.mu.Lock()
-	err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
-	if err == nil {
-		r.launching[task.ID] = true
+	defer r.mu.Unlock()
+	if len(r.launching) >= maxParallelLaunches {
+		return false, nil
 	}
-	r.mu.Unlock()
-	if err != nil {
-		return err
+	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`); err != nil {
+		return false, err
 	}
+	r.launching[taskID] = &launchReservation{done: make(chan struct{})}
+	return true, nil
+}
+
+func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
+	task.State = domain.TaskStateWorking
+	startFailed := false
 	defer func() {
 		if launchErr != nil {
-			task.State = domain.TaskStateWorking
-			cleanupErr := r.failTask(context.WithoutCancel(ctx), task, "launch_failed", `{}`)
-			if !errors.Is(cleanupErr, store.ErrConflict) {
+			cleanupCtx := context.WithoutCancel(ctx)
+			reason := "launch_failed"
+			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
+				reason = "author_checkout_unavailable"
+			}
+			cleanupErr := r.failTask(cleanupCtx, task, reason, `{}`)
+			if startFailed && cleanupErr != nil {
+				launchErr = errors.Join(launchErr, r.store.RevokeTaskLeases(cleanupCtx, task.ID))
+			}
+			if cleanupErr != nil && !errors.Is(cleanupErr, store.ErrConflict) {
 				launchErr = errors.Join(launchErr, cleanupErr)
 			}
 		}
 		r.mu.Lock()
-		delete(r.launching, task.ID)
+		if reservation := r.launching[task.ID]; reservation != nil {
+			if launchErr != nil && launchErr != store.ErrConflict {
+				r.launchErrors = errors.Join(r.launchErrors, launchErr)
+			}
+			delete(r.launching, task.ID)
+			close(reservation.done)
+		}
 		r.mu.Unlock()
 	}()
-	token, err := model.MintTaskToken(ctx, r.store, task.ID, wl.Metadata.Name, time.Hour)
+
+	inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
 	if err != nil {
 		return err
 	}
-
-	inputJSON := task.InputJSON
-	// Assemble bounded context-packet.md and resolve optional model tier for non-deterministic workloads.
-	if wl.Spec.Class != domain.ClassDeterministicController {
-		pkt := contextpack.Assemble(ctx, r.store, task, wl)
-		payload := make(map[string]any)
-		if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil || payload == nil {
-			payload = map[string]any{"prompt": inputJSON}
-		}
-		if tier, _ := payload["tier"].(string); tier != "" {
-			prov, _ := payload["provider"].(string)
-			mod, _ := payload["model"].(string)
-			if prov == "" && mod == "" {
-				if tp, tm := contextpack.ResolveTier(ctx, r.store, tier); tp != "" || tm != "" {
-					if tp != "" {
-						payload["provider"] = tp
-					}
-					if tm != "" {
-						payload["model"] = tm
-					}
-				}
-			}
-		}
-		if pkt.Markdown != "" {
-			payload["context_packet"] = pkt.Markdown
-		}
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-		inputJSON = string(raw)
+	token, err := r.issueLaunchToken(ctx, task.ID)
+	if err != nil {
+		return err
 	}
 
 	spec := scruntime.LaunchSpec{
@@ -756,18 +811,38 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		spec.ModelGateToken = token
 	}
 
-	handle, err := adapter.Start(ctx, spec)
+	callCtx, cancel := context.WithTimeout(ctx, adapterStartTimeout)
+	handle, startErr := adapter.Start(callCtx, spec)
+	if callCtx.Err() != nil {
+		startErr = callCtx.Err()
+	}
+	cancel()
+	startFailed = startErr != nil
+
+	if !startFailed || handle != (scruntime.Handle{}) {
+		r.mu.Lock()
+		r.handles[task.ID] = handle
+		r.handleAdapters[task.ID] = adapter
+		if startFailed {
+			r.partialStarts[task.ID] = true
+		}
+		r.mu.Unlock()
+	}
+
+	current, err := r.store.GetTask(context.WithoutCancel(ctx), task.ID)
 	if err != nil {
 		return err
 	}
-
-	r.mu.Lock()
-	r.handles[task.ID] = handle
-	r.handleAdapters[task.ID] = adapter
-	current, err := r.store.GetTask(ctx, task.ID)
-	r.mu.Unlock()
-	if err != nil {
-		return err
+	if startFailed {
+		// Adapter errors can contain launch input or bearer tokens.
+		startFailure := errors.New("runtime start failed")
+		if terminalTaskState(current.State) {
+			return errors.Join(startFailure, r.reconcileTerminal(context.WithoutCancel(ctx), current))
+		}
+		if current.State == domain.TaskStateInputRequired {
+			task.State = current.State
+		}
+		return startFailure
 	}
 	// The gate may already have requested approval while Start was returning.
 	if terminalTaskState(current.State) {
@@ -785,6 +860,26 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	return nil
 }
 
+func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string) (string, error) {
+	r.mu.Lock()
+	reservation := r.launching[taskID]
+	r.mu.Unlock()
+	if reservation == nil {
+		return "", store.ErrConflict
+	}
+	// Cancellation transitions the task first and then revokes any lease minted here.
+	reservation.tokenMu.Lock()
+	defer reservation.tokenMu.Unlock()
+	current, err := r.store.GetTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	if current.State != domain.TaskStateWorking {
+		return "", store.ErrConflict
+	}
+	return model.MintTaskToken(ctx, r.store, current.ID, current.WorkloadName, time.Hour)
+}
+
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {
 	// Reload completedTask so ArtifactsJSON populated by persistArtifacts is visible.
 	fresh, err := r.store.GetTask(ctx, completedTask.ID)
@@ -796,6 +891,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		Workflow        string `json:"workflow"`
 		StepIndex       int    `json:"step_index"`
 		Input           string `json:"input"`
+		Prompt          string `json:"prompt"`
 		Role            string `json:"role"`
 		MaxRetries      int    `json:"max_retries"`
 		RetryCount      int    `json:"retry_count"`
@@ -812,17 +908,23 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		return nil
 	}
 	wf, ok := b.Workflows[meta.Workflow]
-	if !ok {
+	if !ok || meta.StepIndex < 0 || meta.StepIndex >= len(wf.Spec.Steps) {
+		return nil
+	}
+	step := wf.Spec.Steps[meta.StepIndex]
+	if step.Workload != completedTask.WorkloadName {
 		return nil
 	}
 
-	// If a verifier step rejected the author's output, trigger opt-in remediation or halt advancement.
-	if meta.Role == "verifier" {
-		msgs, err := r.store.ListTaskMessages(ctx, completedTask.ID)
-		if err != nil {
-			return err
+	if step.Role == "verifier" || meta.Role == "verifier" {
+		verdict, findings := finalVerifierVerdict(completedTask.ArtifactsJSON, meta.Prompt)
+		if verdict == "" {
+			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
+				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
+			})
+			return nil
 		}
-		verdict, findings := contextpack.ParseVerdict(completedTask.ArtifactsJSON, msgs)
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
 				TaskID:    completedTask.ID,
@@ -842,9 +944,6 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 			if meta.MaxRetries > 0 && meta.RetryCount < meta.MaxRetries && meta.AuthorStepIndex >= 0 && meta.AuthorStepIndex < len(wf.Spec.Steps) {
 				authorStep := wf.Spec.Steps[meta.AuthorStepIndex]
 				prov, mod := authorStep.Provider, authorStep.Model
-				if authorStep.Tier != "" && prov == "" && mod == "" {
-					prov, mod = contextpack.ResolveTier(ctx, r.store, authorStep.Tier)
-				}
 				handoff := fmt.Sprintf("# Verifier Feedback (CHANGES_REQUESTED)\n\nVerifier task: `%s`\n\n%s\n", completedTask.ID, findings)
 				payload := map[string]any{
 					"workflow":        meta.Workflow,
@@ -889,12 +988,10 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	}
 	nextStep := wf.Spec.Steps[nextIdx]
 	prov, mod := nextStep.Provider, nextStep.Model
-	if nextStep.Tier != "" && prov == "" && mod == "" {
-		prov, mod = contextpack.ResolveTier(ctx, r.store, nextStep.Tier)
-	}
 	prompt := nextStep.Prompt
 	if nextStep.Role == "verifier" {
-		prompt = contextpack.BuildVerifierPrompt(completedTask, nextStep.Prompt)
+		prompt = contextpack.BuildVerifierPrompt(completedTask, nextStep.Prompt) +
+			"Write your findings before the final verdict line.\n"
 	}
 	payload := map[string]any{
 		"workflow":   meta.Workflow,
@@ -1002,14 +1099,36 @@ func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task,
 	return nil
 }
 
-func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) {
-	arts, err := adapter.CollectArtifacts(ctx, handle)
-	if err != nil || len(arts) == 0 {
-		return
+func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) error {
+	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+	arts, err := adapter.CollectArtifacts(callCtx, handle)
+	if callCtx.Err() != nil {
+		err = callCtx.Err()
 	}
-	if raw, err := json.Marshal(arts); err == nil {
-		_ = r.store.UpdateTaskArtifacts(ctx, taskID, string(raw))
+	cancel()
+	if err != nil {
+		return errors.New("runtime artifact collection failed")
 	}
+	if len(arts) == 0 {
+		return nil
+	}
+	clean := make([]scruntime.Artifact, len(arts))
+	for i, artifact := range arts {
+		if artifact.Name == "final-message" && len(artifact.Text) > maxFinalMessage {
+			artifact.Text = ""
+		}
+		clean[i] = scruntime.Artifact{
+			Name:        redact.String(artifact.Name),
+			ContentType: redact.String(artifact.ContentType),
+			URI:         redact.String(artifact.URI),
+			Text:        redact.String(artifact.Text),
+		}
+	}
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return err
+	}
+	return r.store.UpdateTaskArtifacts(ctx, taskID, string(raw))
 }
 
 func newTaskID() (string, error) {

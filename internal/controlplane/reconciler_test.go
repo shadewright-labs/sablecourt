@@ -124,9 +124,7 @@ func TestReconcilerLifecycleAndHubSpokeDelegation(t *testing.T) {
 	}
 
 	// Pass 1: dispatch submitted tasks.
-	if err := rec.ReconcileOnce(ctx); err != nil {
-		t.Fatalf("ReconcileOnce 1: %v", err)
-	}
+	reconcile(t, rec)
 	if ctrlInner.lastSpec.ModelGateToken != "" || ctrlInner.lastSpec.ModelGateURL != "" {
 		t.Fatalf("deterministic controller received Model Gate credentials: %+v", ctrlInner.lastSpec)
 	}
@@ -147,9 +145,7 @@ func TestReconcilerLifecycleAndHubSpokeDelegation(t *testing.T) {
 	}
 
 	// Pass 2: observe working controller -> completed.
-	if err := rec.ReconcileOnce(ctx); err != nil {
-		t.Fatalf("ReconcileOnce 2: %v", err)
-	}
+	reconcile(t, rec)
 	gotCtrl, _ := st.GetTask(ctx, ctrlTask.ID)
 	if gotCtrl.State != domain.TaskStateCompleted {
 		t.Fatalf("expected controller completed, got %q", gotCtrl.State)
