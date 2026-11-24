@@ -34,12 +34,12 @@ type workflowStepRecord struct {
 	Reason       string `json:",omitempty"`
 }
 
-func (r *Reconciler) recordWorkflowStep(ctx context.Context, id string, step workflowStepRecord) error {
+func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
 	raw, err := json.Marshal(step)
 	if err != nil {
-		return err
+		return domain.MemoryEntry{}, err
 	}
-	return r.store.PutMemory(ctx, domain.MemoryEntry{Namespace: workflowStepsNamespace, Key: id, Value: string(raw), Author: "controlplane", UpdatedAt: r.now()})
+	return domain.MemoryEntry{Namespace: workflowStepsNamespace, Key: id, Value: string(raw), Author: "controlplane", UpdatedAt: r.now()}, nil
 }
 
 func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStepRecord, error) {
@@ -84,11 +84,10 @@ type pinnedStarter interface {
 
 func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl domain.Workload) (string, bool, error) {
 	var meta struct {
-		Workflow       string `json:"workflow"`
-		Role           string `json:"role"`
-		StepIndex      int    `json:"step_index"`
-		RetryCount     int    `json:"retry_count"`
-		FailureHandoff string `json:"failure_handoff"`
+		Workflow   string `json:"workflow"`
+		Role       string `json:"role"`
+		StepIndex  int    `json:"step_index"`
+		RetryCount int    `json:"retry_count"`
 	}
 	_ = json.Unmarshal([]byte(task.InputJSON), &meta)
 	if meta.Workflow != "" {
@@ -105,7 +104,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 			}
 		}
 		remediation := strings.HasPrefix(task.IdempotencyKey, "wf:"+meta.Workflow+":remediate:") ||
-			((role == "author" || wl.Spec.Class == domain.ClassCodingAgent) && meta.RetryCount > 0 && meta.FailureHandoff != "")
+			((role == "author" || wl.Spec.Class == domain.ClassCodingAgent) && meta.RetryCount > 0)
 		if role == "verifier" || remediation {
 			member, err := r.workflowStep(ctx, task.ID)
 			if err != nil {

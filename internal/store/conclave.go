@@ -460,6 +460,12 @@ type TaskInserter interface {
 // The persisted task is the run reservation. Failed inserts consume no slots.
 func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(TaskInserter) error) error {
 	turn, ok := ctx.Value(conclaveTurnKey{}).(*conclaveTurn)
+	if entry, hasMemory := ctx.Value(taskMemoryKey{}).(domain.MemoryEntry); hasMemory {
+		if ok || entry.Key != task.ID {
+			return errors.New("invalid task registration")
+		}
+		return insertRegisteredTask(ctx, db, entry, insert)
+	}
 	if !ok {
 		return insert(db)
 	}

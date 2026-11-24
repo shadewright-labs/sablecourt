@@ -321,12 +321,13 @@ func TestWorkflowRefusesUnpinnedAuthorCheckout(t *testing.T) {
 					{Name: "review", Workload: "worker", Role: "verifier"},
 				}}},
 			}
-			task, err := r.SubmitTask(ctx, "worker", tc.key, tc.input)
-			if err != nil {
+			// A task persisted before workflow keys were reserved still needs a pinned checkout.
+			task := domain.Task{ID: "unpinned", WorkloadName: "worker", IdempotencyKey: tc.key, InputJSON: tc.input, State: domain.TaskStateSubmitted}
+			if err := st.CreateTask(ctx, task); err != nil {
 				t.Fatal(err)
 			}
-			if err := launchForTest(ctx, r, task, wl, a); err == nil {
-				t.Error("launch accepted a missing author checkout")
+			if err := launchForTest(ctx, r, task, wl, a); !errors.Is(err, errAuthorCheckoutUnavailable) {
+				t.Errorf("launch with missing author checkout: %v", err)
 			}
 			requireState(t, st, task.ID, domain.TaskStateFailed)
 			if a.starts != 0 {
@@ -577,7 +578,10 @@ func TestLeaseAtMinute61(t *testing.T) {
 				a.at = now
 				switch mode {
 				case "stale":
-					a.at = lease.CreatedAt.Add(-time.Hour)
+					if m < 10 {
+						continue
+					}
+					a.at = lease.CreatedAt.Add(5 * time.Minute)
 				case "future":
 					a.at = now.Add(time.Hour)
 				case "expired":
@@ -636,6 +640,96 @@ func TestFailedResumeRevokesLease(t *testing.T) {
 		if _, err := st.GetActiveLeaseByTokenHash(ctx, l.TokenSHA256, r.now()); !errors.Is(err, store.ErrNotFound) {
 			t.Error("failed resume left an active token")
 		}
+	}
+}
+
+type blockedResume struct {
+	*controlledAdapter
+	entered, release chan struct{}
+}
+
+func (a *blockedResume) Resume(ctx context.Context, _ scruntime.Handle, _ scruntime.CheckpointRef) error {
+	close(a.entered)
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.live = true
+	return nil
+}
+
+type resumeWriteFailure struct{ store.Store }
+
+func (s resumeWriteFailure) UpdateTaskState(ctx context.Context, id string, from, to domain.TaskState, reason, facts string) error {
+	if reason == "operator_resumed" {
+		return errors.New("resume write failed")
+	}
+	return s.Store.UpdateTaskState(ctx, id, from, to, reason, facts)
+}
+
+func TestResumeCleanup(t *testing.T) {
+	for _, mode := range []string{"cancel", "write_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			r, st, base, task := regressionFixture(t)
+			a := &blockedResume{base, make(chan struct{}), make(chan struct{})}
+			r.adapters[r.bundle.Workloads["worker"].Spec.Class] = a
+			reconcile(t, r)
+			if err := r.SuspendTask(ctx, task.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			leases := &recordingLeases{Store: st}
+			r.store = leases
+			if mode == "write_failure" {
+				r.store = resumeWriteFailure{leases}
+			}
+			resumed := make(chan error, 1)
+			go func() { resumed <- r.ResumeTask(ctx, task.ID) }()
+			select {
+			case <-a.entered:
+			case err := <-resumed:
+				t.Fatalf("resume returned before calling the adapter: %v", err)
+			}
+			hash := leases.leases[0].TokenSHA256
+			wantState := domain.TaskStateSuspended
+			var cancelled chan error
+			if mode == "cancel" {
+				wantState = domain.TaskStateCancelled
+				cancelled = make(chan error, 1)
+				go func() { cancelled <- r.CancelTask(ctx, task.ID, "") }()
+				deadline := time.Now().Add(time.Second)
+				for {
+					_, err := st.GetActiveLeaseByTokenHash(ctx, hash, r.now())
+					if errors.Is(err, store.ErrNotFound) {
+						break
+					}
+					if err != nil || time.Now().After(deadline) {
+						t.Errorf("resume lease still active during cancellation: %v", err)
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			close(a.release)
+			if err := <-resumed; err == nil {
+				t.Fatal("resume unexpectedly succeeded")
+			}
+			if cancelled != nil {
+				if err := <-cancelled; err != nil {
+					t.Fatal(err)
+				}
+			}
+			requireState(t, st, task.ID, wantState)
+			if a.live {
+				t.Error("runtime still live after failed resume")
+			}
+			if _, err := st.GetActiveLeaseByTokenHash(ctx, hash, r.now()); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("resume lease after cleanup: %v", err)
+			}
+		})
 	}
 }
 
@@ -723,6 +817,60 @@ func TestWorkflowRequiresMembership(t *testing.T) {
 			tasks, err := st.ListTasks(ctx)
 			if err != nil || len(tasks) != 2 {
 				t.Fatalf("unregistered step dispatched a successor: %d tasks, %v", len(tasks), err)
+			}
+		})
+	}
+}
+
+func TestWorkflowKeyReservation(t *testing.T) {
+	for _, submit := range []string{"direct", "child"} {
+		t.Run(submit, func(t *testing.T) {
+			ctx := t.Context()
+			r, st, _, parent := regressionFixture(t)
+			key := "wf:flow:" + parent.ID + ":step:1"
+			var err error
+			if submit == "child" {
+				_, err = r.ProposeChildTask(ctx, parent.ID, "worker", key, "{}", "{}")
+			} else {
+				_, err = r.SubmitTask(ctx, "worker", key, "{}")
+			}
+			if err == nil {
+				t.Error("accepted reserved workflow key")
+			}
+			if _, err := st.GetTaskByIdempotencyKey(ctx, key); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("reserved key lookup: %v", err)
+			}
+		})
+	}
+}
+
+type failedTaskCreate struct{ store.Store }
+
+func (failedTaskCreate) CreateTask(context.Context, domain.Task) error {
+	return errors.New("task insert failed")
+}
+
+func TestWorkflowStepCreateFailure(t *testing.T) {
+	for _, mode := range []string{"conflict", "write_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			r, st, _, parent := regressionFixture(t)
+			key := "wf:flow:" + parent.ID + ":step:1"
+			if mode == "conflict" {
+				err := st.CreateTask(ctx, domain.Task{ID: "legacy", IdempotencyKey: key, WorkloadName: "worker", State: domain.TaskStateSubmitted})
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				r.store = failedTaskCreate{st}
+			}
+			step := workflowStepRecord{RunID: parent.ID, Workflow: "flow", Index: 1}
+			if _, err := r.submitTask(ctx, "worker", key, "{}", parent.ID, &step); err == nil {
+				t.Fatal("expected create failure")
+			}
+			entries, err := st.SearchMemory(ctx, workflowStepsNamespace, "", 10)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("step registrations after create failure = %v, err = %v", entries, err)
 			}
 		})
 	}
@@ -846,29 +994,45 @@ func TestExitWriteBeforeRemoval(t *testing.T) {
 }
 
 func TestAuthorRetryUsesCommit(t *testing.T) {
-	ctx := context.Background()
-	r, _, _, unused := regressionFixture(t)
-	if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
-		t.Fatal(err)
-	}
-	wl := r.bundle.Workloads["worker"]
-	wl.Spec.Class = domain.ClassCodingAgent
-	wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
-	r.bundle.Workloads["worker"] = wl
-	r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Name: "edit", Workload: "worker", MaxRetries: 1}}}}}
-	commit := strings.Repeat("a", 40)
-	a := &pinnedAdapter{}
-	a.nextState = scruntime.StateFailed
-	a.artifacts = []scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: commit}}
-	r.adapters[wl.Spec.Class] = a
-	if _, err := r.StartWorkflow(ctx, "flow", "edit"); err != nil {
-		t.Fatal(err)
-	}
-	reconcile(t, r)
-	reconcile(t, r)
-	reconcile(t, r)
-	if a.pin != commit || a.readOnly {
-		t.Fatalf("retry checkout = %q, read-only = %t", a.pin, a.readOnly)
+	for _, tc := range []struct {
+		name       string
+		maxRetries int
+	}{
+		{"automatic", 1},
+		{"without_handoff", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, _, _, unused := regressionFixture(t)
+			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = domain.ClassCodingAgent
+			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
+			r.bundle.Workloads["worker"] = wl
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Name: "edit", Workload: "worker", MaxRetries: tc.maxRetries}}}}}
+			commit := strings.Repeat("a", 40)
+			a := &pinnedAdapter{}
+			a.nextState = scruntime.StateFailed
+			a.artifacts = []scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: commit}}
+			r.adapters[wl.Spec.Class] = a
+			root, err := r.StartWorkflow(ctx, "flow", "edit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconcile(t, r)
+			reconcile(t, r)
+			if tc.maxRetries == 0 {
+				if _, err := r.RetryTaskWithHandoff(ctx, root.ID, false, "runtime_failed"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reconcile(t, r)
+			if a.pin != commit || a.readOnly {
+				t.Fatalf("retry checkout = %q, read-only = %t", a.pin, a.readOnly)
+			}
+		})
 	}
 }
 
