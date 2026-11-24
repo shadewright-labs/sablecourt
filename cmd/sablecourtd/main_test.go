@@ -69,7 +69,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	}
 
 	attachHub := attach.NewHub()
-	h := newHandler(st, secret.NewMemoryStore(nil), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), conclaveBroker, attachHub, nil, dash)
+	h := newHandler(st, defaultIntegrationSecrets(), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), conclaveBroker, attachHub, nil, dash)
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
@@ -135,8 +135,8 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	}
 
 	// 8. Conclave API open + Decree + Web UI /conclaves
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/conclaves", strings.NewReader(`{"template":"feature-conclave","title":"Smoke conclave","decree":"Begin triage"}`)))
+	rec = doBearerPOST(h, "/api/v1/conclaves", testOperatorToken,
+		map[string]string{"template": "feature-conclave", "title": "Smoke conclave", "decree": "Begin triage"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("POST /api/v1/conclaves expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
