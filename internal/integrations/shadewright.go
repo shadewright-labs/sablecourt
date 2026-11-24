@@ -460,8 +460,12 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 	if incidentID != "" && shadewrightConclaveID(incidentID) != conclaveID {
 		return errorResponse(http.StatusBadRequest, "incidentId does not match conclaveId")
 	}
-	if err := requireActiveConclave(sess); err != nil {
-		return conclaveWriteError(err)
+	switch sess.State {
+	case domain.ConclaveStateActive:
+	case domain.ConclaveStateInputRequired:
+		return conclaveWriteError(conclave.ErrConclavePaused)
+	default:
+		return conclaveWriteError(conclave.ErrConclaveClosed)
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -521,20 +525,18 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 			return internalErrorResponse(err)
 		}
 	} else {
-		msg, err = h.postVerification(ctx, sess, msgText, func() error {
-			if !hasRelic {
-				var putErr error
-				relic, putErr = h.broker.PutRelic(ctx, conclaveID, ShadewrightRole, relicName, "application/json", string(payload))
-				return putErr
-			}
-			current, err := h.store.GetConclave(ctx, conclaveID)
-			if err != nil {
-				return err
-			}
-			return requireActiveConclave(current)
-		})
+		var newRelic *domain.ConclaveRelic
+		if !hasRelic {
+			newRelic = &domain.ConclaveRelic{Name: relicName, ContentType: "application/json", Body: string(payload)}
+		}
+		broker := conclave.NewBroker(conclave.Options{Store: h.store, GetBundle: h.getBundle, Now: h.now})
+		var writtenRelic domain.ConclaveRelic
+		msg, writtenRelic, err = broker.PostIntegrationReport(ctx, sess, ShadewrightRole, msgText, newRelic)
 		if err != nil {
 			return conclaveWriteError(err)
+		}
+		if newRelic != nil {
+			relic = writtenRelic
 		}
 	}
 	if !audited {

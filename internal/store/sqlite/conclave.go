@@ -121,6 +121,9 @@ func (s *SQLiteStore) ListConclaveMessages(ctx context.Context, conclaveID strin
 }
 
 func (s *SQLiteStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error {
+	if handled, err := store.PutGuardedConclaveReportRelic(ctx, s.db, relic); handled {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO conclave_relics (conclave_id, name, author_role, content_type, body, sha256, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)

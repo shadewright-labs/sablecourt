@@ -14,7 +14,7 @@ import (
 
 var (
 	ErrConclaveClosed   = errors.New("conclave is closed")
-	ErrConclavePaused   = errors.New("conclave is paused by a ward")
+	ErrConclavePaused   = errors.New("conclave paused by a ward")
 	ErrWardTripped      = errors.New("conclave ward tripped")
 	ErrConclaveRunLimit = errors.New("conclave run limit reached")
 )
@@ -38,15 +38,15 @@ type ConclaveLimits struct {
 func LimitsForConclave(tpl domain.Conclave, hasTemplate bool, budgets map[string]domain.Budget, now func() time.Time) ConclaveLimits {
 	wards := tpl.Spec.Wards
 	seats := len(tpl.Spec.Vassals)
-	if !hasTemplate {
+	if !hasTemplate || seats == 0 {
 		seats = 3
 	}
 	limits := ConclaveLimits{MaxMessages: wards.MaxMessages, MaxPingPong: wards.MaxPingPong, MaxRuns: wards.MaxRuns, Now: now}
 	if limits.MaxMessages <= 0 {
-		limits.MaxMessages = 2 * max(1, seats)
+		limits.MaxMessages = 2 * seats
 	}
 	if limits.MaxPingPong <= 0 {
-		limits.MaxPingPong = 2 * max(1, seats)
+		limits.MaxPingPong = 2 * seats
 	}
 	if limits.MaxRuns <= 0 {
 		limits.MaxRuns = domain.ConclaveRunCeiling
@@ -109,17 +109,64 @@ func TaskConclaveAssignment(task domain.Task) (ConclaveAssignment, bool) {
 
 type conclavePostKey struct{}
 type conclavePost struct {
-	limits  ConclaveLimits
-	resume  bool
-	wake    bool
-	applied bool
-	reason  string
-	retryAt time.Time
+	limits       ConclaveLimits
+	resume       bool
+	wake         bool
+	report       bool
+	relic        *domain.ConclaveRelic
+	store        Store
+	budgetReason string
+	applied      bool
+	reason       string
+	retryAt      time.Time
 }
 
 // AppendConclavePost carries the guard through Store decorators to the SQL backend.
 func AppendConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, limits ConclaveLimits, resume, wake bool) (int64, string, time.Time, error) {
 	post := &conclavePost{limits: limits, resume: resume, wake: wake}
+	return runConclavePost(ctx, st, msg, post)
+}
+
+// AppendConclaveReport checks the Wards before recording a verification report and its relic.
+func AppendConclaveReport(ctx context.Context, st Store, msg domain.ConclaveMessage, limits ConclaveLimits, relic *domain.ConclaveRelic) (int64, string, error) {
+	if relic != nil && (relic.ConclaveID != msg.ConclaveID || relic.AuthorRole != msg.FromRole) {
+		return 0, "", errors.New("conclave report and relic must have the same room and author")
+	}
+	post := &conclavePost{limits: limits, report: true, relic: relic, store: st}
+	if limits.Budget != nil {
+		totals, err := conclaveReportBudgetTotals(ctx, st, msg.ConclaveID)
+		if err != nil {
+			return 0, "", err
+		}
+		post.budgetReason = conclaveBudgetReason(totals, *limits.Budget)
+	}
+	id, reason, _, err := runConclavePost(ctx, st, msg, post)
+	return id, reason, err
+}
+
+func conclaveReportBudgetTotals(ctx context.Context, st Store, id string) (domain.BudgetTotals, error) {
+	tasks, err := st.ListTasks(ctx)
+	if err != nil {
+		return domain.BudgetTotals{}, err
+	}
+	var sum domain.BudgetTotals
+	for _, task := range tasks {
+		assignment, ok := TaskConclaveAssignment(task)
+		if !ok || assignment.ConclaveID != id {
+			continue
+		}
+		totals, err := st.TaskBudgetTotals(ctx, task.ID)
+		if err != nil {
+			return domain.BudgetTotals{}, err
+		}
+		sum.InputTokens += totals.InputTokens
+		sum.OutputTokens += totals.OutputTokens
+		sum.CostMicroUSD += totals.CostMicroUSD
+	}
+	return sum, nil
+}
+
+func runConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, post *conclavePost) (int64, string, time.Time, error) {
 	id, err := st.AppendConclaveMessage(context.WithValue(ctx, conclavePostKey{}, post), msg)
 	if err == nil && !post.applied {
 		return 0, "", time.Time{}, errors.New("conclave store did not apply the message guard")
@@ -163,6 +210,10 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 	}
 	if paused && !(operator && post.resume && room.WardReason != conclaveDeadline ||
 		admitted && (room.WardReason == ConclaveMaxRunsWard || room.WardReason == conclaveDeadline)) {
+		// A post refused at the message ceiling also carries the persisted Ward reason.
+		if strings.HasPrefix(room.WardReason, "max_messages_reached(") {
+			return 0, fmt.Errorf("%w: %w: %s", ErrConclavePaused, ErrWardTripped, room.WardReason)
+		}
 		return 0, ErrConclavePaused
 	}
 
@@ -212,12 +263,34 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 		}
 		refusal = true
 	}
+	if post.report && !refusal {
+		reason = post.budgetReason
+		if reason == "" {
+			// Usage can grow between the Store evidence reads and this transaction.
+			reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
+			if err != nil {
+				return 0, err
+			}
+		}
+		if reason == "" {
+			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, count, limits)
+			if err != nil {
+				return 0, err
+			}
+		}
+		refusal = reason != ""
+	}
 	if !refusal {
+		if post.relic != nil {
+			if err := putConclaveReportRelic(ctx, db, tx, post.store, *post.relic); err != nil {
+				return 0, err
+			}
+		}
 		id, err = insertConclaveMessage(ctx, tx, msg)
 		if err != nil {
 			return 0, err
 		}
-		if reason == "" {
+		if reason == "" && !post.report {
 			reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
 			if err != nil {
 				return 0, err
@@ -269,6 +342,60 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 		return 0, fmt.Errorf("%w: %s", ErrWardTripped, reason)
 	}
 	return id, nil
+}
+
+type conclaveReportRelicKey struct{}
+
+type conclaveReportRelic struct {
+	db      *sql.DB
+	tx      *sql.Tx
+	relic   domain.ConclaveRelic
+	applied bool
+}
+
+func putConclaveReportRelic(ctx context.Context, db *sql.DB, tx *sql.Tx, st Store, relic domain.ConclaveRelic) error {
+	write := &conclaveReportRelic{db: db, tx: tx, relic: relic}
+	err := st.PutConclaveRelic(context.WithValue(ctx, conclaveReportRelicKey{}, write), relic)
+	if err == nil && !write.applied {
+		return errors.New("conclave store did not apply the report relic guard")
+	}
+	return err
+}
+
+// PutGuardedConclaveReportRelic writes the relic in the guarded report transaction.
+func PutGuardedConclaveReportRelic(ctx context.Context, db *sql.DB, relic domain.ConclaveRelic) (bool, error) {
+	write, ok := ctx.Value(conclaveReportRelicKey{}).(*conclaveReportRelic)
+	if !ok {
+		return false, nil
+	}
+	if write.db != db || write.relic != relic {
+		return true, errors.New("conclave report relic does not match the guarded write")
+	}
+	res, err := write.tx.ExecContext(ctx, `
+		INSERT INTO conclave_relics (conclave_id, name, author_role, content_type, body, sha256, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (conclave_id, name) DO NOTHING
+	`, relic.ConclaveID, relic.Name, relic.AuthorRole, relic.ContentType, relic.Body, relic.SHA256, relic.CreatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return true, err
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return true, err
+	}
+	if inserted == 0 {
+		var saved domain.ConclaveRelic
+		if err := write.tx.QueryRowContext(ctx, `
+			SELECT author_role, content_type, body, sha256 FROM conclave_relics WHERE conclave_id = $1 AND name = $2
+		`, relic.ConclaveID, relic.Name).Scan(&saved.AuthorRole, &saved.ContentType, &saved.Body, &saved.SHA256); err != nil {
+			return true, err
+		}
+		if saved.AuthorRole != relic.AuthorRole || saved.ContentType != relic.ContentType || saved.Body != relic.Body || saved.SHA256 != relic.SHA256 {
+			return true, ErrConflict
+		}
+	}
+	write.applied = true
+	return true, nil
 }
 
 func admittedConclaveReply(ctx context.Context, tx *sql.Tx, msg domain.ConclaveMessage) (bool, error) {
@@ -615,15 +742,19 @@ func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, id string, budget *doma
 	if err != nil {
 		return "", err
 	}
+	return conclaveBudgetReason(totals, *budget), nil
+}
+
+func conclaveBudgetReason(totals domain.BudgetTotals, budget domain.PerTaskBudget) string {
 	cost := float64(totals.CostMicroUSD) / 1_000_000
 	switch {
 	case budget.MaxCostUSD > 0 && cost >= budget.MaxCostUSD:
-		return fmt.Sprintf("budget_exceeded($%.4f >= $%.2f)", cost, budget.MaxCostUSD), nil
+		return fmt.Sprintf("budget_exceeded($%.4f >= $%.2f)", cost, budget.MaxCostUSD)
 	case budget.MaxInputTokens > 0 && totals.InputTokens >= budget.MaxInputTokens:
-		return fmt.Sprintf("input_tokens_exceeded(%d >= %d)", totals.InputTokens, budget.MaxInputTokens), nil
+		return fmt.Sprintf("input_tokens_exceeded(%d >= %d)", totals.InputTokens, budget.MaxInputTokens)
 	case budget.MaxOutputTokens > 0 && totals.OutputTokens >= budget.MaxOutputTokens:
-		return fmt.Sprintf("output_tokens_exceeded(%d >= %d)", totals.OutputTokens, budget.MaxOutputTokens), nil
+		return fmt.Sprintf("output_tokens_exceeded(%d >= %d)", totals.OutputTokens, budget.MaxOutputTokens)
 	default:
-		return "", nil
+		return ""
 	}
 }

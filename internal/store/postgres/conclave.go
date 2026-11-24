@@ -117,6 +117,9 @@ func (s *PostgresStore) ListConclaveMessages(ctx context.Context, conclaveID str
 }
 
 func (s *PostgresStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error {
+	if handled, err := store.PutGuardedConclaveReportRelic(ctx, s.db, relic); handled {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO conclave_relics (conclave_id, name, author_role, content_type, body, sha256, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)

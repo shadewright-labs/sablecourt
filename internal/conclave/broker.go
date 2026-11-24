@@ -144,6 +144,9 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 			return fail(err)
 		}
 	}
+	if b.reconciler == nil {
+		return session, nil
+	}
 	if err := b.activateAlwaysOn(ctx, session, tpl, decree.Body, limits); err != nil {
 		return fail(err)
 	}
@@ -240,9 +243,6 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 }
 
 func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, hasTpl bool, limits store.ConclaveLimits, fromRole, toRole, kind, body, taskID string, wake bool) (domain.ConclaveMessage, bool, error) {
-	if len(body) > maxMessageBody {
-		return domain.ConclaveMessage{}, false, errors.New("message body exceeds 64 KiB")
-	}
 	if session.TemplateName != "" && !hasTpl {
 		return domain.ConclaveMessage{}, false, ErrMessageDenied
 	}
@@ -273,12 +273,9 @@ func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession
 			kind = "proposal"
 		}
 	}
-	body = redact.String(strings.TrimSpace(body))
-	if len(body) > maxMessageBody {
-		return domain.ConclaveMessage{}, false, errors.New("redacted message body exceeds 64 KiB")
-	}
-	if body == "" {
-		return domain.ConclaveMessage{}, false, errors.New("message body is required")
+	body, err := prepareMessageBody(body)
+	if err != nil {
+		return domain.ConclaveMessage{}, false, err
 	}
 	msg := domain.ConclaveMessage{
 		ConclaveID: session.ID, FromRole: fromRole, ToRole: redact.String(toRole),
@@ -296,6 +293,64 @@ func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession
 		msg.CreatedAt = retryAt
 	}
 	return msg, reason != "", nil
+}
+
+func prepareMessageBody(body string) (string, error) {
+	if len(body) > maxMessageBody {
+		return "", errors.New("message body exceeds 64 KiB")
+	}
+	body = redact.String(strings.TrimSpace(body))
+	if len(body) > maxMessageBody {
+		return "", errors.New("redacted message body exceeds 64 KiB")
+	}
+	if body == "" {
+		return "", errors.New("message body is required")
+	}
+	return body, nil
+}
+
+// PostIntegrationReport is for authenticated intake handlers with a fixed integration role.
+func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.ConclaveSession, role, body string, newRelic *domain.ConclaveRelic) (domain.ConclaveMessage, domain.ConclaveRelic, error) {
+	if !strings.HasPrefix(role, "integration:") || !config.ValidVassalRole(role) {
+		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, ErrMessageDenied
+	}
+	bundle := b.bundle()
+	tpl, hasTpl := template(bundle, session.TemplateName)
+	if session.TemplateName != "" && !hasTpl {
+		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, errors.New("verification conclave template unavailable")
+	}
+	limits := b.limits(bundle, tpl, hasTpl)
+	if limits.BudgetMissing {
+		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, errors.New("verification conclave budget unavailable")
+	}
+	body, err := prepareMessageBody(body)
+	if err != nil {
+		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
+	}
+	msg := domain.ConclaveMessage{
+		ConclaveID: session.ID, FromRole: role, ToRole: "operator", Kind: "report",
+		Body: body, CreatedAt: b.now(),
+	}
+	var relic domain.ConclaveRelic
+	if newRelic != nil {
+		relic, err = b.prepareRelic(session.ID, role, newRelic.Name, newRelic.ContentType, newRelic.Body)
+		if err != nil {
+			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
+		}
+		newRelic = &relic
+	}
+	id, reason, err := store.AppendConclaveReport(ctx, b.store, msg, limits, newRelic)
+	if reason != "" && session.WardReason != reason {
+		b.recordWard(ctx, session, "", reason)
+	}
+	if err != nil {
+		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
+	}
+	if newRelic != nil {
+		b.recordRelic(ctx, relic)
+	}
+	msg.ID = id
+	return msg, relic, nil
 }
 
 func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession, taskID, reason string) {
@@ -400,6 +455,18 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 	default:
 		return domain.ConclaveRelic{}, ErrConclaveClosed
 	}
+	relic, err := b.prepareRelic(conclaveID, authorRole, name, contentType, body)
+	if err != nil {
+		return domain.ConclaveRelic{}, err
+	}
+	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
+		return domain.ConclaveRelic{}, err
+	}
+	b.recordRelic(ctx, relic)
+	return relic, nil
+}
+
+func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body string) (domain.ConclaveRelic, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return domain.ConclaveRelic{}, errors.New("relic name is required")
@@ -409,7 +476,7 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 	}
 	redacted := redact.String(body)
 	sum := sha256.Sum256([]byte(redacted))
-	relic := domain.ConclaveRelic{
+	return domain.ConclaveRelic{
 		ConclaveID:  conclaveID,
 		Name:        name,
 		AuthorRole:  strings.TrimSpace(authorRole),
@@ -417,18 +484,17 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 		Body:        redacted,
 		SHA256:      hex.EncodeToString(sum[:]),
 		CreatedAt:   b.now(),
-	}
-	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
-		return domain.ConclaveRelic{}, err
-	}
+	}, nil
+}
+
+func (b *Broker) recordRelic(ctx context.Context, relic domain.ConclaveRelic) {
 	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.relic_put",
 		Outcome:    "stored",
-		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"name":%q,"author":%q,"sha256":%q}`, conclaveID, name, relic.AuthorRole, relic.SHA256[:12]),
+		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"name":%q,"author":%q,"sha256":%q}`, relic.ConclaveID, relic.Name, relic.AuthorRole, relic.SHA256[:12]),
 		CreatedAt:  relic.CreatedAt,
 	})
-	return relic, nil
 }
 
 func (b *Broker) Close(ctx context.Context, conclaveID string, state domain.ConclaveState) error {
