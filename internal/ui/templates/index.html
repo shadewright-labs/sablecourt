@@ -369,6 +369,9 @@
               const data = await res.json();
               input.value = (input.value ? input.value + " " : "") + data.text;
               input.focus();
+            } else {
+              const errData = await res.json().catch(() => ({}));
+              input.placeholder = "STT error: " + (errData.error || res.status);
             }
           };
           rec.start();

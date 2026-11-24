@@ -93,6 +93,9 @@ func (s *Service) resolve(ctx context.Context, explicit, secretKey, envKey, def 
 
 func (s *Service) Status(ctx context.Context) Status {
 	sttURL := s.resolve(ctx, s.sttURL, "voice_stt_url", "SABLECOURT_STT_URL", DefaultSTTURL)
+	if !strings.HasSuffix(sttURL, "/transcriptions") && !strings.HasSuffix(sttURL, "/inference") {
+		sttURL = strings.TrimRight(sttURL, "/") + "/v1/audio/transcriptions"
+	}
 	sttModel := s.resolve(ctx, s.sttModel, "voice_stt_model", "SABLECOURT_STT_MODEL", DefaultSTTModel)
 	ttsURL := s.resolve(ctx, s.ttsURL, "voice_tts_url", "SABLECOURT_TTS_URL", "")
 	ttsModel := s.resolve(ctx, s.ttsModel, "voice_tts_model", "SABLECOURT_TTS_MODEL", DefaultTTSModel)
@@ -126,6 +129,9 @@ func (s *Service) Transcribe(ctx context.Context, audio []byte, filename, langua
 		filename = "audio.webm"
 	}
 	sttURL := s.resolve(ctx, s.sttURL, "voice_stt_url", "SABLECOURT_STT_URL", DefaultSTTURL)
+	if !strings.HasSuffix(sttURL, "/transcriptions") && !strings.HasSuffix(sttURL, "/inference") {
+		sttURL = strings.TrimRight(sttURL, "/") + "/v1/audio/transcriptions"
+	}
 	sttModel := s.resolve(ctx, s.sttModel, "voice_stt_model", "SABLECOURT_STT_MODEL", DefaultSTTModel)
 
 	var body bytes.Buffer
