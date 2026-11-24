@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
@@ -17,7 +18,27 @@ type gitRepo struct {
 	dir          string
 	gitDir       string
 	workTree     string
+	readOnly     bool
 	filterConfig []string
+}
+
+func sourceGit(repo string) (gitRepo, error) {
+	common := filepath.Join(repo, ".git")
+	info, err := os.Lstat(common)
+	if err != nil || !info.IsDir() {
+		return gitRepo{}, errors.New("configured repository must have its own .git directory")
+	}
+	check := func() error {
+		current, err := os.Lstat(common)
+		if err != nil || !os.SameFile(info, current) {
+			return errors.New("configured repository .git directory changed")
+		}
+		if _, err := os.Lstat(filepath.Join(common, "commondir")); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("configured repository has an unexpected or inaccessible commondir")
+		}
+		return nil
+	}
+	return gitRepo{beforeRun: check, dir: repo, gitDir: common, workTree: repo}, nil
 }
 
 func (g gitRepo) run(ctx context.Context, args ...string) (string, error) {
@@ -43,12 +64,21 @@ func (g gitRepo) run(ctx context.Context, args ...string) (string, error) {
 	if g.workTree != "" {
 		flags = append(flags, "--work-tree="+g.workTree)
 	}
+	if g.readOnly {
+		flags = append(flags, "-c", "core.attributesFile=", "-c", "credential.helper=")
+	}
 	flags = append(flags, g.filterConfig...)
 	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)
-	cmd.Env = make([]string, 0)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_") {
-			cmd.Env = append(cmd.Env, entry)
+	if g.readOnly {
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"), "LC_ALL=C", "GIT_ATTR_NOSYSTEM=1",
+			"GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=",
+		}
+	} else {
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, "GIT_") {
+				cmd.Env = append(cmd.Env, entry)
+			}
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
@@ -65,6 +95,26 @@ func (g gitRepo) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w (%s)", args[0], err, message)
 	}
 	return string(out), nil
+}
+
+// ReadOnlyGitPrecheck returns the available status and diff for a source checkout.
+func ReadOnlyGitPrecheck(ctx context.Context, repo string) (status, diff string) {
+	repo, err := resolvedPath(repo)
+	if err != nil {
+		return "", ""
+	}
+	checkout, err := sourceGit(repo)
+	if err != nil {
+		return "", ""
+	}
+	checkout.readOnly = true
+	checkout, err = checkout.withoutFilters(ctx)
+	if err != nil {
+		return "", ""
+	}
+	status, _ = checkout.run(ctx, "status", "--short", "--ignore-submodules=all")
+	diff, _ = checkout.run(ctx, "diff", "--stat", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all")
+	return status, diff
 }
 
 func gitExitCode(err error, code int) bool {

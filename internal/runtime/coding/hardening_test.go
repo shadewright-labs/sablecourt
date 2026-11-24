@@ -112,6 +112,61 @@ func TestGitCallsUseSafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestSourceRegistrationBeforeBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registered bool
+		wantBranch bool
+	}{
+		{name: "configured source", registered: true, wantBranch: true},
+		{name: "different registered source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, spec := codingFixture(t)
+			repo, err := resolvedPath(spec.Workload.Spec.Coding.RepoPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registered := filepath.Join(repo, "other")
+			if tc.registered {
+				registered = repo
+			}
+			trace := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("TEST_GIT_TRACE", trace)
+			t.Setenv("TEST_REGISTERED_SOURCE", registered)
+			interceptGit(t, `
+{ printf '%s\t' "$@"; printf '\n'; } >> "$TEST_GIT_TRACE"
+case " $* " in
+  *' worktree list '*) printf 'worktree %s\000HEAD fixture\000\000' "$TEST_REGISTERED_SOURCE"; exit 0 ;;
+  *' branch '*) exit 23 ;;
+esac`)
+			if _, _, err := a.prepareWorktree(t.Context(), repo, spec.TaskID); err == nil {
+				t.Fatal("expected setup to stop before branch creation")
+			} else if tc.wantBranch && !gitExitCode(err, 23) {
+				t.Errorf("registered source did not reach the branch command: %v", err)
+			}
+			listed, branched := false, false
+			for _, args := range gitCalls(t, trace) {
+				if !slices.Contains(args, "--git-dir="+filepath.Join(repo, ".git")) {
+					t.Errorf("Git call uses an unpinned directory: %q", args)
+				}
+				if slices.Contains(args, "worktree") && slices.Contains(args, "list") {
+					listed = true
+				}
+				if slices.Contains(args, "branch") {
+					branched = true
+					if !listed {
+						t.Error("branch command ran before registration check")
+					}
+				}
+			}
+			if !listed || branched != tc.wantBranch {
+				t.Errorf("registration checked = %t, branch attempted = %t", listed, branched)
+			}
+		})
+	}
+}
+
 func TestCleanupRefusesChangedGitEntry(t *testing.T) {
 	for _, kind := range []string{"symlink", "replacement", "directory", "missing", "different target", "checkout symlink"} {
 		t.Run(kind, func(t *testing.T) {
