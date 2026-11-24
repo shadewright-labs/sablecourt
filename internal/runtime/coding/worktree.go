@@ -2,11 +2,11 @@ package coding
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,22 +18,26 @@ import (
 )
 
 const (
-	sessionMarkerFile  = ".sablecourt-session.json"
-	sessionContextFile = ".sablecourt-context.md"
-	stateSuffix        = ".state.json"
+	sessionMarkerFile   = ".sablecourt-session.json"
+	sessionContextFile  = ".sablecourt-context.md"
+	stateSuffix         = ".state.json"
+	excludeConfigSuffix = ".exclude-config"
 )
 
 type worktreeState struct {
-	TaskID     string
-	Repo       string
-	CommonDir  string
-	GitDir     string
-	GitFile    *gitFileIdentity
-	Branch     string
-	Base       string
-	Tip        string
-	FinishedAt time.Time
-	Artifacts  []scruntime.Artifact
+	beforeGit    func() error
+	TaskID       string
+	Repo         string
+	CommonDir    string
+	GitDir       string
+	GitFile      *gitFileIdentity
+	Registration map[string]fileStamp
+	CleanupError string `json:",omitempty"`
+	Branch       string
+	Base         string
+	Tip          string
+	FinishedAt   time.Time
+	Artifacts    []scruntime.Artifact
 }
 
 func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (string, *worktreeState, error) {
@@ -48,7 +52,7 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 		return "", nil, err
 	}
 	dir = filepath.Join(dir, sanitizeSegment(taskID))
-	for _, path := range []string{dir, dir + stateSuffix, dir + ".log"} {
+	for _, path := range []string{dir, dir + stateSuffix, dir + ".log", dir + excludeConfigSuffix} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			if err == nil {
 				err = os.ErrExist
@@ -84,6 +88,9 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 		return "", nil, err
 	}
 	if err := state.createCheckout(setupCtx, dir); err != nil {
+		return "", nil, errors.Join(err, rollbackWorktree(setupCtx, dir, state))
+	}
+	if err := excludeSessionFiles(setupCtx, dir, state); err != nil {
 		return "", nil, errors.Join(err, rollbackWorktree(setupCtx, dir, state))
 	}
 	if err := writeWorktreeState(dir, state); err != nil {
@@ -123,11 +130,11 @@ func resolvedPath(path string) (string, error) {
 }
 
 func (s *worktreeState) commonGit() gitRepo {
-	return gitRepo{dir: s.CommonDir, gitDir: s.CommonDir}
+	return gitRepo{beforeRun: s.beforeGit, dir: s.CommonDir, gitDir: s.CommonDir}
 }
 
 func (s *worktreeState) checkoutGit(dir string) gitRepo {
-	return gitRepo{dir: s.CommonDir, gitDir: s.GitDir, workTree: dir}
+	return gitRepo{beforeRun: s.beforeGit, dir: s.CommonDir, gitDir: s.GitDir, workTree: dir}
 }
 
 func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) error {
@@ -140,73 +147,115 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 	if out != "" {
 		return errors.New("repository tracks a reserved session file")
 	}
-	oldExclude, err := checkout.config(ctx, "--path", "--get", "core.excludesFile")
-	if err != nil {
-		return err
-	}
-	if oldExclude == "" {
-		configHome := os.Getenv("XDG_CONFIG_HOME")
-		if configHome == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				configHome = filepath.Join(home, ".config")
-			}
-		}
-		if configHome != "" {
-			oldExclude = filepath.Join(configHome, "git", "ignore")
-		}
-	}
-	var patterns []byte
-	if oldExclude != "" {
-		if !filepath.IsAbs(oldExclude) {
-			oldExclude = filepath.Join(dir, oldExclude)
-		}
-		patterns, err = os.ReadFile(oldExclude)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read existing excludes: %w", err)
-		}
-	}
 	infoDir := filepath.Join(state.GitDir, "info")
-	if err := os.MkdirAll(infoDir, 0o700); err != nil {
+	if err := os.Mkdir(infoDir, 0o700); err != nil {
 		return err
 	}
 	exclude := filepath.Join(infoDir, "exclude")
-	for _, file := range files {
-		patterns = append(patterns, "\n/"+file+"\n"...)
-	}
-	if err := os.WriteFile(exclude, patterns, 0o600); err != nil {
+	if err := os.WriteFile(exclude, []byte("/"+strings.Join(files, "\n/")+"\n"), 0o600); err != nil {
 		return err
 	}
-
-	// Linked worktrees share info/exclude unless a worktree config points to a private file.
-	enabled, err := checkout.config(ctx, "--local", "--type=bool", "--get", "extensions.worktreeConfig")
-	if err != nil {
+	// Plain Git looks in the common info directory. Select the private exclude
+	// file only for this registration, using config outside the workload.
+	config := dir + excludeConfigSuffix
+	if _, err := checkout.run(ctx, "config", "--file", config, "core.excludesFile", exclude); err != nil {
 		return err
 	}
-	if enabled != "true" {
-		bare, err := checkout.config(ctx, "--local", "--type=bool", "--get", "core.bare")
+	state.Registration = make(map[string]fileStamp)
+	for _, path := range state.registrationPaths(dir) {
+		_, stamp, err := readMetadata(path)
 		if err != nil {
 			return err
 		}
-		worktree, err := checkout.config(ctx, "--local", "--get", "core.worktree")
-		if err != nil {
-			return err
-		}
-		if bare == "true" || worktree != "" {
-			return errors.New("repository must migrate its Git worktree config before starting")
-		}
-		if _, err := checkout.run(ctx, "config", "--local", "extensions.worktreeConfig", "true"); err != nil {
-			return err
-		}
+		state.Registration[path] = stamp
 	}
-	if _, err := checkout.run(ctx, "config", "--worktree", "core.excludesFile", exclude); err != nil {
+	if err := state.validateRegistration(dir); err != nil {
 		return err
 	}
-	ignored, err := checkout.run(ctx, append([]string{"check-ignore", "--no-index", "--"}, files...)...)
+	if _, err := state.commonGit().run(ctx, "config", "--local", "--add", state.excludeIncludeKey(), config); err != nil {
+		return err
+	}
+	ignored, err := checkout.run(ctx, append([]string{"-c", "core.excludesFile=" + exclude, "check-ignore", "--no-index", "--"}, files...)...)
 	if err != nil && !gitExitCode(err, 1) {
 		return err
 	}
 	if ignored != strings.Join(files, "\n")+"\n" {
 		return errors.New("repository ignore rules override the session excludes")
+	}
+	return nil
+}
+
+func (s *worktreeState) excludeIncludeKey() string {
+	escape := strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`)
+	return "includeIf.gitdir:" + escape.Replace(s.GitDir) + ".path"
+}
+
+func (s *worktreeState) registrationPaths(dir string) []string {
+	return []string{filepath.Join(s.GitDir, "commondir"), filepath.Join(s.GitDir, "gitdir"),
+		filepath.Join(s.GitDir, "info", "exclude"), dir + excludeConfigSuffix}
+}
+
+type fileStamp struct {
+	gitFileIdentity
+	Digest   [sha256.Size]byte
+	Mode     os.FileMode
+	Modified int64
+}
+
+// Registration pointers and the exclude files are short, regular files.
+func readMetadata(path string) ([]byte, fileStamp, error) {
+	var stamp fileStamp
+	actual, err := filepath.EvalSymlinks(path)
+	if err != nil || actual != path {
+		return nil, stamp, fmt.Errorf("invalid Git metadata path %s", path)
+	}
+	entry, err := os.Lstat(path)
+	if err != nil {
+		return nil, stamp, err
+	}
+	if !entry.Mode().IsRegular() {
+		return nil, stamp, fmt.Errorf("invalid Git metadata file %s", path)
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, stamp, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, stamp, err
+	}
+	const limit = 64 * 1024
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !os.SameFile(entry, info) || info.Size() > limit {
+		return nil, stamp, fmt.Errorf("invalid Git metadata file %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, stamp, err
+	}
+	if len(data) > limit {
+		return nil, stamp, fmt.Errorf("oversized Git metadata file %s", path)
+	}
+	stamp.gitFileIdentity = gitFileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}
+	stamp.Digest = sha256.Sum256(data)
+	stamp.Mode = info.Mode()
+	stamp.Modified = info.ModTime().UnixNano()
+	return data, stamp, nil
+}
+
+func (s *worktreeState) validateRegistration(dir string) error {
+	if _, err := os.Lstat(filepath.Join(s.GitDir, "config.worktree")); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("coding worktree gitdir has an unexpected or inaccessible config.worktree")
+	}
+	for _, path := range s.registrationPaths(dir) {
+		_, stamp, err := readMetadata(path)
+		if err != nil {
+			return err
+		}
+		if stamp != s.Registration[path] {
+			return fmt.Errorf("coding worktree registration file %q changed", path)
+		}
 	}
 	return nil
 }
@@ -281,39 +330,17 @@ func (s *worktreeState) readGitFile(dir string) (*gitFileIdentity, error) {
 	if !checkout.IsDir() {
 		return nil, errors.New("coding worktree .git entry is outside a regular checkout directory")
 	}
-	path := filepath.Join(dir, ".git")
-	entry, err := os.Lstat(path)
+	data, stamp, err := readMetadata(filepath.Join(dir, ".git"))
 	if err != nil {
 		return nil, fmt.Errorf("check coding worktree .git entry: %w", err)
 	}
-	if !entry.Mode().IsRegular() {
-		return nil, errors.New("coding worktree .git entry must be a regular file")
-	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open coding worktree .git entry: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat coding worktree .git entry: %w", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !os.SameFile(entry, info) {
-		return nil, errors.New("coding worktree .git entry changed while opening it")
-	}
-	expected := "gitdir: " + s.GitDir + "\n"
-	data, err := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
-	if err != nil {
-		return nil, fmt.Errorf("read coding worktree .git entry: %w", err)
-	}
-	if string(data) != expected {
+	if string(data) != "gitdir: "+s.GitDir+"\n" {
 		return nil, errors.New("coding worktree .git entry does not point to the recorded gitdir")
 	}
-	return &gitFileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
+	return &stamp.gitFileIdentity, nil
 }
 
-func (s *worktreeState) validateCheckout(ctx context.Context, dir string) error {
+func (s *worktreeState) validateCheckout(ctx context.Context, dir string, launched bool) error {
 	if s.GitFile == nil {
 		return errors.New("coding worktree .git entry has no recorded identity")
 	}
@@ -323,6 +350,9 @@ func (s *worktreeState) validateCheckout(ctx context.Context, dir string) error 
 	}
 	if *identity != *s.GitFile {
 		return errors.New("coding worktree .git entry was replaced")
+	}
+	if launched {
+		s.beforeGit = func() error { return s.validateRegistration(dir) }
 	}
 	checkout := s.checkoutGit(dir)
 	common, err := checkout.run(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -342,21 +372,8 @@ func (s *worktreeState) validateCheckout(ctx context.Context, dir string) error 
 	return nil
 }
 
-func snapshotWorktree(ctx context.Context, checkout gitRepo) error {
-	untracked, err := checkout.run(ctx, "ls-files", "-z", "--others", "--exclude-standard")
-	if err != nil {
-		return err
-	}
-	add := []string{"add", "-A", "--"}
-	for _, path := range strings.Split(untracked, "\x00") {
-		// Without --directory, Git marks embedded, untracked repositories with a trailing slash.
-		if nested, ok := strings.CutSuffix(path, "/"); ok {
-			if !emptyNestedRepo(checkout.workTree, nested) {
-				return fmt.Errorf("cannot safely remove nested Git repository %q", redact.String(nested))
-			}
-			add = append(add, ":(exclude,literal)"+nested)
-		}
-	}
+func snapshotWorktree(ctx context.Context, checkout gitRepo, exclude []string) error {
+	add := append([]string{"add", "-A", "--"}, exclude...)
 	if err := commitWorktreeIndex(ctx, checkout, "chore(coding): preserve staged task edits"); err != nil {
 		return err
 	}
@@ -364,43 +381,6 @@ func snapshotWorktree(ctx context.Context, checkout gitRepo) error {
 		return err
 	}
 	return commitWorktreeIndex(ctx, checkout, "chore(coding): preserve task edits")
-}
-
-func emptyNestedRepo(dir, nested string) bool {
-	checkout, err := os.OpenRoot(dir)
-	if err != nil {
-		return false
-	}
-	defer checkout.Close()
-	path := filepath.Join(nested, ".git")
-	info, err := checkout.Lstat(path)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	repo, err := checkout.OpenRoot(path)
-	if err != nil {
-		return false
-	}
-	defer repo.Close()
-
-	// Inspect the stores without loading config or following a nested gitdir.
-	for _, file := range []string{"commondir", "packed-refs", "reftable"} {
-		if _, err := repo.Lstat(file); !errors.Is(err, os.ErrNotExist) {
-			return false
-		}
-	}
-	for _, store := range []string{"refs", "objects"} {
-		err := fs.WalkDir(repo.FS(), store, func(_ string, entry fs.DirEntry, err error) error {
-			if err == nil && !entry.IsDir() {
-				return errors.New("nested Git repository has data")
-			}
-			return err
-		})
-		if err != nil {
-			return false
-		}
-	}
-	return true
 }
 
 func commitWorktreeIndex(ctx context.Context, checkout gitRepo, message string) error {
@@ -411,14 +391,41 @@ func commitWorktreeIndex(ctx context.Context, checkout gitRepo, message string) 
 	if !gitExitCode(err, 1) {
 		return err
 	}
-	_, err = checkout.run(ctx, "-c", "user.name=Sablecourt", "-c", "user.email=sablecourt",
-		"-c", "commit.gpgSign=false", "commit", "--quiet", "--no-status", "-m", message)
+	// commit refreshes the whole index and reads initialized submodule
+	// configuration even with --no-status. Commit the verified index directly.
+	parent, err := checkout.commitID(ctx, "HEAD")
+	if err != nil {
+		return err
+	}
+	tree, err := checkout.run(ctx, "write-tree")
+	if err != nil {
+		return err
+	}
+	tree = strings.TrimSuffix(tree, "\n")
+	if !isCommitID(tree) {
+		return errors.New("Git returned an invalid tree ID")
+	}
+	result, err := checkout.run(ctx, "-c", "user.name=Sablecourt", "-c", "user.email=sablecourt", "-c", "commit.gpgSign=false", "commit-tree", tree, "-p", parent, "-m", message)
+	if err != nil {
+		return err
+	}
+	commit := strings.TrimSuffix(result, "\n")
+	if !isCommitID(commit) {
+		return errors.New("Git returned an invalid snapshot commit ID")
+	}
+	_, err = checkout.run(ctx, "update-ref", "--end-of-options", "HEAD", commit, parent)
 	return err
 }
 
-func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktreeState) error {
+func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktreeState) (finishErr error) {
+	defer func() {
+		if finishErr != nil {
+			state.CleanupError = redact.String(finishErr.Error())
+			finishErr = errors.Join(fmt.Errorf("coding worktree cleanup incomplete: %w", finishErr), writeWorktreeState(dir, state))
+		}
+	}()
 	if state.FinishedAt.IsZero() {
-		if err := state.validateCheckout(ctx, dir); err != nil {
+		if err := state.validateCheckout(ctx, dir, true); err != nil {
 			return err
 		}
 		base, err := state.commonGit().commitID(ctx, state.Base)
@@ -432,15 +439,19 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 		if err != nil {
 			return err
 		}
+		exclude, err := inspectNested(ctx, checkout, "HEAD", state.Base, filepath.Join(state.GitDir, "modules"))
+		if err != nil {
+			return err
+		}
 		if err := removeSessionFiles(ctx, checkout, dir); err != nil {
 			return err
 		}
-		status, err := checkout.run(ctx, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty")
+		status, err := checkout.run(ctx, append([]string{"status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all", "--"}, exclude...)...)
 		if err != nil {
 			return err
 		}
 		if status != "" {
-			if err := snapshotWorktree(ctx, checkout); err != nil {
+			if err := snapshotWorktree(ctx, checkout, exclude); err != nil {
 				return err
 			}
 		}
@@ -453,18 +464,23 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 		if err != nil {
 			return err
 		}
+		state.CleanupError = ""
 		state.FinishedAt = time.Now().UTC()
 		if err := writeWorktreeState(dir, state); err != nil {
 			return err
 		}
 	}
-	if err := removeWorktree(ctx, dir, state); err != nil {
+	if err := removeWorktree(ctx, dir, state, true); err != nil {
 		return err
 	}
 	if err := removeFile(dir + ".log"); err != nil {
 		return err
 	}
 	delete(a.running, dir)
+	if state.CleanupError != "" {
+		state.CleanupError = ""
+		return writeWorktreeState(dir, state)
+	}
 	return nil
 }
 
@@ -507,14 +523,24 @@ func worktreeArtifacts(ctx context.Context, dir string, state *worktreeState, st
 	return artifacts, nil
 }
 
-func removeWorktree(ctx context.Context, dir string, state *worktreeState) error {
+func removeWorktree(ctx context.Context, dir string, state *worktreeState, launched bool) error {
 	_, statErr := os.Lstat(dir)
 	if !errors.Is(statErr, os.ErrNotExist) {
 		if statErr != nil {
 			return statErr
 		}
-		if err := state.validateCheckout(ctx, dir); err != nil {
+		if err := state.validateCheckout(ctx, dir, launched); err != nil {
 			return err
+		}
+		if launched {
+			if _, err := inspectNested(ctx, state.checkoutGit(dir), state.Tip, state.Base, filepath.Join(state.GitDir, "modules")); err != nil {
+				return err
+			}
+		}
+	}
+	if errors.Is(statErr, os.ErrNotExist) && launched {
+		if _, err := os.Lstat(state.GitDir); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("coding worktree is missing but its gitdir remains")
 		}
 	}
 	common := state.commonGit()
@@ -524,18 +550,33 @@ func removeWorktree(ctx context.Context, dir string, state *worktreeState) error
 	}
 	for _, field := range strings.Split(list, "\x00") {
 		if field == "worktree "+dir {
-			_, err := common.run(ctx, "worktree", "remove", "--force", "--", dir)
-			return err
+			if _, err := common.run(ctx, "worktree", "remove", "--force", "--", dir); err != nil {
+				return err
+			}
+			statErr = os.ErrNotExist
+			common.beforeRun = nil
+			state.beforeGit = nil
+			break
 		}
 	}
 	if statErr == nil {
 		return errors.New("coding worktree path is no longer registered with Git")
 	}
+	config := dir + excludeConfigSuffix
+	if _, err := os.Lstat(config); !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return err
+		}
+		if _, err := common.run(ctx, "config", "--local", "--fixed-value", "--unset-all", state.excludeIncludeKey(), config); err != nil && !gitExitCode(err, 5) {
+			return err
+		}
+		return removeFile(config)
+	}
 	return nil
 }
 
 func rollbackWorktree(ctx context.Context, dir string, state *worktreeState) error {
-	if err := removeWorktree(ctx, dir, state); err != nil {
+	if err := removeWorktree(ctx, dir, state, false); err != nil {
 		return err
 	}
 	common := state.commonGit()
@@ -576,7 +617,7 @@ func (a *Adapter) pruneFinishedBranches(ctx context.Context, root string, curren
 		path := filepath.Join(root, entry.Name())
 		state, err := readWorktreeState(path)
 		if err != nil || state.CommonDir != current.CommonDir ||
-			state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
+			state.CleanupError != "" || state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
 			state.Branch != "sablecourt/"+sanitizeSegment(state.TaskID) {
 			continue
 		}

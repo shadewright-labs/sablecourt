@@ -13,6 +13,7 @@ import (
 )
 
 type gitRepo struct {
+	beforeRun    func() error
 	dir          string
 	gitDir       string
 	workTree     string
@@ -20,9 +21,15 @@ type gitRepo struct {
 }
 
 func (g gitRepo) run(ctx context.Context, args ...string) (string, error) {
+	if g.beforeRun != nil {
+		if err := g.beforeRun(); err != nil {
+			return "", err
+		}
+	}
 	flags := []string{
 		"-C", g.dir, "--no-pager", "--no-replace-objects",
 		"-c", "core.fsmonitor=false",
+		"-c", "core.excludesFile=",
 		"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.sshCommand=false",
 		"-c", "protocol.file.allow=never",
@@ -44,6 +51,7 @@ func (g gitRepo) run(ctx context.Context, args ...string) (string, error) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {

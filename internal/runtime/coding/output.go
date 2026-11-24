@@ -14,6 +14,7 @@ const maxSessionLine = 1024 * 1024
 
 var (
 	privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+	credentialTail  = regexp.MustCompile(`(?i)(?:\b[a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token)\b\s*[:=]|authorization\s*:\s*(?:bearer)?)\s*$`)
 	privateKeyEnd   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 )
 
@@ -22,6 +23,7 @@ type sessionOutput struct {
 	hub        *attach.Hub
 	taskID     string
 	pending    []byte
+	lineStart  int
 	privateKey bool
 	suppressed bool
 }
@@ -43,6 +45,14 @@ func (s *sessionOutput) Write(chunk []byte) (int, error) {
 		s.pending = append(s.pending, chunk[:size]...)
 		chunk = chunk[size:]
 		if newline >= 0 {
+			line := s.pending[s.lineStart:]
+			trimmed := bytes.TrimSpace(line)
+			continuation := s.lineStart > 0 && (len(trimmed) == 0 || bytes.EqualFold(trimmed, []byte("Bearer")))
+			if credentialTail.Match(line) || continuation {
+				s.lineStart = len(s.pending)
+				continue
+			}
+			s.lineStart = 0
 			err := s.writeLine(string(s.pending))
 			s.pending = s.pending[:0]
 			if err != nil {
@@ -56,6 +66,7 @@ func (s *sessionOutput) Write(chunk []byte) (int, error) {
 func (s *sessionOutput) Flush() error {
 	err := s.writeLine(string(s.pending))
 	s.pending = nil
+	s.lineStart = 0
 	return err
 }
 
