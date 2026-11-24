@@ -174,18 +174,11 @@ func strippedEnv(spec scruntime.LaunchSpec, home string) []string {
 		"SABLECOURT_TASK_ID=" + spec.TaskID,
 		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
 	}
-	token := spec.TaskToken
-	if token == "" {
-		token = spec.ModelGateToken
-	}
-	if spec.ModelGateURL != "" && spec.ModelGateToken != "" && spec.ModelGateToken == token {
-		env = append(env, "SABLECOURT_MODEL_GATE_URL="+spec.ModelGateURL)
-	}
 	if spec.DataGateURL != "" && spec.TaskToken != "" {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)
 	}
-	if token != "" {
-		env = append(env, "SABLECOURT_TASK_TOKEN="+token)
+	if spec.TaskToken != "" {
+		env = append(env, "SABLECOURT_TASK_TOKEN="+spec.TaskToken)
 	}
 	return env
 }

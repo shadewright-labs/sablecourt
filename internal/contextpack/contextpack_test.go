@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +15,64 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
+
+func TestPrecheckGitUsesSafeConfiguration(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "core.fsmonitor", "unused-fixture-helper"}} {
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("set up Git fixture: %v (%s)", err, out)
+		}
+	}
+	bin := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "calls")
+	// The stand-in records the invocation without executing repository helpers.
+	script := fmt.Sprintf(`#!/bin/sh
+{ printf '%%s\t' "$@"; printf '\n'; } >> %q
+if test -n "${DAEMON_FIXTURE_VALUE+x}${GIT_TRACE+x}"; then printf 'inherited environment\n' >> %q; fi
+case " $* " in
+  *' status '*) printf ' M notes\n' ;;
+  *' diff '*) printf ' notes | 1 +\n' ;;
+esac
+`, trace, trace)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DAEMON_FIXTURE_VALUE", "present")
+	t.Setenv("GIT_TRACE", "present")
+	pkt := Assemble(t.Context(), nil, domain.Task{}, domain.Workload{
+		Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{RepoPath: repo}},
+	})
+	if !pkt.PrecheckRan || !slices.Equal(pkt.ChangedPaths, []string{"notes"}) || !strings.Contains(pkt.Markdown, "notes | 1 +") {
+		t.Errorf("missing Git precheck output: %+v", pkt)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "inherited environment") {
+		t.Error("Git inherited daemon environment")
+	}
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(data), "\n") {
+		args := strings.Split(line, "\t")
+		for _, flag := range []string{"--no-pager", "core.fsmonitor=false", "core.hooksPath=" + os.DevNull} {
+			if line != "" && line != "inherited environment" && !slices.Contains(args, flag) {
+				t.Errorf("Git call missing %q: %q", flag, line)
+			}
+		}
+		for _, name := range []string{"status", "diff"} {
+			seen[name] = seen[name] || slices.Contains(args, name)
+		}
+		if slices.Contains(args, "diff") && (!slices.Contains(args, "--no-ext-diff") || !slices.Contains(args, "--no-textconv")) {
+			t.Error("Git diff allows external helpers")
+		}
+	}
+	if !seen["status"] || !seen["diff"] {
+		t.Error("missing Git status or diff invocation")
+	}
+}
 
 func TestDecreesRequireOperatorSender(t *testing.T) {
 	for _, kind := range []string{"decree", "decision"} {

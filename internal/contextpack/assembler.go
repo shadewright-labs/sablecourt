@@ -13,6 +13,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -230,30 +231,24 @@ func runReadOnlyPrecheck(ctx context.Context, repoPath string) (string, []string
 	var b strings.Builder
 	var changed []string
 
-	if _, err := exec.LookPath("git"); err == nil {
-		if out, err := exec.CommandContext(tctx, "git", "-C", repoPath, "status", "--short").Output(); err == nil {
-			txt := strings.TrimSpace(string(out))
-			if txt != "" {
-				b.WriteString("### git status --short\n```\n" + txt + "\n```\n\n")
-				for _, line := range strings.Split(txt, "\n") {
-					if len(line) > 3 {
-						p := strings.TrimSpace(line[3:])
-						if idx := strings.Index(p, " -> "); idx >= 0 {
-							p = strings.TrimSpace(p[idx+4:])
-						}
-						if p != "" {
-							changed = append(changed, p)
-						}
-					}
-				}
+	status, diff := coding.ReadOnlyGitPrecheck(tctx, repoPath)
+	if status = strings.TrimSuffix(status, "\n"); status != "" {
+		b.WriteString("### git status --short\n```\n" + status + "\n```\n\n")
+		for _, line := range strings.Split(status, "\n") {
+			if len(line) <= 3 {
+				continue
+			}
+			path := strings.TrimSpace(line[3:])
+			if idx := strings.Index(path, " -> "); idx >= 0 {
+				path = strings.TrimSpace(path[idx+4:])
+			}
+			if path != "" {
+				changed = append(changed, path)
 			}
 		}
-		if out, err := exec.CommandContext(tctx, "git", "-C", repoPath, "diff", "--stat").Output(); err == nil {
-			txt := strings.TrimSpace(string(out))
-			if txt != "" {
-				b.WriteString("### git diff --stat\n```\n" + txt + "\n```\n\n")
-			}
-		}
+	}
+	if diff = strings.TrimSpace(diff); diff != "" {
+		b.WriteString("### git diff --stat\n```\n" + diff + "\n```\n\n")
 	}
 
 	if _, err := os.Stat(filepath.Join(repoPath, "go.mod")); err == nil {
