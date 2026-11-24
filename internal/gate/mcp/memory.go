@@ -1,10 +1,12 @@
 package mcpgate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -13,8 +15,42 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
+var errToolRefused = errors.New("refused")
+
+func isReservedWriteNamespace(ns string) bool {
+	lower := strings.ToLower(strings.TrimSpace(ns))
+	return strings.HasPrefix(lower, "learning:") ||
+		strings.HasPrefix(lower, "proposed:learning:") ||
+		strings.HasPrefix(lower, "system:")
+}
+
+func isReservedReadNamespace(ns string) bool {
+	lower := strings.ToLower(strings.TrimSpace(ns))
+	return strings.HasPrefix(lower, "system:")
+}
+
+func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, workloadName, action, outcome string, detail map[string]string) {
+	for field, value := range detail {
+		detail[field] = redact.String(value)
+	}
+	detailBytes, _ := json.Marshal(detail)
+	now := time.Now().UTC()
+	if gate != nil && gate.now != nil {
+		now = gate.now()
+	}
+	_ = st.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "memory",
+		TaskID:       taskID,
+		WorkloadName: workloadName,
+		Action:       action,
+		Outcome:      outcome,
+		DetailJSON:   string(detailBytes),
+		CreatedAt:    now,
+	})
+}
+
 // RegisterBuiltinMemory registers redacted project-level Court Memory MCP tools
-// (memory.put, memory.get, memory.search) on the Data/Action Gate.
+// (memory.put, memory.get, memory.search, memory.delete) on the Data/Action Gate.
 func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 	if gate == nil || st == nil {
 		return
@@ -33,40 +69,44 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				return "", err
 			}
 			in.Key = strings.TrimSpace(in.Key)
+			ns := strings.TrimSpace(in.Namespace)
+			if ns == "" {
+				ns = "default"
+			}
+			if isReservedWriteNamespace(ns) {
+				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "denied", map[string]string{
+					"namespace": ns,
+					"key":       in.Key,
+					"reason":    "reserved_namespace",
+				})
+				return "", fmt.Errorf("%w: namespace %q is reserved and cannot be written via memory.put", errToolRefused, redact.String(ns))
+			}
 			if in.Key == "" {
 				return "", errors.New("key is required")
 			}
-			if strings.TrimSpace(in.Namespace) == "" {
-				in.Namespace = "default"
-			}
 			entry := domain.MemoryEntry{
-				Namespace: strings.TrimSpace(in.Namespace),
+				Namespace: ns,
 				Key:       in.Key,
 				Value:     redact.String(strings.TrimSpace(in.Value)),
 				Author:    wl.Metadata.Name,
-				UpdatedAt: time.Now().UTC(),
+				UpdatedAt: gate.now(),
 			}
 			if err := st.PutMemory(ctx, entry); err != nil {
 				return "", err
 			}
-			_ = st.AppendAudit(ctx, domain.AuditRecord{
-				Category:     "memory",
-				TaskID:       taskID,
-				WorkloadName: wl.Metadata.Name,
-				Action:       "memory.put",
-				Outcome:      "stored",
-				DetailJSON:   fmt.Sprintf(`{"namespace":%q,"key":%q}`, entry.Namespace, entry.Key),
-				CreatedAt:    entry.UpdatedAt,
+			auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "stored", map[string]string{
+				"namespace": entry.Namespace,
+				"key":       entry.Key,
 			})
 			out, _ := json.Marshal(entry)
 			return string(out), nil
 		},
 	})
 	gate.RegisterTool(ToolDef{
-		Name:        "memory.get",
-		Description: "Retrieve a project memory entry by namespace and key.",
+		Name:        "memory.delete",
+		Description: "Delete a project memory entry by namespace and key.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"key":{"type":"string"}},"required":["key"]}`),
-		Handler: func(ctx context.Context, _ domain.Workload, _ string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, wl domain.Workload, taskID string, args json.RawMessage) (string, error) {
 			var in struct {
 				Namespace string `json:"namespace"`
 				Key       string `json:"key"`
@@ -74,7 +114,60 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", err
 			}
-			entry, err := st.GetMemory(ctx, strings.TrimSpace(in.Namespace), strings.TrimSpace(in.Key))
+			key := strings.TrimSpace(in.Key)
+			ns := strings.TrimSpace(in.Namespace)
+			if ns == "" {
+				ns = "default"
+			}
+			if isReservedWriteNamespace(ns) {
+				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "denied", map[string]string{
+					"namespace": ns,
+					"key":       key,
+					"reason":    "reserved_namespace",
+				})
+				return "", fmt.Errorf("%w: namespace %q is reserved and cannot be deleted via memory.delete", errToolRefused, redact.String(ns))
+			}
+			if key == "" {
+				return "", errors.New("key is required")
+			}
+			if err := st.DeleteMemory(ctx, ns, key); err != nil {
+				return "", err
+			}
+			auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "deleted", map[string]string{
+				"namespace": ns,
+				"key":       key,
+			})
+			out, _ := json.Marshal(map[string]string{
+				"namespace": ns,
+				"key":       key,
+				"status":    "deleted",
+			})
+			return string(out), nil
+		},
+	})
+	gate.RegisterTool(ToolDef{
+		Name:        "memory.get",
+		Description: "Retrieve a project memory entry by namespace and key.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"key":{"type":"string"}},"required":["key"]}`),
+		Handler: func(ctx context.Context, wl domain.Workload, taskID string, args json.RawMessage) (string, error) {
+			var in struct {
+				Namespace string `json:"namespace"`
+				Key       string `json:"key"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", err
+			}
+			ns := strings.TrimSpace(in.Namespace)
+			key := strings.TrimSpace(in.Key)
+			if isReservedReadNamespace(ns) {
+				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.get", "denied", map[string]string{
+					"namespace": ns,
+					"key":       key,
+					"reason":    "reserved_namespace",
+				})
+				return "", fmt.Errorf("%w: namespace %q is reserved and cannot be read via memory.get", errToolRefused, redact.String(ns))
+			}
+			entry, err := st.GetMemory(ctx, ns, key)
 			if err != nil {
 				return "", err
 			}
@@ -86,14 +179,27 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 		Name:        "memory.search",
 		Description: "Search project memory entries by optional namespace and substring query.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer"}}}`),
-		Handler: func(ctx context.Context, _ domain.Workload, _ string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, wl domain.Workload, taskID string, args json.RawMessage) (string, error) {
 			var in struct {
 				Namespace string `json:"namespace"`
 				Query     string `json:"query"`
 				Limit     int    `json:"limit"`
 			}
-			_ = json.Unmarshal(args, &in)
-			items, err := st.SearchMemory(ctx, in.Namespace, in.Query, in.Limit)
+			if len(bytes.TrimSpace(args)) > 0 {
+				if err := json.Unmarshal(args, &in); err != nil {
+					return "", err
+				}
+			}
+			ns := strings.TrimSpace(in.Namespace)
+			if isReservedReadNamespace(ns) {
+				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.search", "denied", map[string]string{
+					"namespace": ns,
+					"query":     in.Query,
+					"reason":    "reserved_namespace",
+				})
+				return "", fmt.Errorf("%w: namespace %q is reserved and cannot be searched via memory.search", errToolRefused, redact.String(ns))
+			}
+			items, err := searchVisibleMemory(ctx, st, ns, in.Query, in.Limit)
 			if err != nil {
 				return "", err
 			}
@@ -101,4 +207,31 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			return string(out), nil
 		},
 	})
+}
+
+func searchVisibleMemory(ctx context.Context, st store.Store, namespace, query string, limit int) ([]domain.MemoryEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	fetchLimit := limit
+	for {
+		items, err := st.SearchMemory(ctx, namespace, query, fetchLimit)
+		if err != nil {
+			return nil, err
+		}
+		visible := make([]domain.MemoryEntry, 0, min(len(items), limit))
+		for _, item := range items {
+			if !isReservedReadNamespace(item.Namespace) {
+				visible = append(visible, item)
+				if len(visible) == limit {
+					return visible, nil
+				}
+			}
+		}
+		if len(items) < fetchLimit || fetchLimit == math.MaxInt {
+			return visible, nil
+		}
+		// The store limits all matches. Fetch a larger prefix when hidden rows fill part of it.
+		fetchLimit += min(fetchLimit, math.MaxInt-fetchLimit)
+	}
 }
