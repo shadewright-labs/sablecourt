@@ -31,6 +31,8 @@ const (
 	adapterStartTimeout = 30 * time.Second
 )
 
+var errWorkflowKeyReserved = errors.New("wf: keys are reserved for workflows")
+
 type Options struct {
 	Store           store.Store
 	Bundle          *config.Bundle
@@ -234,13 +236,16 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 	}()
 
 	attempt.tokenMu.Lock()
-	defer attempt.tokenMu.Unlock()
 	task, err := r.store.GetTask(ctx, taskID)
+	if err == nil && task.State != domain.TaskStateSuspended {
+		err = fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, task.State)
+	}
+	if err == nil {
+		_, err = model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, taskLeaseTTL)
+	}
+	attempt.tokenMu.Unlock()
 	if err != nil {
 		return err
-	}
-	if task.State != domain.TaskStateSuspended {
-		return fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, task.State)
 	}
 
 	var cp scruntime.CheckpointRef
@@ -253,12 +258,19 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 	adapter := r.handleAdapters[taskID]
 	r.mu.Unlock()
 
-	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, taskLeaseTTL); err != nil {
-		return err
-	}
 	defer func() {
-		if resumeErr != nil {
-			resumeErr = errors.Join(resumeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), taskID))
+		if resumeErr == nil {
+			return
+		}
+		cleanupCtx := context.WithoutCancel(ctx)
+		resumeErr = errors.Join(resumeErr, r.store.RevokeTaskLeases(cleanupCtx, taskID))
+		if hasHandle && adapter != nil {
+			// Cancellation may already have removed the handle before Resume returned.
+			stopCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
+			defer cancel()
+			if err := adapter.Stop(stopCtx, handle); err != nil {
+				resumeErr = errors.Join(resumeErr, errors.New("runtime stop failed"))
+			}
 		}
 	}()
 	if hasHandle && adapter != nil {
@@ -322,6 +334,9 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 }
 
 func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON, parentID string, step *workflowStepRecord) (domain.Task, error) {
+	if step == nil && strings.HasPrefix(idempotencyKey, "wf:") {
+		return domain.Task{}, errWorkflowKeyReserved
+	}
 	if strings.HasPrefix(idempotencyKey, "conclave-") && !store.HasConclaveReservation(ctx, idempotencyKey) {
 		return domain.Task{}, errors.New("conclave submission requires a run reservation")
 	}
@@ -346,10 +361,6 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		if step.RunID == "" {
 			step.RunID = id
 		}
-		// Publish membership before the submitted task can become visible to a worker.
-		if err := r.recordWorkflowStep(ctx, id, *step); err != nil {
-			return domain.Task{}, err
-		}
 	}
 	if idempotencyKey == "" {
 		idempotencyKey = id
@@ -365,7 +376,16 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := r.store.CreateTask(ctx, task); err != nil {
+	if step != nil {
+		entry, encodeErr := r.workflowStepEntry(id, *step)
+		if encodeErr != nil {
+			return domain.Task{}, encodeErr
+		}
+		err = store.CreateTaskWithMemory(ctx, r.store, task, entry)
+	} else {
+		err = r.store.CreateTask(ctx, task)
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			if step != nil {
 				existing, getErr := r.store.GetTask(ctx, id)
@@ -553,6 +573,9 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
 // and pass deterministic policy before the control plane dispatches the child task.
 func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetWorkload, idempotencyKey, inputJSON, subBudgetJSON string) (domain.Task, error) {
+	if strings.HasPrefix(idempotencyKey, "wf:") {
+		return domain.Task{}, errWorkflowKeyReserved
+	}
 	parent, err := r.store.GetTask(ctx, parentTaskID)
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("load parent task: %w", err)
@@ -1101,7 +1124,11 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				return err
 			}
 			rootStep.Status, rootStep.Reason = "halted", "verdict_missing"
-			return r.recordWorkflowStep(ctx, root.ID, *rootStep)
+			entry, err := r.workflowStepEntry(root.ID, *rootStep)
+			if err != nil {
+				return err
+			}
+			return r.store.PutMemory(ctx, entry)
 		}
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
