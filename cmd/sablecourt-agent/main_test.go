@@ -195,3 +195,17 @@ func TestExtractTextAllProviders(t *testing.T) {
 		t.Fatalf("gemini extract failed: %q", got)
 	}
 }
+
+func TestWakeThreadHistory(t *testing.T) {
+	for _, sender := range []string{"coder", "operator"} {
+		t.Run(sender, func(t *testing.T) {
+			content := `{"activation":"on-mention","messageId":1,"fromRole":"` + sender + `","prompt":"review notes"}`
+			body, _ := json.Marshal([]map[string]string{{"Role": "user", "Content": content}})
+			useFakeGate(t, func(*http.Request) (*http.Response, error) { return gateResponse(200, string(body)), nil })
+			msgs := loadThreadHistory("/control", "fixture")
+			if len(msgs) != 1 || strings.Contains(msgs[0].Content, "<untrusted-peer-message>") != (sender != "operator") {
+				t.Fatalf("unexpected wake history: %+v", msgs)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -81,4 +82,33 @@ func hostAuthority(authority string) (string, bool) {
 		}
 	}
 	return net.JoinHostPort(strings.ToLower(host), port), true
+}
+
+func (cfg daemonConfig) containerGateHost() string {
+	if cfg.gateHost != "" {
+		return cfg.gateHost
+	}
+	if host, port, err := net.SplitHostPort(cfg.listenAddr); err == nil && (host == "" || host == net.IPv4(127, 0, 0, 1).String()) {
+		return "host.docker.internal:" + port
+	}
+	return cfg.listenAddr
+}
+
+func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Handler, error) {
+	gate, ok := hostAuthority(cfg.containerGateHost())
+	if !ok {
+		return nil, fmt.Errorf("gate-host requires an exact host and port")
+	}
+	regular, err := hostAllowlistMiddleware(next, cfg.listenAddr, cfg.allowedHosts, unixSocket)
+	if err != nil {
+		return nil, err
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, valid := hostAuthority(r.Host)
+		if valid && host == gate && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		regular.ServeHTTP(w, r)
+	}), nil
 }

@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -33,6 +35,7 @@ type controlledAdapter struct {
 
 func (a *controlledAdapter) Start(_ context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
 	a.mu.Lock()
+	a.lastSpec = spec
 	a.starts++
 	a.live = true
 	a.mu.Unlock()
@@ -510,5 +513,180 @@ func TestRetryWaitsForCleanup(t *testing.T) {
 				t.Fatalf("retry after cleanup: %v", err)
 			}
 		})
+	}
+}
+
+type unavailableRevocations struct{ store.Store }
+
+func (unavailableRevocations) RevokeTaskLeases(context.Context, string) error {
+	return errors.New("revocation unavailable")
+}
+
+func TestTerminalLeaseRecovery(t *testing.T) {
+	ctx := context.Background()
+	for _, state := range []domain.TaskState{domain.TaskStateCancelled, domain.TaskStateCompleted, domain.TaskStateFailed} {
+		t.Run(string(state), func(t *testing.T) {
+			r, st, a, task := regressionFixture(t)
+			reconcile(t, r)
+			now := r.now()
+			if err := st.CreateLease(ctx, domain.Lease{TaskID: task.ID, WorkloadName: "worker", TokenSHA256: "fixture", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+				t.Fatal(err)
+			}
+			r.store = unavailableRevocations{st}
+			var err error
+			switch state {
+			case domain.TaskStateCancelled:
+				err = r.CancelTask(ctx, task.ID, "")
+			default:
+				a.state = scruntime.StateCompleted
+				if state == domain.TaskStateFailed {
+					a.state = scruntime.StateFailed
+				}
+				err = r.ReconcileOnce(ctx)
+			}
+			if err == nil {
+				t.Fatal("revocation error was lost")
+			}
+			requireState(t, st, task.ID, state)
+			restarted := NewReconciler(Options{Store: st, Bundle: r.bundle})
+			reconcile(t, restarted)
+			if _, err := st.GetActiveLeaseByTokenHash(ctx, "fixture", now); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("terminal lease lookup = %v", err)
+			}
+		})
+	}
+}
+
+func TestFailureRequiresStateClaim(t *testing.T) {
+	ctx := context.Background()
+	r, st, a, task := regressionFixture(t)
+	reconcile(t, r)
+	task.State = domain.TaskStateWorking
+	if err := st.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateInputRequired, "approval_required", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.failTask(ctx, task, "observe_error", "{}"); !errors.Is(err, store.ErrConflict) {
+		t.Errorf("stale failure claim = %v", err)
+	}
+	if !a.live || a.stops != 0 {
+		t.Error("stale claim stopped the runtime")
+	}
+	if _, ok := r.handles[task.ID]; !ok {
+		t.Error("stale claim removed the handle")
+	}
+	if _, err := st.GetActiveLeaseByTokenHash(ctx, model.HashToken(a.lastSpec.TaskToken), r.now()); err != nil {
+		t.Errorf("stale claim invalidated live lease: %v", err)
+	}
+}
+
+func TestLaunchInputPacket(t *testing.T) {
+	for _, input := range []string{"review these logs", "null", "[]", "42"} {
+		t.Run(input, func(t *testing.T) {
+			r, _, _, task := regressionFixture(t)
+			task.InputJSON = input
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = domain.ClassLongLivedAgent
+			wl.Spec.RoleCard = "Inspect the logs."
+			a := &fakeAdapter{}
+			defer func() {
+				if err := recover(); err != nil {
+					t.Errorf("launch panicked: %v", err)
+				}
+			}()
+			if err := r.launchTask(context.Background(), task, wl, a); err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal([]byte(a.lastSpec.InputJSON), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(payload["context_packet"], wl.Spec.RoleCard) || payload["prompt"] != input {
+				t.Fatalf("launch input = %v", payload)
+			}
+		})
+	}
+}
+
+func TestPendingApprovalDeadline(t *testing.T) {
+	for _, otherPending := range []bool{false, true} {
+		t.Run(fmt.Sprint(otherPending), func(t *testing.T) {
+			ctx := context.Background()
+			r, st, _, task := regressionFixture(t)
+			reconcile(t, r)
+			now := r.now()
+			r.now = func() time.Time { return now }
+			apr := domain.Approval{ID: "expired", TaskID: task.ID, WorkloadName: "worker", PayloadCanonicalJSON: "{}", PayloadSHA256: "digest", Status: domain.ApprovalPending, ExpiresAt: now}
+			if err := st.CreateApproval(ctx, apr); err != nil {
+				t.Fatal(err)
+			}
+			want := domain.TaskStateWorking
+			if otherPending {
+				apr.ID = "pending"
+				apr.ExpiresAt = now.Add(time.Hour)
+				if err := st.CreateApproval(ctx, apr); err != nil {
+					t.Fatal(err)
+				}
+				want = domain.TaskStateInputRequired
+			}
+			if err := st.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			reconcile(t, r)
+			got, err := st.GetApproval(ctx, "expired")
+			if err != nil || got.Status != domain.ApprovalExpired {
+				t.Errorf("approval = %s, %v", got.Status, err)
+			}
+			requireState(t, st, task.ID, want)
+		})
+	}
+}
+
+func TestTerminalFollowupAfterRestart(t *testing.T) {
+	for _, observed := range []scruntime.ObservedState{scruntime.StateCompleted, scruntime.StateFailed} {
+		t.Run(string(observed), func(t *testing.T) {
+			ctx := context.Background()
+			r, st, a, unused := regressionFixture(t)
+			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker"}, {Workload: "worker"}}}}}
+			task, err := r.SubmitTask(ctx, "worker", "flow", `{"workflow":"flow","auto_remediate":true}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconcile(t, r)
+			a.state = observed
+			r.store = unavailableRevocations{st}
+			if err := r.ReconcileOnce(ctx); err == nil {
+				t.Fatal("missing revocation failure")
+			}
+			r = NewReconciler(Options{Store: st, Bundle: r.bundle, Adapters: r.adapters})
+			reconcile(t, r)
+			reconcile(t, r)
+			tasks, err := st.ListTasks(ctx)
+			if err != nil || len(tasks) != 3 {
+				t.Fatalf("expected one successor for %s, tasks=%d, err=%v", task.ID, len(tasks), err)
+			}
+		})
+	}
+}
+
+type heartbeatDuringApproval struct{ store.Store }
+
+func (s heartbeatDuringApproval) RecordHeartbeat(ctx context.Context, id string, _ time.Time) error {
+	if err := s.UpdateTaskState(ctx, id, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", "{}"); err != nil {
+		return err
+	}
+	return errors.New("heartbeat unavailable")
+}
+func TestLaunchFailureDuringApproval(t *testing.T) {
+	r, st, a, task := regressionFixture(t)
+	r.store = heartbeatDuringApproval{st}
+	if err := r.ReconcileOnce(context.Background()); err == nil {
+		t.Error("heartbeat failure was hidden")
+	}
+	requireState(t, st, task.ID, domain.TaskStateInputRequired)
+	if !a.live || a.stops != 0 {
+		t.Fatal("approval lost its runtime")
 	}
 }

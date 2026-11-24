@@ -185,7 +185,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	manifestsPath := cfg.manifestsPath
 	listenAddr := cfg.listenAddr
 	socketPath := cfg.socketPath
-	gateHost := cfg.gateHost
+	gateHost := cfg.containerGateHost()
 	secretFile := cfg.secretFile
 	repoRoot := cfg.repoRoot
 
@@ -288,7 +288,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	secretStore := &secret.ChainStore{Stores: stores}
 
 	modelGate := model.New(model.Options{
-		Store:      st,
+		Store:      gateLeaseStore{st},
 		Secrets:    secretStore,
 		Bundle:     bundle,
 		GatewayURL: cfg.modelGatewayURL,
@@ -315,7 +315,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}()
 	})
 	dataActionGate := mcpgate.New(mcpgate.Options{
-		Store:     st,
+		Store:     gateLeaseStore{st},
 		Bundle:    bundle,
 		Policy:    policyEng,
 		Breaker:   breaker,
@@ -368,13 +368,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}
 
-	if gateHost == "" {
-		if _, port, err := net.SplitHostPort(listenAddr); err == nil && strings.HasPrefix(listenAddr, "127.0.0.1:") {
-			gateHost = "host.docker.internal:" + port
-		} else {
-			gateHost = listenAddr
-		}
-	}
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:         st,
 		Bundle:        bundle,
@@ -506,11 +499,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
 		mux = requireOperatorAuth(mux, secretStore)
 	}
-	unixMux, err := hostAllowlistMiddleware(mux, listenAddr, cfg.allowedHosts, true)
+	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
 	}
-	mux, err = hostAllowlistMiddleware(mux, listenAddr, cfg.allowedHosts)
+	mux, err = cfg.hostHandler(mux, false)
 	if err != nil {
 		return err
 	}
@@ -1334,15 +1327,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, apr)
 	})
 	mux.HandleFunc("GET /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
-			return
-		}
-		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+		lease, ok := authenticateGateLease(w, r, st)
+		if !ok {
 			return
 		}
 		msgs, err := st.ListTaskMessages(r.Context(), lease.TaskID)
@@ -1353,15 +1339,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, msgs)
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
-			return
-		}
-		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+		lease, ok := authenticateGateLease(w, r, st)
+		if !ok {
 			return
 		}
 		var body struct {
@@ -1701,6 +1680,24 @@ func securityHardeningMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// Gate requests can arrive after a terminal transition and before lease cleanup.
+type gateLeaseStore struct{ store.Store }
+
+func (s gateLeaseStore) GetActiveLeaseByTokenHash(ctx context.Context, hash string, now time.Time) (domain.Lease, error) {
+	lease, err := s.Store.GetActiveLeaseByTokenHash(ctx, hash, now)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	task, err := s.GetTask(ctx, lease.TaskID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	if task.WorkloadName != lease.WorkloadName || (task.State != domain.TaskStateWorking && task.State != domain.TaskStateInputRequired) {
+		return domain.Lease{}, store.ErrNotFound
+	}
+	return lease, nil
+}
+
 func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Store) (domain.Lease, bool) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -1708,7 +1705,7 @@ func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Stor
 		return domain.Lease{}, false
 	}
 	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-	lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
+	lease, err := (gateLeaseStore{st}).GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
 		return domain.Lease{}, false

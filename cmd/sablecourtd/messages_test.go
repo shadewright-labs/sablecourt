@@ -112,3 +112,21 @@ func TestParticipantMessageKindIsServerAssigned(t *testing.T) {
 		})
 	}
 }
+
+func TestGateLeaseRequiresActiveTask(t *testing.T) {
+	for _, state := range []domain.TaskState{domain.TaskStateCompleted, domain.TaskStateFailed, domain.TaskStateCancelled, domain.TaskStateInputRequired} {
+		t.Run(string(state), func(t *testing.T) {
+			st := daemonTestStore(t)
+			token := addMessageTestLease(t, st)
+			if err := st.UpdateTaskState(context.Background(), "task", domain.TaskStateWorking, state, "fixture", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("Authorization", "Bearer "+token)
+			_, ok := authenticateGateLease(httptest.NewRecorder(), r, st)
+			if ok != (state == domain.TaskStateInputRequired) {
+				t.Fatalf("lease accepted=%v", ok)
+			}
+		})
+	}
+}

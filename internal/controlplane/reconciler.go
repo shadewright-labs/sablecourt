@@ -495,7 +495,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	var passErr error
 	for _, task := range tasks {
 		if terminalTaskState(task.State) {
-			passErr = errors.Join(passErr, r.stopTask(context.WithoutCancel(ctx), task.ID))
+			passErr = errors.Join(passErr, r.reconcileTerminal(context.WithoutCancel(ctx), task))
 			continue
 		}
 		if task.State != domain.TaskStateSubmitted && task.State != domain.TaskStateWorking && task.State != domain.TaskStateInputRequired {
@@ -536,15 +536,45 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	return passErr
 }
 
+func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) error {
+	if err := errors.Join(r.store.RevokeTaskLeases(ctx, task.ID), r.stopTask(ctx, task.ID)); err != nil {
+		return err
+	}
+	if task.State == domain.TaskStateCancelled {
+		return nil
+	}
+	events, err := r.store.ListTaskEvents(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 || events[len(events)-1].Reason != "runtime_exit_observed" {
+		return nil
+	}
+	reason := "runtime_completed"
+	if task.State == domain.TaskStateCompleted {
+		err = r.advanceWorkflowStep(ctx, task)
+	} else {
+		reason = "runtime_failed"
+		err = r.maybeAutoRemediate(ctx, task, reason)
+	}
+	if err != nil {
+		return err
+	}
+	if err := r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, reason, events[len(events)-1].FactJSON); err != nil {
+		return err
+	}
+	if task.State == domain.TaskStateFailed && r.onTaskFailed != nil {
+		r.onTaskFailed(task, reason)
+	}
+	return nil
+}
+
 func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, facts string) error {
 	cleanupCtx := context.WithoutCancel(ctx)
-	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, task.ID), r.stopTask(cleanupCtx, task.ID))
 	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return cleanupErr
-		}
-		return errors.Join(cleanupErr, err)
+		return err
 	}
+	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, task.ID), r.stopTask(cleanupCtx, task.ID))
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
 	}
@@ -605,47 +635,47 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 	switch obs.State {
 	case scruntime.StateCompleted, scruntime.StateFailed:
 		r.persistArtifacts(ctx, task.ID, adapter, handle)
-		target, reason := domain.TaskStateCompleted, "runtime_completed"
+		target := domain.TaskStateCompleted
 		if obs.State == scruntime.StateFailed {
-			target, reason = domain.TaskStateFailed, "runtime_failed"
+			target = domain.TaskStateFailed
 		}
-		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, reason, fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
-			return err
-		}
-		if err := r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID); err != nil {
+		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, "runtime_exit_observed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
 			return err
 		}
 		r.mu.Lock()
 		delete(r.handles, task.ID)
 		delete(r.handleAdapters, task.ID)
 		r.mu.Unlock()
-		if target == domain.TaskStateCompleted {
-			r.advanceWorkflowStep(ctx, task)
-		} else {
-			if r.onTaskFailed != nil {
-				r.onTaskFailed(task, reason)
-			}
-			r.maybeAutoRemediate(ctx, task.ID, reason)
-		}
+		task.State = target
+		return r.reconcileTerminal(context.WithoutCancel(ctx), task)
 	case scruntime.StateRunning:
 		if task.State == domain.TaskStateInputRequired {
 			approvals, err := r.store.ListApprovals(ctx, "")
 			if err != nil {
 				return err
 			}
-			decided := false
+			decided, pending := false, false
 			for _, approval := range approvals {
 				if approval.TaskID != task.ID {
 					continue
 				}
 				switch approval.Status {
+				case domain.ApprovalPending:
+					if r.now().Before(approval.ExpiresAt) {
+						pending = true
+						continue
+					}
+					if err := r.store.DecideApproval(ctx, approval.ID, approval.PayloadSHA256, domain.ApprovalExpired, "system", `{"reason":"expired"}`); err != nil {
+						return err
+					}
+					decided = true
 				case domain.ApprovalApproved, domain.ApprovalDenied, domain.ApprovalExpired:
 					decided = true
 				default:
 					return nil
 				}
 			}
-			if decided {
+			if decided && !pending {
 				return r.store.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateWorking, "approval_decided", `{}`)
 			}
 		}
@@ -668,9 +698,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		if launchErr != nil {
 			task.State = domain.TaskStateWorking
 			cleanupErr := r.failTask(context.WithoutCancel(ctx), task, "launch_failed", `{}`)
-			if errors.Is(launchErr, store.ErrConflict) {
-				launchErr = cleanupErr
-			} else {
+			if !errors.Is(cleanupErr, store.ErrConflict) {
 				launchErr = errors.Join(launchErr, cleanupErr)
 			}
 		}
@@ -688,28 +716,31 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if wl.Spec.Class != domain.ClassDeterministicController {
 		pkt := contextpack.Assemble(ctx, r.store, task, wl)
 		payload := make(map[string]any)
-		if err := json.Unmarshal([]byte(inputJSON), &payload); err == nil {
-			if tier, _ := payload["tier"].(string); tier != "" {
-				prov, _ := payload["provider"].(string)
-				mod, _ := payload["model"].(string)
-				if prov == "" && mod == "" {
-					if tp, tm := contextpack.ResolveTier(ctx, r.store, tier); tp != "" || tm != "" {
-						if tp != "" {
-							payload["provider"] = tp
-						}
-						if tm != "" {
-							payload["model"] = tm
-						}
+		if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil || payload == nil {
+			payload = map[string]any{"prompt": inputJSON}
+		}
+		if tier, _ := payload["tier"].(string); tier != "" {
+			prov, _ := payload["provider"].(string)
+			mod, _ := payload["model"].(string)
+			if prov == "" && mod == "" {
+				if tp, tm := contextpack.ResolveTier(ctx, r.store, tier); tp != "" || tm != "" {
+					if tp != "" {
+						payload["provider"] = tp
+					}
+					if tm != "" {
+						payload["model"] = tm
 					}
 				}
 			}
-			if pkt.Markdown != "" {
-				payload["context_packet"] = pkt.Markdown
-			}
-			if raw, err := json.Marshal(payload); err == nil {
-				inputJSON = string(raw)
-			}
 		}
+		if pkt.Markdown != "" {
+			payload["context_packet"] = pkt.Markdown
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		inputJSON = string(raw)
 	}
 
 	spec := scruntime.LaunchSpec{
@@ -727,7 +758,6 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 
 	handle, err := adapter.Start(ctx, spec)
 	if err != nil {
-		_ = r.store.RevokeTaskLeases(ctx, task.ID)
 		return err
 	}
 
@@ -740,6 +770,12 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		return err
 	}
 	// The gate may already have requested approval while Start was returning.
+	if terminalTaskState(current.State) {
+		if err := r.reconcileTerminal(context.WithoutCancel(ctx), current); err != nil {
+			return err
+		}
+		return store.ErrConflict
+	}
 	if current.State != domain.TaskStateWorking && current.State != domain.TaskStateInputRequired {
 		return store.ErrConflict
 	}
@@ -749,11 +785,13 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	return nil
 }
 
-func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) {
+func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {
 	// Reload completedTask so ArtifactsJSON populated by persistArtifacts is visible.
-	if fresh, err := r.store.GetTask(ctx, completedTask.ID); err == nil {
-		completedTask = fresh
+	fresh, err := r.store.GetTask(ctx, completedTask.ID)
+	if err != nil {
+		return err
 	}
+	completedTask = fresh
 	var meta struct {
 		Workflow        string `json:"workflow"`
 		StepIndex       int    `json:"step_index"`
@@ -765,22 +803,25 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		AuthorStepIndex int    `json:"author_step_index"`
 	}
 	if err := json.Unmarshal([]byte(completedTask.InputJSON), &meta); err != nil || meta.Workflow == "" {
-		return
+		return nil
 	}
 	r.mu.Lock()
 	b := r.bundle
 	r.mu.Unlock()
 	if b == nil {
-		return
+		return nil
 	}
 	wf, ok := b.Workflows[meta.Workflow]
 	if !ok {
-		return
+		return nil
 	}
 
 	// If a verifier step rejected the author's output, trigger opt-in remediation or halt advancement.
 	if meta.Role == "verifier" {
-		msgs, _ := r.store.ListTaskMessages(ctx, completedTask.ID)
+		msgs, err := r.store.ListTaskMessages(ctx, completedTask.ID)
+		if err != nil {
+			return err
+		}
 		verdict, findings := contextpack.ParseVerdict(completedTask.ArtifactsJSON, msgs)
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
@@ -826,22 +867,25 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				if remTask, err := r.SubmitTask(ctx, authorStep.Workload, idem, string(raw)); err == nil {
-					_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
-						TaskID:    remTask.ID,
-						Role:      "system",
-						Content:   fmt.Sprintf("Closed-loop remediation attempt %d/%d triggered by verifier %s.", meta.RetryCount+1, meta.MaxRetries, completedTask.ID),
-						CreatedAt: r.now(),
-					})
+				remTask, err := r.SubmitTask(ctx, authorStep.Workload, idem, string(raw))
+				if err != nil {
+					return err
 				}
+
+				_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+					TaskID:    remTask.ID,
+					Role:      "system",
+					Content:   fmt.Sprintf("Closed-loop remediation attempt %d/%d triggered by verifier %s.", meta.RetryCount+1, meta.MaxRetries, completedTask.ID),
+					CreatedAt: r.now(),
+				})
 			}
-			return
+			return nil
 		}
 	}
 
 	nextIdx := meta.StepIndex + 1
 	if nextIdx >= len(wf.Spec.Steps) {
-		return
+		return nil
 	}
 	nextStep := wf.Spec.Steps[nextIdx]
 	prov, mod := nextStep.Provider, nextStep.Model
@@ -889,7 +933,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	raw, _ := json.Marshal(payload)
 	nextID, err := newTaskID()
 	if err != nil {
-		return
+		return err
 	}
 	now := r.now()
 	child := domain.Task{
@@ -902,56 +946,60 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := r.store.CreateTask(ctx, child); err == nil {
-		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
-			TaskID:    child.ID,
-			Role:      "system",
-			Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
-			CreatedAt: now,
-		})
-		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-			Category:     "workflow",
-			TaskID:       child.ID,
-			WorkloadName: nextStep.Workload,
-			Action:       "workflow.advance",
-			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step":%q,"step_index":%d,"parent_task_id":%q}`, meta.Workflow, nextStep.Name, nextIdx, completedTask.ID),
-			CreatedAt:    now,
-		})
+	if err := r.store.CreateTask(ctx, child); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return nil
+		}
+		return err
 	}
+	_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+		TaskID:    child.ID,
+		Role:      "system",
+		Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
+		CreatedAt: now,
+	})
+	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "workflow",
+		TaskID:       child.ID,
+		WorkloadName: nextStep.Workload,
+		Action:       "workflow.advance",
+		Outcome:      "submitted",
+		DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step":%q,"step_index":%d,"parent_task_id":%q}`, meta.Workflow, nextStep.Name, nextIdx, completedTask.ID),
+		CreatedAt:    now,
+	})
+	return nil
 }
 
-func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failedTaskID, reason string) {
-	failed, err := r.store.GetTask(ctx, failedTaskID)
-	if err != nil {
-		return
-	}
+func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task, reason string) error {
 	var meta struct {
 		AutoRemediate bool `json:"auto_remediate"`
 		MaxRetries    int  `json:"max_retries"`
 		RetryCount    int  `json:"retry_count"`
 	}
 	if err := json.Unmarshal([]byte(failed.InputJSON), &meta); err != nil {
-		return
+		return nil
 	}
 	maxR := meta.MaxRetries
 	if meta.AutoRemediate && maxR == 0 {
 		maxR = 1
 	}
 	if maxR <= 0 || meta.RetryCount >= maxR {
-		return
+		return nil
 	}
-	if rem, err := r.RetryTaskWithHandoff(ctx, failedTaskID, true, reason); err == nil {
-		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-			Category:     "controlplane",
-			TaskID:       rem.ID,
-			WorkloadName: rem.WorkloadName,
-			Action:       "task.auto_remediate",
-			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"failed_task_id":%q,"attempt":%d,"max_retries":%d}`, failedTaskID, meta.RetryCount+1, maxR),
-			CreatedAt:    r.now(),
-		})
+	rem, err := r.RetryTaskWithHandoff(ctx, failed.ID, true, reason)
+	if err != nil {
+		return err
 	}
+	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       rem.ID,
+		WorkloadName: rem.WorkloadName,
+		Action:       "task.auto_remediate",
+		Outcome:      "submitted",
+		DetailJSON:   fmt.Sprintf(`{"failed_task_id":%q,"attempt":%d,"max_retries":%d}`, failed.ID, meta.RetryCount+1, maxR),
+		CreatedAt:    r.now(),
+	})
+	return nil
 }
 
 func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) {
