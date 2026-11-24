@@ -21,10 +21,10 @@ import (
 )
 
 var (
-	ErrWardTripped     = errors.New("conclave ward tripped")
-	ErrMessageDenied   = errors.New("conclave message denied by vassal policy")
-	ErrConclaveClosed  = errors.New("conclave is closed")
-	ErrConclavePaused  = errors.New("conclave paused by ward; operator decree required")
+	ErrWardTripped    = errors.New("conclave ward tripped")
+	ErrMessageDenied  = errors.New("conclave message denied by vassal policy")
+	ErrConclaveClosed = errors.New("conclave is closed")
+	ErrConclavePaused = errors.New("conclave paused by ward; operator decree required")
 )
 
 type Options struct {
@@ -140,10 +140,12 @@ func (b *Broker) PostMessage(ctx context.Context, conclaveID, fromRole, toRole, 
 	if toRole == "" {
 		toRole = "all"
 	}
-	if kind == "" {
-		if fromRole == "operator" {
-			kind = "decree"
-		} else {
+	if fromRole == "operator" {
+		kind = "decree"
+	} else {
+		switch kind {
+		case "proposal", "question", "review", "blocker", "decision":
+		default:
 			kind = "proposal"
 		}
 	}
@@ -251,8 +253,18 @@ func (b *Broker) PostMessage(ctx context.Context, conclaveID, fromRole, toRole, 
 
 // PutRelic stores a redacted shared artifact (diff, log, report) in the Conclave.
 func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, contentType, body string) (domain.ConclaveRelic, error) {
-	if _, err := b.store.GetConclave(ctx, conclaveID); err != nil {
+	session, err := b.store.GetConclave(ctx, conclaveID)
+	if err != nil {
 		return domain.ConclaveRelic{}, err
+	}
+	switch session.State {
+	case domain.ConclaveStateCompleted, domain.ConclaveStateCancelled:
+		return domain.ConclaveRelic{}, ErrConclaveClosed
+	case domain.ConclaveStateInputRequired:
+		return domain.ConclaveRelic{}, ErrConclavePaused
+	case domain.ConclaveStateActive:
+	default:
+		return domain.ConclaveRelic{}, ErrConclaveClosed
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -445,7 +457,7 @@ func (b *Broker) checkWards(ctx context.Context, conclaveID string, tpl domain.C
 	wards := tpl.Spec.Wards
 	msgs, err := b.store.ListConclaveMessages(ctx, conclaveID, 0)
 	if err != nil {
-		return "", false
+		return "message_evidence_unavailable", true
 	}
 	// 1. Check aggregate session budget ceiling when budgetRef is declared.
 	if tpl.Spec.BudgetRef != "" && b.getBundle != nil {
