@@ -31,6 +31,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
@@ -714,50 +715,14 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		if len(options) > 0 {
 			cfg = options[0]
 		}
-		mux.Handle("POST /api/v1/integrations/shadewright/incidents", incidentHandler(st, getBundle, conclaveBroker, reconciler, cfg.incidentTemplate))
-
-		// Contract 3c: Shadewright Verifier -> Sablecourt Conclave VerificationReport Relic.
-		mux.HandleFunc("POST /api/v1/integrations/shadewright/verifications", func(w http.ResponseWriter, r *http.Request) {
-			var req struct {
-				ConclaveID string         `json:"conclaveId"`
-				IncidentID string         `json:"incidentId"`
-				PRNumber   int            `json:"prNumber"`
-				Status     string         `json:"status"` // RolledOut | Cleared | Failed
-				Summary    string         `json:"summary"`
-				Report     map[string]any `json:"report"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			if strings.TrimSpace(req.ConclaveID) == "" || strings.TrimSpace(req.Status) == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "conclaveId and status are required"})
-				return
-			}
-			payload, _ := json.MarshalIndent(req, "", "  ")
-			relicName := fmt.Sprintf("verification-%s.json", req.IncidentID)
-			if strings.TrimSpace(req.IncidentID) == "" {
-				relicName = fmt.Sprintf("verification-%d.json", time.Now().UTC().Unix())
-			}
-			relic, err := conclaveBroker.PutRelic(r.Context(), req.ConclaveID, "shadewright-verifier", relicName, "application/json", string(payload))
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			msgText := fmt.Sprintf("Shadewright Verifier report (%s): %s (Relic: %s)", req.Status, req.Summary, relic.Name)
-			_, _ = conclaveBroker.PostMessage(r.Context(), req.ConclaveID, "operator", "all", "decree", msgText, "")
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
-				Category:   "integration",
-				Action:     "shadewright.verification_posted",
-				Outcome:    req.Status,
-				DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"incident_id":%q,"status":%q}`, req.ConclaveID, req.IncidentID, req.Status),
-				CreatedAt:  time.Now().UTC(),
-			})
-			writeJSON(w, http.StatusCreated, map[string]any{
-				"status": "recorded",
-				"relic":  relic,
-			})
-		})
+		integrations.NewShadewright(integrations.ShadewrightOptions{
+			Store:           st,
+			Secrets:         secrets,
+			GetBundle:       getBundle,
+			Broker:          conclaveBroker,
+			Reconciler:      reconciler,
+			DefaultTemplate: cfg.incidentTemplate,
+		}).RegisterRoutes(mux)
 	}
 	mux.HandleFunc("POST /api/v1/tasks/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
@@ -1639,7 +1604,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusOK, relic)
 		})
 	}
-	return securityHardeningMiddleware(mux)
+	return securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(mux, secrets))
 }
 
 func securityHardeningMiddleware(next http.Handler) http.Handler {
@@ -1806,7 +1771,8 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 			strings.HasPrefix(p, "/gate/") ||
 			p == "/api/v1/hooks/github" ||
 			p == "/api/v1/devices/pair/complete" ||
-			p == "/a2a" {
+			p == "/a2a" ||
+			integrations.IsShadewrightRoute(r.Method, p) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1827,16 +1793,6 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 		if r.Method == http.MethodGet && (p == "/api/v1/observer/snapshot" || p == "/api/v1/observer/stream" || (strings.HasPrefix(p, "/api/v1/tasks/") && strings.HasSuffix(p, "/scry"))) {
 			if obsTok, obsErr := secrets.Get(r.Context(), "observer_bearer_token"); obsErr == nil && strings.TrimSpace(obsTok) != "" {
 				if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(obsTok))) == 1 {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-		}
-
-		// Allow scoped shadewright_bearer_token strictly on Shadewright Contract 3 integration routes.
-		if r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/integrations/shadewright/") {
-			if swTok, swErr := secrets.Get(r.Context(), "shadewright_bearer_token"); swErr == nil && strings.TrimSpace(swTok) != "" {
-				if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(swTok))) == 1 {
 					next.ServeHTTP(w, r)
 					return
 				}
