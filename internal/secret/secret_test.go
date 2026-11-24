@@ -59,3 +59,247 @@ func TestChainStoreFallsBack(t *testing.T) {
 		t.Fatalf("expected ErrSecretNotFound, got %v", err)
 	}
 }
+
+type faultSecretStore struct {
+	inner     *MemoryStore
+	getErr    error
+	setErr    error
+	deleteErr error
+	setCalls  int
+	delCalls  int
+}
+
+func (f *faultSecretStore) Get(ctx context.Context, name string) (string, error) {
+	if f.getErr != nil {
+		return "", f.getErr
+	}
+	return f.inner.Get(ctx, name)
+}
+
+func (f *faultSecretStore) Set(ctx context.Context, name, value string) error {
+	f.setCalls++
+	if f.setErr != nil {
+		return f.setErr
+	}
+	return f.inner.Set(ctx, name, value)
+}
+
+func (f *faultSecretStore) Delete(ctx context.Context, name string) error {
+	f.delCalls++
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	return f.inner.Delete(ctx, name)
+}
+
+func TestChainStoreSetAndDelete(t *testing.T) {
+	errPrimaryDown := errors.New("keyring locked")
+	errSecondaryDown := errors.New("disk read-only")
+
+	t.Run("Set", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			stores       func() ([]*faultSecretStore, *ChainStore)
+			wantErr      error
+			wantNonNil   bool
+			wantInStore  int
+			wantSetCalls []int
+		}{
+			{
+				name: "writes to first store when it accepts",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantInStore:  0,
+				wantSetCalls: []int{1, 0},
+			},
+			{
+				name: "falls back to second store when first rejects",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil), setErr: errPrimaryDown}
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantInStore:  1,
+				wantSetCalls: []int{1, 1},
+			},
+			{
+				name: "skips nil store and writes to fallback",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					return []*faultSecretStore{s1}, &ChainStore{Stores: []SecretStore{nil, s1}}
+				},
+				wantInStore:  0,
+				wantSetCalls: []int{1},
+			},
+			{
+				name: "fails closed when all stores reject",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil), setErr: errPrimaryDown}
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil), setErr: errSecondaryDown}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantNonNil:   true,
+				wantInStore:  -1,
+				wantSetCalls: []int{1, 1},
+			},
+			{
+				name: "fails closed when no stores configured",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					return nil, &ChainStore{}
+				},
+				wantNonNil:  true,
+				wantInStore: -1,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				mocks, chain := tc.stores()
+				err := chain.Set(ctx, "k", "v")
+				if tc.wantErr != nil {
+					if !errors.Is(err, tc.wantErr) {
+						t.Fatalf("Set err = %v, want %v", err, tc.wantErr)
+					}
+				} else if tc.wantNonNil {
+					if err == nil {
+						t.Fatalf("expected non-nil error from Set")
+					}
+				} else if err != nil {
+					t.Fatalf("unexpected Set err: %v", err)
+				}
+
+				for i, m := range mocks {
+					if m.setCalls != tc.wantSetCalls[i] {
+						t.Errorf("store[%d] setCalls = %d, want %d", i, m.setCalls, tc.wantSetCalls[i])
+					}
+					_, getErr := m.Get(ctx, "k")
+					if i == tc.wantInStore && getErr != nil {
+						t.Errorf("expected key in store[%d], got err=%v", i, getErr)
+					}
+					if i != tc.wantInStore && getErr == nil {
+						t.Errorf("did not expect key in store[%d]", i)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			stores       func() ([]*faultSecretStore, *ChainStore)
+			wantErr      error
+			wantNonNil   bool
+			wantDelCalls []int
+		}{
+			{
+				name: "deletes from every store",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(map[string]string{"k": "v1"})}
+					s1 := &faultSecretStore{inner: NewMemoryStore(map[string]string{"k": "v2"})}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantDelCalls: []int{1, 1},
+			},
+			{
+				name: "deletes from fallback when missing in primary",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					s1 := &faultSecretStore{inner: NewMemoryStore(map[string]string{"k": "v2"})}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantDelCalls: []int{1, 1},
+			},
+			{
+				name: "attempts all stores and returns first real error",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil)} // ErrSecretNotFound
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil), deleteErr: errPrimaryDown}
+					s2 := &faultSecretStore{inner: NewMemoryStore(map[string]string{"k": "v3"})}
+					s3 := &faultSecretStore{inner: NewMemoryStore(nil), deleteErr: errSecondaryDown}
+					return []*faultSecretStore{s0, s1, s2, s3}, &ChainStore{Stores: []SecretStore{s0, s1, s2, s3}}
+				},
+				wantErr:      errPrimaryDown,
+				wantDelCalls: []int{1, 1, 1, 1},
+			},
+			{
+				name: "returns ErrSecretNotFound when absent in all stores",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					s0 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					s1 := &faultSecretStore{inner: NewMemoryStore(nil)}
+					return []*faultSecretStore{s0, s1}, &ChainStore{Stores: []SecretStore{s0, s1}}
+				},
+				wantErr:      ErrSecretNotFound,
+				wantDelCalls: []int{1, 1},
+			},
+			{
+				name: "fails closed when no stores configured",
+				stores: func() ([]*faultSecretStore, *ChainStore) {
+					return nil, &ChainStore{Stores: []SecretStore{nil}}
+				},
+				wantNonNil: true,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				mocks, chain := tc.stores()
+				err := chain.Delete(ctx, "k")
+				if tc.wantErr != nil {
+					if !errors.Is(err, tc.wantErr) {
+						t.Fatalf("Delete err = %v, want %v", err, tc.wantErr)
+					}
+				} else if tc.wantNonNil {
+					if err == nil {
+						t.Fatalf("expected non-nil error from Delete")
+					}
+				} else if err != nil {
+					t.Fatalf("unexpected Delete err: %v", err)
+				}
+
+				for i, m := range mocks {
+					if m.delCalls != tc.wantDelCalls[i] {
+						t.Errorf("store[%d] delCalls = %d, want %d", i, m.delCalls, tc.wantDelCalls[i])
+					}
+					if m.deleteErr == nil {
+						if _, getErr := m.Get(ctx, "k"); !errors.Is(getErr, ErrSecretNotFound) {
+							t.Errorf("store[%d] still has key after Delete: getErr=%v", i, getErr)
+						}
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestChainStoreSetRequiresAbsentHigherPriorityKey(t *testing.T) {
+	writeErr := errors.New("write rejected")
+	readErr := errors.New("read unavailable")
+	for _, tc := range []struct {
+		name    string
+		initial map[string]string
+		getErr  error
+	}{
+		{name: "primary would return stale value", initial: map[string]string{"k": "old"}},
+		{name: "higher priority read fails", getErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			absent := &faultSecretStore{inner: NewMemoryStore(nil), setErr: writeErr}
+			blocked := &faultSecretStore{inner: NewMemoryStore(tc.initial), setErr: writeErr, getErr: tc.getErr}
+			fallback := NewMemoryStore(nil)
+			chain := &ChainStore{Stores: []SecretStore{absent, nil, blocked, fallback}}
+			if err := chain.Set(ctx, "k", "new"); !errors.Is(err, writeErr) {
+				t.Errorf("Set error = %v, want %v", err, writeErr)
+			}
+			if _, err := fallback.Get(ctx, "k"); !errors.Is(err, ErrSecretNotFound) {
+				t.Errorf("fallback Get error = %v, want ErrSecretNotFound", err)
+			}
+		})
+	}
+}

@@ -5,15 +5,13 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 const defaultRingSize = 64 * 1024
 
 var (
-	ErrSessionNotFound    = errors.New("live attach session not found")
-	ErrTakeoverHeld       = errors.New("takeover already held by another operator")
+	ErrSessionNotFound     = errors.New("live attach session not found")
+	ErrTakeoverHeld        = errors.New("takeover already held by another operator")
 	ErrTakeoverUnsupported = errors.New("process does not accept stdin takeover")
 )
 
@@ -21,6 +19,7 @@ type session struct {
 	mu            sync.Mutex
 	ring          []byte
 	maxRing       int
+	output        streamRedactor
 	stdin         io.WriteCloser
 	takeoverOwner string
 	closed        bool
@@ -56,8 +55,8 @@ func (h *Hub) Register(taskID string, stdin io.WriteCloser) {
 	}
 }
 
-// WriteOutput redacts raw process output, appends it to the ring buffer,
-// and fans it out to all active Scry/Takeover subscribers.
+// WriteOutput redacts credentials across writes and sends safe output to the
+// history ring and active Scry/Takeover subscribers.
 func (h *Hub) WriteOutput(taskID string, raw []byte) {
 	if len(raw) == 0 {
 		return
@@ -68,10 +67,16 @@ func (h *Hub) WriteOutput(taskID string, raw []byte) {
 	if !ok {
 		return
 	}
-	clean := redact.String(string(raw))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return
+	}
+	s.emitLocked(s.output.write(raw, false))
+}
+
+func (s *session) emitLocked(clean string) {
+	if clean == "" {
 		return
 	}
 	s.ring = append(s.ring, []byte(clean)...)
@@ -230,6 +235,8 @@ func (s *session) closeLocked() {
 	if s.closed {
 		return
 	}
+	s.emitLocked(s.output.write(nil, true))
+	s.output = streamRedactor{}
 	s.closed = true
 	s.takeoverOwner = ""
 	if s.stdin != nil {

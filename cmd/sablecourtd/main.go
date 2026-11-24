@@ -52,15 +52,15 @@ import (
 
 func main() {
 	var (
-		dbPath          string
-		postgresDSN     string
-		manifestsPath   string
-		listenAddr       string
-		socketPath       string
-		gateHost         string
-		secretFile       string
-		repoRoot         string
-		runtimeBackend   string
+		dbPath               string
+		postgresDSN          string
+		manifestsPath        string
+		listenAddr           string
+		socketPath           string
+		gateHost             string
+		secretFile           string
+		repoRoot             string
+		runtimeBackend       string
 		k8sNamespace         string
 		k8sRuntimeClass      string
 		kubeconfigPath       string
@@ -71,6 +71,8 @@ func main() {
 		maxConcurrent        int
 		mode                 string
 		modelGatewayURL      string
+		allowedHosts         []string
+		incidentTemplate     string
 	)
 
 	rootCmd := &cobra.Command{
@@ -97,6 +99,8 @@ func main() {
 				maxConcurrent:        maxConcurrent,
 				mode:                 mode,
 				modelGatewayURL:      modelGatewayURL,
+				allowedHosts:         allowedHosts,
+				incidentTemplate:     incidentTemplate,
 			})
 		},
 	}
@@ -111,6 +115,8 @@ func main() {
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum number of concurrently running tasks (0 = unlimited)")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
+	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
+	rootCmd.Flags().StringVar(&incidentTemplate, "incident-conclave-template", "", "Default Conclave template for new Shadewright incidents")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
 	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
@@ -150,6 +156,8 @@ type daemonConfig struct {
 	maxConcurrent        int
 	mode                 string
 	modelGatewayURL      string
+	allowedHosts         []string
+	incidentTemplate     string
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -177,7 +185,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	manifestsPath := cfg.manifestsPath
 	listenAddr := cfg.listenAddr
 	socketPath := cfg.socketPath
-	gateHost := cfg.gateHost
+	gateHost := cfg.containerGateHost()
 	secretFile := cfg.secretFile
 	repoRoot := cfg.repoRoot
 
@@ -280,7 +288,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	secretStore := &secret.ChainStore{Stores: stores}
 
 	modelGate := model.New(model.Options{
-		Store:      st,
+		Store:      gateLeaseStore{st},
 		Secrets:    secretStore,
 		Bundle:     bundle,
 		GatewayURL: cfg.modelGatewayURL,
@@ -307,7 +315,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}()
 	})
 	dataActionGate := mcpgate.New(mcpgate.Options{
-		Store:     st,
+		Store:     gateLeaseStore{st},
 		Bundle:    bundle,
 		Policy:    policyEng,
 		Breaker:   breaker,
@@ -360,13 +368,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}
 
-	if gateHost == "" {
-		if _, port, err := net.SplitHostPort(listenAddr); err == nil && strings.HasPrefix(listenAddr, "127.0.0.1:") {
-			gateHost = "host.docker.internal:" + port
-		} else {
-			gateHost = listenAddr
-		}
-	}
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:         st,
 		Bundle:        bundle,
@@ -493,10 +494,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash)
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash, handlerConfig{incidentTemplate: cfg.incidentTemplate})
 	if cfg.operatorAuthRequired {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
 		mux = requireOperatorAuth(mux, secretStore)
+	}
+	unixMux, err := cfg.hostHandler(mux, true)
+	if err != nil {
+		return err
+	}
+	mux, err = cfg.hostHandler(mux, false)
+	if err != nil {
+		return err
 	}
 	srv := &http.Server{
 		Addr:              listenAddr,
@@ -516,7 +525,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 		_ = os.Chmod(socketPath, 0o600)
 		defer os.Remove(socketPath)
-		unixSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		unixSrv = &http.Server{Handler: unixMux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
 			_ = unixSrv.Serve(uln)
@@ -545,7 +554,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard) http.Handler {
+type handlerConfig struct {
+	incidentTemplate string
+}
+
+func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -697,69 +710,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusCreated, retried)
 	})
 	if conclaveBroker != nil {
-		// Contract 3a: Shadewright -> Sablecourt code-level Incident escalation into a Conclave + Relic.
-		mux.HandleFunc("POST /api/v1/integrations/shadewright/incidents", func(w http.ResponseWriter, r *http.Request) {
-			var req struct {
-				ConclaveTemplate string         `json:"conclaveTemplate"`
-				IncidentID       string         `json:"incidentId"`
-				Cluster          string         `json:"cluster"`
-				Namespace        string         `json:"namespace"`
-				Workload         string         `json:"workload"`
-				Summary          string         `json:"summary"`
-				Evidence         map[string]any `json:"evidence"`
-				Logs             string         `json:"logs"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			if strings.TrimSpace(req.IncidentID) == "" || strings.TrimSpace(req.Summary) == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incidentId and summary are required"})
-				return
-			}
-			tpl := strings.TrimSpace(req.ConclaveTemplate)
-			if tpl == "" {
-				if b := getBundle(); b != nil {
-					for name := range b.Conclaves {
-						tpl = name
-						break
-					}
-				}
-			}
-			title := fmt.Sprintf("Shadewright Incident %s (%s/%s)", req.IncidentID, req.Namespace, req.Workload)
-			decree := fmt.Sprintf("Escalated from Shadewright (%s): %s. Review Relic incident-%s.json and propose a reviewed fix PR.", req.Cluster, req.Summary, req.IncidentID)
-			sess, err := conclaveBroker.Open(r.Context(), tpl, title, decree)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			evidencePayload, _ := json.MarshalIndent(map[string]any{
-				"incidentId": req.IncidentID,
-				"cluster":    req.Cluster,
-				"namespace":  req.Namespace,
-				"workload":   req.Workload,
-				"summary":    req.Summary,
-				"evidence":   req.Evidence,
-				"logs":       req.Logs,
-			}, "", "  ")
-			relicName := "incident-" + req.IncidentID + ".json"
-			relic, err := conclaveBroker.PutRelic(r.Context(), sess.ID, "shadewright-analyzer", relicName, "application/json", string(evidencePayload))
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
-				Category:   "integration",
-				Action:     "shadewright.incident_escalated",
-				Outcome:    "ok",
-				DetailJSON: fmt.Sprintf(`{"incident_id":%q,"conclave_id":%q,"relic":%q}`, req.IncidentID, sess.ID, relic.Name),
-				CreatedAt:  time.Now().UTC(),
-			})
-			writeJSON(w, http.StatusCreated, map[string]any{
-				"conclave": sess,
-				"relic":    relic,
-			})
-		})
+		var cfg handlerConfig
+		if len(options) > 0 {
+			cfg = options[0]
+		}
+		mux.Handle("POST /api/v1/integrations/shadewright/incidents", incidentHandler(st, getBundle, conclaveBroker, reconciler, cfg.incidentTemplate))
 
 		// Contract 3c: Shadewright Verifier -> Sablecourt Conclave VerificationReport Relic.
 		mux.HandleFunc("POST /api/v1/integrations/shadewright/verifications", func(w http.ResponseWriter, r *http.Request) {
@@ -1071,10 +1026,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		budget, _ := st.TotalBudgetTotals(r.Context())
 
 		type taskSummary struct {
-			ID           string           `json:"id"`
-			Workload     string           `json:"workload"`
-			State        domain.TaskState `json:"state"`
-			UpdatedAt    time.Time        `json:"updatedAt"`
+			ID        string           `json:"id"`
+			Workload  string           `json:"workload"`
+			State     domain.TaskState `json:"state"`
+			UpdatedAt time.Time        `json:"updatedAt"`
 		}
 		var activeTasks []taskSummary
 		for _, t := range tasks {
@@ -1372,15 +1327,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, apr)
 	})
 	mux.HandleFunc("GET /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
-			return
-		}
-		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+		lease, ok := authenticateGateLease(w, r, st)
+		if !ok {
 			return
 		}
 		msgs, err := st.ListTaskMessages(r.Context(), lease.TaskID)
@@ -1391,15 +1339,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, msgs)
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
-			return
-		}
-		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
+		lease, ok := authenticateGateLease(w, r, st)
+		if !ok {
 			return
 		}
 		var body struct {
@@ -1410,13 +1351,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
 			return
 		}
-		role := body.Role
-		if role != "agent" && role != "system" {
-			role = "agent"
+		if strings.EqualFold(strings.TrimSpace(body.Role), "system") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "system role is reserved"})
+			return
 		}
 		if err := st.AppendTaskMessage(r.Context(), domain.TaskMessage{
 			TaskID:    lease.TaskID,
-			Role:      role,
+			Role:      "agent",
 			Content:   redact.String(body.Content),
 			CreatedAt: time.Now().UTC(),
 		}); err != nil {
@@ -1620,14 +1561,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			var body struct {
 				To   string `json:"to"`
-				Kind string `json:"kind"`
 				Body string `json:"body"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
-			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), role, body.To, body.Kind, body.Body, lease.TaskID)
+			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), role, body.To, "proposal", body.Body, lease.TaskID)
 			if err != nil {
 				code := http.StatusConflict
 				if errors.Is(err, conclave.ErrMessageDenied) {
@@ -1740,6 +1680,24 @@ func securityHardeningMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// Gate requests can arrive after a terminal transition and before lease cleanup.
+type gateLeaseStore struct{ store.Store }
+
+func (s gateLeaseStore) GetActiveLeaseByTokenHash(ctx context.Context, hash string, now time.Time) (domain.Lease, error) {
+	lease, err := s.Store.GetActiveLeaseByTokenHash(ctx, hash, now)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	task, err := s.GetTask(ctx, lease.TaskID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	if task.WorkloadName != lease.WorkloadName || (task.State != domain.TaskStateWorking && task.State != domain.TaskStateInputRequired) {
+		return domain.Lease{}, store.ErrNotFound
+	}
+	return lease, nil
+}
+
 func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Store) (domain.Lease, bool) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -1747,7 +1705,7 @@ func authenticateGateLease(w http.ResponseWriter, r *http.Request, st store.Stor
 		return domain.Lease{}, false
 	}
 	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-	lease, err := st.GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
+	lease, err := (gateLeaseStore{st}).GetActiveLeaseByTokenHash(r.Context(), model.HashToken(tok), time.Now().UTC())
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired task token"})
 		return domain.Lease{}, false
@@ -1798,9 +1756,9 @@ func buildAgentCard(bundle *config.Bundle) map[string]any {
 		"description": "Policy-governed broker for heterogeneous Shadewright Labs workloads.",
 		"version":     "0.1.0",
 		"capabilities": map[string]bool{
-			"streaming":         true,
-			"stateTransition":   true,
-			"humanInTheLoop":    true,
+			"streaming":       true,
+			"stateTransition": true,
+			"humanInTheLoop":  true,
 		},
 		"skills": skills,
 	}
