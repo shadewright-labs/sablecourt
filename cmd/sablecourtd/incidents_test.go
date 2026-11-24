@@ -64,7 +64,7 @@ func TestIncidentIntakeIdempotent(t *testing.T) {
 			reconciler := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})
 			buildHandler := func() http.Handler {
 				broker := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle, Reconciler: reconciler})
-				return newHandler(st, incidentTestSecrets(), getBundle, nil, nil, nil, nil, reconciler, nil, broker, nil, nil, nil)
+				return newHandler(st, incidentTestSecrets(), getBundle, nil, nil, nil, nil, reconciler, nil, broker, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
 			}
 			h := buildHandler()
 			const count = 6
@@ -127,7 +127,7 @@ func TestIncidentIntakeIdempotent(t *testing.T) {
 				t.Fatalf("opening messages = %d, error = %v", len(msgs), err)
 			}
 			w := httptest.NewRecorder()
-			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/conclaves/"+id+"/relics/"+relics[0].Name, nil))
+			h.ServeHTTP(w, operatorRequest(http.MethodGet, "/api/v1/conclaves/"+id+"/relics/"+relics[0].Name, nil))
 			if w.Code != 200 {
 				t.Fatalf("Relic fetch status = %d", w.Code)
 			}

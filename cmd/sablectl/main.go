@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
@@ -45,24 +47,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output raw JSON instead of styled tables")
 
 	httpClient := func(timeout time.Duration) (*http.Client, string) {
-		tok := strings.TrimSpace(opToken)
-		if tok == "" {
-			tok = strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
-		}
-		var baseRT http.RoundTripper = http.DefaultTransport
-		baseURL := strings.TrimRight(apiURL, "/")
-		if socketPath != "" {
-			baseRT = &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-				},
-			}
-			baseURL = "http://unix"
-		}
-		if tok != "" {
-			baseRT = &bearerTransport{base: baseRT, token: tok}
-		}
-		return &http.Client{Timeout: timeout, Transport: baseRT}, baseURL
+		return newDaemonClient(timeout, apiURL, socketPath, opToken)
 	}
 
 	validateCmd := &cobra.Command{
@@ -1153,14 +1138,73 @@ func writeJSONOut(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+func newDaemonClient(timeout time.Duration, apiURL, socketPath, opToken string) (*http.Client, string) {
+	baseURL := strings.TrimRight(apiURL, "/")
+	client := &http.Client{Timeout: timeout, Transport: http.DefaultTransport}
+	if socketPath != "" {
+		client.Transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+			},
+		}
+		baseURL = "http://unix"
+	}
+	endpoint, err := url.Parse(baseURL)
+	if err != nil || endpoint.Host == "" || endpoint.User != nil {
+		client.Transport = daemonClientError{errors.New("invalid daemon API URL")}
+		return client, baseURL
+	}
+	host := endpoint.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		// The standard transport exempts the lowercase loopback name from proxies.
+		endpoint.Host = strings.ToLower(endpoint.Host)
+		baseURL = endpoint.String()
+		host = endpoint.Hostname()
+	}
+	local := socketPath != "" || host == "localhost" || net.ParseIP(host).IsLoopback()
+	tok := strings.TrimSpace(opToken)
+	if tok == "" {
+		tok = strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
+	}
+	if tok == "" && local {
+		dir, err := operatortoken.StateDir()
+		if err == nil {
+			tok, err = operatortoken.Read(dir)
+		}
+		if err != nil {
+			client.Transport = daemonClientError{fmt.Errorf("read operator credential: %w", err)}
+			return client, baseURL
+		}
+	}
+	if tok != "" {
+		if endpoint.Scheme != "https" && !(local && endpoint.Scheme == "http") {
+			client.Transport = daemonClientError{errors.New("operator credentials require HTTPS or a local daemon")}
+			return client, baseURL
+		}
+		client.Transport = &bearerTransport{base: client.Transport, token: tok, origin: endpoint}
+	}
+	return client, baseURL
+}
+
+type daemonClientError struct{ err error }
+
+func (t daemonClientError) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
 type bearerTransport struct {
-	base  http.RoundTripper
-	token string
+	base   http.RoundTripper
+	token  string
+	origin *url.URL
 }
 
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	if r.URL.Scheme == t.origin.Scheme && r.URL.Host == t.origin.Host && r.URL.User == nil {
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	} else {
+		r.Header.Del("Authorization")
+	}
 	return t.base.RoundTrip(r)
 }
 

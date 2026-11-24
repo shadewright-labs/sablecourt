@@ -81,9 +81,9 @@ func newIntegrationTestEnv(t *testing.T, wards domain.ConclaveWards, secrets sec
 	if err != nil {
 		t.Fatal(err)
 	}
-	sanctum := newHandler(st, secrets, getBundle, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), broker, attach.NewHub(), nil, dash, handlerConfig{incidentTemplate: "primary"})
+	sanctum := newHandler(st, secrets, getBundle, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), broker, attach.NewHub(), nil, dash, handlerConfig{incidentTemplate: "primary", operatorToken: testOperatorToken})
 	citadel := newHandler(st, secrets, getBundle, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), broker, attach.NewHub(), nil, dash,
-		handlerConfig{incidentTemplate: "primary", operatorAuthRequired: true})
+		handlerConfig{incidentTemplate: "primary", operatorToken: testOperatorToken})
 	return st, broker, reconciler, sanctum, citadel
 }
 
