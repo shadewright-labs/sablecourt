@@ -495,11 +495,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash, handlerConfig{incidentTemplate: cfg.incidentTemplate})
 	if cfg.operatorAuthRequired {
 		logger.Info("operator bearer authentication enabled on UI and API routes")
-		mux = requireOperatorAuth(mux, secretStore)
 	}
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
+		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorAuthRequired: cfg.operatorAuthRequired})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
@@ -556,10 +556,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 }
 
 type handlerConfig struct {
-	incidentTemplate string
+	incidentTemplate     string
+	operatorAuthRequired bool
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
+	var cfg handlerConfig
+	if len(options) > 0 {
+		cfg = options[0]
+	}
 	mux := http.NewServeMux()
 	if dash != nil {
 		dash.RegisterRoutes(mux)
@@ -711,10 +716,6 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusCreated, retried)
 	})
 	if conclaveBroker != nil {
-		var cfg handlerConfig
-		if len(options) > 0 {
-			cfg = options[0]
-		}
 		integrations.NewShadewright(integrations.ShadewrightOptions{
 			Store:           st,
 			Secrets:         secrets,
@@ -1604,7 +1605,24 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusOK, relic)
 		})
 	}
-	return securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(mux, secrets))
+	authenticated := requireOperatorAuth(mux, secrets)
+	if cfg.operatorAuthRequired {
+		return requireOperatorAuth(securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(mux, secrets)), secrets)
+	}
+	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, pattern := mux.Handler(r)
+			switch pattern {
+			case "POST /api/v1/conclaves", "POST /ui/conclaves",
+				"POST /api/v1/conclaves/{id}/decree", "POST /ui/conclaves/{id}/decree",
+				"POST /api/v1/conclaves/{id}/voice-decree":
+				authenticated.ServeHTTP(w, r)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(routes, secrets))
 }
 
 func securityHardeningMiddleware(next http.Handler) http.Handler {
@@ -1772,7 +1790,7 @@ func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Han
 			p == "/api/v1/hooks/github" ||
 			p == "/api/v1/devices/pair/complete" ||
 			p == "/a2a" ||
-			integrations.IsShadewrightRoute(r.Method, p) {
+			integrations.IsShadewrightRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

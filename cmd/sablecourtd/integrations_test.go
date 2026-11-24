@@ -82,7 +82,8 @@ func newIntegrationTestEnv(t *testing.T, wards domain.ConclaveWards, secrets sec
 		t.Fatal(err)
 	}
 	sanctum := newHandler(st, secrets, getBundle, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), broker, attach.NewHub(), nil, dash, handlerConfig{incidentTemplate: "primary"})
-	citadel := requireOperatorAuth(sanctum, secrets)
+	citadel := newHandler(st, secrets, getBundle, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), broker, attach.NewHub(), nil, dash,
+		handlerConfig{incidentTemplate: "primary", operatorAuthRequired: true})
 	return st, broker, reconciler, sanctum, citadel
 }
 
@@ -288,10 +289,10 @@ func TestShadewrightVerificationRequiresIntegrationOwnedConclave(t *testing.T) {
 
 func TestShadewrightTokenRequiredInEveryMode(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		secrets   secret.SecretStore
-		token     string
-		wantCode  int
+		name     string
+		secrets  secret.SecretStore
+		token    string
+		wantCode int
 	}{
 		{"missing header", defaultIntegrationSecrets(), "", http.StatusUnauthorized},
 		{"wrong token", defaultIntegrationSecrets(), "wrong-token", http.StatusUnauthorized},
@@ -367,9 +368,11 @@ func TestShadewrightTokenRefusedOnEveryOtherRoute(t *testing.T) {
 		{http.MethodGet, "/api/v1/conclaves", ""},
 		{http.MethodPost, "/api/v1/conclaves", `{"template":"primary","title":"hijack","decree":"do stuff"}`},
 		{http.MethodGet, "/api/v1/conclaves/" + opSess.ID, ""},
+		{http.MethodPost, "/api/v1/conclaves/" + opSess.ID + "/voice-decree", ""},
 		{http.MethodPost, "/api/v1/conclaves/" + opSess.ID + "/decree", `{"to":"all","body":"hijack"}`},
 		{http.MethodPost, "/api/v1/conclaves/" + opSess.ID + "/close", `{"state":"completed"}`},
 		{http.MethodPost, "/api/v1/conclaves/" + opSess.ID + "/relics", `{"name":"x","body":"y"}`},
+		{http.MethodPost, "/ui/conclaves", "template=primary&decree=unexpected"},
 		{http.MethodPost, "/ui/conclaves/" + opSess.ID + "/decree", "to=all&body=hijack"},
 		{http.MethodGet, "/api/v1/approvals", ""},
 		{http.MethodPost, "/api/v1/reload", ""},
@@ -393,6 +396,7 @@ func TestShadewrightTokenRefusedOnEveryOtherRoute(t *testing.T) {
 		{http.MethodPost, "/gate/model/openai/v1/chat/completions", `{}`},
 		{http.MethodGet, "/api/v1/integrations/shadewright/incidents", ""},
 		{http.MethodGet, "/api/v1/integrations/shadewright/verifications", ""},
+		{http.MethodPost, "/api/v1/integrations/shadewright%2Fincidents", `{}`},
 		{http.MethodPost, "/api/v1/integrations/shadewright/other", `{}`},
 		{http.MethodPost, "/api/v1/integrations/shadewright/incidents/../other", `{}`},
 	}
@@ -494,11 +498,7 @@ func TestShadewrightPausedCouncilStaysPausedAndLimitsNotReset(t *testing.T) {
 		if err := json.Unmarshal(wInc.Body.Bytes(), &incResp); err != nil {
 			t.Fatal(err)
 		}
-		// One vassal message reaches 2 messages (opening report + vassal message).
-		if _, err := broker.PostMessage(ctx, incResp.Conclave.ID, "maintainer", "analyst", "proposal", "Investigating", ""); err != nil {
-			t.Fatalf("vassal message 1 failed: %v", err)
-		}
-		// Verification report must NOT reset the Ward message counter.
+		// The verification can fill the last slot after the opening report.
 		wVer := doBearerPOST(sanctum, "/api/v1/integrations/shadewright/verifications", testShadewrightToken, map[string]any{
 			"conclaveId": incResp.Conclave.ID,
 			"incidentId": "INC-WARD-1",
@@ -518,4 +518,106 @@ func TestShadewrightPausedCouncilStaysPausedAndLimitsNotReset(t *testing.T) {
 			t.Fatalf("expected paused council after ward trip, got %+v, err=%v", sess, err)
 		}
 	})
+}
+
+func TestDecreeRoutesRequireOperator(t *testing.T) {
+	ctx := context.Background()
+	st, broker, _, sanctum, citadel := newIntegrationTestEnv(t, domain.ConclaveWards{}, defaultIntegrationSecrets())
+	sess, err := broker.Open(ctx, "primary", "Operator room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := sess.ID
+	if err := st.UpdateConclaveState(ctx, id, domain.ConclaveStateInputRequired, "message limit"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mode := range []struct {
+		name string
+		h    http.Handler
+	}{{"sanctum", sanctum}, {"citadel", citadel}} {
+		for _, route := range []struct {
+			path string
+			body string
+		}{
+			{"/api/v1/conclaves/" + id + "/decree", `{"body":"Resume"}`},
+			{"/api/v1/conclaves/" + id + "/%64ecree", `{"body":"Resume"}`},
+			{"/api/v1/conclaves/" + id + "/voice-decree", ""},
+			{"/ui/conclaves/" + id + "/decree", "to=all&body=Resume"},
+			{"/api/v1/conclaves", `{"template":"primary","title":"Another room","decree":"Begin"}`},
+			{"/ui/conclaves", "template=primary&title=Another+room&decree=Begin"},
+		} {
+			for _, cred := range []struct{ name, value string }{
+				{"missing", ""}, {"observer", testObserverToken},
+			} {
+				t.Run(mode.name+"/"+cred.name+route.path, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodPost, route.path, strings.NewReader(route.body))
+					req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+					if cred.value != "" {
+						req.Header.Set("Authorization", "Bearer "+cred.value)
+					}
+					rec := httptest.NewRecorder()
+					mode.h.ServeHTTP(rec, req)
+					if rec.Code != http.StatusUnauthorized {
+						t.Errorf("decree route = %d, want 401", rec.Code)
+					}
+				})
+			}
+		}
+	}
+	got, err := st.GetConclave(ctx, id)
+	if err != nil || got.State != domain.ConclaveStateInputRequired || got.WardReason != "message limit" {
+		t.Errorf("unauthenticated request changed paused room, err=%v", err)
+	}
+	res := doBearerPOST(sanctum, "/api/v1/conclaves/"+id+"/decree", testOperatorToken, map[string]string{"body": "Resume"})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("operator decree = %d, want 201: %s", res.Code, res.Body.String())
+	}
+}
+
+func TestVerificationHonorsWardBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		wards domain.ConclaveWards
+	}{
+		{"message limit", domain.ConclaveWards{MaxMessages: 2}},
+		{"ping-pong limit", domain.ConclaveWards{MaxPingPong: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, broker, _, h, _ := newIntegrationTestEnv(t, tc.wards, defaultIntegrationSecrets())
+			res := doBearerPOST(h, "/api/v1/integrations/shadewright/incidents", testShadewrightToken,
+				map[string]string{"incidentId": "INC-WARD-LIMIT", "summary": "Crash"})
+			var opened struct{ Conclave domain.ConclaveSession }
+			if err := json.Unmarshal(res.Body.Bytes(), &opened); err != nil || res.Code != http.StatusCreated {
+				t.Fatalf("incident status = %d, err=%v", res.Code, err)
+			}
+			id := opened.Conclave.ID
+			if _, err := broker.PostMessage(ctx, id, "maintainer", "analyst", "proposal", "Investigating", ""); err != nil {
+				t.Fatal(err)
+			}
+			res = doBearerPOST(h, "/api/v1/integrations/shadewright/verifications", testShadewrightToken,
+				map[string]string{"conclaveId": id, "status": "RolledOut"})
+			if res.Code != http.StatusConflict {
+				t.Errorf("verification = %d, want 409", res.Code)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, id, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, msg := range msgs {
+				if msg.FromRole == "integration:shadewright" && msg.ToRole == "operator" {
+					t.Error("verification report persisted after Ward reached")
+				}
+			}
+			relics, err := st.ListConclaveRelics(ctx, id)
+			if err != nil || len(relics) != 1 {
+				t.Errorf("relics = %d, want 1, err=%v", len(relics), err)
+			}
+			paused, err := st.GetConclave(ctx, id)
+			if err != nil || paused.State != domain.ConclaveStateInputRequired {
+				t.Errorf("state = %q, want input required, err=%v", paused.State, err)
+			}
+		})
+	}
 }

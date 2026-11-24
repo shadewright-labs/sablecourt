@@ -255,7 +255,7 @@ func TestIncidentStorageFailuresFailClosed(t *testing.T) {
 }
 
 func TestIncidentRetryAfterFault(t *testing.T) {
-	for _, failure := range []string{"relic", "message", "wake", "audit"} {
+	for _, failure := range []string{"open audit", "relic", "message", "wake", "audit"} {
 		t.Run(failure, func(t *testing.T) {
 			ctx := context.Background()
 			base := daemonTestStore(t)
@@ -329,7 +329,8 @@ func (s incidentFailureStore) CreateTask(ctx context.Context, t domain.Task) err
 	return s.Store.CreateTask(ctx, t)
 }
 func (s incidentFailureStore) AppendAudit(ctx context.Context, a domain.AuditRecord) error {
-	if s.failure == "audit" && a.Action == "shadewright.incident_escalated" {
+	if (s.failure == "open audit" && a.Action == "conclave.open") ||
+		(s.failure == "audit" && a.Action == "shadewright.incident_escalated") {
 		return fmt.Errorf("audit unavailable")
 	}
 	return s.Store.AppendAudit(ctx, a)
