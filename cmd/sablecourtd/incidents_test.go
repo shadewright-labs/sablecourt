@@ -14,19 +14,25 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
+
+func incidentTestSecrets() secret.SecretStore {
+	return secret.NewMemoryStore(map[string]string{"shadewright_bearer_token": testShadewrightToken})
+}
 
 func incidentTestHandler(st store.Store, defaultTemplate string) http.Handler {
 	bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{"primary": {}, "secondary": {}}}
 	getBundle := func() *config.Bundle { return bundle }
 	broker := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle})
-	return newHandler(st, nil, getBundle, nil, nil, nil, nil, nil, nil, broker, nil, nil, nil, handlerConfig{incidentTemplate: defaultTemplate})
+	return newHandler(st, incidentTestSecrets(), getBundle, nil, nil, nil, nil, nil, nil, broker, nil, nil, nil, handlerConfig{incidentTemplate: defaultTemplate})
 }
 
 func postIncident(h http.Handler, id, template string) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]string{"incidentId": id, "summary": "Review failure", "conclaveTemplate": template})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/shadewright/incidents", strings.NewReader(string(body)))
+	r.Header.Set("Authorization", "Bearer "+testShadewrightToken)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
@@ -58,7 +64,7 @@ func TestIncidentIntakeIdempotent(t *testing.T) {
 			reconciler := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})
 			buildHandler := func() http.Handler {
 				broker := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle, Reconciler: reconciler})
-				return newHandler(st, nil, getBundle, nil, nil, nil, nil, reconciler, nil, broker, nil, nil, nil)
+				return newHandler(st, incidentTestSecrets(), getBundle, nil, nil, nil, nil, reconciler, nil, broker, nil, nil, nil)
 			}
 			h := buildHandler()
 			const count = 6
@@ -249,7 +255,7 @@ func TestIncidentStorageFailuresFailClosed(t *testing.T) {
 }
 
 func TestIncidentRetryAfterFault(t *testing.T) {
-	for _, failure := range []string{"relic", "message", "wake", "audit"} {
+	for _, failure := range []string{"open audit", "relic", "message", "wake", "audit"} {
 		t.Run(failure, func(t *testing.T) {
 			ctx := context.Background()
 			base := daemonTestStore(t)
@@ -269,7 +275,7 @@ func TestIncidentRetryAfterFault(t *testing.T) {
 			build := func() http.Handler {
 				get := func() *config.Bundle { return b }
 				r := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: b})
-				return incidentHandler(st, get, conclave.NewBroker(conclave.Options{Store: st, GetBundle: get, Reconciler: r}), r, "")
+				return incidentHandler(st, incidentTestSecrets(), get, conclave.NewBroker(conclave.Options{Store: st, GetBundle: get, Reconciler: r}), r, "")
 			}
 			if w := postIncident(build(), "incident", "primary"); w.Code < 500 {
 				t.Errorf("fault returned %d", w.Code)
@@ -323,7 +329,8 @@ func (s incidentFailureStore) CreateTask(ctx context.Context, t domain.Task) err
 	return s.Store.CreateTask(ctx, t)
 }
 func (s incidentFailureStore) AppendAudit(ctx context.Context, a domain.AuditRecord) error {
-	if s.failure == "audit" && a.Action == "shadewright.incident_escalated" {
+	if (s.failure == "open audit" && a.Action == "conclave.open") ||
+		(s.failure == "audit" && a.Action == "shadewright.incident_escalated") {
 		return fmt.Errorf("audit unavailable")
 	}
 	return s.Store.AppendAudit(ctx, a)
