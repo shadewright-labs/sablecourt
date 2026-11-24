@@ -3,6 +3,7 @@ package conclave
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,8 +13,124 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
+
+type brokerReadFailure struct {
+	store.Store
+}
+
+func (s brokerReadFailure) ListConclaveMessages(context.Context, string, int64) ([]domain.ConclaveMessage, error) {
+	return nil, errors.New("messages unavailable")
+}
+
+func brokerTestStore(t *testing.T) store.Store {
+	t.Helper()
+	st, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func TestPostMessageDerivesKindFromSender(t *testing.T) {
+	for _, tc := range []struct{ role, kind, want string }{
+		{"coder", "decree", "proposal"},
+		{"coder", "system", "proposal"},
+		{"coder", "review", "review"},
+		{"operator", "proposal", "decree"},
+		{"@operator", "", "decree"},
+	} {
+		t.Run(tc.role+"/"+tc.kind, func(t *testing.T) {
+			ctx := context.Background()
+			st := brokerTestStore(t)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+				t.Fatal(err)
+			}
+			b := NewBroker(Options{Store: st})
+			msg, err := b.PostMessage(ctx, "room", tc.role, "all", tc.kind, "message", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := st.ListConclaveMessages(ctx, "room", 0)
+			if err != nil || len(stored) != 1 || stored[0].Kind != tc.want || msg.Kind != tc.want {
+				t.Fatalf("want kind %q, returned %+v, stored %+v, error %v", tc.want, msg, stored, err)
+			}
+		})
+	}
+}
+
+func TestWardMessageReadFailsClosed(t *testing.T) {
+	for _, wards := range []domain.ConclaveWards{{}, {MaxMessages: 1}, {MaxPingPong: 1}} {
+		t.Run(fmt.Sprintf("%+v", wards), func(t *testing.T) {
+			ctx := context.Background()
+			st := brokerTestStore(t)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", TemplateName: "template", State: domain.ConclaveStateActive}); err != nil {
+				t.Fatal(err)
+			}
+			b := NewBroker(Options{Store: brokerReadFailure{st}, GetBundle: func() *config.Bundle {
+				return &config.Bundle{Conclaves: map[string]domain.Conclave{"template": {Spec: domain.ConclaveSpec{
+					Wards: wards, Vassals: []domain.ConclaveVassal{{Role: "coder", CanMessage: []string{"all"}}},
+				}}}}
+			}})
+			_, err := b.PostMessage(ctx, "room", "coder", "all", "proposal", "must not persist", "")
+			if !errors.Is(err, ErrWardTripped) {
+				t.Errorf("want Ward refusal, got %v", err)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, "room", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, msg := range msgs {
+				if msg.FromRole == "coder" {
+					t.Error("participant message persisted despite unreadable Ward evidence")
+				}
+			}
+			session, err := st.GetConclave(ctx, "room")
+			if err != nil || session.State != domain.ConclaveStateInputRequired {
+				t.Fatalf("want paused session, got %+v, %v", session, err)
+			}
+		})
+	}
+}
+
+func TestPutRelicRequiresActiveConclave(t *testing.T) {
+	for _, tc := range []struct {
+		state domain.ConclaveState
+		want  error
+	}{
+		{domain.ConclaveStateActive, nil},
+		{domain.ConclaveStateCompleted, ErrConclaveClosed},
+		{domain.ConclaveStateCancelled, ErrConclaveClosed},
+		{domain.ConclaveStateInputRequired, ErrConclavePaused},
+		{"", ErrConclaveClosed},
+		{"unknown", ErrConclaveClosed},
+	} {
+		for _, role := range []string{"coder", "operator"} {
+			t.Run(string(tc.state)+"/"+role, func(t *testing.T) {
+				ctx := context.Background()
+				st := brokerTestStore(t)
+				if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: tc.state}); err != nil {
+					t.Fatal(err)
+				}
+				b := NewBroker(Options{Store: st})
+				_, err := b.PutRelic(ctx, "room", role, "report", "", "body")
+				if !errors.Is(err, tc.want) {
+					t.Errorf("want %v, got %v", tc.want, err)
+				}
+				relics, err := st.ListConclaveRelics(ctx, "room")
+				if err != nil || (tc.want != nil && len(relics) != 0) {
+					t.Fatalf("unexpected relics %+v, %v", relics, err)
+				}
+			})
+		}
+	}
+}
 
 func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 	ctx := context.Background()
