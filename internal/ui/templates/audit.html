@@ -3,69 +3,46 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sablecourt · Audit Tribunal</title>
-  <link rel="icon" href="/favicon.ico?v=2" sizes="any">
+  <title>SableCourt · Audit Tribunal</title>
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any">
+  <link rel="stylesheet" href="/assets/sablecourt.css?v=3">
   <style>
-    :root {
-      --bg-night: #08060E;
-      --bg-slate: #111422;
-      --accent-indigo: #4C1D95;
-      --text-bone: #EFE9DC;
-      --text-muted: #B9B2A6;
-      --accent-jade: #2DD4BF;
-      --status-amber: #F0B86A;
-      --status-red: #F87171;
-      --border: #25203A;
-      --serif: "Iowan Old Style", Georgia, serif;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg-night); color: var(--text-bone); font-family: var(--sans); line-height: 1.5; }
-    .shell { max-width: 1440px; margin: 0 auto; padding: 20px 24px 56px; }
-    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 20px; }
-    .brand img { height: 48px; width: auto; display: block; }
-    .nav { display: flex; gap: 8px; }
-    .btn-nav { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-slate); color: var(--text-bone); font-size: 12px; text-decoration: none; }
-    .btn-nav:hover { border-color: var(--accent-jade); color: #fff; }
-    .panel { background: var(--bg-slate); border: 1px solid var(--border); border-top: 2px solid var(--accent-indigo); border-radius: 10px; padding: 18px; }
-    .top-bar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
-    h1 { font-family: var(--serif); font-weight: 500; font-size: 22px; margin: 0; }
-    .pill-ok { font-family: var(--mono); font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--accent-jade); color: var(--accent-jade); background: rgba(45,212,191,0.08); }
-    .pill-err { font-family: var(--mono); font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--status-red); color: var(--status-red); background: rgba(248,113,113,0.08); }
-    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
-    input, select { background: var(--bg-night); color: var(--text-bone); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px; }
-    button { background: var(--accent-jade); color: var(--bg-night); border: none; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; font-size: 12px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { font-family: var(--mono); font-size: 11px; color: var(--text-muted); text-transform: uppercase; }
-    .mono { font-family: var(--mono); font-size: 11px; }
-    .hash { color: var(--text-muted); }
-    .out-deny { color: var(--status-red); }
-    .out-ok { color: var(--accent-jade); }
-    .out-warn { color: var(--status-amber); }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+    .mono { font-family: var(--mono); font-size: 11.5px; }
+    .hash { color: var(--muted-dim); }
+    .out-deny { color: var(--red); }
+    .out-ok { color: var(--jade); }
+    .out-warn { color: var(--amber); }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header>
-      <div class="brand"><a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt"></a></div>
-      <div class="nav">
-        <a class="btn-nav" href="/">Cockpit</a>
-        <a class="btn-nav" href="/conclaves">Conclaves</a>
-        <a class="btn-nav" href="/schedules">Schedules</a>
-        <a class="btn-nav" href="/audit">Audit</a>
-        <a class="btn-nav" href="/api/v1/audit/export" download="sablecourt-audit.jsonl">Export JSONL</a>
+  <header class="sc-topbar">
+    <div class="sc-topbar-inner">
+      <a class="sc-brand" href="/"><img src="/assets/logo-horizontal-nolabs-dark.png?v=3" alt="SableCourt"></a>
+      <nav class="sc-nav" aria-label="Primary navigation">
+        <a href="/">Cockpit</a>
+        <a href="/conclaves">Conclaves</a>
+        <a href="/schedules">Schedules</a>
+        <a href="/memory">Memory</a>
+        <a href="/audit" class="active">Audit</a>
+        <a href="/studio">Studio</a>
+        <a href="/providers">Providers</a>
+      </nav>
+      <div class="sc-top-right">
+        <a class="sc-btn sc-btn-sm" href="/api/v1/audit/export" download="sablecourt-audit.jsonl">Export JSONL</a>
+        <button type="button" class="sc-cmdk-btn" data-open-cmdk><span>Jump</span><span class="sc-kbd">⌘K</span></button>
       </div>
-    </header>
+    </div>
+  </header>
 
-    <section class="panel">
-      <div class="top-bar">
-        <h1>Audit Tribunal ({{len .Records}})</h1>
+  <div class="sc-shell sc-enter">
+    <section class="sc-panel sc-panel-indigo">
+      <div class="sc-panel-head">
+        <h1 class="sc-h1">Audit Tribunal ({{len .Records}})</h1>
         {{if .ChainValid}}
-        <span class="pill-ok">SHA-256 chain verified ({{.VerifiedRows}} rows)</span>
+        <span class="sc-badge sc-badge-jade"><i class="sc-glyph sc-glyph-working"></i>SHA-256 chain verified ({{.VerifiedRows}} rows)</span>
         {{else}}
-        <span class="pill-err">SHA-256 chain broken: {{.ChainError}}</span>
+        <span class="sc-badge sc-badge-red"><i class="sc-glyph sc-glyph-failed"></i>SHA-256 chain broken: {{.ChainError}}</span>
         {{end}}
       </div>
 
@@ -73,21 +50,22 @@
         <select name="category">
           <option value="">all categories</option>
           <option value="controlplane" {{if eq .Category "controlplane"}}selected{{end}}>controlplane</option>
-          <option value="model" {{if eq .Category "model"}}selected{{end}}>model</option>
+          <option value="model_gate" {{if eq .Category "model_gate"}}selected{{end}}>model_gate</option>
           <option value="policy" {{if eq .Category "policy"}}selected{{end}}>policy</option>
           <option value="approval" {{if eq .Category "approval"}}selected{{end}}>approval</option>
           <option value="conclave" {{if eq .Category "conclave"}}selected{{end}}>conclave</option>
           <option value="attach" {{if eq .Category "attach"}}selected{{end}}>attach</option>
+          <option value="integration" {{if eq .Category "integration"}}selected{{end}}>integration</option>
           <option value="voice" {{if eq .Category "voice"}}selected{{end}}>voice</option>
           <option value="device" {{if eq .Category "device"}}selected{{end}}>device</option>
         </select>
         <input type="text" name="workload" value="{{.Workload}}" placeholder="workload name">
-        <input type="text" name="outcome" value="{{.Outcome}}" placeholder="outcome (allow, denied, paused)">
-        <button type="submit">Filter</button>
-        <a class="btn-nav" href="/audit">Reset</a>
+        <input type="text" name="outcome" value="{{.Outcome}}" placeholder="outcome (allowed, denied, paused)">
+        <button type="submit" class="sc-btn sc-btn-primary">Filter</button>
+        <a class="sc-btn" href="/audit">Reset</a>
       </form>
 
-      <table>
+      <table class="sc-table">
         <thead>
           <tr><th>ID</th><th>Time</th><th>Category</th><th>Workload</th><th>Action</th><th>Outcome</th><th>Detail</th><th>Row SHA-256</th></tr>
         </thead>
@@ -107,6 +85,15 @@
         </tbody>
       </table>
     </section>
+
+    <footer class="sc-footer">
+      <div class="sc-footer-house">
+        <img src="/assets/shadewright-labs-mark.svg?v=3" alt="ShadeWright Labs seal">
+        <span>SableCourt · by ShadeWright Labs</span>
+      </div>
+      <span>Tamper-evident SHA-256 audit log</span>
+    </footer>
   </div>
+  <script src="/assets/app.js?v=3"></script>
 </body>
 </html>

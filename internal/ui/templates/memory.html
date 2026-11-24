@@ -3,105 +3,102 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Court Memory - Sablecourt</title>
-  <link rel="icon" type="image/png" href="/assets/favicon.png">
+  <title>SableCourt · Court Memory</title>
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any">
+  <link rel="stylesheet" href="/assets/sablecourt.css?v=3">
   <style>
-    :root {
-      --bg: #08060E; --panel: #111422; --border: #25203A;
-      --bone: #EFE9DC; --muted: #DDD6CA; --jade: #2DD4BF;
-      --amber: #F0B86A; --red: #F87171;
-      --serif: "Iowan Old Style", Georgia, serif;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--bone); font-family: var(--sans); }
-    .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 20px 64px; }
-    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; gap: 16px; flex-wrap: wrap; }
-    nav { display: flex; gap: 14px; font-family: var(--mono); font-size: 13px; flex-wrap: wrap; }
-    nav a { color: var(--muted); text-decoration: none; }
-    nav a.active, nav a:hover { color: var(--jade); }
-    h1, h2 { font-family: var(--serif); font-weight: 500; margin: 0 0 12px; }
-    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 18px; margin-bottom: 20px; }
-    .notice { border-left: 3px solid var(--jade); padding: 10px 14px; background: var(--panel); margin-bottom: 16px; font-family: var(--mono); font-size: 13px; }
-    .err { border-left: 3px solid var(--red); padding: 10px 14px; background: var(--panel); margin-bottom: 16px; font-family: var(--mono); font-size: 13px; color: var(--red); }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    input, textarea { background: var(--bg); color: var(--bone); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; font-family: var(--mono); font-size: 13px; }
-    textarea { width: 100%; min-height: 80px; }
-    button { background: var(--bg); color: var(--jade); border: 1px solid var(--jade); border-radius: 4px; padding: 8px 14px; font-family: var(--mono); font-size: 12px; cursor: pointer; }
-    button.danger { color: var(--red); border-color: var(--red); }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--muted); }
     pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div><h1>Court Memory</h1></div>
-    <nav>
-      <a href="/">Dashboard</a>
-      <a href="/conclaves">Conclaves</a>
-      <a href="/schedules">Schedules</a>
-      <a href="/memory" class="active">Memory</a>
-      <a href="/audit">Audit</a>
-      <a href="/providers">Providers</a>
-      <a href="/studio">Studio</a>
-    </nav>
+  <header class="sc-topbar">
+    <div class="sc-topbar-inner">
+      <a class="sc-brand" href="/"><img src="/assets/logo-horizontal-nolabs-dark.png?v=3" alt="SableCourt"></a>
+      <nav class="sc-nav" aria-label="Primary navigation">
+        <a href="/">Cockpit</a>
+        <a href="/conclaves">Conclaves</a>
+        <a href="/schedules">Schedules</a>
+        <a href="/memory" class="active">Memory</a>
+        <a href="/audit">Audit</a>
+        <a href="/studio">Studio</a>
+        <a href="/providers">Providers</a>
+      </nav>
+      <div class="sc-top-right">
+        <button type="button" class="sc-cmdk-btn" data-open-cmdk><span>Jump</span><span class="sc-kbd">⌘K</span></button>
+      </div>
+    </div>
   </header>
 
-  {{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
-  {{if .ErrMsg}}<div class="err">{{.ErrMsg}}</div>{{end}}
+  <div class="sc-shell sc-shell-narrow sc-enter">
+    {{if .Notice}}<div class="sc-banner sc-banner-ok">{{.Notice}}</div>{{end}}
+    {{if .ErrMsg}}<div class="sc-banner sc-banner-err">{{.ErrMsg}}</div>{{end}}
 
-  <div class="card">
-    <h2>Search &amp; filter</h2>
-    <form method="get" action="/memory" class="row">
-      <input type="text" name="scope" value="{{.Scope}}" placeholder="scope (e.g. global, go-coder)">
-      <input type="text" name="q" value="{{.Query}}" placeholder="FTS5 search query..." style="flex:1; min-width:220px;">
-      <button type="submit">Search</button>
-    </form>
-  </div>
-
-  <div class="card">
-    <h2>Store memory entry</h2>
-    <form method="post" action="/ui/memory/set">
-      <div class="row" style="margin-bottom:10px;">
-        <input type="text" name="scope" value="{{if .Scope}}{{.Scope}}{{else}}global{{end}}" placeholder="scope" required>
-        <input type="text" name="key" placeholder="key (e.g. repo-conventions)" style="flex:1;" required>
+    <div class="sc-panel sc-panel-jade">
+      <div class="sc-panel-head">
+        <h1 class="sc-h1">Court Memory</h1>
+        <span class="sc-badge sc-badge-jade">FTS5 · RE2 redacted</span>
       </div>
-      <textarea name="value" placeholder="Redacted persistent knowledge accessible to authorized workloads via memory.get / memory.search..." required></textarea>
-      <div style="margin-top:10px;"><button type="submit">Save memory</button></div>
-    </form>
-  </div>
+      <form method="get" action="/memory" class="row">
+        <input type="text" name="scope" value="{{.Scope}}" placeholder="namespace (e.g. global, go-coder)">
+        <input type="text" name="q" value="{{.Query}}" placeholder="Full-text search query..." style="flex:1; min-width:220px;">
+        <button type="submit" class="sc-btn sc-btn-primary">Search</button>
+        <a href="/memory" class="sc-btn">Reset</a>
+      </form>
+    </div>
 
-  <div class="card">
-    <h2>Stored entries ({{len .Entries}})</h2>
-    {{if .Entries}}
-    <table>
-      <thead><tr><th>Scope</th><th>Key</th><th>Value</th><th>Updated</th><th>Action</th></tr></thead>
-      <tbody>
-        {{range .Entries}}
-        <tr>
-          <td style="font-family:var(--mono); color:var(--jade);">{{.Namespace}}</td>
-          <td style="font-family:var(--mono);">{{.Key}}</td>
-          <td><pre>{{.Value}}</pre></td>
-          <td style="font-family:var(--mono); font-size:11px; color:var(--muted);">{{.UpdatedAt.Format "2006-01-02 15:04"}}<br>{{.Author}}</td>
-          <td>
-            <form method="post" action="/ui/memory/delete">
-              <input type="hidden" name="scope" value="{{.Namespace}}">
-              <input type="hidden" name="key" value="{{.Key}}">
-              <button type="submit" class="danger">Delete</button>
-            </form>
-          </td>
-        </tr>
-        {{end}}
-      </tbody>
-    </table>
-    {{else}}
-    <p style="color:var(--muted); font-family:var(--mono); font-size:13px;">No memory entries found.</p>
-    {{end}}
+    <div class="sc-panel">
+      <div class="sc-panel-head">
+        <h2 class="sc-panel-title">Store Memory Entry</h2>
+      </div>
+      <form method="post" action="/ui/memory/set">
+        <div class="row" style="margin-bottom:10px;">
+          <input type="text" name="scope" value="{{if .Scope}}{{.Scope}}{{else}}global{{end}}" placeholder="namespace" required>
+          <input type="text" name="key" placeholder="key (e.g. repo-conventions)" style="flex:1;" required>
+        </div>
+        <textarea name="value" placeholder="Redacted persistent knowledge accessible to authorized workloads via memory.get / memory.search..." required></textarea>
+        <div style="margin-top:10px;"><button type="submit" class="sc-btn sc-btn-primary">Save memory</button></div>
+      </form>
+    </div>
+
+    <div class="sc-panel">
+      <div class="sc-panel-head">
+        <h2 class="sc-panel-title">Stored Entries ({{len .Entries}})</h2>
+      </div>
+      {{if .Entries}}
+      <table class="sc-table">
+        <thead><tr><th>Namespace</th><th>Key</th><th>Value</th><th>Updated</th><th>Action</th></tr></thead>
+        <tbody>
+          {{range .Entries}}
+          <tr>
+            <td style="font-family:var(--mono); color:var(--jade);">{{.Namespace}}</td>
+            <td style="font-family:var(--mono);">{{.Key}}</td>
+            <td><pre>{{.Value}}</pre></td>
+            <td style="font-family:var(--mono); font-size:11px; color:var(--muted);">{{.UpdatedAt.Format "2006-01-02 15:04"}}<br>{{.Author}}</td>
+            <td>
+              <form method="post" action="/ui/memory/delete">
+                <input type="hidden" name="scope" value="{{.Namespace}}">
+                <input type="hidden" name="key" value="{{.Key}}">
+                <button type="submit" class="sc-btn sc-btn-danger sc-btn-sm">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <p style="color:var(--muted-dim); font-family:var(--mono); font-size:12px;">No memory entries found.</p>
+      {{end}}
+    </div>
+
+    <footer class="sc-footer">
+      <div class="sc-footer-house">
+        <img src="/assets/shadewright-labs-mark.svg?v=3" alt="ShadeWright Labs seal">
+        <span>SableCourt · by ShadeWright Labs</span>
+      </div>
+      <span>Press ⌘K to jump</span>
+    </footer>
   </div>
-</div>
+  <script src="/assets/app.js?v=3"></script>
 </body>
 </html>
