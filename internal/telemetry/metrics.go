@@ -83,7 +83,7 @@ func MetricsHandler(st store.Store) http.Handler {
 		fallbacks := 0
 		for _, a := range audits {
 			outcomeCounts[a.Outcome]++
-			if a.Action == "conclave.ward_tripped" {
+			if a.Action == "conclave.ward" {
 				wardTrips++
 			}
 			if a.Action == "model.fallback" {

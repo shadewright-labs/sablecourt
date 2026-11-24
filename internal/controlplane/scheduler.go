@@ -19,12 +19,19 @@ type Scheduler struct {
 
 	mu     sync.Mutex
 	runner *cron.Cron
+
+	// fired tracks UTC minute slots already executed per workflow schedule so
+	// double triggers in one slot stay idempotent across Reload without a
+	// StartWorkflow idempotency parameter.
+	firedMu sync.Mutex
+	fired   map[string]map[string]time.Time
 }
 
 func NewScheduler(reconciler *Reconciler) *Scheduler {
 	return &Scheduler{
 		reconciler: reconciler,
 		now:        func() time.Time { return time.Now().UTC() },
+		fired:      make(map[string]map[string]time.Time),
 	}
 }
 
@@ -72,7 +79,8 @@ func (s *Scheduler) Fire(ctx context.Context, sc domain.Schedule) error {
 	if s.reconciler == nil {
 		return nil
 	}
-	slot := s.now().UTC().Format("200601021504")
+	now := s.now().UTC()
+	slot := now.Format("200601021504")
 	idemKey := fmt.Sprintf("sched:%s:%s", sc.Metadata.Name, slot)
 
 	switch sc.Spec.TargetKind {
@@ -84,8 +92,32 @@ func (s *Scheduler) Fire(ctx context.Context, sc domain.Schedule) error {
 		_, err := s.reconciler.SubmitTask(ctx, sc.Spec.TargetName, idemKey, input)
 		return err
 	case "workflow":
-		_, err := s.reconciler.StartWorkflow(ctx, sc.Spec.TargetName, sc.Spec.Input)
-		return err
+		s.firedMu.Lock()
+		defer s.firedMu.Unlock()
+		if s.fired == nil {
+			s.fired = make(map[string]map[string]time.Time)
+		}
+		if slots := s.fired[sc.Metadata.Name]; slots != nil {
+			if _, seen := slots[slot]; seen {
+				return nil
+			}
+		}
+		if _, err := s.reconciler.StartWorkflow(ctx, sc.Spec.TargetName, sc.Spec.Input); err != nil {
+			return err
+		}
+		slots := s.fired[sc.Metadata.Name]
+		if slots == nil {
+			slots = make(map[string]time.Time)
+			s.fired[sc.Metadata.Name] = slots
+		}
+		cutoff := now.Add(-24 * time.Hour)
+		for k, ts := range slots {
+			if ts.Before(cutoff) {
+				delete(slots, k)
+			}
+		}
+		slots[slot] = now
+		return nil
 	default:
 		return fmt.Errorf("unsupported schedule targetKind %q", sc.Spec.TargetKind)
 	}
