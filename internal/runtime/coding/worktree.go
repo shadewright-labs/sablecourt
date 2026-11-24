@@ -142,8 +142,7 @@ func (s *worktreeState) checkoutGit(dir string) gitRepo {
 
 func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) error {
 	checkout := state.checkoutGit(dir)
-	files := []string{sessionMarkerFile, sessionContextFile}
-	out, err := checkout.run(ctx, append([]string{"ls-files", "--"}, files...)...)
+	out, err := checkout.run(ctx, "ls-files", "--", sessionMarkerFile, sessionContextFile)
 	if err != nil {
 		return err
 	}
@@ -155,7 +154,7 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 		return err
 	}
 	exclude := filepath.Join(infoDir, "exclude")
-	if err := os.WriteFile(exclude, []byte("/"+strings.Join(files, "\n/")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(exclude, []byte("/"+sessionMarkerFile+"\n/"+sessionContextFile+"\n"), 0o600); err != nil {
 		return err
 	}
 	// Plain Git looks in the common info directory. Select the private exclude
@@ -178,11 +177,17 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 	if err := state.updateCommonConfig(ctx, "--add", state.excludeIncludeKey(), config); err != nil {
 		return err
 	}
-	ignored, err := checkout.run(ctx, append([]string{"-c", "core.excludesFile=" + exclude, "check-ignore", "--no-index", "--"}, files...)...)
+	return state.checkSessionExcludes(ctx, dir)
+}
+
+func (s *worktreeState) checkSessionExcludes(ctx context.Context, dir string) error {
+	exclude := filepath.Join(s.GitDir, "info", "exclude")
+	ignored, err := s.checkoutGit(dir).run(ctx, "-c", "core.excludesFile="+exclude,
+		"check-ignore", "--no-index", "--", sessionMarkerFile, sessionContextFile)
 	if err != nil && !gitExitCode(err, 1) {
 		return err
 	}
-	if ignored != strings.Join(files, "\n")+"\n" {
+	if ignored != sessionMarkerFile+"\n"+sessionContextFile+"\n" {
 		return errors.New("repository ignore rules override the session excludes")
 	}
 	return nil

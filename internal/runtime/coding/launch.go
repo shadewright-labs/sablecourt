@@ -118,6 +118,14 @@ func (a *Adapter) buildCommand(spec scruntime.LaunchSpec, input launchInput, dir
 	args := input.args(cfg.Harness)
 	var profile string
 	if cfg.Sandbox == "seatbelt" {
+		dir, err = resolvedPath(dir)
+		if err != nil {
+			return nil, "", err
+		}
+		scratch, err = resolvedPath(scratch)
+		if err != nil {
+			return nil, "", err
+		}
 		profile, err = seatbeltProfile(dir, scratch, bin, state, readOnly)
 		if err != nil {
 			return nil, "", err
