@@ -1,6 +1,7 @@
 package attach
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"sync"
@@ -9,11 +10,15 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
-const defaultRingSize = 64 * 1024
+const (
+	defaultRingSize     = 64 * 1024
+	maxPendingLineBytes = 16 * 1024
+	pendingTailKeep     = 512
+)
 
 var (
-	ErrSessionNotFound    = errors.New("live attach session not found")
-	ErrTakeoverHeld       = errors.New("takeover already held by another operator")
+	ErrSessionNotFound     = errors.New("live attach session not found")
+	ErrTakeoverHeld        = errors.New("takeover already held by another operator")
 	ErrTakeoverUnsupported = errors.New("process does not accept stdin takeover")
 )
 
@@ -21,6 +26,7 @@ type session struct {
 	mu            sync.Mutex
 	ring          []byte
 	maxRing       int
+	pending       []byte
 	stdin         io.WriteCloser
 	takeoverOwner string
 	closed        bool
@@ -56,8 +62,9 @@ func (h *Hub) Register(taskID string, stdin io.WriteCloser) {
 	}
 }
 
-// WriteOutput redacts raw process output, appends it to the ring buffer,
-// and fans it out to all active Scry/Takeover subscribers.
+// WriteOutput buffers raw process output across chunk boundaries, redacts complete
+// lines (or multi-line private key blocks), appends to the ring buffer, and
+// fans out to all active Scry/Takeover subscribers.
 func (h *Hub) WriteOutput(taskID string, raw []byte) {
 	if len(raw) == 0 {
 		return
@@ -68,12 +75,51 @@ func (h *Hub) WriteOutput(taskID string, raw []byte) {
 	if !ok {
 		return
 	}
-	clean := redact.String(string(raw))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
+	s.pending = append(s.pending, raw...)
+	emit, rest := splitFlushable(s.pending)
+	if len(emit) == 0 {
+		return
+	}
+	if len(rest) > 0 {
+		s.pending = append([]byte(nil), rest...)
+	} else {
+		s.pending = nil
+	}
+	s.emitLocked(emit)
+}
+
+func splitFlushable(buf []byte) (emit, rest []byte) {
+	if beginIdx := bytes.LastIndex(buf, []byte("-----BEGIN ")); beginIdx >= 0 {
+		tail := buf[beginIdx:]
+		endIdx := bytes.Index(tail, []byte("-----END "))
+		hasEnd := endIdx >= 0 && bytes.Contains(tail[endIdx:], []byte("PRIVATE KEY-----"))
+		if !hasEnd && len(tail) <= maxPendingLineBytes {
+			if nl := bytes.LastIndexByte(buf[:beginIdx], '\n'); nl >= 0 {
+				return buf[:nl+1], buf[nl+1:]
+			}
+			return nil, buf
+		}
+	}
+	if nl := bytes.LastIndexByte(buf, '\n'); nl >= 0 {
+		return buf[:nl+1], buf[nl+1:]
+	}
+	if len(buf) > maxPendingLineBytes {
+		cut := len(buf) - pendingTailKeep
+		return buf[:cut], buf[cut:]
+	}
+	return nil, buf
+}
+
+func (s *session) emitLocked(raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	clean := redact.String(string(raw))
 	s.ring = append(s.ring, []byte(clean)...)
 	if len(s.ring) > s.maxRing {
 		s.ring = append([]byte(nil), s.ring[len(s.ring)-s.maxRing:]...)
@@ -229,6 +275,11 @@ func (s *session) closeLocked() {
 	defer s.mu.Unlock()
 	if s.closed {
 		return
+	}
+	if len(s.pending) > 0 {
+		pending := s.pending
+		s.pending = nil
+		s.emitLocked(pending)
 	}
 	s.closed = true
 	s.takeoverOwner = ""

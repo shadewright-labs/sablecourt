@@ -49,3 +49,68 @@ func TestMetricsHandlerExposesPrometheusFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsHandlerConclaveWardTripsAndFallbacks(t *testing.T) {
+	cases := []struct {
+		name      string
+		actions   []string
+		wantWards string
+		wantFB    string
+	}{
+		{
+			name:      "counts conclave.ward events emitted by broker",
+			actions:   []string{"conclave.ward"},
+			wantWards: "sablecourt_conclave_ward_trips_recent 1",
+			wantFB:    "sablecourt_model_fallbacks_recent 0",
+		},
+		{
+			name:      "ignores unrelated conclave events and stale name",
+			actions:   []string{"conclave.open", "conclave.post", "conclave.ward_tripped", "conclave.ward", "conclave.ward"},
+			wantWards: "sablecourt_conclave_ward_trips_recent 2",
+			wantFB:    "sablecourt_model_fallbacks_recent 0",
+		},
+		{
+			name:      "counts both conclave.ward and model.fallback",
+			actions:   []string{"conclave.ward", "model.fallback"},
+			wantWards: "sablecourt_conclave_ward_trips_recent 1",
+			wantFB:    "sablecourt_model_fallbacks_recent 1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+
+			for _, action := range tc.actions {
+				if err := st.AppendAudit(ctx, domain.AuditRecord{
+					Category: "conclave",
+					Action:   action,
+					Outcome:  "paused",
+				}); err != nil {
+					t.Fatalf("AppendAudit %q: %v", action, err)
+				}
+			}
+
+			rec := httptest.NewRecorder()
+			MetricsHandler(st).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, tc.wantWards) {
+				t.Errorf("missing %q in /metrics output:\n%s", tc.wantWards, body)
+			}
+			if !strings.Contains(body, tc.wantFB) {
+				t.Errorf("missing %q in /metrics output:\n%s", tc.wantFB, body)
+			}
+		})
+	}
+}

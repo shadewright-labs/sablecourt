@@ -141,7 +141,7 @@ func (f *FileStore) saveLocked(data map[string]string) error {
 	return os.WriteFile(f.Path, raw, 0o600)
 }
 
-// ChainStore tries stores in order on Get and writes to the primary store.
+// ChainStore tries stores in order on Get and Set, and removes from every store on Delete.
 type ChainStore struct {
 	Stores []SecretStore
 }
@@ -168,17 +168,56 @@ func (c *ChainStore) Get(ctx context.Context, name string) (string, error) {
 }
 
 func (c *ChainStore) Set(ctx context.Context, name, value string) error {
-	if len(c.Stores) == 0 || c.Stores[0] == nil {
-		return errors.New("no primary secret store configured")
+	var lastErr error
+	for _, st := range c.Stores {
+		if st == nil {
+			continue
+		}
+		err := st.Set(ctx, name, value)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
 	}
-	return c.Stores[0].Set(ctx, name, value)
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("no primary secret store configured")
 }
 
 func (c *ChainStore) Delete(ctx context.Context, name string) error {
-	if len(c.Stores) == 0 || c.Stores[0] == nil {
+	var (
+		hasStore bool
+		deleted  bool
+		firstErr error
+	)
+	for _, st := range c.Stores {
+		if st == nil {
+			continue
+		}
+		hasStore = true
+		err := st.Delete(ctx, name)
+		if err == nil {
+			deleted = true
+			continue
+		}
+		if errors.Is(err, ErrSecretNotFound) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if !hasStore {
 		return errors.New("no primary secret store configured")
 	}
-	return c.Stores[0].Delete(ctx, name)
+	if firstErr != nil {
+		return firstErr
+	}
+	if !deleted {
+		return ErrSecretNotFound
+	}
+	return nil
 }
 
 // MemoryStore is an in-memory SecretStore for tests.
