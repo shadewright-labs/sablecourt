@@ -545,7 +545,14 @@ func (d *Dashboard) handleProviderSaveModels(w http.ResponseWriter, r *http.Requ
 	_ = r.ParseForm()
 	id := r.PathValue("id")
 	defModel := strings.TrimSpace(r.FormValue("default_model"))
-	enabled := r.Form["enabled_models"]
+	enabled := append([]string(nil), r.Form["enabled_models"]...)
+	if custom := strings.TrimSpace(r.FormValue("custom_model")); custom != "" {
+		for _, part := range strings.Split(custom, ",") {
+			if m := strings.TrimSpace(part); m != "" {
+				enabled = append(enabled, m)
+			}
+		}
+	}
 	if err := d.providers.SavePrefs(r.Context(), id, defModel, enabled); err != nil {
 		http.Redirect(w, r, "/providers?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return

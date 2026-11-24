@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -54,7 +56,7 @@ var builtinProviders = []providerDef{
 		Kind:          "api_key",
 		SecretName:    "openai_api_key",
 		BaseURL:       "https://api.openai.com",
-		DefaultModels: []string{"gpt-5", "gpt-5-mini", "gpt-4.1", "o3"},
+		DefaultModels: []string{"gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-sol", "gpt-5", "o3"},
 	},
 	{
 		ID:            "anthropic",
@@ -62,7 +64,7 @@ var builtinProviders = []providerDef{
 		Kind:          "api_key",
 		SecretName:    "anthropic_api_key",
 		BaseURL:       "https://api.anthropic.com",
-		DefaultModels: []string{"claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-3-5"},
+		DefaultModels: []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"},
 	},
 	{
 		ID:            "gemini",
@@ -70,7 +72,7 @@ var builtinProviders = []providerDef{
 		Kind:          "api_key",
 		SecretName:    "gemini_api_key",
 		BaseURL:       "https://generativelanguage.googleapis.com",
-		DefaultModels: []string{"gemini-2.5-pro", "gemini-2.5-flash"},
+		DefaultModels: []string{"gemini-4-neon-high", "gemini-4-carbon-high", "gemini-3.8-flash-high"},
 	},
 	{
 		ID:            "local",
@@ -94,19 +96,19 @@ var builtinCLIs = []cliDef{
 		ID:            "cli:claude",
 		DisplayName:   "Claude Code CLI (claude)",
 		Bin:           "claude",
-		DefaultModels: []string{"claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5", "sonnet", "opus"},
+		DefaultModels: []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2", "opus", "sonnet", "haiku"},
 	},
 	{
 		ID:            "cli:codex",
 		DisplayName:   "Codex CLI (codex)",
 		Bin:           "codex",
-		DefaultModels: []string{"gpt-5.3-codex", "gpt-5.2-codex", "o3", "gpt-5-mini"},
+		DefaultModels: []string{"gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol"},
 	},
 	{
 		ID:            "cli:agy",
 		DisplayName:   "Antigravity CLI (agy)",
 		Bin:           "agy",
-		DefaultModels: []string{"gemini-2.5-pro", "gemini-2.5-flash", "claude-sonnet-4-6"},
+		DefaultModels: []string{"gemini-4-neon-high", "gemini-4-carbon-high", "gemini-3.8-flash-high", "claude-opus-5-5-high", "claude-sonnet-5-5-high"},
 	},
 }
 
@@ -254,6 +256,7 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 		for i := range rawModels {
 			rawModels[i].Enabled = len(pref.EnabledModels) == 0 || slices.Contains(pref.EnabledModels, rawModels[i].ID)
 		}
+		rawModels = mergeCustomModels(rawModels, def.ID, pref)
 		st.Models = rawModels
 		if st.DefaultModel == "" && len(st.Models) > 0 {
 			for _, m := range st.Models {
@@ -287,14 +290,21 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 		st.DefaultModel = pref.DefaultModel
 		st.EnabledModels = append([]string(nil), pref.EnabledModels...)
 
-		rawModels := make([]ModelInfo, 0, len(cliDef.DefaultModels))
-		for _, m := range cliDef.DefaultModels {
-			rawModels = append(rawModels, ModelInfo{
-				ID:       m,
-				Provider: cliDef.ID,
-				Enabled:  len(pref.EnabledModels) == 0 || slices.Contains(pref.EnabledModels, m),
-			})
+		var rawModels []ModelInfo
+		if models, ok := r.synced[cliDef.ID]; ok && len(models) > 0 {
+			rawModels = append([]ModelInfo(nil), models...)
+			ts := r.syncedAt[cliDef.ID]
+			st.LastSyncedAt = &ts
+		} else {
+			rawModels = make([]ModelInfo, 0, len(cliDef.DefaultModels))
+			for _, m := range cliDef.DefaultModels {
+				rawModels = append(rawModels, ModelInfo{ID: m, Provider: cliDef.ID})
+			}
 		}
+		for i := range rawModels {
+			rawModels[i].Enabled = len(pref.EnabledModels) == 0 || slices.Contains(pref.EnabledModels, rawModels[i].ID)
+		}
+		rawModels = mergeCustomModels(rawModels, cliDef.ID, pref)
 		st.Models = rawModels
 		if st.DefaultModel == "" && len(st.Models) > 0 {
 			for _, m := range st.Models {
@@ -303,6 +313,9 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 					break
 				}
 			}
+		}
+		if errMsg := r.lastErrors[cliDef.ID]; errMsg != "" {
+			st.Detail = errMsg
 		}
 		out = append(out, st)
 	}
@@ -351,9 +364,23 @@ func (r *Registry) Disconnect(ctx context.Context, providerID string) error {
 	return nil
 }
 
-// SyncModels queries the upstream provider's /models endpoint using the stored credential
+// SyncModels queries the upstream provider's /models endpoint (or local CLI catalog)
 // and caches the available model IDs.
 func (r *Registry) SyncModels(ctx context.Context, providerID string) ([]ModelInfo, error) {
+	if cliDef, ok := findCLIDef(providerID); ok {
+		models, err := r.syncCLIModels(ctx, cliDef)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if err != nil {
+			r.lastErrors[providerID] = err.Error()
+			return nil, err
+		}
+		delete(r.lastErrors, providerID)
+		r.synced[providerID] = models
+		r.syncedAt[providerID] = time.Now().UTC()
+		return append([]ModelInfo(nil), models...), nil
+	}
+
 	def, ok := findDef(providerID)
 	if !ok {
 		return nil, fmt.Errorf("unknown provider %q", providerID)
@@ -526,4 +553,143 @@ func findDef(id string) (providerDef, bool) {
 		}
 	}
 	return providerDef{}, false
+}
+
+func mergeCustomModels(raw []ModelInfo, providerID string, pref domain.ProviderPrefs) []ModelInfo {
+	seen := make(map[string]bool, len(raw))
+	for _, m := range raw {
+		seen[m.ID] = true
+	}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		raw = append(raw, ModelInfo{ID: id, Provider: providerID, Enabled: true})
+	}
+	if pref.DefaultModel != "" {
+		add(pref.DefaultModel)
+	}
+	for _, m := range pref.EnabledModels {
+		add(m)
+	}
+	return raw
+}
+
+func (r *Registry) syncCLIModels(ctx context.Context, def cliDef) ([]ModelInfo, error) {
+	binPath, err := r.look(def.Bin)
+	if err != nil || binPath == "" {
+		return nil, fmt.Errorf("%s binary not found in PATH", def.Bin)
+	}
+	switch def.ID {
+	case "cli:agy":
+		tctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(tctx, binPath, "models").CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("agy models failed: %w", err)
+		}
+		models := parseAgyModelsOutput(string(out))
+		if len(models) == 0 {
+			return nil, errors.New("agy models returned no model IDs")
+		}
+		return models, nil
+	case "cli:codex":
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			if models, err := readCodexModelsCache(filepath.Join(home, ".codex", "models_cache.json")); err == nil && len(models) > 0 {
+				return models, nil
+			}
+		}
+		var out []ModelInfo
+		for _, m := range def.DefaultModels {
+			out = append(out, ModelInfo{ID: m, Provider: def.ID})
+		}
+		return out, nil
+	case "cli:claude":
+		seen := make(map[string]bool)
+		var out []ModelInfo
+		add := func(id string) {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				out = append(out, ModelInfo{ID: id, Provider: def.ID})
+			}
+		}
+		// If Anthropic API key is configured, also pull live Anthropic model IDs.
+		if r.secrets != nil {
+			if key, err := r.secrets.Get(ctx, "anthropic_api_key"); err == nil && strings.TrimSpace(key) != "" {
+				if apiModels, err := r.fetchAnthropicModels(ctx, r.baseMap["anthropic"], strings.TrimSpace(key)); err == nil {
+					for _, m := range apiModels {
+						add(m.ID)
+					}
+				}
+			}
+		}
+		for _, m := range def.DefaultModels {
+			add(m)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("sync not supported for %q", def.ID)
+	}
+}
+
+func parseAgyModelsOutput(raw string) []ModelInfo {
+	seen := make(map[string]bool)
+	var out []ModelInfo
+	for _, line := range strings.Split(raw, "\n") {
+		// Strip spinner carriage-return prefixes like "\r⠋ Fetching...\rgemini-4-neon-high ..."
+		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+			line = line[idx+1:]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		id := fields[0]
+		// Skip non-model log/spinner lines.
+		if strings.HasPrefix(id, "ERROR:") || strings.HasPrefix(id, "WARNING:") || strings.HasPrefix(id, "Fetching") || !strings.Contains(id, "-") {
+			continue
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, ModelInfo{ID: id, Provider: "cli:agy"})
+		}
+	}
+	return out
+}
+
+func readCodexModelsCache(path string) ([]ModelInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Models []struct {
+			Slug string `json:"slug"`
+			ID   string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var out []ModelInfo
+	for _, m := range payload.Models {
+		id := strings.TrimSpace(m.Slug)
+		if id == "" {
+			id = strings.TrimSpace(m.ID)
+		}
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, ModelInfo{ID: id, Provider: "cli:codex"})
+	}
+	return out, nil
 }
