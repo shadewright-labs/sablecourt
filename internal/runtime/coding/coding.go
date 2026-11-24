@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -59,7 +58,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (_ scrun
 		}
 	}()
 
-	if err := excludeSessionFiles(ctx, dir); err != nil {
+	if err := excludeSessionFiles(ctx, dir, state); err != nil {
 		return scruntime.Handle{}, err
 	}
 	if err := writeSessionMarker(dir, spec); err != nil {
@@ -125,26 +124,13 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (_ scrun
 	go func() {
 		defer close(done)
 		_ = cmd.Wait()
+		_ = output.Flush()
 		_ = logFile.Close()
 		if output.hub != nil {
 			output.hub.Close(spec.TaskID)
 		}
 	}()
 	return handle, nil
-}
-
-type sessionOutput struct {
-	file   *os.File
-	hub    *attach.Hub
-	taskID string
-}
-
-func (s *sessionOutput) Write(chunk []byte) (int, error) {
-	if s.hub != nil {
-		s.hub.WriteOutput(s.taskID, chunk)
-	}
-	_, err := s.file.WriteString(redact.String(string(chunk)))
-	return len(chunk), err
 }
 
 func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) error {

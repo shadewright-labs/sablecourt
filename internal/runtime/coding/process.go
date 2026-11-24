@@ -41,10 +41,9 @@ func stopProcessGroup(ctx context.Context, pid int, done <-chan struct{}) error 
 	if pid <= 0 {
 		return nil
 	}
+	// Once shutdown starts, give each signal its full wait even if the request ends.
+	ctx = context.WithoutCancel(ctx)
 	for _, signal := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if err := syscall.Kill(-pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("signal coding process group: %w", err)
 		}
