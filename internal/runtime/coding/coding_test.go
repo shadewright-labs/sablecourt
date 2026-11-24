@@ -85,19 +85,17 @@ func TestCodingAdapterCreatesWorktreeAndStripsEnv(t *testing.T) {
 		}
 	}
 
-	profile := SeatbeltProfile(handle.WorkDir)
-	if !strings.Contains(profile, "(deny file-write*)") || !strings.Contains(profile, handle.WorkDir) {
-		t.Fatalf("unexpected Seatbelt profile:\n%s", profile)
-	}
 }
 
 func codingFixture(t *testing.T) (*Adapter, scruntime.LaunchSpec) {
 	t.Helper()
 	repo := initTempGitRepo(t)
-	return NewAdapter(filepath.Join(t.TempDir(), "worktrees")), scruntime.LaunchSpec{
+	adapter := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	adapter.allowUnconfined = true
+	return adapter, scruntime.LaunchSpec{
 		TaskID: "task-test",
 		Workload: domain.Workload{Spec: domain.WorkloadSpec{
-			Coding: &domain.CodingConfig{RepoPath: repo, Harness: "claude"},
+			Coding: &domain.CodingConfig{RepoPath: repo, Harness: "claude", Sandbox: "none"},
 		}},
 	}
 }
@@ -532,7 +530,7 @@ func TestHarnessFinalResponse(t *testing.T) {
 			shellHarness(t, tc.command)
 			a, spec := codingFixture(t)
 			h := startTestTask(t, a, spec)
-			waitUntil(t, func() bool { return outputClosed(a.running[h.WorkDir]) })
+			waitUntil(t, func() bool { return outputClosed(a.process(h.WorkDir).done) })
 			if _, err := a.Observe(context.Background(), h); err != nil {
 				t.Fatal(err)
 			}
@@ -610,25 +608,31 @@ func TestPinnedWorktrees(t *testing.T) {
 }
 
 func TestVerifierSandbox(t *testing.T) {
-	shellHarness(t, "exit 0")
-	work, scratch := t.TempDir(), t.TempDir()
-	bin, args, err := buildCommand("claude", "", work, "Review", scratch)
+	a, spec := codingFixture(t)
+	a.DryRun = true
+	h := startTestTask(t, a, spec)
+	state, err := a.worktreeState(h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		if bin != "/usr/bin/sandbox-exec" || !strings.Contains(args[1], "(deny file-write*)") || strings.Contains(args[1], work) || !strings.Contains(args[1], scratch) {
-			t.Fatalf("verifier policy = %v", args)
-		}
-	case "linux":
-		flags := strings.Join(args, "\n")
-		if bin != "bwrap" || !strings.Contains(flags, "--ro-bind\n/\n/\n") || strings.Contains(flags, "--bind\n"+work+"\n") {
-			t.Fatalf("verifier mounts = %v", args)
+	scratch := t.TempDir()
+	bin, err := resolvedPath("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := seatbeltProfile(h.WorkDir, scratch, bin, state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(profile, "\n") {
+		if strings.Contains(line, "file-write") && (strings.Contains(line, h.WorkDir) || strings.Contains(line, state.CommonDir)) {
+			t.Fatalf("verifier can write checkout or Git metadata: %s", line)
 		}
 	}
-	if _, _, err := buildCommand("claude", "unsupported", work, "Review", scratch); err == nil {
-		t.Fatal("verifier started without a read-only sandbox")
+	for _, sandbox := range []string{"", "none", "unsupported"} {
+		if err := a.validateSandbox(sandbox, true); err == nil {
+			t.Fatalf("verifier accepted sandbox %q", sandbox)
+		}
 	}
 }
 
@@ -640,10 +644,6 @@ func TestVerifierCannotWriteCheckout(t *testing.T) {
 				t.Skip("nested Seatbelt denied by sandbox")
 			}
 			t.Fatalf("Seatbelt probe: %v (%s)", err, out)
-		}
-	case "linux":
-		if _, err := exec.LookPath("bwrap"); err != nil {
-			t.Skip("bubblewrap unavailable")
 		}
 	default:
 		t.Skip("no native verifier sandbox")
@@ -658,12 +658,13 @@ func TestVerifierCannotWriteCheckout(t *testing.T) {
 	}
 	tip := strings.TrimSpace(testGit(t, spec.Workload.Spec.Coding.RepoPath, "rev-parse", h.Branch))
 	spec.TaskID = "check"
+	spec.Workload.Spec.Coding.Sandbox = "seatbelt"
 	a.DryRun = false
 	h, err := a.StartAtCommit(context.Background(), spec, tip, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, func() bool { return outputClosed(a.running[h.WorkDir]) })
+	waitUntil(t, func() bool { return outputClosed(a.process(h.WorkDir).done) })
 	arts, err := a.CollectArtifacts(context.Background(), h)
 	if err != nil {
 		t.Fatal(err)

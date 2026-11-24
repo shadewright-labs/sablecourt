@@ -26,6 +26,7 @@ const (
 
 type worktreeState struct {
 	beforeGit    func() error
+	configLock   func(context.Context) (func(), error)
 	TaskID       string
 	Repo         string
 	CommonDir    string
@@ -38,6 +39,7 @@ type worktreeState struct {
 	Tip          string
 	FinishedAt   time.Time
 	Artifacts    []scruntime.Artifact
+	Result       *processResult `json:",omitempty"`
 }
 
 func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (string, *worktreeState, error) {
@@ -77,6 +79,7 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 		TaskID: taskID, Repo: repo, CommonDir: strings.TrimSuffix(common, "\n"),
 		Branch: "sablecourt/" + sanitizeSegment(taskID), Base: base,
 	}
+	a.bindConfigLock(state)
 	a.pruneFinishedBranches(ctx, filepath.Dir(dir), state)
 
 	if err := ctx.Err(); err != nil {
@@ -172,7 +175,7 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 	if err := state.validateRegistration(dir); err != nil {
 		return err
 	}
-	if _, err := state.commonGit().run(ctx, "config", "--local", "--add", state.excludeIncludeKey(), config); err != nil {
+	if err := state.updateCommonConfig(ctx, "--add", state.excludeIncludeKey(), config); err != nil {
 		return err
 	}
 	ignored, err := checkout.run(ctx, append([]string{"-c", "core.excludesFile=" + exclude, "check-ignore", "--no-index", "--"}, files...)...)
@@ -276,7 +279,26 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	if state.TaskID != handle.ExternalID || state.Branch != handle.Branch {
 		return nil, errors.New("coding worktree state does not match handle")
 	}
+	a.bindConfigLock(state)
 	return state, nil
+}
+
+func (a *Adapter) bindConfigLock(state *worktreeState) {
+	state.configLock = func(ctx context.Context) (func(), error) {
+		return a.lockScope(ctx, "config:"+state.CommonDir, false)
+	}
+}
+
+func (s *worktreeState) updateCommonConfig(ctx context.Context, args ...string) error {
+	if s.configLock != nil {
+		release, err := s.configLock(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	_, err := s.commonGit().run(ctx, append([]string{"config", "--local"}, args...)...)
+	return err
 }
 
 func readWorktreeState(path string) (*worktreeState, error) {
@@ -476,7 +498,7 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 	if err := removeFile(dir + ".log"); err != nil {
 		return err
 	}
-	delete(a.running, dir)
+	a.running.Delete(dir)
 	if state.CleanupError != "" {
 		state.CleanupError = ""
 		return writeWorktreeState(dir, state)
@@ -519,6 +541,9 @@ func worktreeArtifacts(ctx context.Context, dir string, state *worktreeState, st
 			clean = "...[truncated]\n" + clean[len(clean)-16*1024:]
 		}
 		artifacts = append(artifacts, scruntime.Artifact{Name: "session-log", ContentType: "text/plain", Text: strings.TrimSpace(clean)})
+	}
+	if state.Result != nil && state.Result.Response != "" {
+		artifacts = append(artifacts, scruntime.Artifact{Name: "final-message", ContentType: "text/plain", Text: state.Result.Response})
 	}
 	return artifacts, nil
 }
@@ -567,7 +592,7 @@ func removeWorktree(ctx context.Context, dir string, state *worktreeState, launc
 		if err != nil {
 			return err
 		}
-		if _, err := common.run(ctx, "config", "--local", "--fixed-value", "--unset-all", state.excludeIncludeKey(), config); err != nil && !gitExitCode(err, 5) {
+		if err := state.updateCommonConfig(ctx, "--fixed-value", "--unset-all", state.excludeIncludeKey(), config); err != nil && !gitExitCode(err, 5) {
 			return err
 		}
 		return removeFile(config)
@@ -614,23 +639,32 @@ func (a *Adapter) pruneFinishedBranches(ctx context.Context, root string, curren
 		if !strings.HasSuffix(entry.Name(), stateSuffix) || entry.Type() != 0 {
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		state, err := readWorktreeState(path)
-		if err != nil || state.CommonDir != current.CommonDir ||
-			state.CleanupError != "" || state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
-			state.Branch != "sablecourt/"+sanitizeSegment(state.TaskID) {
+		id := strings.TrimSuffix(entry.Name(), stateSuffix)
+		release, err := a.lockTask(ctx, id, true)
+		if err != nil {
 			continue
 		}
-		owner := gitRepo{dir: current.Repo}
-		tip, err := owner.commitID(ctx, "refs/heads/"+state.Branch)
-		if err != nil || strings.TrimSpace(tip) != state.Tip {
-			continue
-		}
-		if _, err := owner.run(ctx, "merge-base", "--is-ancestor", "--end-of-options", state.Tip, "HEAD"); err != nil {
-			continue
-		}
-		if _, err := owner.run(ctx, "branch", "-d", "--", state.Branch); err == nil {
-			_ = removeFile(path)
-		}
+		pruneFinishedBranch(ctx, filepath.Join(root, entry.Name()), id, current, cutoff)
+		release()
+	}
+}
+
+func pruneFinishedBranch(ctx context.Context, path, id string, current *worktreeState, cutoff time.Time) {
+	state, err := readWorktreeState(path)
+	if err != nil || state.CommonDir != current.CommonDir ||
+		state.CleanupError != "" || state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
+		id != sanitizeSegment(state.TaskID) || state.Branch != "sablecourt/"+id {
+		return
+	}
+	owner := gitRepo{dir: current.Repo}
+	tip, err := owner.commitID(ctx, "refs/heads/"+state.Branch)
+	if err != nil || strings.TrimSpace(tip) != state.Tip {
+		return
+	}
+	if _, err := owner.run(ctx, "merge-base", "--is-ancestor", "--end-of-options", state.Tip, "HEAD"); err != nil {
+		return
+	}
+	if _, err := owner.run(ctx, "branch", "-d", "--", state.Branch); err == nil {
+		_ = removeFile(path)
 	}
 }
