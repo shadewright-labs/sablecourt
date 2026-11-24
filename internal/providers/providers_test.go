@@ -92,3 +92,29 @@ func TestRegistryConnectSyncAndDisconnect(t *testing.T) {
 		t.Fatal("expected SyncModels to fail after Disconnect")
 	}
 }
+
+func TestParseAgyModelsAndCodexCacheAndCustomModels(t *testing.T) {
+	raw := "\r⠋ Fetching available models...\rgemini-4-neon-high             Gemini 4 Neon (High)\nclaude-opus-5-5-high           Claude Opus 5.5 (High)\n"
+	agy := parseAgyModelsOutput(raw)
+	if len(agy) != 2 || agy[0].ID != "gemini-4-neon-high" || agy[1].ID != "claude-opus-5-5-high" {
+		t.Fatalf("unexpected agy models: %+v", agy)
+	}
+
+	reg := NewRegistry(Options{})
+	if err := reg.SavePrefs(context.Background(), "cli:claude", "claude-fable-5-2", []string{"claude-opus-5-5", "claude-fable-5-2", "custom-model-x"}); err != nil {
+		t.Fatalf("SavePrefs: %v", err)
+	}
+	var found bool
+	for _, p := range reg.List(context.Background()) {
+		if p.ID == "cli:claude" {
+			for _, m := range p.Models {
+				if m.ID == "custom-model-x" && m.Enabled {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected custom-model-x to be preserved in cli:claude models")
+	}
+}
