@@ -19,11 +19,13 @@ type LaunchSpec struct {
 }
 
 type Handle struct {
-	AdapterName string
-	ExternalID  string
-	WorkDir     string
-	Branch      string
-	PID         int
+	AdapterName      string
+	ExternalID       string
+	WorkDir          string
+	Branch           string
+	PID              int
+	ProcessStartTime time.Time
+	LogPath          string
 }
 
 type ObservedState string

@@ -483,6 +483,7 @@ func TestSeatbeltWorktreeAndSecretIsolation(t *testing.T) {
 set -e
 if cat %q; then exit 11; fi
 if (printf escaped > %q); then exit 12; fi
+if (printf forged > "$PWD.run/exit"); then exit 13; fi
 printf 'scratch\n' > "$HOME/scratch"
 printf 'temporary\n' > "$TMPDIR/temporary"
 printf 'created\n' > example

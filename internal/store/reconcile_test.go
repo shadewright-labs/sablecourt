@@ -47,14 +47,47 @@ func TestReconcileStore(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Run("candidates", func(t *testing.T) { testCandidates(t, st) })
-			t.Run("renewal", func(t *testing.T) {
-				db, err := sql.Open(driver, dsn)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer db.Close()
-				testRenewal(t, st, db)
-			})
+			db, err := sql.Open(driver, dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			t.Run("renewal", func(t *testing.T) { testRenewal(t, st, db) })
+			if backend == "sqlite" {
+				t.Run("atomic_failure", func(t *testing.T) {
+					createTask(t, st, "atomic", domain.TaskStateWorking)
+					createLease(t, st, "atomic", time.Now().Add(time.Hour))
+					if _, err := db.Exec("CREATE TRIGGER reject_revoke BEFORE UPDATE ON leases BEGIN SELECT RAISE(FAIL, 'unavailable'); END"); err != nil {
+						t.Fatal(err)
+					}
+					err := st.UpdateTaskState(t.Context(), "atomic", domain.TaskStateWorking, domain.TaskStateFailed, "lost_on_restart", "{}")
+					if err == nil {
+						t.Fatal("committed failure without revocation")
+					}
+					task, err := st.GetTask(t.Context(), "atomic")
+					if err != nil || task.State != domain.TaskStateWorking {
+						t.Fatal(task.State, err)
+					}
+					events, err := st.ListTaskEvents(t.Context(), "atomic")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, event := range events {
+						if event.Reason == "lost_on_restart" {
+							t.Fatal("failure event survived rollback")
+						}
+					}
+					if _, err := db.Exec("DROP TRIGGER reject_revoke"); err != nil {
+						t.Fatal(err)
+					}
+					if err := st.UpdateTaskState(t.Context(), "atomic", domain.TaskStateWorking, domain.TaskStateFailed, "lost_on_restart", "{}"); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := st.GetActiveLeaseByTokenHash(t.Context(), "atomic", time.Now()); !errors.Is(err, store.ErrNotFound) {
+						t.Fatal("lease survived retry", err)
+					}
+				})
+			}
 		})
 	}
 }
@@ -146,6 +179,10 @@ func testCandidates(t *testing.T, st store.Store) {
 		t.Fatal(err)
 	}
 	check(nil, []string{"queued", "remediate", "running", "waiting"})
+	if err := st.PutMemory(ctx, domain.MemoryEntry{Namespace: "system:runtime-handles", Key: "cleanup", Value: "{}", Author: "controlplane"}); err != nil {
+		t.Fatal(err)
+	}
+	check(nil, []string{"cleanup", "queued", "remediate", "running", "waiting"})
 }
 
 func testRenewal(t *testing.T, st store.Store, db *sql.DB) {
