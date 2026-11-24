@@ -1,6 +1,6 @@
 # Sablecourt technical architecture
 
-Sablecourt is a single-binary Go control plane (`sablecourtd`) and operator CLI (`sablectl`) that runs heterogeneous workloads (`coding-agent`, `long-lived-agent`, `deterministic-controller`) and multi-agent `Conclaves` behind deterministic capability gates, cost ceilings, and a tamper-evident SHA-256 audit chain.
+Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) that runs heterogeneous workloads (`coding-agent`, `long-lived-agent`, `deterministic-controller`) and multi-agent `Conclaves` behind deterministic capability gates, cost ceilings, and a SHA-256 audit chain whose verification has limits described below.
 
 ## System overview
 
@@ -59,14 +59,14 @@ flowchart TB
 | `cmd/sablectl` | Operator CLI (`init`, `doctor`, `task`, `conclave`, `approval`, `audit`, `memory`, `pair`, `device`, `voice`, `service`, `tailscale`, `mcp-server`) |
 | `internal/config` | YAML manifest parser (`sablecourt.io/v1alpha1`), cross-reference and security zone validator, hot-reload `GitSyncer` |
 | `internal/domain` | Core structs for `Workload`, `Policy`, `Budget`, `Workflow`, `Schedule`, `Conclave`, `Task`, `Lease`, `Approval`, `AuditRecord`, `MemoryEntry` |
-| `internal/store` | `Store` interface implemented by `internal/store/sqlite` (WAL + FTS5) and `internal/store/postgres` (`pgx/v5`) |
+| `internal/store` | `Store` interface implemented by `internal/store/sqlite` (WAL, `LIKE` memory search) and `internal/store/postgres` (`pgx/v5`, `ILIKE` memory search) |
 | `internal/secret` | `SecretStore` interface backed by macOS Keychain, encrypted local file, or Kubernetes `0400` volume mount |
 | `internal/policy` | Deterministic `allow` / `approve` / `deny` evaluator (fail-closed default `deny`) and failure `CircuitBreaker` |
 | `internal/redact` | Linear-time RE2 secret redactor scrubbing API keys, bearer tokens, and private keys before storage or broadcast |
 | `internal/gate/model` | HTTP/SSE proxy for OpenAI, Anthropic, Gemini, local endpoints, and upstream `agentgateway`; enforces `sc_task_` leases, budgets, SSRF protection, and `openai <-> local` fallback |
 | `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.open_pr`), and proxied upstream MCP servers |
 | `internal/approval` | Pinned SHA-256 approval queue, macOS native `osascript` out-of-band prompt, and ECDSA P-256 device signature verification |
-| `internal/conclave` | Multi-agent room broker enforcing `canMessage` graphs, `always-on` vs `on-mention` activation, `Wards` (`maxMessages`, `maxPingPong`, `budgetRef`), operator `Decrees`, and shared `Relics` |
+| `internal/conclave` | Multi-agent room broker enforcing `canMessage` graphs, one-time-on-open `always-on` and `on-mention` activation, `Wards` (`maxMessages`, `maxPingPong`), `spec.budgetRef`, operator `Decrees`, and shared `Relics` |
 | `internal/attach` | 64 KiB redacted ring buffer (`Scry` SSE streaming) and exclusive operator `stdin` lock (`Takeover`) |
 | `internal/runtime/*` | Execution adapters: `coding` (Git worktrees + Seatbelt/Bubblewrap), `docker` (Docker/Podman/OrbStack/Colima/Rancher), `k8s` (hardened Jobs and Deployments), `controller` (zero-LLM) |
 | `internal/notify` | Outbound alerts to Slack, Discord, ntfy, or generic webhooks on approvals, Ward pauses, and task failures |
@@ -100,12 +100,20 @@ flowchart TB
 
 ## Agentic context, learnings, and verification pipeline (ADR-0010)
 
-Before dispatching any non-deterministic workload, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped `context-packet.md` (also written to `.sablecourt-context.md` inside coding worktrees). The packet combines four inputs:
+Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Matching scoped learnings are currently attached automatically to CLI coding tasks. The packet combines:
 
 1. Task intent (`prompt`, `input`, workflow step metadata, and any failure handoff).
 2. Scoped learnings matched from `Court Memory` under `learning:global`, `learning:repo:<name>`, and `learning:path:<glob>` namespaces.
 3. Recent Conclave Decrees and Relics when the task runs inside a Conclave.
 4. A read-only repository pre-check (10-second timeout, 16 KiB cap) running `git status --short`, `git diff --stat`, `go vet ./...` for Go modules, and `sg scan` when `sgconfig.yml` is present.
+
+## Audit verification limits
+
+The SQLite and PostgreSQL verifiers recalculate hashes and previous-row links for rows that have hashes. They skip legacy rows with an empty hash and verify only rows still present in the database. A deleted middle row breaks a later row's previous-hash link; deletion of the final row leaves no later link to check. External anchoring for detecting tail deletion is parked under tracking [epic #1](https://github.com/shadewright-labs/sablecourt/issues/1).
+
+### Dated amendment, 2026-11-24
+
+The description above corrects the implementation claim in ADR-0009. That accepted ADR was outside this documentation work package and remains unchanged; this amendment records the limit without changing the decision text.
 
 Workflows can pair an authoring step with an independent `role: verifier` step running on a separate model or CLI harness. The reconciler wraps the verifier prompt with author artifacts and expects `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. On verifier rejection or runtime failure, opt-in remediation (`maxRetries` on `WorkflowStep`, or manual `Fix from failure` / `sablectl task retry --handoff`) packages redacted artifacts and events into `failure-handoff.md` for the next attempt.
 

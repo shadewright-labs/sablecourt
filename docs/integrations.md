@@ -81,6 +81,6 @@ In `--mode=citadel`, `internal/runtime/k8s` supports two Kubernetes workload pri
 
 | Feature | Endpoints and commands | Purpose |
 | :--- | :--- | :--- |
-| Court Memory Web UI | `GET /memory`, `POST /ui/memory/set`, `POST /ui/memory/delete` | Search persistent FTS5 memory entries by `scope` and query, store new redacted knowledge, and remove obsolete entries |
-| Operator Relic upload | `POST /ui/conclaves/{id}/relics` | Attach logs, crash dumps, or design notes directly into an active Conclave room as a redacted `Relic` |
+| Court Memory Web UI | `GET /memory`, `POST /ui/memory/set`, `POST /ui/memory/delete` | Search persisted entries by scope and query using SQL `LIKE`/`ILIKE`, store new redacted knowledge, and remove obsolete entries. FTS5 search is parked under tracking [epic #1](https://github.com/shadewright-labs/sablecourt/issues/1). |
+| Operator Relic upload | `POST /ui/conclaves/{id}/relics` | The route accepts a Relic, but the Conclave page has no upload form. Use `sablectl conclave relic` or the API. The UI form is parked under tracking [epic #1](https://github.com/shadewright-labs/sablecourt/issues/1). |
 | Task retry | `POST /api/v1/tasks/{id}/retry`, `POST /ui/tasks/{id}/retry`, `sablectl task retry <id>` | Re-submit an interrupted or failed task with its original `workload` and `inputJSON` under a fresh idempotency key and log `task.retry` to the audit chain |
