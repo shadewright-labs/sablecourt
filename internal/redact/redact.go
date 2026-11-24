@@ -13,6 +13,8 @@ type rule struct {
 }
 
 // Go's regexp package implements RE2, guaranteeing linear O(n) scan time with no backtracking.
+const sensitiveField = `[a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token)`
+
 var rules = []rule{
 	{
 		category: "private_key",
@@ -56,7 +58,12 @@ var rules = []rule{
 	},
 	{
 		category: "generic_secret_kv",
-		re:       regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token))\b(\s*[:=]\s*["']?)([^\s"',;]{6,})`),
+		re:       regexp.MustCompile(`(?i)("` + sensitiveField + `"\s*:\s*")(?:[^"\\]|\\.)*(")`),
+		replace:  "${1}[REDACTED:secret]${2}",
+	},
+	{
+		category: "generic_secret_kv",
+		re:       regexp.MustCompile(`(?i)\b(` + sensitiveField + `)\b(\s*[:=]\s*["']?)([^\s"',;]{6,})`),
 		replace:  "${1}${2}[REDACTED:secret]",
 	},
 }

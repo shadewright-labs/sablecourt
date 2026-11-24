@@ -335,3 +335,45 @@ func (s incidentFailureStore) AppendAudit(ctx context.Context, a domain.AuditRec
 	}
 	return s.Store.AppendAudit(ctx, a)
 }
+
+func TestIncidentUsesRunCeiling(t *testing.T) {
+	ctx := context.Background()
+	for _, count := range []int{6, 7} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			st := daemonTestStore(t)
+			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker"}); err != nil {
+				t.Fatal(err)
+			}
+			var roles []domain.ConclaveVassal
+			for i := range count {
+				roles = append(roles, domain.ConclaveVassal{Role: fmt.Sprintf("role-%d", i), Workload: "worker", Activation: domain.ActivationAlwaysOn})
+			}
+			bundle := &config.Bundle{
+				Conclaves: map[string]domain.Conclave{"primary": {Spec: domain.ConclaveSpec{Vassals: roles}}},
+				Workloads: map[string]domain.Workload{"worker": {Metadata: domain.ObjectMeta{Name: "worker"}}},
+			}
+			getBundle := func() *config.Bundle { return bundle }
+			r := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})
+			b := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle, Reconciler: r})
+			h := incidentHandler(st, incidentTestSecrets(), getBundle, b, r, "primary")
+			got := postIncident(h, "INC-42", "")
+			want := http.StatusCreated
+			if count == 7 {
+				want = http.StatusConflict
+			}
+			if got.Code != want {
+				t.Errorf("intake status = %d, want %d", got.Code, want)
+			}
+			tasks, err := st.ListTasks(ctx)
+			if err != nil || len(tasks) != 6 {
+				t.Errorf("reserved %d tasks, %v", len(tasks), err)
+			}
+			if count == 7 {
+				rooms, err := st.ListConclaves(ctx)
+				if err != nil || len(rooms) != 1 || rooms[0].WardReason != "max_runs" {
+					t.Errorf("intake did not pause at the ceiling: %+v, %v", rooms, err)
+				}
+			}
+		})
+	}
+}

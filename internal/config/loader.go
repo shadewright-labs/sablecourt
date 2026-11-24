@@ -326,6 +326,9 @@ func validateConclave(name string, cc domain.Conclave, bundle *Bundle) error {
 			return fmt.Errorf("conclave %q: referenced budget %q not found", name, cc.Spec.BudgetRef)
 		}
 	}
+	if cc.Spec.Wards.MaxRuns < 0 || cc.Spec.Wards.MaxRuns > domain.ConclaveRunCeiling {
+		return fmt.Errorf("conclave %q: maxRuns must be between 0 and %d", name, domain.ConclaveRunCeiling)
+	}
 	if cc.Spec.Wards.MaxMessages < 0 || cc.Spec.Wards.MaxPingPong < 0 {
 		return fmt.Errorf("conclave %q: ward limits must be non-negative", name)
 	}

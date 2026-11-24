@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 )
 
 const (
+	taskLeaseTTL        = time.Hour
 	maxParallelLaunches = 4
 	adapterCallTimeout  = 15 * time.Second
 	adapterStartTimeout = 30 * time.Second
@@ -65,7 +68,7 @@ type Reconciler struct {
 	partialStarts  map[string]bool
 	launching      map[string]*launchReservation
 	launchErrors   error
-	stopping       map[string]bool
+	stopping       map[string]chan struct{}
 }
 
 func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
@@ -90,6 +93,11 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 		return err
 	}
 	cleanupCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		cleanupCtx, cancel = context.WithDeadline(cleanupCtx, deadline)
+		defer cancel()
+	}
 	r.mu.Lock()
 	reservation := r.launching[taskID]
 	r.mu.Unlock()
@@ -115,26 +123,36 @@ func terminalTaskState(state domain.TaskState) bool {
 // stopTask retains the handle if stopping fails so a later pass can retry cleanup.
 func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 	r.mu.Lock()
+	for r.stopping[taskID] != nil {
+		done := r.stopping[taskID]
+		r.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		r.mu.Lock()
+	}
 	handle, ok := r.handles[taskID]
 	adapter := r.handleAdapters[taskID]
-	if !ok {
+	if !ok || adapter == nil {
 		r.mu.Unlock()
+		if ok {
+			return errors.New("runtime adapter unavailable for cleanup")
+		}
 		return nil
 	}
-	if adapter == nil || r.stopping[taskID] {
-		r.mu.Unlock()
-		return errors.New("runtime cleanup unavailable or already in progress")
-	}
-	r.stopping[taskID] = true
+	done := make(chan struct{})
+	r.stopping[taskID] = done
 	r.mu.Unlock()
 
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 	err := adapter.Stop(callCtx, handle)
 	cancel()
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.stopping, taskID)
+	close(done)
 	if err != nil {
 		return errors.New("runtime stop failed")
 	}
@@ -235,7 +253,7 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 	adapter := r.handleAdapters[taskID]
 	r.mu.Unlock()
 
-	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, time.Hour); err != nil {
+	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, taskLeaseTTL); err != nil {
 		return err
 	}
 	defer func() {
@@ -295,7 +313,7 @@ func NewReconciler(opts Options) *Reconciler {
 		handleAdapters:  make(map[string]scruntime.Adapter),
 		partialStarts:   make(map[string]bool),
 		launching:       make(map[string]*launchReservation),
-		stopping:        make(map[string]bool),
+		stopping:        make(map[string]chan struct{}),
 	}
 }
 
@@ -304,6 +322,9 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 }
 
 func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON, parentID string, step *workflowStepRecord) (domain.Task, error) {
+	if strings.HasPrefix(idempotencyKey, "conclave-") && !store.HasConclaveReservation(ctx, idempotencyKey) {
+		return domain.Task{}, errors.New("conclave submission requires a run reservation")
+	}
 	r.mu.Lock()
 	bundle := r.bundle
 	r.mu.Unlock()
@@ -354,14 +375,12 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 				return domain.Task{}, err
 			}
 			// The unique key selects the winner even when submissions race.
-			tasks, listErr := r.store.ListTasks(ctx)
-			if listErr != nil {
-				return domain.Task{}, listErr
+			existing, lookupErr := r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey)
+			if lookupErr == nil && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
+				return existing, nil
 			}
-			for _, existing := range tasks {
-				if existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
-					return existing, nil
-				}
+			if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+				return domain.Task{}, lookupErr
 			}
 		}
 		return domain.Task{}, err
@@ -493,21 +512,42 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	if err != nil {
 		return domain.Task{}, err
 	}
-	idem := fmt.Sprintf("retry-%s-%d", orig.ID, attempt)
-	member, err := r.workflowStep(ctx, orig.ID)
-	if err != nil {
-		return domain.Task{}, err
-	}
-	if member != nil && payload["role"] != "verifier" {
-		if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
-			member.AuthorCommit = commit
+	if !strings.HasPrefix(orig.IdempotencyKey, "conclave-") {
+		idem := fmt.Sprintf("retry-%s-%d", orig.ID, attempt)
+		member, err := r.workflowStep(ctx, orig.ID)
+		if err != nil {
+			return domain.Task{}, err
 		}
+		if member != nil && payload["role"] != "verifier" {
+			if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
+				member.AuthorCommit = commit
+			}
+		}
+		return r.submitTask(ctx, orig.WorkloadName, idem, string(raw), orig.ParentTaskID, member)
 	}
-	retried, err := r.submitTask(ctx, orig.WorkloadName, idem, string(raw), orig.ParentTaskID, member)
+	assignment, ok := store.TaskConclaveAssignment(orig)
+	if !ok {
+		return domain.Task{}, errors.New("invalid conclave task assignment")
+	}
+	room, err := r.store.GetConclave(ctx, assignment.ConclaveID)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return retried, nil
+	r.mu.Lock()
+	bundle := r.bundle
+	r.mu.Unlock()
+	if bundle == nil {
+		return domain.Task{}, errors.New("no workload bundle loaded")
+	}
+	tpl, ok := bundle.Conclaves[room.TemplateName]
+	if !ok {
+		return domain.Task{}, errors.New("conclave template not found")
+	}
+	key := assignment.RetryKey(orig.ID, attempt)
+	limits := store.LimitsForConclave(tpl, true, bundle.Budgets, r.now)
+	return store.SubmitConclaveTurn(ctx, room.ID, key, limits, func(ctx context.Context) (domain.Task, error) {
+		return r.SubmitTask(ctx, orig.WorkloadName, key, string(raw))
+	})
 }
 
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
@@ -587,12 +627,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	defer r.reconcileMu.Unlock()
 	r.mu.Lock()
 	launching := maps.Clone(r.launching)
+	handleIDs := slices.Collect(maps.Keys(r.handles))
 	bundle := r.bundle
 	passErr := r.launchErrors
 	r.launchErrors = nil
 	r.mu.Unlock()
 
-	tasks, err := r.store.ListTasks(ctx)
+	tasks, err := r.store.ListReconcileTasks(ctx, handleIDs)
 	if err != nil {
 		return errors.Join(passErr, err)
 	}
@@ -747,8 +788,12 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 			return err
 		}
 	}
-	if err := r.store.RecordHeartbeat(ctx, task.ID, obs.ObservedAt); err != nil {
-		return err
+	now := r.now()
+	hasTimestamp := !obs.ObservedAt.IsZero() && !obs.ObservedAt.After(now)
+	if hasTimestamp {
+		if err := r.store.RecordHeartbeat(ctx, task.ID, obs.ObservedAt); err != nil {
+			return err
+		}
 	}
 	switch obs.State {
 	case scruntime.StateCompleted, scruntime.StateFailed:
@@ -771,6 +816,13 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 		task.State = target
 		return r.reconcileTerminal(context.WithoutCancel(ctx), task)
 	case scruntime.StateRunning:
+		now := r.now()
+		age := now.Sub(obs.ObservedAt)
+		if hasTimestamp && age >= 0 && age <= r.stalenessWindow {
+			if err := r.store.RenewTaskLeases(ctx, task.ID, now, obs.ObservedAt.Add(taskLeaseTTL)); err != nil {
+				return err
+			}
+		}
 		if task.State == domain.TaskStateInputRequired {
 			approvals, err := r.store.ListApprovals(ctx, "")
 			if err != nil {
@@ -844,7 +896,17 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		r.mu.Unlock()
 	}()
 
-	if err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`); err != nil {
+	assignment, assigned := store.TaskConclaveAssignment(task)
+	if strings.HasPrefix(task.IdempotencyKey, "conclave-") && !assigned {
+		return store.ErrConflict
+	}
+	var err error
+	if assigned {
+		err = store.ClaimConclaveTask(ctx, r.store, task.ID, assignment.ConclaveID, r.now)
+	} else {
+		err = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
+	}
+	if err != nil {
 		return err
 	}
 	claimed = true
@@ -964,7 +1026,7 @@ func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string) (strin
 	if current.State != domain.TaskStateWorking {
 		return "", store.ErrConflict
 	}
-	return model.MintTaskToken(ctx, r.store, current.ID, current.WorkloadName, time.Hour)
+	return model.MintTaskToken(ctx, r.store, current.ID, current.WorkloadName, taskLeaseTTL)
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {
