@@ -210,7 +210,7 @@ func newMCPServer(clientFactory func(time.Duration) (*http.Client, string)) *mcp
 
 	addJSONTool(
 		"sablecourt_council_convene",
-		"Convene a bounded multi-agent council from the built-in council template.",
+		"Convene a bounded multi-agent council.",
 		`{"type":"object","properties":{"question":{"type":"string"},"repo":{"type":"string"},"ref":{"type":"string"},"live":{"type":"boolean"},"rounds":{"type":"integer"},"with":{"type":"array","items":{"type":"string"}},"sequential":{"type":"boolean"}},"required":["question"]}`,
 		func(ctx context.Context, raw json.RawMessage) ([]byte, error) {
 			var in struct {
@@ -258,7 +258,7 @@ func newMCPServer(clientFactory func(time.Duration) (*http.Client, string)) *mcp
 			}
 			payload := buildCouncilOpenPayload(question, repo, ref, in.Live, rounds, harnesses, in.Sequential)
 			cli, base := clientFactory(15 * time.Second)
-			return fetchPOSTContext(ctx, cli, base+"/api/v1/conclaves", payload)
+			return postCouncilOpen(ctx, cli, base, payload)
 		},
 	)
 
@@ -353,9 +353,11 @@ func newMCPServer(clientFactory func(time.Duration) (*http.Client, string)) *mcp
 			if body == "" && !shouldClose {
 				return nil, errors.New("body or close is required")
 			}
+			if body != "" && shouldClose {
+				return nil, errors.New("body cannot be combined with close or state; send the decree and close in separate calls")
+			}
 
 			cli, base := clientFactory(10 * time.Second)
-			var notes []string
 			if body != "" {
 				to := strings.TrimSpace(in.To)
 				if to == "" {
@@ -370,23 +372,12 @@ func newMCPServer(clientFactory func(time.Duration) (*http.Client, string)) *mcp
 				}
 				var msg domain.ConclaveMessage
 				_ = json.Unmarshal(msgRaw, &msg)
-				notes = append(notes, fmt.Sprintf("decree #%d sent to @%s", msg.ID, to))
+				return []byte(fmt.Sprintf("decree #%d sent to @%s", msg.ID, to)), nil
 			}
-			if shouldClose {
-				if state == string(domain.ConclaveStateCancelled) {
-					if err := stopCouncilAndTasks(clientFactory, base, conclaveID); err != nil {
-						return nil, err
-					}
-				} else {
-					if _, err := fetchPOSTContext(ctx, cli, base+"/api/v1/conclaves/"+escapedID+"/close", map[string]string{
-						"state": state,
-					}); err != nil {
-						return nil, err
-					}
-				}
-				notes = append(notes, fmt.Sprintf("council %s closed (%s)", conclaveID, state))
+			if _, err := closeConclaveAndStopTasks(ctx, clientFactory, base, conclaveID, domain.ConclaveState(state)); err != nil {
+				return nil, err
 			}
-			return []byte(strings.Join(notes, "; ")), nil
+			return []byte(fmt.Sprintf("council %s closed (%s)", conclaveID, state)), nil
 		},
 	)
 
@@ -429,19 +420,14 @@ func formatCouncilRelicText(r domain.ConclaveRelic) string {
 
 func formatCouncilReadText(detail councilDetailResponse, sinceID int64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Council %s (%s) state=%s template=%s\n",
+	fmt.Fprintf(&b, "Council %s (%q) state=%s template=%s\n",
 		detail.Conclave.ID, detail.Conclave.Title, detail.Conclave.State, detail.Conclave.TemplateName)
 	if detail.Conclave.WardReason != "" {
-		fmt.Fprintf(&b, "Ward: %s\n", detail.Conclave.WardReason)
+		fmt.Fprintf(&b, "Ward: %q\n", detail.Conclave.WardReason)
 	}
 	b.WriteString("\nMessages:\n")
-	roleCounts := make(map[string]int)
 	msgCount := 0
 	for _, m := range detail.Messages {
-		if m.FromRole != "operator" && m.FromRole != "system" && m.Round <= 0 {
-			roleCounts[m.FromRole]++
-			m.Round = roleCounts[m.FromRole]
-		}
 		if m.ID <= sinceID {
 			continue
 		}
@@ -450,7 +436,7 @@ func formatCouncilReadText(detail councilDetailResponse, sinceID int64) string {
 		if m.Round > 0 {
 			roundTag = fmt.Sprintf(" round=%d", m.Round)
 		}
-		fmt.Fprintf(&b, "  #%d%s @%s -> @%s (%s): %s\n", m.ID, roundTag, m.FromRole, m.ToRole, m.Kind, strings.TrimSpace(m.Body))
+		fmt.Fprintf(&b, "  #%d%s @%s -> @%s (%s): %q\n", m.ID, roundTag, m.FromRole, m.ToRole, m.Kind, strings.TrimSpace(m.Body))
 	}
 	if msgCount == 0 {
 		b.WriteString("  (none)\n")
@@ -467,6 +453,8 @@ func formatCouncilReadText(detail councilDetailResponse, sinceID int64) string {
 	}
 	if digest, ok := findDigestRelic(detail.Relics); ok {
 		fmt.Fprintf(&b, "\nDigest (%s):\n%s\n", digest.Name, strings.TrimSpace(digest.Body))
+	} else {
+		b.WriteString("\nDigest: no digest recorded\n")
 	}
 	return b.String()
 }

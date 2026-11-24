@@ -457,13 +457,8 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 		Use:   "export",
 		Short: "Export audit records as JSONL to stdout",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cli, base := httpClient(15 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/audit/export")
-			if err != nil {
-				return err
-			}
-			_, err = cmd.OutOrStdout().Write(body)
-			return err
+			cli, base := httpClient(0)
+			return streamGETContext(cmd.Context(), cli, base+"/api/v1/audit/export", cmd.OutOrStdout())
 		},
 	})
 
@@ -960,8 +955,7 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 		Short: "Close a Conclave session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cli, base := httpClient(5 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+url.PathEscape(args[0])+"/close", map[string]string{"state": "completed"})
+			body, err := closeConclaveAndStopTasks(cmd.Context(), httpClient, "", args[0], domain.ConclaveStateCompleted)
 			if err != nil {
 				return err
 			}
@@ -1133,6 +1127,38 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 
 const maxHTTPResponseBytes = 8 << 20
 
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+func readBoundedHTTPResponse(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxHTTPResponseBytes {
+		if resp.StatusCode >= 400 {
+			return nil, &httpStatusError{
+				StatusCode: resp.StatusCode,
+				Body:       strings.TrimSpace(string(body[:maxHTTPResponseBytes])),
+			}
+		}
+		return nil, fmt.Errorf("HTTP response exceeded %d bytes", maxHTTPResponseBytes)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+		}
+	}
+	return body, nil
+}
+
 func fetchGET(client *http.Client, rawURL string) ([]byte, error) {
 	return fetchGETContext(context.Background(), client, rawURL)
 }
@@ -1147,14 +1173,28 @@ func fetchGETContext(ctx context.Context, client *http.Client, rawURL string) ([
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes))
+	return readBoundedHTTPResponse(resp)
+}
+
+func streamGETContext(ctx context.Context, client *http.Client, rawURL string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes))
+		return &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
-	return body, nil
+	_, err = io.Copy(out, resp.Body)
+	return err
 }
 
 func fetchPOST(client *http.Client, rawURL string, payload any) ([]byte, error) {
@@ -1176,14 +1216,7 @@ func fetchPOSTContext(ctx context.Context, client *http.Client, rawURL string, p
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return body, nil
+	return readBoundedHTTPResponse(resp)
 }
 
 func writeJSONOut(w io.Writer, v any) error {

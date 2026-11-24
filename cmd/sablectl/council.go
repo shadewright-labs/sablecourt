@@ -12,13 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -42,10 +42,18 @@ type councilMessageView struct {
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
+type councilTurnView struct {
+	Round  int    `json:"round"`
+	Role   string `json:"role"`
+	Status string `json:"status,omitempty"`
+	State  string `json:"state,omitempty"`
+}
+
 type councilDetailResponse struct {
 	Conclave domain.ConclaveSession `json:"conclave"`
 	Messages []councilMessageView   `json:"messages"`
 	Relics   []domain.ConclaveRelic `json:"relics"`
+	Turns    []councilTurnView      `json:"turns,omitempty"`
 }
 
 func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), jsonOut *bool) *cobra.Command {
@@ -68,9 +76,8 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 				question = args[0]
 			} else {
 				fmt.Fprint(cmd.ErrOrStderr(), "Council question: ")
-				limited := io.LimitReader(cmd.InOrStdin(), maxCouncilQuestionBytes+1)
-				line, err := bufio.NewReader(limited).ReadString('\n')
-				if err != nil && !errors.Is(err, io.EOF) {
+				line, err := readLineContext(cmd.Context(), cmd.InOrStdin(), maxCouncilQuestionBytes)
+				if err != nil {
 					return err
 				}
 				question = line
@@ -147,7 +154,7 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 	cli, base := httpClient(15 * time.Second)
 	payload := buildCouncilOpenPayload(params.Question, params.Repo, params.Ref, params.Live, params.Rounds, params.Harnesses, params.Sequential)
 
-	raw, err := fetchPOSTContext(ctx, cli, base+"/api/v1/conclaves", payload)
+	raw, err := postCouncilOpen(ctx, cli, base, payload)
 	if err != nil {
 		return err
 	}
@@ -178,12 +185,9 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 	defer ticker.Stop()
 
 	var (
-		lastSeenID         int64
-		participantAnswers int
-		lastRound          int
-		roleCounts         = make(map[string]int)
-		printedMessages    []councilMessageView
-		latest             councilDetailResponse
+		lastSeenID int64
+		lastRound  int
+		latest     councilDetailResponse
 	)
 
 	syncState := func(fetchCtx context.Context) (bool, error) {
@@ -205,18 +209,10 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 					fmt.Fprintf(out, "%s %s\n", stAmber.Render("!"), strings.TrimSpace(m.Body))
 				}
 			default:
-				participantAnswers++
-				round := m.Round
-				if round <= 0 {
-					roleCounts[m.FromRole]++
-					round = roleCounts[m.FromRole]
-				}
-				m.Round = round
-				printedMessages = append(printedMessages, m)
 				if !params.JSONOut {
-					if round != lastRound {
-						fmt.Fprintf(out, "\n%s\n", stTitle.Render(fmt.Sprintf("--- Round %d ---", round)))
-						lastRound = round
+					if m.Round > 0 && m.Round != lastRound {
+						fmt.Fprintf(out, "\n%s\n", stTitle.Render(fmt.Sprintf("--- Round %d ---", m.Round)))
+						lastRound = m.Round
 					}
 					fmt.Fprintf(out, "%s %s\n%s\n\n",
 						stJade.Render("@"+m.FromRole),
@@ -254,7 +250,9 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 			if syncErr != nil && ctx.Err() == nil {
 				consecutiveErrs++
 				if consecutiveErrs >= maxConsecutiveFetchErrs {
-					return syncErr
+					cancelStream()
+					stopErr := stopCouncilAndTasks(httpClient, base, sess.ID)
+					return fmt.Errorf("council %s poll failed: %w", sess.ID, errors.Join(syncErr, stopErr))
 				}
 			} else if syncErr == nil {
 				consecutiveErrs = 0
@@ -265,7 +263,9 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 			if syncErr != nil && ctx.Err() == nil {
 				consecutiveErrs++
 				if consecutiveErrs >= maxConsecutiveFetchErrs {
-					return syncErr
+					cancelStream()
+					stopErr := stopCouncilAndTasks(httpClient, base, sess.ID)
+					return fmt.Errorf("council %s poll failed: %w", sess.ID, errors.Join(syncErr, stopErr))
 				}
 			} else if syncErr == nil {
 				consecutiveErrs = 0
@@ -284,10 +284,10 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 			return err
 		}
 	} else {
-		printCouncilDigest(out, latest.Relics, printedMessages, params.Harnesses)
+		printCouncilDigest(out, latest.Relics)
 	}
 
-	if participantAnswers == 0 {
+	if countCompletedCouncilTurns(latest, params.Rounds) == 0 {
 		return fmt.Errorf("council %s finished with no participant answers", sess.ID)
 	}
 	if latest.Conclave.State == domain.ConclaveStateCancelled {
@@ -299,12 +299,93 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 	return nil
 }
 
+func postCouncilOpen(ctx context.Context, cli *http.Client, base string, payload map[string]any) ([]byte, error) {
+	raw, err := fetchPOSTContext(ctx, cli, base+"/api/v1/councils", payload)
+	if err != nil {
+		var statusErr *httpStatusError
+		if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusMethodNotAllowed) {
+			return nil, fmt.Errorf("daemon does not support council endpoint POST /api/v1/councils (HTTP %d): upgrade sablecourtd", statusErr.StatusCode)
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+func countCompletedCouncilTurns(detail councilDetailResponse, maxRounds int) int {
+	if len(detail.Turns) > 0 {
+		n := 0
+		for _, t := range detail.Turns {
+			if t.Round <= 0 || (maxRounds > 0 && t.Round > maxRounds) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(t.Status), "completed") || strings.EqualFold(strings.TrimSpace(t.State), "completed") {
+				n++
+			}
+		}
+		return n
+	}
+	n := 0
+	for _, m := range detail.Messages {
+		if m.FromRole == "operator" || m.FromRole == "system" {
+			continue
+		}
+		if m.Round <= 0 || (maxRounds > 0 && m.Round > maxRounds) {
+			continue
+		}
+		if isCouncilAnswerKind(m.Kind) {
+			n++
+		}
+	}
+	return n
+}
+
+func isCouncilAnswerKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "proposal", "review", "decision", "answer":
+		return true
+	default:
+		return false
+	}
+}
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		limited := io.LimitReader(r, maxBytes+1)
+		line, err := bufio.NewReader(limited).ReadString('\n')
+		ch <- result{line: line, err: err}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil && !errors.Is(res.err, io.EOF) {
+			return "", res.err
+		}
+		return res.line, nil
+	case <-ctx.Done():
+		if ds, ok := r.(readDeadlineSetter); ok {
+			_ = ds.SetReadDeadline(time.Now())
+		}
+		return "", ctx.Err()
+	}
+}
+
 func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, harnesses []string, sequential bool) map[string]any {
+	redactedQuestion := redact.String(question)
 	payload := map[string]any{
-		"template":   "council",
-		"title":      singleLineSummary(question, 120),
-		"decree":     question,
-		"question":   question,
+		"title":      singleLineSummary(redactedQuestion, 120),
+		"decree":     redactedQuestion,
+		"question":   redactedQuestion,
 		"rounds":     rounds,
 		"with":       harnesses,
 		"sequential": sequential,
@@ -364,98 +445,98 @@ func fetchCouncilDetail(ctx context.Context, cli *http.Client, base, conclaveID 
 func stopCouncilAndTasks(httpClient func(time.Duration) (*http.Client, string), base, conclaveID string) error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	_, err := closeConclaveAndStopTasks(stopCtx, httpClient, base, conclaveID, domain.ConclaveStateCancelled)
+	return err
+}
 
-	cli, resolvedBase := httpClient(10 * time.Second)
+func closeConclaveAndStopTasks(ctx context.Context, httpClient func(time.Duration) (*http.Client, string), base, conclaveID string, state domain.ConclaveState) ([]byte, error) {
+	cli, resolvedBase := httpClient(5 * time.Second)
 	if base != "" {
 		resolvedBase = base
 	}
 	escapedID := url.PathEscape(conclaveID)
 
 	var errs []error
-	if _, err := fetchPOSTContext(stopCtx, cli, resolvedBase+"/api/v1/conclaves/"+escapedID+"/close", map[string]string{
-		"state": string(domain.ConclaveStateCancelled),
-	}); err != nil {
+	closeBody, err := fetchPOSTContext(ctx, cli, resolvedBase+"/api/v1/conclaves/"+escapedID+"/close", map[string]string{
+		"state": string(state),
+	})
+	if err != nil {
 		errs = append(errs, fmt.Errorf("close council: %w", err))
 	}
 
-	rawTasks, err := fetchGETContext(stopCtx, cli, resolvedBase+"/api/v1/tasks")
+	tasks, err := listTasksContext(ctx, cli, resolvedBase)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list tasks: %w", err))
-		return errors.Join(errs...)
+		return closeBody, errors.Join(errs...)
 	}
-	var tasks []domain.Task
-	if err := json.Unmarshal(rawTasks, &tasks); err != nil {
-		errs = append(errs, fmt.Errorf("decode tasks: %w", err))
-		return errors.Join(errs...)
-	}
+
+	var activeOwned []domain.Task
 	for _, task := range tasks {
 		if !taskBelongsToConclave(task, conclaveID) || isTerminalTaskState(task.State) {
 			continue
 		}
-		if _, err := fetchPOSTContext(stopCtx, cli, resolvedBase+"/api/v1/tasks/"+url.PathEscape(task.ID)+"/cancel", map[string]string{}); err != nil {
+		activeOwned = append(activeOwned, task)
+	}
+
+	for _, task := range activeOwned {
+		if _, err := fetchPOSTContext(ctx, cli, resolvedBase+"/api/v1/tasks/"+url.PathEscape(task.ID)+"/cancel", map[string]string{}); err != nil {
 			errs = append(errs, fmt.Errorf("cancel task %s: %w", task.ID, err))
 		}
 	}
-	return errors.Join(errs...)
+
+	if len(activeOwned) > 0 {
+		afterTasks, err := listTasksContext(ctx, cli, resolvedBase)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("verify tasks after close: %w", err))
+			return closeBody, errors.Join(errs...)
+		}
+		for _, task := range afterTasks {
+			if taskBelongsToConclave(task, conclaveID) && !isTerminalTaskState(task.State) {
+				errs = append(errs, fmt.Errorf("owned task %s is still %s after close", task.ID, task.State))
+			}
+		}
+	}
+	return closeBody, errors.Join(errs...)
+}
+
+func listTasksContext(ctx context.Context, cli *http.Client, base string) ([]domain.Task, error) {
+	rawTasks, err := fetchGETContext(ctx, cli, base+"/api/v1/tasks")
+	if err != nil {
+		return nil, err
+	}
+	var tasks []domain.Task
+	if err := json.Unmarshal(rawTasks, &tasks); err != nil {
+		return nil, fmt.Errorf("decode tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 func taskBelongsToConclave(task domain.Task, conclaveID string) bool {
-	if a, ok := store.TaskConclaveAssignment(task); ok && a.ConclaveID == conclaveID {
-		return true
+	if conclaveID == "" {
+		return false
 	}
-	var meta struct {
-		ConclaveID string `json:"conclaveId"`
-	}
-	if err := json.Unmarshal([]byte(task.InputJSON), &meta); err == nil && meta.ConclaveID == conclaveID {
-		return true
-	}
-	return strings.HasPrefix(task.IdempotencyKey, "conclave-"+conclaveID+"-")
+	a, ok := store.TaskConclaveAssignment(task)
+	return ok && a.ConclaveID == conclaveID
 }
 
 func isTerminalTaskState(state domain.TaskState) bool {
 	return state == domain.TaskStateCompleted || state == domain.TaskStateFailed || state == domain.TaskStateCancelled
 }
 
-func printCouncilDigest(out io.Writer, relics []domain.ConclaveRelic, msgs []councilMessageView, expectedRoles []string) {
+func printCouncilDigest(out io.Writer, relics []domain.ConclaveRelic) {
 	if digest, ok := findDigestRelic(relics); ok {
 		fmt.Fprintf(out, "\n%s\n%s\n", stTitle.Render("=== Digest ==="), strings.TrimSpace(digest.Body))
 		return
 	}
-	if len(msgs) == 0 {
-		return
-	}
-	fmt.Fprintf(out, "\n%s\n", stTitle.Render("=== Digest ==="))
-	byRound := make(map[int][]councilMessageView)
-	var rounds []int
-	for _, m := range msgs {
-		r := m.Round
-		if r <= 0 {
-			r = 1
-		}
-		if _, ok := byRound[r]; !ok {
-			rounds = append(rounds, r)
-		}
-		byRound[r] = append(byRound[r], m)
-	}
-	sort.Ints(rounds)
-	for _, r := range rounds {
-		fmt.Fprintf(out, "Round %d:\n", r)
-		seen := make(map[string]bool)
-		for _, m := range byRound[r] {
-			seen[m.FromRole] = true
-			fmt.Fprintf(out, "- @%s: %s\n", m.FromRole, singleLineSummary(m.Body, 240))
-		}
-		for _, role := range expectedRoles {
-			if !seen[role] {
-				fmt.Fprintf(out, "- @%s: [missing turn]\n", role)
-			}
-		}
-	}
+	fmt.Fprintf(out, "\n%s\nno digest recorded\n", stTitle.Render("=== Digest ==="))
 }
 
 func findDigestRelic(relics []domain.ConclaveRelic) (domain.ConclaveRelic, bool) {
 	for _, target := range []string{"digest", "digest.md", "council-digest", "council-digest.md"} {
 		for _, r := range relics {
+			if strings.TrimSpace(r.AuthorRole) != "system" {
+				continue
+			}
 			if strings.EqualFold(strings.TrimSpace(r.Name), target) && strings.TrimSpace(r.Body) != "" {
 				return r, true
 			}
