@@ -169,6 +169,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 
 	now := time.Now().UTC()
 	key := strings.TrimSpace(r.FormValue("key"))
+	msgID := parseConclaveMessageID(r.FormValue("message_id"), key)
 	if key == "" {
 		key = fmt.Sprintf("conclave-%s-%d", id, now.Unix())
 	}
@@ -179,25 +180,34 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 	}
 	cleanRule := redact.String(rule)
 
-	msgID := parseConclaveMessageID(r.FormValue("message_id"), key)
-	src := proposedLearningSource{
-		Kind:        "conclave_message",
-		ConclaveID:  id,
-		MessageID:   msgID,
-		MessageBody: cleanRule,
+	sourceErrorURL := "/conclaves/" + url.PathEscape(id) + "?error=" + url.QueryEscape("source conclave message is unavailable")
+	if msgID == 0 || d.store == nil {
+		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		return
 	}
-	if msgID > 0 && d.store != nil {
-		if msgs, err := d.store.ListConclaveMessages(r.Context(), id, 0); err == nil {
-			for _, m := range msgs {
-				if m.ID == msgID {
-					src.FromRole = m.FromRole
-					src.ToRole = m.ToRole
-					src.MessageKind = m.Kind
-					src.MessageBody = redact.String(strings.TrimSpace(m.Body))
-					break
-				}
+	msgs, err := d.store.ListConclaveMessages(r.Context(), id, msgID-1)
+	if err != nil {
+		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		return
+	}
+	var src proposedLearningSource
+	for _, m := range msgs {
+		if m.ID == msgID && m.ConclaveID == id {
+			src = proposedLearningSource{
+				Kind:        "conclave_message",
+				ConclaveID:  m.ConclaveID,
+				MessageID:   m.ID,
+				FromRole:    m.FromRole,
+				ToRole:      m.ToRole,
+				MessageKind: m.Kind,
+				MessageBody: redact.String(strings.TrimSpace(m.Body)),
 			}
+			break
 		}
+	}
+	if src.MessageID == 0 {
+		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		return
 	}
 
 	proposal := proposedLearningRecord{

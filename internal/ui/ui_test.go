@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -79,6 +81,7 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 		wantProposalNS string
 		wantTargetNS   string
 		wantErr        bool
+		source         string
 	}{
 		{
 			name:           "global scope creates proposed learning",
@@ -119,6 +122,37 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 			rule:    "   ",
 			wantErr: true,
 		},
+		{
+			name:    "missing message ID fails closed",
+			scope:   "global",
+			key:     "manual-rule",
+			rule:    "Keep PRs small",
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent message fails closed",
+			scope:   "global",
+			key:     "manual-rule",
+			rule:    "Keep PRs small",
+			wantErr: true,
+			source:  "nonexistent",
+		},
+		{
+			name:    "message from another conclave fails closed",
+			scope:   "global",
+			key:     "manual-rule",
+			rule:    "Keep PRs small",
+			wantErr: true,
+			source:  "other conclave",
+		},
+		{
+			name:    "message lookup failure fails closed",
+			scope:   "global",
+			key:     "conclave-msg-1",
+			rule:    "Keep PRs small",
+			wantErr: true,
+			source:  "lookup failure",
+		},
 	}
 
 	for _, tc := range cases {
@@ -134,14 +168,15 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 			}
 
 			now := time.Now().UTC()
-			if err := st.CreateConclave(ctx, domain.ConclaveSession{
+			session := domain.ConclaveSession{
 				ID:           "cc-1",
 				TemplateName: "arch-review",
 				Title:        "Security Review",
 				State:        domain.ConclaveStateActive,
 				CreatedAt:    now,
 				UpdatedAt:    now,
-			}); err != nil {
+			}
+			if err := st.CreateConclave(ctx, session); err != nil {
 				t.Fatalf("CreateConclave: %v", err)
 			}
 			msgID, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{
@@ -156,7 +191,11 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 				t.Fatalf("AppendConclaveMessage: %v", err)
 			}
 
-			dash, err := NewDashboard(Options{Store: st})
+			dashStore := store.Store(st)
+			if tc.source == "lookup failure" {
+				dashStore = conclaveMessageLookupError{Store: st}
+			}
+			dash, err := NewDashboard(Options{Store: dashStore})
 			if err != nil {
 				t.Fatalf("NewDashboard: %v", err)
 			}
@@ -171,6 +210,27 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 				form.Set("key", tc.key)
 			}
 			form.Set("rule", tc.rule)
+			switch tc.source {
+			case "nonexistent":
+				form.Set("message_id", strconv.FormatInt(msgID+1, 10))
+			case "other conclave":
+				session.ID = "cc-2"
+				if err := st.CreateConclave(ctx, session); err != nil {
+					t.Fatalf("create other conclave: %v", err)
+				}
+				otherID, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{
+					ConclaveID: session.ID,
+					FromRole:   "coder",
+					ToRole:     "all",
+					Kind:       "proposal",
+					Body:       "Other message",
+					CreatedAt:  now,
+				})
+				if err != nil {
+					t.Fatalf("append other message: %v", err)
+				}
+				form.Set("message_id", strconv.FormatInt(otherID, 10))
+			}
 
 			req := httptest.NewRequest(http.MethodPost, "/ui/conclaves/cc-1/learning", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -190,7 +250,19 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 			if tc.wantErr {
 				loc := rec.Header().Get("Location")
 				if !strings.Contains(loc, "error=") && !strings.Contains(loc, "err=") {
-					t.Fatalf("expected error redirect on empty rule, got Location=%q", loc)
+					t.Errorf("expected error redirect, got Location=%q", loc)
+				}
+				if _, err := st.GetMemory(ctx, "proposed:learning:global", form.Get("key")); !errors.Is(err, store.ErrNotFound) {
+					t.Errorf("expected no proposal after rejection, got %v", err)
+				}
+				audits, err := st.ListAudit(ctx, 50)
+				if err != nil {
+					t.Fatalf("ListAudit: %v", err)
+				}
+				for _, rec := range audits {
+					if rec.Action == "learning.propose" && rec.Outcome == "proposed" {
+						t.Errorf("unexpected successful proposal audit after rejection")
+					}
 				}
 				return
 			}
@@ -240,4 +312,12 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 			}
 		})
 	}
+}
+
+type conclaveMessageLookupError struct {
+	store.Store
+}
+
+func (conclaveMessageLookupError) ListConclaveMessages(context.Context, string, int64) ([]domain.ConclaveMessage, error) {
+	return nil, errors.New("message lookup failed")
 }

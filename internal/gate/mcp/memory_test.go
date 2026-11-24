@@ -20,6 +20,30 @@ import (
 
 func setupMemoryGateTest(t *testing.T) (*Gate, *sqlite.SQLiteStore, *mcp.ClientSession) {
 	t.Helper()
+	gate, st := newMemoryGateTest(t)
+	ctx := context.Background()
+	wl := gate.snapshot().bundle.Workloads["coder"]
+	lease := domain.Lease{TaskID: "task-mem-1", WorkloadName: "coder"}
+	srv := gate.NewServerForWorkload(lease, wl)
+	ct, svt := mcp.NewInMemoryTransports()
+	srvSession, err := srv.Connect(ctx, svt, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { _ = srvSession.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.1.0"}, nil)
+	cliSession, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cliSession.Close() })
+
+	return gate, st, cliSession
+}
+
+func newMemoryGateTest(t *testing.T) (*Gate, *sqlite.SQLiteStore) {
+	t.Helper()
 	ctx := context.Background()
 	st, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
 	if err != nil {
@@ -63,24 +87,7 @@ func setupMemoryGateTest(t *testing.T) (*Gate, *sqlite.SQLiteStore, *mcp.ClientS
 		Policy: eng,
 	})
 	RegisterBuiltinMemory(gate, st)
-
-	lease := domain.Lease{TaskID: "task-mem-1", WorkloadName: "coder"}
-	srv := gate.NewServerForWorkload(lease, wl)
-	ct, svt := mcp.NewInMemoryTransports()
-	srvSession, err := srv.Connect(ctx, svt, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	t.Cleanup(func() { _ = srvSession.Close() })
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.1.0"}, nil)
-	cliSession, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	t.Cleanup(func() { _ = cliSession.Close() })
-
-	return gate, st, cliSession
+	return gate, st
 }
 
 func hasAuditRecord(records []domain.AuditRecord, category, action, outcome, wantSubstr string) bool {
@@ -338,6 +345,138 @@ func TestMemoryDeleteNamespacePolicy(t *testing.T) {
 			}
 			if _, err := st.GetMemory(ctx, tc.seedNS, tc.key); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("expected entry %q/%q to be deleted, got err=%v", tc.seedNS, tc.key, err)
+			}
+		})
+	}
+}
+
+func TestMemoryProposalRejectsWrites(t *testing.T) {
+	for _, name := range []string{"memory.put", "memory.delete"} {
+		for _, namespace := range []string{"proposed:learning:global", "\u2003PrOpOsEd:LeArNiNg:repo:fixture\u2002"} {
+			t.Run(name+"/"+strings.TrimSpace(namespace), func(t *testing.T) {
+				ctx := context.Background()
+				_, st, cli := setupMemoryGateTest(t)
+				entry := domain.MemoryEntry{
+					Namespace: strings.TrimSpace(namespace),
+					Key:       "rule",
+					Value:     "operator proposal",
+					Author:    "operator",
+					UpdatedAt: time.Now().UTC(),
+				}
+				if err := st.PutMemory(ctx, entry); err != nil {
+					t.Fatalf("seed proposal: %v", err)
+				}
+				args := map[string]any{"namespace": namespace, "key": entry.Key}
+				if name == "memory.put" {
+					args["value"] = "replacement"
+				}
+				res, err := cli.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+				if err != nil {
+					t.Fatalf("CallTool: %v", err)
+				}
+				if !res.IsError {
+					t.Errorf("%s accepted a proposal write", name)
+				}
+				got, err := st.GetMemory(ctx, entry.Namespace, entry.Key)
+				if err != nil || got.Value != entry.Value || got.Author != entry.Author {
+					t.Fatalf("operator proposal changed: got %+v, err %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestMemoryRefusalAudits(t *testing.T) {
+	token := "ghp_" + strings.Repeat("x", 36)
+	for _, tc := range []struct {
+		name  string
+		tool  string
+		field string
+		input string
+	}{
+		{name: "put credential", tool: "memory.put", field: "key", input: token},
+		{name: "delete credential", tool: "memory.delete", field: "key", input: token},
+		{name: "get credential", tool: "memory.get", field: "key", input: token},
+		{name: "namespace credential", tool: "memory.get", field: "namespace", input: "system:" + token},
+		{name: "search credential", tool: "memory.search", field: "query", input: token},
+		{name: "put blank key", tool: "memory.put", field: "key", input: " \u2003 "},
+		{name: "delete blank key", tool: "memory.delete", field: "key", input: " \u2003 "},
+		{name: "get blank key", tool: "memory.get", field: "key", input: " \u2003 "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, st, cli := setupMemoryGateTest(t)
+			args := map[string]any{"namespace": "system:fixture", "key": "entry"}
+			args[tc.field] = tc.input
+			if tc.tool == "memory.put" {
+				args["value"] = "note"
+			}
+			res, err := cli.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: args})
+			if err != nil || !res.IsError {
+				t.Fatalf("expected tool refusal, got %v, err %v", res, err)
+			}
+			audits, err := st.ListAudit(ctx, 50)
+			if err != nil {
+				t.Fatalf("ListAudit: %v", err)
+			}
+			if !hasAuditRecord(audits, "memory", tc.tool, "denied", "reserved_namespace") ||
+				!hasAuditRecord(audits, "data_action_gate", "mcp:"+tc.tool, "denied", "") {
+				t.Errorf("expected a reserved namespace denial at both audit layers")
+			}
+			for _, rec := range audits {
+				if strings.Contains(rec.DetailJSON, token) {
+					t.Errorf("raw credential persisted in %s audit", rec.Category)
+				}
+			}
+			if strings.Contains(tc.input, token) && !hasAuditRecord(audits, "memory", tc.tool, "denied", "[REDACTED:github_token]") {
+				t.Errorf("expected redacted credential in denial detail")
+			}
+		})
+	}
+}
+
+func TestMemoryWildcardSearchLimitsVisibleRows(t *testing.T) {
+	ctx := context.Background()
+	_, st, cli := setupMemoryGateTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for i, ns := range []string{"notes", "learning:global", "system:fixture", "\u2003SyStEm:fixture\u2002"} {
+		if err := st.PutMemory(ctx, domain.MemoryEntry{
+			Namespace: ns,
+			Key:       "shared-match",
+			Value:     "note",
+			UpdatedAt: now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("seed memory: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  []string
+	}{
+		{name: "one visible row", limit: 1, want: []string{"learning:global"}},
+		{name: "all visible rows", limit: 3, want: []string{"learning:global", "notes"}},
+		{name: "default limit", limit: 0, want: []string{"learning:global", "notes"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := cli.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "memory.search",
+				Arguments: map[string]any{"query": "shared-match", "limit": tc.limit},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("memory.search failed: %v, err %v", res, err)
+			}
+			var items []domain.MemoryEntry
+			if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &items); err != nil {
+				t.Fatalf("decode search results: %v", err)
+			}
+			if len(items) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d", len(items), len(tc.want))
+			}
+			for i, item := range items {
+				if item.Namespace != tc.want[i] {
+					t.Errorf("row %d namespace = %q, want %q", i, item.Namespace, tc.want[i])
+				}
 			}
 		})
 	}
