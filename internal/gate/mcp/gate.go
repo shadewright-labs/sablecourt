@@ -80,6 +80,31 @@ func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) {
 	g.policy = pol
 }
 
+type gateSnapshot struct {
+	bundle *config.Bundle
+	policy *policy.Engine
+}
+
+type snapshotCtxKey struct{}
+
+func (g *Gate) snapshot() gateSnapshot {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return gateSnapshot{
+		bundle: g.bundle,
+		policy: g.policy,
+	}
+}
+
+func (g *Gate) snapshotFromContext(ctx context.Context) gateSnapshot {
+	if ctx != nil {
+		if snap, ok := ctx.Value(snapshotCtxKey{}).(gateSnapshot); ok {
+			return snap
+		}
+	}
+	return g.snapshot()
+}
+
 func (g *Gate) RegisterTool(def ToolDef) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -131,7 +156,12 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 
 func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload domain.Workload, def ToolDef, args json.RawMessage) (*mcp.CallToolResult, error) {
 	capability := "mcp:" + def.Name
-	decision := g.policy.Evaluate(workload, capability)
+	snap := g.snapshotFromContext(ctx)
+	if snap.policy == nil {
+		g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, "denied", `{"reason":"policy_engine_unavailable"}`)
+		return errorToolResult("policy failed closed"), nil
+	}
+	decision := snap.policy.Evaluate(workload, capability)
 
 	switch decision.Effect {
 	case domain.EffectDeny:
@@ -161,7 +191,11 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 	case domain.EffectAllow:
 		out, err := def.Handler(ctx, workload, lease.TaskID, args)
 		if err != nil {
-			g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
+			outcome := "error"
+			if errors.Is(err, errToolRefused) {
+				outcome = "denied"
+			}
+			g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, outcome, fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
 			return errorToolResult(redact.String(err.Error())), nil
 		}
 		red := redact.Text(out)
@@ -182,14 +216,16 @@ func (g *Gate) MCPHandler() http.Handler {
 			return nil
 		}
 		return g.NewServerForWorkload(ac.Lease, ac.Workload)
-	}, nil)
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ac, ok := g.authenticate(w, r)
+		snap := g.snapshot()
+		ac, ok := g.authenticateWithSnapshot(w, r, snap)
 		if !ok {
 			return
 		}
-		ctx := context.WithValue(r.Context(), authCtxKey{}, ac)
+		ctx := context.WithValue(r.Context(), snapshotCtxKey{}, snap)
+		ctx = context.WithValue(ctx, authCtxKey{}, ac)
 		streamHandler.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -206,10 +242,12 @@ func (g *Gate) ActionHandler() http.Handler {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 			return
 		}
-		ac, ok := g.authenticate(w, r)
+		snap := g.snapshot()
+		ac, ok := g.authenticateWithSnapshot(w, r, snap)
 		if !ok {
 			return
 		}
+		ctx := context.WithValue(r.Context(), snapshotCtxKey{}, snap)
 		actionName := strings.TrimPrefix(r.URL.Path, "/")
 		if actionName == "" {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "action name required"})
@@ -220,7 +258,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		fn, exists := g.actions[actionName]
 		g.mu.RUnlock()
 		if !exists {
-			g.audit(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, "action:"+actionName, "denied", `{"reason":"unknown_action"}`)
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, "action:"+actionName, "denied", `{"reason":"unknown_action"}`)
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "action not in closed catalog"})
 			return
 		}
@@ -247,10 +285,15 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 
 		capability := "action:" + actionName
-		decision := g.policy.Evaluate(ac.Workload, capability)
+		if snap.policy == nil {
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", `{"reason":"policy_engine_unavailable"}`)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy failed closed"})
+			return
+		}
+		decision := snap.policy.Evaluate(ac.Workload, capability)
 		switch decision.Effect {
 		case domain.EffectDeny:
-			g.audit(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q}`, decision.Reason))
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q}`, decision.Reason))
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy denied: " + decision.Reason})
 			return
 
@@ -260,12 +303,12 @@ func (g *Gate) ActionHandler() http.Handler {
 					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "approval queue unavailable"})
 					return
 				}
-				apr, err := g.approvals.Request(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, canonicalPayload, 15*time.Minute)
+				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, canonicalPayload, 15*time.Minute)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
 				}
-				_ = g.store.UpdateTaskState(r.Context(), ac.Lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))
+				_ = g.store.UpdateTaskState(ctx, ac.Lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))
 				writeJSON(w, http.StatusAccepted, map[string]string{
 					"status":         "approval_required",
 					"approval_id":    apr.ID,
@@ -275,7 +318,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			}
 
 			// Verify an existing approved decision matches this exact task, capability, and canonical payload digest.
-			apr, err := g.store.GetApproval(r.Context(), req.ApprovalID)
+			apr, err := g.store.GetApproval(ctx, req.ApprovalID)
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval not found"})
 				return
@@ -286,7 +329,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				return
 			}
 			if apr.Status != domain.ApprovalApproved || apr.TaskID != ac.Lease.TaskID || apr.Capability != capability || apr.PayloadSHA256 != digest {
-				g.audit(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", `{"reason":"approval_mismatch_or_unapproved"}`)
+				g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", `{"reason":"approval_mismatch_or_unapproved"}`)
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval does not authorize this payload"})
 				return
 			}
@@ -298,12 +341,12 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 
-		result, err := fn(r.Context(), ac.Workload, ac.Lease.TaskID, req.Payload)
+		result, err := fn(ctx, ac.Workload, ac.Lease.TaskID, req.Payload)
 		if err != nil {
 			if g.breaker != nil {
 				g.breaker.RecordFailure(capability)
 			}
-			g.audit(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
@@ -312,7 +355,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
-		g.audit(r.Context(), ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d}`, red.Hits))
+		g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d}`, red.Hits))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -321,6 +364,10 @@ func (g *Gate) ActionHandler() http.Handler {
 }
 
 func (g *Gate) authenticate(w http.ResponseWriter, r *http.Request) (authContext, bool) {
+	return g.authenticateWithSnapshot(w, r, g.snapshot())
+}
+
+func (g *Gate) authenticateWithSnapshot(w http.ResponseWriter, r *http.Request, snap gateSnapshot) (authContext, bool) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer task token required"})
@@ -340,11 +387,11 @@ func (g *Gate) authenticate(w http.ResponseWriter, r *http.Request) (authContext
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "lease lookup failed"})
 		return authContext{}, false
 	}
-	if g.bundle == nil {
+	if snap.bundle == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no workload bundle loaded"})
 		return authContext{}, false
 	}
-	wl, ok := g.bundle.Workloads[lease.WorkloadName]
+	wl, ok := snap.bundle.Workloads[lease.WorkloadName]
 	if !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "workload not declared"})
 		return authContext{}, false
