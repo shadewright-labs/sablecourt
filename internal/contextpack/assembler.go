@@ -88,7 +88,7 @@ func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.W
 	}
 
 	var b strings.Builder
-	b.WriteString("# SableCourt Context Packet\n\n")
+	b.WriteString("# Sablecourt Context Packet\n\n")
 	b.WriteString(fmt.Sprintf("- Task: `%s`\n- Workload: `%s`\n", task.ID, task.WorkloadName))
 	if meta.Workflow != "" {
 		b.WriteString(fmt.Sprintf("- Workflow: `%s` (step `%s`)\n", meta.Workflow, meta.Step))

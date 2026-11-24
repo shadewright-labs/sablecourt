@@ -1,4 +1,4 @@
-/* SableCourt Command Palette (Cmd+K / Ctrl+K) & Micro-interactions */
+/* Sablecourt Command Palette (Cmd+K / Ctrl+K) & Micro-interactions */
 (function () {
   const COMMANDS = [
     { label: "Cockpit Dashboard", hint: "/", url: "/" },
@@ -24,7 +24,7 @@
       '<div class="sc-cmdk-dialog" role="dialog" aria-label="Command palette">' +
       '  <input id="sc-cmdk-input" class="sc-cmdk-input" type="text" placeholder="Jump to view, tribunal, memory, or endpoint..." autocomplete="off">' +
       '  <div id="sc-cmdk-list" class="sc-cmdk-list"></div>' +
-      '  <div class="sc-cmdk-foot"><span>↑↓ navigate · Enter open · Esc close</span><span>SableCourt · ShadeWright Labs</span></div>' +
+      '  <div class="sc-cmdk-foot"><span>↑↓ navigate · Enter open · Esc close</span><span>Sablecourt · Shadewright Labs</span></div>' +
       '</div>';
     document.body.appendChild(el);
     el.addEventListener("click", function (ev) {
