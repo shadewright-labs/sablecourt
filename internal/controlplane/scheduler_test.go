@@ -2,14 +2,12 @@ package controlplane
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
-	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -59,7 +57,14 @@ func TestSchedulerIdempotentFireAndReload(t *testing.T) {
 	if err := sched.Fire(ctx, sc); err != nil {
 		t.Fatalf("first Fire: %v", err)
 	}
-	if err := sched.Fire(ctx, sc); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("expected ErrConflict on duplicate minute slot, got %v", err)
+	if err := sched.Fire(ctx, sc); err != nil {
+		t.Fatalf("second Fire in the same minute slot: %v", err)
+	}
+	tasks, err := st.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("two Fires in one minute slot made %d tasks, want 1", len(tasks))
 	}
 }
