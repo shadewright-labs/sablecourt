@@ -39,7 +39,8 @@ type worktreeState struct {
 	Tip          string
 	FinishedAt   time.Time
 	Artifacts    []scruntime.Artifact
-	Result       *processResult `json:",omitempty"`
+	Worker       *workerIdentity `json:",omitempty"`
+	Result       *processResult  `json:",omitempty"`
 }
 
 func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (string, *worktreeState, error) {
@@ -291,6 +292,9 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	if err != nil {
 		return nil, err
 	}
+	if state.Worker != nil && (state.Worker.PID != handle.PID || state.Worker.Start.IsZero() || !state.Worker.Start.Equal(handle.ProcessStartTime)) {
+		return nil, errors.New("coding worker identity does not match handle")
+	}
 	if state.TaskID != handle.ExternalID || state.Branch != handle.Branch {
 		return nil, errors.New("coding worktree state does not match handle")
 	}
@@ -512,6 +516,11 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 	}
 	if err := removeFile(dir + ".log"); err != nil {
 		return err
+	}
+	if state.Worker != nil {
+		if err := os.RemoveAll(dir + ".run"); err != nil {
+			return err
+		}
 	}
 	a.running.Delete(dir)
 	if state.CleanupError != "" {

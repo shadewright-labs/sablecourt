@@ -398,6 +398,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			}()
 		},
 	})
+	if err := reconciler.Recover(ctx); err != nil {
+		logger.Warn("task recovery completed with errors", "error", err)
+	}
 	scheduler := controlplane.NewScheduler(reconciler)
 	if err := scheduler.Reload(ctx, bundle); err != nil {
 		return err
