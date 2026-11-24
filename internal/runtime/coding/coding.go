@@ -129,7 +129,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, err
 	}
 	if profile != "" {
-		if err := checkSeatbelt(ctx, profile, dir); err != nil {
+		if err := checkSeatbelt(ctx, profile, cmd.Dir); err != nil {
 			return scruntime.Handle{}, err
 		}
 	}
@@ -163,6 +163,9 @@ func pinWorktree(ctx context.Context, dir string, state *worktreeState, commit s
 		return errors.New("author commit tracks a reserved session file")
 	}
 	if _, err := checkout.run(ctx, "read-tree", "--reset", "-u", "--end-of-options", commit); err != nil {
+		return err
+	}
+	if err := state.checkSessionExcludes(ctx, dir); err != nil {
 		return err
 	}
 	if _, err := checkout.run(ctx, "update-ref", "--end-of-options", "HEAD", commit, state.Base); err != nil {

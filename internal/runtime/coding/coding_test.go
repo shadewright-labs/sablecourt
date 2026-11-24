@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -607,6 +606,36 @@ func TestPinnedWorktrees(t *testing.T) {
 	}
 }
 
+func TestPinnedWorktreeRefusesSessionExcludeOverride(t *testing.T) {
+	for _, name := range []string{sessionMarkerFile, sessionContextFile} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			a, spec := codingFixture(t)
+			a.DryRun = true
+			repo := spec.Workload.Spec.Coding.RepoPath
+			base := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+			testWrite(t, repo, ".gitignore", "!/"+name+"\n", 0o600)
+			testGit(t, repo, "add", ".gitignore")
+			testGit(t, repo, "commit", "-m", "override session exclude")
+			pin := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+			testGit(t, repo, "checkout", "--detach", base)
+
+			h, err := a.StartAtCommit(ctx, spec, pin, true)
+			if err == nil {
+				_ = a.Stop(ctx, h)
+				t.Fatal("started with an author commit that overrides a session exclude")
+			}
+			if !strings.Contains(err.Error(), "ignore rules override the session excludes") {
+				t.Fatal(err)
+			}
+			h = startTestTask(t, a, spec)
+			if err := a.Stop(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestVerifierSandbox(t *testing.T) {
 	a, spec := codingFixture(t)
 	a.DryRun = true
@@ -637,18 +666,15 @@ func TestVerifierSandbox(t *testing.T) {
 }
 
 func TestVerifierCannotWriteCheckout(t *testing.T) {
-	switch runtime.GOOS {
-	case "darwin":
-		if out, err := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true").CombinedOutput(); err != nil {
-			if strings.Contains(string(out), "Operation not permitted") {
-				t.Skip("nested Seatbelt denied by sandbox")
-			}
-			t.Fatalf("Seatbelt probe: %v (%s)", err, out)
-		}
-	default:
-		t.Skip("no native verifier sandbox")
-	}
-	shellHarness(t, `if test "$(cat change)" = "author content" && ! (echo modified >change) && ! touch new-file; then echo "verified read-only"; fi`)
+	requireNestedSeatbelt(t)
+	fakeHarness(t, `#!/bin/sh
+set -e
+printf scratch > "$HOME/scratch"
+printf temporary > "$TMPDIR/temporary"
+if test "$(cat change)" = "author content" && ! (echo modified >change) && ! touch new-file; then
+    echo "verified read-only"
+fi
+`)
 	a, spec := codingFixture(t)
 	a.DryRun = true
 	h := startTestTask(t, a, spec)
