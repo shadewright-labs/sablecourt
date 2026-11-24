@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,9 +22,13 @@ import (
 // Adapter runs local coding CLIs (claude or codex) inside dedicated Git worktrees
 // with stripped environment variables, detached process groups, and OS sandboxing.
 type Adapter struct {
-	WorktreeRoot string
-	DryRun       bool
-	AttachHub    *attach.Hub
+	WorktreeRoot    string // Directory for worktrees and their state.
+	DryRun          bool
+	AttachHub       *attach.Hub
+	BranchRetention time.Duration // Prune merged branches after this age on the next start.
+
+	mu      sync.Mutex
+	running map[string]<-chan struct{}
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -34,7 +37,7 @@ func NewAdapter(worktreeRoot string) *Adapter {
 	return &Adapter{WorktreeRoot: worktreeRoot}
 }
 
-func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
+func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (_ scruntime.Handle, startErr error) {
 	if spec.Workload.Spec.Coding == nil {
 		return scruntime.Handle{}, errors.New("coding config is required")
 	}
@@ -43,111 +46,108 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return scruntime.Handle{}, fmt.Errorf("unsupported coding harness %q", cfg.Harness)
 	}
 
-	branch := "sablecourt/" + sanitizeSegment(spec.TaskID)
-	worktreeDir := filepath.Join(a.WorktreeRoot, sanitizeSegment(spec.TaskID))
-	if err := os.MkdirAll(filepath.Dir(worktreeDir), 0o700); err != nil {
-		return scruntime.Handle{}, fmt.Errorf("mkdir worktree root: %w", err)
-	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if err := createWorktree(ctx, cfg.RepoPath, worktreeDir, branch); err != nil {
+	dir, state, err := a.prepareWorktree(ctx, cfg.RepoPath, spec.TaskID)
+	if err != nil {
 		return scruntime.Handle{}, err
 	}
+	defer func() {
+		if startErr != nil {
+			startErr = errors.Join(startErr, rollbackWorktree(context.WithoutCancel(ctx), dir, state))
+		}
+	}()
 
-	writeSessionMarker(worktreeDir, spec)
-
+	if err := excludeSessionFiles(ctx, dir); err != nil {
+		return scruntime.Handle{}, err
+	}
+	if err := writeSessionMarker(dir, spec); err != nil {
+		return scruntime.Handle{}, err
+	}
 	handle := scruntime.Handle{
 		AdapterName: "coding:" + cfg.Harness,
 		ExternalID:  spec.TaskID,
-		WorkDir:     worktreeDir,
-		Branch:      branch,
+		WorkDir:     dir,
+		Branch:      state.Branch,
 	}
 	if a.DryRun {
 		return handle, nil
 	}
 
-	bin, argv, err := buildCommand(cfg.Harness, cfg.Sandbox, worktreeDir, spec.InputJSON)
+	bin, argv, err := buildCommand(cfg.Harness, cfg.Sandbox, dir, spec.InputJSON)
 	if err != nil {
 		return scruntime.Handle{}, err
 	}
-
 	cmd := exec.Command(bin, argv...)
-	cmd.Dir = worktreeDir
+	cmd.Dir = dir
 	cmd.Env = BuildStrippedEnv(spec)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = processGracePeriod
 
-	// Capture session output next to the worktree so git status stays clean.
-	logPath := worktreeDir + ".log"
-	if a.AttachHub != nil {
-		stdinPipe, err := cmd.StdinPipe()
+	logFile, err := os.OpenFile(dir+".log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return scruntime.Handle{}, fmt.Errorf("open session log: %w", err)
+	}
+	defer func() {
+		if startErr != nil {
+			_ = logFile.Close()
+			startErr = errors.Join(startErr, os.Remove(logFile.Name()))
+		}
+	}()
+	output := &sessionOutput{file: logFile, hub: a.AttachHub, taskID: spec.TaskID}
+	cmd.Stdout, cmd.Stderr = output, output
+	if err := ctx.Err(); err != nil {
+		return scruntime.Handle{}, err
+	}
+	if output.hub != nil {
+		stdin, err := cmd.StdinPipe()
 		if err != nil {
 			return scruntime.Handle{}, fmt.Errorf("stdin pipe: %w", err)
 		}
-		stdoutPipe, err := cmd.StdoutPipe()
-		if err != nil {
-			return scruntime.Handle{}, fmt.Errorf("stdout pipe: %w", err)
-		}
-		stderrPipe, err := cmd.StderrPipe()
-		if err != nil {
-			return scruntime.Handle{}, fmt.Errorf("stderr pipe: %w", err)
-		}
-		if err := cmd.Start(); err != nil {
-			return scruntime.Handle{}, fmt.Errorf("start coding harness %q: %w", cfg.Harness, err)
-		}
-		handle.PID = cmd.Process.Pid
-		a.AttachHub.Register(spec.TaskID, stdinPipe)
-
-		logFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		go func() {
-			defer func() {
-				if logFile != nil {
-					_ = logFile.Close()
-				}
-				a.AttachHub.Close(spec.TaskID)
-			}()
-			var logMu sync.Mutex
-			pump := func(r io.Reader) {
-				buf := make([]byte, 4096)
-				for {
-					n, readErr := r.Read(buf)
-					if n > 0 {
-						chunk := buf[:n]
-						a.AttachHub.WriteOutput(spec.TaskID, chunk)
-						if logFile != nil {
-							logMu.Lock()
-							_, _ = logFile.Write(chunk)
-							logMu.Unlock()
-						}
-					}
-					if readErr != nil {
-						return
-					}
-				}
+		output.hub.Register(spec.TaskID, stdin)
+		defer func() {
+			if startErr != nil {
+				output.hub.Close(spec.TaskID)
 			}
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); pump(stdoutPipe) }()
-			go func() { defer wg.Done(); pump(stderrPipe) }()
-			wg.Wait()
-			_ = cmd.Wait()
 		}()
-		return handle, nil
 	}
-
-	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		defer logFile.Close()
-	}
-
 	if err := cmd.Start(); err != nil {
 		return scruntime.Handle{}, fmt.Errorf("start coding harness %q: %w", cfg.Harness, err)
 	}
+
 	handle.PID = cmd.Process.Pid
-	_ = cmd.Process.Release()
+	done := make(chan struct{})
+	if a.running == nil {
+		a.running = make(map[string]<-chan struct{})
+	}
+	a.running[dir] = done
+	go func() {
+		defer close(done)
+		_ = cmd.Wait()
+		_ = logFile.Close()
+		if output.hub != nil {
+			output.hub.Close(spec.TaskID)
+		}
+	}()
 	return handle, nil
 }
 
-func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) {
+type sessionOutput struct {
+	file   *os.File
+	hub    *attach.Hub
+	taskID string
+}
+
+func (s *sessionOutput) Write(chunk []byte) (int, error) {
+	if s.hub != nil {
+		s.hub.WriteOutput(s.taskID, chunk)
+	}
+	_, err := s.file.WriteString(redact.String(string(chunk)))
+	return len(chunk), err
+}
+
+func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) error {
 	var meta struct {
 		ConclaveID string `json:"conclaveId"`
 		Role       string `json:"role"`
@@ -166,21 +166,43 @@ func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) {
 	}
 	raw, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(filepath.Join(worktreeDir, ".sablecourt-session.json"), raw, 0o444)
+	return writeSessionFile(worktreeDir, sessionMarkerFile, raw)
 }
 
-func (a *Adapter) Observe(_ context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
-	now := time.Now().UTC()
-	if handle.PID <= 0 {
-		return scruntime.Observation{State: scruntime.StateCompleted, ObservedAt: now}, nil
+func writeSessionFile(dir, name string, data []byte) error {
+	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o444)
+	if err != nil {
+		return fmt.Errorf("create session file: %w", err)
 	}
-	err := syscall.Kill(handle.PID, 0)
-	if err == nil || errors.Is(err, syscall.EPERM) {
-		return scruntime.Observation{State: scruntime.StateRunning, ObservedAt: now}, nil
+	_, err = file.Write(data)
+	return errors.Join(err, file.Close())
+}
+
+func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	obs := scruntime.Observation{State: scruntime.StateRunning, ObservedAt: time.Now().UTC()}
+	state, err := a.worktreeState(handle)
+	if err != nil {
+		return scruntime.Observation{}, err
 	}
-	return scruntime.Observation{State: scruntime.StateCompleted, ObservedAt: now}, nil
+	if state.FinishedAt.IsZero() {
+		running, err := processGroupRunning(handle.PID)
+		if err != nil {
+			return scruntime.Observation{}, err
+		}
+		if running || !outputClosed(a.running[handle.WorkDir]) {
+			return obs, nil
+		}
+	}
+	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
+		return scruntime.Observation{}, err
+	}
+	obs.State = scruntime.StateCompleted
+	return obs, nil
 }
 
 func (a *Adapter) Suspend(_ context.Context, _ scruntime.Handle) (scruntime.CheckpointRef, error) {
@@ -191,56 +213,43 @@ func (a *Adapter) Resume(_ context.Context, _ scruntime.Handle, _ scruntime.Chec
 	return errors.New("coding CLI adapter does not support live resume")
 }
 
-func (a *Adapter) Stop(_ context.Context, handle scruntime.Handle) error {
-	if handle.PID > 0 {
-		_ = syscall.Kill(-handle.PID, syscall.SIGTERM)
+func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	state, err := a.worktreeState(handle)
+	if err != nil {
+		return err
 	}
-	if handle.WorkDir != "" {
-		_ = os.Remove(handle.WorkDir + ".log")
-		_ = os.RemoveAll(handle.WorkDir)
+	if state.FinishedAt.IsZero() {
+		if err := stopProcessGroup(ctx, handle.PID, a.running[handle.WorkDir]); err != nil {
+			return err
+		}
 	}
-	return nil
+	return a.finishWorktree(ctx, handle.WorkDir, state)
 }
 
 func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle) ([]scruntime.Artifact, error) {
-	if handle.WorkDir == "" {
-		return nil, nil
-	}
-	var artifacts []scruntime.Artifact
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if out, err := exec.CommandContext(ctx, "git", "-C", handle.WorkDir, "status", "--short").Output(); err == nil {
-		artifacts = append(artifacts, scruntime.Artifact{
-			Name:        "git-status",
-			ContentType: "text/plain",
-			Text:        redact.String(strings.TrimSpace(string(out))),
-		})
+	state, err := a.worktreeState(handle)
+	if err != nil {
+		return nil, err
 	}
-
-	if out, err := exec.CommandContext(ctx, "git", "-C", handle.WorkDir, "diff").Output(); err == nil && len(out) > 0 {
-		diffText := string(out)
-		if len(diffText) > 32*1024 {
-			diffText = diffText[:32*1024] + "\n...[truncated]"
+	if state.FinishedAt.IsZero() {
+		running, err := processGroupRunning(handle.PID)
+		if err != nil {
+			return nil, err
 		}
-		artifacts = append(artifacts, scruntime.Artifact{
-			Name:        "git-diff",
-			ContentType: "text/x-diff",
-			Text:        redact.String(diffText),
-		})
-	}
-
-	if logBytes, err := os.ReadFile(handle.WorkDir + ".log"); err == nil && len(logBytes) > 0 {
-		logText := string(logBytes)
-		if len(logText) > 16*1024 {
-			logText = "...[truncated]\n" + logText[len(logText)-16*1024:]
+		if running || !outputClosed(a.running[handle.WorkDir]) {
+			return nil, errors.New("coding worktree is still running")
 		}
-		artifacts = append(artifacts, scruntime.Artifact{
-			Name:        "session-log",
-			ContentType: "text/plain",
-			Text:        redact.String(strings.TrimSpace(logText)),
-		})
 	}
-
-	return artifacts, nil
+	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
+		return nil, err
+	}
+	return state.Artifacts, nil
 }
 
 // BuildStrippedEnv constructs a minimal allowlisted environment with zero raw provider keys
@@ -287,7 +296,9 @@ func buildCommand(harness, sandbox, workDir, prompt string) (string, []string, e
 		if strings.TrimSpace(meta.ContextPacket) != "" {
 			effectivePrompt = meta.ContextPacket
 			if workDir != "" {
-				_ = os.WriteFile(filepath.Join(workDir, ".sablecourt-context.md"), []byte(meta.ContextPacket), 0o444)
+				if err := writeSessionFile(workDir, sessionContextFile, []byte(meta.ContextPacket)); err != nil {
+					return "", nil, err
+				}
 			}
 		} else if strings.TrimSpace(meta.Prompt) != "" {
 			effectivePrompt = meta.Prompt
@@ -336,18 +347,6 @@ func buildCommand(harness, sandbox, workDir, prompt string) (string, []string, e
 		}
 	}
 	return baseBin, baseArgs, nil
-}
-
-func createWorktree(ctx context.Context, repoPath, worktreeDir, branch string) error {
-	if strings.HasPrefix(branch, "-") {
-		return fmt.Errorf("invalid worktree branch name %q", branch)
-	}
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-b", branch, "--", worktreeDir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git worktree add: %w (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 func sanitizeSegment(s string) string {
