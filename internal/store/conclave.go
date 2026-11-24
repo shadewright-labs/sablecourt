@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,7 +19,11 @@ var (
 	ErrConclaveRunLimit = errors.New("conclave run limit reached")
 )
 
-const conclaveDeadline = "wall_time_reached"
+const (
+	conclaveDeadline    = "wall_time_reached"
+	ConclaveMaxRunsWard = "max_runs"
+	ConclaveWallTime    = 15 * time.Minute
+)
 
 type ConclaveLimits struct {
 	MaxMessages   int
@@ -30,113 +35,276 @@ type ConclaveLimits struct {
 	BudgetMissing bool
 }
 
+func LimitsForConclave(tpl domain.Conclave, hasTemplate bool, budgets map[string]domain.Budget, now func() time.Time) ConclaveLimits {
+	wards := tpl.Spec.Wards
+	seats := len(tpl.Spec.Vassals)
+	if !hasTemplate {
+		seats = 3
+	}
+	limits := ConclaveLimits{MaxMessages: wards.MaxMessages, MaxPingPong: wards.MaxPingPong, MaxRuns: wards.MaxRuns, Now: now}
+	if limits.MaxMessages <= 0 {
+		limits.MaxMessages = 2 * max(1, seats)
+	}
+	if limits.MaxPingPong <= 0 {
+		limits.MaxPingPong = 2 * max(1, seats)
+	}
+	if limits.MaxRuns <= 0 {
+		limits.MaxRuns = domain.ConclaveRunCeiling
+	}
+	if hasTemplate {
+		limits.MaxAge = ConclaveWallTime
+	}
+	if tpl.Spec.BudgetRef != "" {
+		budget, ok := budgets[tpl.Spec.BudgetRef]
+		limits.BudgetMissing = !ok
+		if ok {
+			limits.Budget = &budget.Spec.PerTask
+		}
+	}
+	return limits
+}
+
+const MaxConclaveTurnInput = 1 << 20
+
+type ConclaveAssignment struct {
+	ConclaveID string                    `json:"conclaveId"`
+	Role       string                    `json:"role"`
+	MessageID  int64                     `json:"messageId,omitempty"`
+	Activation domain.ConclaveActivation `json:"activation"`
+}
+
+func (a ConclaveAssignment) TurnKey() string {
+	if a.MessageID == 0 {
+		return fmt.Sprintf("conclave-%s-init-%s", a.ConclaveID, a.Role)
+	}
+	return fmt.Sprintf("conclave-%s-msg-%d-%s", a.ConclaveID, a.MessageID, a.Role)
+}
+
+func (a ConclaveAssignment) RetryKey(taskID string, attempt int) string {
+	return fmt.Sprintf("conclave-%s-retry-%s-%d", a.ConclaveID, taskID, attempt)
+}
+
+func TaskConclaveAssignment(task domain.Task) (ConclaveAssignment, bool) {
+	var input struct {
+		ConclaveAssignment
+		RetriedFrom string `json:"retried_from"`
+		RetryCount  int    `json:"retry_count"`
+	}
+	if task.ParentTaskID != "" || !strings.HasPrefix(task.IdempotencyKey, "conclave-") ||
+		len(task.InputJSON) > MaxConclaveTurnInput || json.Unmarshal([]byte(task.InputJSON), &input) != nil {
+		return ConclaveAssignment{}, false
+	}
+	a := input.ConclaveAssignment
+	if a.ConclaveID == "" || a.Role == "" ||
+		!(a.Activation == domain.ActivationAlwaysOn && a.MessageID == 0 ||
+			a.Activation == domain.ActivationOnMention && a.MessageID > 0) {
+		return ConclaveAssignment{}, false
+	}
+	key := a.TurnKey()
+	if input.RetriedFrom != "" && input.RetryCount > 0 {
+		key = a.RetryKey(input.RetriedFrom, input.RetryCount)
+	}
+	return a, task.IdempotencyKey == key
+}
+
 type conclavePostKey struct{}
 type conclavePost struct {
 	limits  ConclaveLimits
+	resume  bool
+	wake    bool
 	applied bool
 	reason  string
+	retryAt time.Time
 }
 
 // AppendConclavePost carries the guard through Store decorators to the SQL backend.
-func AppendConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, limits ConclaveLimits) (int64, string, error) {
-	post := &conclavePost{limits: limits}
+func AppendConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, limits ConclaveLimits, resume, wake bool) (int64, string, time.Time, error) {
+	post := &conclavePost{limits: limits, resume: resume, wake: wake}
 	id, err := st.AppendConclaveMessage(context.WithValue(ctx, conclavePostKey{}, post), msg)
 	if err == nil && !post.applied {
-		return 0, "", errors.New("conclave store did not apply the message guard")
+		return 0, "", time.Time{}, errors.New("conclave store did not apply the message guard")
 	}
-	return id, post.reason, err
+	return id, post.reason, post.retryAt, err
 }
 
 // AppendGuardedConclavePost handles broker writes. Bare Store appends are also
 // used for importing stored messages and do not carry a guard.
-func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage) (bool, int64, error) {
+func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (bool, int64, error) {
 	post, ok := ctx.Value(conclavePostKey{}).(*conclavePost)
 	if !ok {
 		return false, 0, nil
 	}
-	id, reason, err := appendConclavePost(ctx, db, msg, post.limits)
-	post.applied, post.reason = true, reason
+	id, err := appendConclavePost(ctx, db, msg, post, audit)
+	post.applied = true
 	return true, id, err
 }
 
-func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage, limits ConclaveLimits) (int64, string, error) {
+func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage, post *conclavePost, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (int64, error) {
 	tx, room, err := lockConclave(ctx, db, msg.ConclaveID)
 	if err != nil {
-		return 0, "", err
+		return 0, err
 	}
 	defer tx.Rollback()
 
 	if room.State != domain.ConclaveStateActive && room.State != domain.ConclaveStateInputRequired {
-		return 0, "", ErrConclaveClosed
+		return 0, ErrConclaveClosed
 	}
-	operator := msg.FromRole == "operator"
-	if room.State == domain.ConclaveStateInputRequired && (!operator || room.WardReason == conclaveDeadline) {
-		return 0, "", ErrConclavePaused
-	}
-
+	limits := post.limits
 	now := limits.Now().UTC()
-	state := domain.ConclaveStateActive
-	reason := ""
-	var decree int64
-	var count int
-	var refusal error
-	switch {
-	case conclaveExpired(room, limits, now):
-		reason = conclaveDeadline
-	case limits.BudgetMissing:
-		reason = "budget_evidence_unavailable"
-	default:
-		if !operator {
-			decree, count, err = conclaveMessageCount(ctx, tx, msg.ConclaveID)
-			if err != nil {
-				return 0, "", err
-			}
-			if count >= limits.MaxMessages {
-				reason = fmt.Sprintf("max_messages_reached(%d)", limits.MaxMessages)
-			}
+	operator := msg.FromRole == "operator"
+	expired := conclaveExpired(room, limits, now)
+	paused := room.State == domain.ConclaveStateInputRequired
+	var admitted bool
+	if !operator && msg.TaskID != "" && (expired || paused && room.WardReason == ConclaveMaxRunsWard) {
+		admitted, err = admittedConclaveReply(ctx, tx, msg)
+		if err != nil {
+			return 0, err
 		}
 	}
-	if reason != "" {
-		refusal = fmt.Errorf("%w: %s", ErrWardTripped, reason)
+	if paused && !(operator && post.resume && room.WardReason != conclaveDeadline ||
+		admitted && (room.WardReason == ConclaveMaxRunsWard || room.WardReason == conclaveDeadline)) {
+		return 0, ErrConclavePaused
 	}
 
-	var id int64
-	if refusal == nil {
+	// An unfinished dispatch is replayed against the original message.
+	var id, decree int64
+	if post.wake {
+		var created string
+		err = tx.QueryRowContext(ctx, `
+			SELECT id, created_at FROM conclave_messages
+			WHERE conclave_id = $1 AND from_role = $2 AND to_role = $3 AND kind = $4 AND body = $5 AND task_id = $6
+				AND wake_pending = 1 AND id >= (SELECT COALESCE(MAX(id), 0) FROM conclave_messages
+					WHERE conclave_id = $1 AND from_role = 'operator')
+			ORDER BY id DESC LIMIT 1
+		`, msg.ConclaveID, msg.FromRole, msg.ToRole, msg.Kind, msg.Body, msg.TaskID).Scan(&id, &created)
+		if err == nil {
+			if paused {
+				return 0, ErrConclavePaused
+			}
+			post.retryAt, err = time.Parse(time.RFC3339Nano, created)
+			return id, err
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+	}
+
+	var count int
+	if !operator {
+		decree, count, err = conclaveMessageCount(ctx, tx, msg.ConclaveID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	reason := ""
+	var refusal bool
+	switch {
+	case expired:
+		reason, refusal = conclaveDeadline, !admitted
+	case limits.BudgetMissing:
+		reason, refusal = "budget_evidence_unavailable", true
+	case paused && !operator:
+		reason = room.WardReason
+	}
+	if !operator && count >= limits.MaxMessages {
+		if reason == "" {
+			reason = fmt.Sprintf("max_messages_reached(%d)", limits.MaxMessages)
+		}
+		refusal = true
+	}
+	if !refusal {
 		id, err = insertConclaveMessage(ctx, tx, msg)
 		if err != nil {
-			return 0, "", err
+			return 0, err
 		}
-		reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
-		if err != nil {
-			return 0, "", err
+		if reason == "" {
+			reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
+			if err != nil {
+				return 0, err
+			}
 		}
 		if !operator && reason == "" {
 			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, count+1, limits)
 			if err != nil {
-				return 0, "", err
+				return 0, err
 			}
 		}
 	}
-	if reason != "" {
-		state = domain.ConclaveStateInputRequired
-		_, err = insertConclaveMessage(ctx, tx, domain.ConclaveMessage{
-			ConclaveID: msg.ConclaveID, FromRole: "system", ToRole: "operator", Kind: "system",
-			Body: fmt.Sprintf("Ward tripped (%s). Conclave paused.", reason), CreatedAt: now,
-		})
-		if err != nil {
-			return 0, "", err
+	if post.wake && id != 0 && reason == "" {
+		if _, err := tx.ExecContext(ctx, "UPDATE conclave_messages SET wake_pending = 1 WHERE id = $1", id); err != nil {
+			return 0, err
 		}
 	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE conclaves SET state = $1, ward_reason = $2, updated_at = $3 WHERE id = $4
-	`, string(state), reason, now.Format(time.RFC3339Nano), msg.ConclaveID)
-	if err != nil {
-		return 0, "", err
+	switch {
+	case reason != "":
+		if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+			return 0, err
+		}
+	case paused: // A successful operator decree opens one new run window.
+		runs, err := conclaveRunCount(ctx, tx, room.ID)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE conclaves SET state = $1, ward_reason = '', updated_at = $2, run_baseline = $3 WHERE id = $4
+		`, string(domain.ConclaveStateActive), now.Format(time.RFC3339Nano), runs, room.ID); err != nil {
+			return 0, err
+		}
+		if err := audit(ctx, tx, domain.AuditRecord{
+			Category: "conclave", Action: "conclave.run_window_reset", Outcome: "active", CreatedAt: now,
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"decree_id":%d,"previous_runs":%d,"max_runs":%d}`, room.ID, id, runs, limits.MaxRuns),
+		}); err != nil {
+			return 0, err
+		}
+	default:
+		if _, err := tx.ExecContext(ctx, "UPDATE conclaves SET updated_at = $1 WHERE id = $2", now.Format(time.RFC3339Nano), room.ID); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, "", err
+		return 0, err
 	}
-	return id, reason, refusal
+	post.reason = reason
+	if refusal {
+		return 0, fmt.Errorf("%w: %s", ErrWardTripped, reason)
+	}
+	return id, nil
+}
+
+func admittedConclaveReply(ctx context.Context, tx *sql.Tx, msg domain.ConclaveMessage) (bool, error) {
+	task := domain.Task{ID: msg.TaskID}
+	err := tx.QueryRowContext(ctx, `
+		SELECT parent_task_id, idempotency_key, input_json FROM tasks WHERE id = $1
+	`, task.ID).Scan(&task.ParentTaskID, &task.IdempotencyKey, &task.InputJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	a, ok := TaskConclaveAssignment(task)
+	return ok && a.ConclaveID == msg.ConclaveID && a.Role == msg.FromRole, nil
+}
+
+func FinishConclaveWake(ctx context.Context, db *sql.DB, id int64) error {
+	_, err := db.ExecContext(ctx, "UPDATE conclave_messages SET wake_pending = 0 WHERE id = $1", id)
+	return err
+}
+
+func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time) error {
+	if room.State == domain.ConclaveStateInputRequired && room.WardReason == reason {
+		return nil
+	}
+	if _, err := insertConclaveMessage(ctx, tx, domain.ConclaveMessage{
+		ConclaveID: room.ID, FromRole: "system", ToRole: "operator", Kind: "system",
+		Body: fmt.Sprintf("Ward tripped (%s). Conclave paused.", reason), CreatedAt: now,
+	}); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE conclaves SET state = $1, ward_reason = $2, updated_at = $3 WHERE id = $4
+	`, string(domain.ConclaveStateInputRequired), reason, now.Format(time.RFC3339Nano), room.ID)
+	return err
 }
 
 type conclaveTurnKey struct{}
@@ -169,9 +337,8 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 		return insert(db)
 	}
 	turn.applied = true
-	if task.IdempotencyKey != turn.key || task.ParentTaskID != "" ||
-		(!strings.HasPrefix(turn.key, "conclave-"+turn.id+"-init-") &&
-			!strings.HasPrefix(turn.key, "conclave-"+turn.id+"-msg-")) {
+	a, assigned := TaskConclaveAssignment(task)
+	if !assigned || a.ConclaveID != turn.id || task.IdempotencyKey != turn.key {
 		return errors.New("task does not match the conclave turn reservation")
 	}
 	tx, room, err := lockConclave(ctx, db, turn.id)
@@ -198,7 +365,17 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 	}
 
 	limits := turn.limits
-	if conclaveExpired(room, limits, limits.Now()) || limits.BudgetMissing {
+	now := limits.Now().UTC()
+	if conclaveExpired(room, limits, now) {
+		if err := pauseConclave(ctx, tx, room, conclaveDeadline, now); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return ErrConclavePaused
+	}
+	if limits.BudgetMissing {
 		return ErrConclavePaused
 	}
 	decree, count, err := conclaveMessageCount(ctx, tx, turn.id)
@@ -220,37 +397,118 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 		return ErrConclavePaused
 	}
 
-	// The existing idempotency namespace also accounts for pre-upgrade turns.
-	init, mentions := conclaveTaskPatterns(turn.id)
-	var runs int
-	err = tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM tasks WHERE parent_task_id = '' AND
-			(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!')
-	`, init, mentions).Scan(&runs)
+	runs, err := conclaveRunCount(ctx, tx, turn.id)
 	if err != nil {
 		return err
 	}
-	if runs >= limits.MaxRuns {
+	if runs-room.baseline >= min(limits.MaxRuns, domain.ConclaveRunCeiling) {
+		if err := pauseConclave(ctx, tx, room, ConclaveMaxRunsWard, limits.Now().UTC()); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 		return ErrConclaveRunLimit
 	}
 	if err := insert(tx); err != nil {
 		return err
 	}
+	if room.baseline != 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE tasks SET conclave_run_baseline = $1 WHERE id = $2", room.baseline, task.ID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
-func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, domain.ConclaveSession, error) {
+// HasConclaveReservation reports whether submission is inside the council guard.
+func HasConclaveReservation(ctx context.Context, key string) bool {
+	turn, ok := ctx.Value(conclaveTurnKey{}).(*conclaveTurn)
+	return ok && turn.key == key
+}
+
+type conclaveClaimKey struct{}
+type conclaveClaim struct {
+	roomID, taskID     string
+	now                func() time.Time
+	applied, cancelled bool
+}
+
+// ClaimConclaveTask checks room state and deadline inside the task claim transaction.
+func ClaimConclaveTask(ctx context.Context, st Store, taskID, roomID string, now func() time.Time) error {
+	claim := &conclaveClaim{roomID: roomID, taskID: taskID, now: now}
+	ctx = context.WithValue(ctx, conclaveClaimKey{}, claim)
+	err := st.UpdateTaskState(ctx, taskID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
+	if err != nil {
+		return err
+	}
+	if !claim.applied {
+		return errors.New("conclave store did not apply the claim guard")
+	}
+	if claim.cancelled {
+		return ErrConflict
+	}
+	return nil
+}
+
+func BeginTaskTransition(ctx context.Context, db *sql.DB, to domain.TaskState, reason string) (*sql.Tx, domain.TaskState, string, error) {
+	claim, guarded := ctx.Value(conclaveClaimKey{}).(*conclaveClaim)
+	if !guarded {
+		tx, err := db.BeginTx(ctx, nil)
+		return tx, to, reason, err
+	}
+	tx, room, err := lockConclave(ctx, db, claim.roomID)
+	if err != nil {
+		return nil, to, reason, err
+	}
+	claim.applied = true
+	now := claim.now().UTC()
+	if room.State != domain.ConclaveStateActive {
+		reason = "conclave_inactive"
+	}
+	if (room.State == domain.ConclaveStateActive || room.State == domain.ConclaveStateInputRequired) &&
+		conclaveExpired(room, ConclaveLimits{MaxAge: ConclaveWallTime}, now) {
+		reason = conclaveDeadline
+		if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+			_ = tx.Rollback()
+			return nil, to, reason, err
+		}
+	}
+	if reason == "dispatch_claimed" && room.baseline != 0 {
+		var reservedBaseline int
+		if err := tx.QueryRowContext(ctx, "SELECT conclave_run_baseline FROM tasks WHERE id = $1", claim.taskID).Scan(&reservedBaseline); err != nil {
+			_ = tx.Rollback()
+			return nil, to, reason, err
+		}
+		if reservedBaseline != room.baseline {
+			reason = "conclave_run_window_ended"
+		}
+	}
+	if reason != "dispatch_claimed" {
+		claim.cancelled = true
+		to = domain.TaskStateCancelled
+	}
+	return tx, to, reason, nil
+}
+
+type lockedConclave struct {
+	domain.ConclaveSession
+	baseline int
+}
+
+func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, lockedConclave, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, domain.ConclaveSession{}, err
+		return nil, lockedConclave{}, err
 	}
-	var room domain.ConclaveSession
+	var room lockedConclave
+	room.ID = id
 	var created string
 	// PostgreSQL locks this row. In SQLite the first statement takes the write lock.
 	err = tx.QueryRowContext(ctx, `
 		UPDATE conclaves SET updated_at = updated_at WHERE id = $1
-		RETURNING state, ward_reason, created_at
-	`, id).Scan(&room.State, &room.WardReason, &created)
+		RETURNING state, ward_reason, created_at, run_baseline
+	`, id).Scan(&room.State, &room.WardReason, &created, &room.baseline)
 	if err == nil {
 		room.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
 	}
@@ -259,12 +517,12 @@ func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, domain.C
 		if errors.Is(err, sql.ErrNoRows) {
 			err = ErrNotFound
 		}
-		return nil, domain.ConclaveSession{}, err
+		return nil, lockedConclave{}, err
 	}
 	return tx, room, nil
 }
 
-func conclaveExpired(room domain.ConclaveSession, limits ConclaveLimits, now time.Time) bool {
+func conclaveExpired(room lockedConclave, limits ConclaveLimits, now time.Time) bool {
 	return limits.MaxAge > 0 && !now.Before(room.CreatedAt.Add(limits.MaxAge))
 }
 
@@ -326,24 +584,34 @@ func conclaveMessageWard(ctx context.Context, tx *sql.Tx, id string, decree int6
 	return "", nil
 }
 
-func conclaveTaskPatterns(id string) (string, string) {
-	escaped := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(id)
-	return "conclave-" + escaped + "-init-%", "conclave-" + escaped + "-msg-%"
+func conclaveRunCount(ctx context.Context, tx *sql.Tx, id string) (int, error) {
+	init, mentions, retries := conclaveTaskPatterns(id)
+	var runs int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM tasks WHERE parent_task_id = '' AND
+			(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')
+	`, init, mentions, retries).Scan(&runs)
+	return runs, err
+}
+
+func conclaveTaskPatterns(id string) (string, string, string) {
+	prefix := "conclave-" + strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(id)
+	return prefix + "-init-%", prefix + "-msg-%", prefix + "-retry-%"
 }
 
 func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, id string, budget *domain.PerTaskBudget) (string, error) {
 	if budget == nil {
 		return "", nil
 	}
-	init, mentions := conclaveTaskPatterns(id)
+	init, mentions, retries := conclaveTaskPatterns(id)
 	var totals domain.BudgetTotals
 	err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger WHERE task_id IN (
 			SELECT id FROM tasks WHERE parent_task_id = '' AND
-				(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!')
+				(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')
 		)
-	`, init, mentions).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`, init, mentions, retries).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	if err != nil {
 		return "", err
 	}

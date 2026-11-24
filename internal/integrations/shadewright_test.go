@@ -834,13 +834,14 @@ func TestVerificationWardBudgetEvidence(t *testing.T) {
 			tpl := bundle.Conclaves["primary"]
 			tpl.Spec.BudgetRef = "cap"
 			bundle.Conclaves["primary"] = tpl
-			if tc.name != "missing budget" {
-				bundle.Budgets = map[string]domain.Budget{"cap": {
-					Spec: domain.BudgetSpec{PerTask: domain.PerTaskBudget{MaxCostUSD: 1}},
-				}}
-			}
+			bundle.Budgets = map[string]domain.Budget{"cap": {
+				Spec: domain.BudgetSpec{PerTask: domain.PerTaskBudget{MaxCostUSD: 1}},
+			}}
 			sw := reviewHandler(st, bundle, controlplane.NewReconciler(controlplane.Options{Store: base, Bundle: bundle}))
 			id := openReviewIncident(t, sw, "INC-BUDGET")
+			if tc.name == "missing budget" {
+				delete(bundle.Budgets, "cap")
+			}
 			if tc.name == "exhausted" {
 				tasks, err := base.ListTasks(ctx)
 				if err != nil || len(tasks) == 0 {

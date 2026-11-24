@@ -1,0 +1,3 @@
+ALTER TABLE conclaves ADD COLUMN run_baseline INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conclave_messages ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN conclave_run_baseline INTEGER NOT NULL DEFAULT 0;

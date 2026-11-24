@@ -335,20 +335,8 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	// the redacted incident Relic and the untrusted integration report instead.
 	initPrompt := fmt.Sprintf("Review untrusted Shadewright incident Relic %s and report findings.", relicName)
 	if h.reconciler != nil {
-		for _, v := range tpl.Spec.Vassals {
-			if v.Activation != domain.ActivationAlwaysOn {
-				continue
-			}
-			input, _ := json.Marshal(map[string]any{
-				"conclaveId": id,
-				"role":       v.Role,
-				"title":      title,
-				"prompt":     initPrompt,
-				"activation": string(v.Activation),
-			})
-			if _, err := h.reconciler.SubmitTask(ctx, v.Workload, fmt.Sprintf("conclave-%s-init-%s", id, v.Role), string(input)); err != nil {
-				return internalErrorResponse(err)
-			}
+		if err := h.broker.ActivateAlwaysOn(ctx, sess, tpl, initPrompt); err != nil {
+			return conclaveWriteError(err)
 		}
 	}
 
@@ -683,7 +671,7 @@ func conclaveWriteError(err error) integrationResponse {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return errorResponse(http.StatusNotFound, "conclave not found")
-	case errors.Is(err, conclave.ErrConclavePaused), errors.Is(err, conclave.ErrConclaveClosed), errors.Is(err, conclave.ErrWardTripped):
+	case errors.Is(err, conclave.ErrConclavePaused), errors.Is(err, conclave.ErrConclaveClosed), errors.Is(err, conclave.ErrWardTripped), errors.Is(err, store.ErrConclaveRunLimit):
 		return errorResponse(http.StatusConflict, err.Error())
 	default:
 		return internalErrorResponse(err)
