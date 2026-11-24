@@ -126,11 +126,7 @@ func reconcile(t *testing.T, r *Reconciler) {
 }
 
 func launchForTest(ctx context.Context, r *Reconciler, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) error {
-	claimed, err := r.claimLaunch(ctx, task.ID)
-	if err != nil {
-		return err
-	}
-	if !claimed {
+	if !r.claimLaunch(task.ID) {
 		return store.ErrConflict
 	}
 	return r.launchTask(ctx, task, wl, adapter)
@@ -685,8 +681,8 @@ func TestTerminalFollowupAfterRestart(t *testing.T) {
 			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
 				t.Fatal(err)
 			}
-			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker"}, {Workload: "worker"}}}}}
-			task, err := r.SubmitTask(ctx, "worker", "flow", `{"workflow":"flow","auto_remediate":true}`)
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker", MaxRetries: 1}, {Workload: "worker"}}}}}
+			task, err := r.StartWorkflow(ctx, "flow", "")
 			if err != nil {
 				t.Fatal(err)
 			}

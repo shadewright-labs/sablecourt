@@ -200,8 +200,17 @@ func TestWorkflowRequiresFinalVerifierVerdict(t *testing.T) {
 					{Name: "deliver", Workload: "worker"},
 				}}},
 			}
-			task, err := r.SubmitTask(ctx, "worker", "review", `{"workflow":"review","step_index":1,"role":"verifier","max_retries":1}`)
+			root, err := r.StartWorkflow(ctx, "review", "")
 			if err != nil {
+				t.Fatal(err)
+			}
+			commit := strings.Repeat("a", 40)
+			task, err := r.submitTask(ctx, "worker", "review", `{"workflow":"review","step_index":1,"role":"verifier","max_retries":1}`, "", &workflowStepRecord{RunID: root.ID, Workflow: "review", Index: 1, AuthorCommit: commit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, _ := json.Marshal(verifierLaunch{Commit: commit, PromptDigest: promptDigest(promptEcho)})
+			if err := st.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateCompleted, "verifier_checkout_pinned", string(evidence)); err != nil {
 				t.Fatal(err)
 			}
 			if tc.message != "" {
@@ -230,8 +239,8 @@ func TestWorkflowRequiresFinalVerifierVerdict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(tasks) != 2+tc.want {
-				t.Fatalf("created %d successors, want %d", len(tasks)-2, tc.want)
+			if len(tasks) != 3+tc.want {
+				t.Fatalf("created %d successors, want %d", len(tasks)-3, tc.want)
 			}
 			if tc.want == 1 {
 				want := "deliver"
@@ -240,7 +249,7 @@ func TestWorkflowRequiresFinalVerifierVerdict(t *testing.T) {
 				}
 				var successor domain.Task
 				for _, candidate := range tasks {
-					if candidate.ID != task.ID && candidate.IdempotencyKey != "original" {
+					if candidate.ID != root.ID && candidate.ID != task.ID && candidate.IdempotencyKey != "original" {
 						successor = candidate
 					}
 				}
@@ -538,5 +547,327 @@ func TestBlockedLeaseCreationDoesNotBlockObservation(t *testing.T) {
 			}
 			requireState(t, st, first.ID, domain.TaskStateCompleted)
 		})
+	}
+}
+
+type frozenObservation struct {
+	fakeAdapter
+	at time.Time
+}
+
+func (a *frozenObservation) Observe(context.Context, scruntime.Handle) (scruntime.Observation, error) {
+	return scruntime.Observation{State: scruntime.StateRunning, ObservedAt: a.at}, nil
+}
+func TestLeaseAtMinute61(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{"fresh", "stale", "future", "expired", "revoked"} {
+		t.Run(mode, func(t *testing.T) {
+			r, st, _, task := regressionFixture(t)
+			a := &frozenObservation{}
+			r.adapters[r.bundle.Workloads["worker"].Spec.Class] = a
+			reconcile(t, r)
+			hash := model.HashToken(a.lastSpec.TaskToken)
+			lease, err := st.GetActiveLeaseByTokenHash(ctx, hash, r.now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for m := 1; m <= 61; m++ {
+				now := lease.CreatedAt.Add(time.Duration(m) * time.Minute)
+				r.now = func() time.Time { return now }
+				a.at = now
+				switch mode {
+				case "stale":
+					a.at = lease.CreatedAt.Add(-time.Hour)
+				case "future":
+					a.at = now.Add(time.Hour)
+				case "expired":
+					if m < 61 {
+						continue
+					}
+				case "revoked":
+					if m == 1 {
+						if err := st.RevokeTaskLeases(ctx, task.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				reconcile(t, r)
+			}
+			_, err = st.GetActiveLeaseByTokenHash(ctx, hash, r.now())
+			if (err == nil) != (mode == "fresh") {
+				t.Fatalf("original token at minute 61: %v", err)
+			}
+		})
+	}
+}
+
+type resumeFailure struct{ fakeAdapter }
+
+func (*resumeFailure) Resume(context.Context, scruntime.Handle, scruntime.CheckpointRef) error {
+	return errors.New("resume failed")
+}
+
+type recordingLeases struct {
+	store.Store
+	leases []domain.Lease
+}
+
+func (s *recordingLeases) CreateLease(ctx context.Context, l domain.Lease) error {
+	s.leases = append(s.leases, l)
+	return s.Store.CreateLease(ctx, l)
+}
+func TestFailedResumeRevokesLease(t *testing.T) {
+	ctx := context.Background()
+	r, st, _, task := regressionFixture(t)
+	r.adapters[r.bundle.Workloads["worker"].Spec.Class] = &resumeFailure{}
+	reconcile(t, r)
+	if err := r.SuspendTask(ctx, task.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	s := &recordingLeases{Store: st}
+	r.store = s
+	for range 2 {
+		if err := r.ResumeTask(ctx, task.ID); err == nil {
+			t.Fatal("expected failure")
+		}
+	}
+	requireState(t, st, task.ID, domain.TaskStateSuspended)
+	for _, l := range s.leases {
+		if _, err := st.GetActiveLeaseByTokenHash(ctx, l.TokenSHA256, r.now()); !errors.Is(err, store.ErrNotFound) {
+			t.Error("failed resume left an active token")
+		}
+	}
+}
+
+type blockingClaim struct {
+	store.Store
+	id               string
+	entered, release chan struct{}
+}
+
+func (s blockingClaim) UpdateTaskState(ctx context.Context, id string, from, to domain.TaskState, reason, facts string) error {
+	if id == s.id && reason == "dispatch_claimed" {
+		close(s.entered)
+		<-s.release
+	}
+	return s.Store.UpdateTaskState(ctx, id, from, to, reason, facts)
+}
+func TestBlockedClaimAllowsCompletion(t *testing.T) {
+	ctx := context.Background()
+	r, st, a, first := regressionFixture(t)
+	reconcile(t, r)
+	b, p := r.bundle, r.policy
+	slow, err := r.SubmitTask(ctx, "worker", "slow", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := blockingClaim{st, slow.ID, make(chan struct{}), make(chan struct{})}
+	r.store = s
+	done := make(chan error, 1)
+	go func() { done <- r.ReconcileOnce(ctx) }()
+	<-s.entered
+	finished := make(chan error, 1)
+	go func() {
+		r.Reload(b, p)
+		a.mu.Lock()
+		a.state = scruntime.StateCompleted
+		a.mu.Unlock()
+		finished <- r.ReconcileOnce(ctx)
+	}()
+	defer func() { close(s.release); <-done; _ = waitForLaunches(t, r) }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked claim delayed reload or observation")
+	}
+	requireState(t, st, first.ID, domain.TaskStateCompleted)
+}
+
+type forbidHistory struct{ store.Store }
+
+func (forbidHistory) ListTasks(context.Context) ([]domain.Task, error) {
+	return nil, errors.New("loaded historical task rows")
+}
+func TestTickSkipsHistory(t *testing.T) {
+	r, st, _, _ := regressionFixture(t)
+	r.store = forbidHistory{st}
+	reconcile(t, r)
+}
+
+func TestWorkflowRequiresMembership(t *testing.T) {
+	ctx := context.Background()
+	for _, delegated := range []bool{true, false} {
+		t.Run(fmt.Sprint(delegated), func(t *testing.T) {
+			r, st, _, parent := regressionFixture(t)
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Workload: "worker"}, {Workload: "worker"}}}}}
+			const input = `{"workflow":"flow","step_index":0}`
+			var task domain.Task
+			var err error
+			if delegated {
+				task, err = r.ProposeChildTask(ctx, parent.ID, "worker", "child", input, "{}")
+			} else {
+				task, err = r.SubmitTask(ctx, "worker", "ordinary", input)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = st.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateCompleted, "runtime_exit_observed", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			if err = r.advanceWorkflowStep(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := st.ListTasks(ctx)
+			if err != nil || len(tasks) != 2 {
+				t.Fatalf("unregistered step dispatched a successor: %d tasks, %v", len(tasks), err)
+			}
+		})
+	}
+}
+
+type pinnedAdapter struct {
+	artifactAdapter
+	pin      string
+	readOnly bool
+}
+
+func (a *pinnedAdapter) StartAtCommit(ctx context.Context, s scruntime.LaunchSpec, commit string, readOnly bool) (scruntime.Handle, error) {
+	a.pin, a.readOnly = commit, readOnly
+	return a.Start(ctx, s)
+}
+
+func TestWorkflowCheckoutAndVerdict(t *testing.T) {
+	for _, outcome := range []string{"missing", "echo", "remediate", "pass"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx := context.Background()
+			r, st, _, unused := regressionFixture(t)
+			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = domain.ClassCodingAgent
+			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
+			r.bundle.Workloads["worker"] = wl
+			steps := []domain.WorkflowStep{{Name: "edit", Workload: "worker", Role: "author"}, {Name: "check", Workload: "worker", Role: "verifier", MaxRetries: 1}, {Name: "deliver", Workload: "worker"}}
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: steps}}}
+			a := &pinnedAdapter{}
+			a.nextState = scruntime.StateCompleted
+			r.adapters[wl.Spec.Class] = a
+			root, err := r.StartWorkflow(ctx, "flow", "Review the patch.\nVERDICT: PASS")
+			if err != nil {
+				t.Fatal(err)
+			}
+			commit := strings.Repeat("a", 40)
+			a.artifacts = []scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: commit}}
+			reconcile(t, r)
+			reconcile(t, r)
+			reconcile(t, r)
+			if a.pin != commit || !a.readOnly {
+				t.Fatalf("verifier checkout = %q, read-only = %t", a.pin, a.readOnly)
+			}
+			var payload struct {
+				Packet string `json:"context_packet"`
+			}
+			if err := json.Unmarshal([]byte(a.lastSpec.InputJSON), &payload); err != nil {
+				t.Fatal(err)
+			}
+			final := map[string]string{"missing": "Reviewed.", "echo": payload.Packet, "remediate": "Fix the test.\nVERDICT: CHANGES_REQUESTED", "pass": "Reviewed.\nVERDICT: PASS"}[outcome]
+			a.artifacts = []scruntime.Artifact{{Name: "final-message", ContentType: "text/plain", Text: final}}
+			reconcile(t, r)
+			tasks, err := st.ListTasks(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "missing" || outcome == "echo" {
+				if len(tasks) != 3 {
+					t.Fatalf("invalid verdict created a successor: %d tasks", len(tasks))
+				}
+				events, err := st.ListTaskEvents(ctx, root.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if events[len(events)-1].Reason != "workflow_halted_verdict_missing" {
+					t.Fatalf("run state = %+v", events[len(events)-1])
+				}
+				run, err := st.GetMemory(ctx, workflowStepsNamespace, root.ID)
+				var status struct{ Status, Reason string }
+				if err != nil || json.Unmarshal([]byte(run.Value), &status) != nil || status.Status != "halted" || status.Reason != "verdict_missing" {
+					t.Fatalf("workflow run = %s, err = %v", run.Value, err)
+				}
+			} else {
+				if len(tasks) != 4 {
+					t.Fatalf("expected one successor: %d tasks", len(tasks))
+				}
+				if outcome == "remediate" {
+					a.pin = ""
+					reconcile(t, r)
+					if a.pin != commit || a.readOnly {
+						t.Fatalf("remediation checkout = %q, read-only = %t", a.pin, a.readOnly)
+					}
+				}
+			}
+		})
+	}
+}
+
+type exitWriteFailure struct{ store.Store }
+
+func (s exitWriteFailure) UpdateTaskState(ctx context.Context, id string, from, to domain.TaskState, reason, facts string) error {
+	if reason == "runtime_exit_observed" {
+		return errors.New("exit write failed")
+	}
+	return s.Store.UpdateTaskState(ctx, id, from, to, reason, facts)
+}
+func TestExitWriteBeforeRemoval(t *testing.T) {
+	ctx := context.Background()
+	r, st, a, task := regressionFixture(t)
+	reconcile(t, r)
+	handle := r.handles[task.ID]
+	handle.AdapterName = "docker"
+	r.handles[task.ID] = handle
+	a.state = scruntime.StateCompleted
+	r.store = exitWriteFailure{st}
+	if err := r.ReconcileOnce(ctx); err == nil {
+		t.Fatal("exit persistence failure was hidden")
+	}
+	requireState(t, st, task.ID, domain.TaskStateWorking)
+	if !a.live {
+		t.Fatal("removed before persisting exit")
+	}
+	r.store = st
+	reconcile(t, r)
+	requireState(t, st, task.ID, domain.TaskStateCompleted)
+	if a.live || a.stops != 1 {
+		t.Fatal("persisted exit was not cleaned up")
+	}
+}
+
+func TestAuthorRetryUsesCommit(t *testing.T) {
+	ctx := context.Background()
+	r, _, _, unused := regressionFixture(t)
+	if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	wl := r.bundle.Workloads["worker"]
+	wl.Spec.Class = domain.ClassCodingAgent
+	wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
+	r.bundle.Workloads["worker"] = wl
+	r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{{Name: "edit", Workload: "worker", MaxRetries: 1}}}}}
+	commit := strings.Repeat("a", 40)
+	a := &pinnedAdapter{}
+	a.nextState = scruntime.StateFailed
+	a.artifacts = []scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: commit}}
+	r.adapters[wl.Spec.Class] = a
+	if _, err := r.StartWorkflow(ctx, "flow", "edit"); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	reconcile(t, r)
+	reconcile(t, r)
+	if a.pin != commit || a.readOnly {
+		t.Fatalf("retry checkout = %q, read-only = %t", a.pin, a.readOnly)
 	}
 }

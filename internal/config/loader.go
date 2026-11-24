@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"sigs.k8s.io/yaml"
 
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 )
 
@@ -268,6 +270,19 @@ func validateBundle(bundle *Bundle) error {
 			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
 				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
 			}
+			if step.Tier != "" {
+				provider, model := step.Provider, step.Model
+				defaultProvider, defaultModel := contextpack.ResolveTier(context.Background(), nil, step.Tier)
+				if defaultProvider == "" {
+					return fmt.Errorf("workflow %q step %q: unknown model tier", name, step.Name)
+				}
+				if provider == "" && model == "" {
+					provider, model = defaultProvider, defaultModel
+				}
+				if err := ValidateTierRoute(wl, provider, model); err != nil {
+					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
+				}
+			}
 		}
 	}
 
@@ -425,4 +440,45 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 
 func isValidEffect(e domain.PolicyEffect) bool {
 	return e == domain.EffectAllow || e == domain.EffectApprove || e == domain.EffectDeny
+}
+
+func ValidateTierRoute(wl domain.Workload, provider, model string) error {
+	if !validRouteID(provider, 64) || !validRouteID(model, 128) {
+		return errors.New("invalid tier provider or model")
+	}
+	switch wl.Spec.Class {
+	case domain.ClassDeterministicController:
+		return errors.New("deterministic workload cannot use a model tier")
+	case domain.ClassCodingAgent:
+		if wl.Spec.Coding == nil || provider != "cli:"+wl.Spec.Coding.Harness || !harnessAcceptsModel(wl.Spec.Coding.Harness, model) {
+			return errors.New("tier model is incompatible with the workload harness")
+		}
+	}
+	return nil
+}
+
+func validRouteID(value string, maxLen int) bool {
+	if len(value) == 0 || len(value) > maxLen || value[0] == '-' {
+		return false
+	}
+	for _, c := range value {
+		if ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || strings.ContainsRune("-._:/", c) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func harnessAcceptsModel(harness, model string) bool {
+	switch harness {
+	case "claude":
+		return strings.HasPrefix(model, "claude-") || model == "opus" || model == "sonnet" || model == "haiku"
+	case "codex":
+		return strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "codex-")
+	case "agy":
+		return strings.HasPrefix(model, "gemini-") || strings.HasPrefix(model, "claude-")
+	default:
+		return false
+	}
 }
