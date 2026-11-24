@@ -10,9 +10,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,6 +29,24 @@ import (
 const version = "0.1.0-dev"
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	rootCmd := newRootCmd()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
+	return newRootCmdWithTransport(http.DefaultTransport)
+}
+
+func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command {
+	if defaultTransport == nil {
+		defaultTransport = http.DefaultTransport
+	}
 	var (
 		apiURL     string
 		socketPath string
@@ -49,7 +70,7 @@ func main() {
 		if tok == "" {
 			tok = strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
 		}
-		var baseRT http.RoundTripper = http.DefaultTransport
+		var baseRT http.RoundTripper = defaultTransport
 		baseURL := strings.TrimRight(apiURL, "/")
 		if socketPath != "" {
 			baseRT = &http.Transport{
@@ -195,7 +216,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/tasks/"+args[0])
+			body, err := fetchGET(cli, base+"/api/v1/tasks/"+url.PathEscape(args[0]))
 			if err != nil {
 				return err
 			}
@@ -221,7 +242,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/cancel", map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+url.PathEscape(args[0])+"/cancel", map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -239,7 +260,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/suspend", map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+url.PathEscape(args[0])+"/suspend", map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -257,7 +278,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/resume", map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+url.PathEscape(args[0])+"/resume", map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -276,7 +297,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			urlPath := base + "/api/v1/tasks/" + args[0] + "/retry"
+			urlPath := base + "/api/v1/tasks/" + url.PathEscape(args[0]) + "/retry"
 			if retryHandoff {
 				urlPath += "?handoff=true"
 			}
@@ -309,7 +330,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(0)
-			return streamScry(cmd.Context(), cli, base+"/api/v1/tasks/"+args[0]+"/scry", cmd.OutOrStdout())
+			return streamScry(cmd.Context(), cli, base+"/api/v1/tasks/"+url.PathEscape(args[0])+"/scry", cmd.OutOrStdout())
 		},
 	})
 	taskCmd.AddCommand(&cobra.Command{
@@ -317,25 +338,26 @@ func main() {
 		Short: "Attach to a running task with exclusive stdin control (Ctrl-C to detach)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id := url.PathEscape(args[0])
 			cli, base := httpClient(10 * time.Second)
-			if _, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/takeover", map[string]string{"operator": "sablectl"}); err != nil {
+			if _, err := fetchPOST(cli, base+"/api/v1/tasks/"+id+"/takeover", map[string]string{"operator": "sablectl"}); err != nil {
 				return err
 			}
 			defer func() {
-				_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/detach", map[string]string{"operator": "sablectl"})
+				_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+id+"/detach", map[string]string{"operator": "sablectl"})
 			}()
 			fmt.Fprintf(cmd.ErrOrStderr(), "%s takeover acquired on %s (type lines to send to stdin)\n", stJade.Render("●"), args[0])
 			go func() {
 				sc := bufio.NewScanner(cmd.InOrStdin())
 				for sc.Scan() {
-					_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/stdin", map[string]string{
+					_, _ = fetchPOST(cli, base+"/api/v1/tasks/"+id+"/stdin", map[string]string{
 						"operator": "sablectl",
 						"data":     sc.Text() + "\n",
 					})
 				}
 			}()
 			streamCli, _ := httpClient(0)
-			return streamScry(cmd.Context(), streamCli, base+"/api/v1/tasks/"+args[0]+"/scry", cmd.OutOrStdout())
+			return streamScry(cmd.Context(), streamCli, base+"/api/v1/tasks/"+id+"/scry", cmd.OutOrStdout())
 		},
 	})
 
@@ -435,13 +457,8 @@ func main() {
 		Use:   "export",
 		Short: "Export audit records as JSONL to stdout",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cli, base := httpClient(15 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/audit/export")
-			if err != nil {
-				return err
-			}
-			_, err = cmd.OutOrStdout().Write(body)
-			return err
+			cli, base := httpClient(0)
+			return streamGETContext(cmd.Context(), cli, base+"/api/v1/audit/export", cmd.OutOrStdout())
 		},
 	})
 
@@ -478,7 +495,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(65 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/approvals/"+args[0]+"/approve", map[string]string{
+			body, err := fetchPOST(cli, base+"/api/v1/approvals/"+url.PathEscape(args[0])+"/approve", map[string]string{
 				"expectedSha256": approveDigest,
 			})
 			if err != nil {
@@ -502,7 +519,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/approvals/"+args[0]+"/deny", map[string]string{
+			body, err := fetchPOST(cli, base+"/api/v1/approvals/"+url.PathEscape(args[0])+"/deny", map[string]string{
 				"reason": denyReason,
 			})
 			if err != nil {
@@ -620,7 +637,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(15 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/providers/"+args[0]+"/sync", map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/providers/"+url.PathEscape(args[0])+"/sync", map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -651,7 +668,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/promote/"+args[0], map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/promote/"+url.PathEscape(args[0]), map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -765,7 +782,7 @@ func main() {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/decree", map[string]string{
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+url.PathEscape(args[0])+"/decree", map[string]string{
 				"to":   decreeTo,
 				"body": args[1],
 			})
@@ -789,7 +806,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+args[0])
+			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+url.PathEscape(args[0]))
 			if err != nil {
 				return err
 			}
@@ -828,7 +845,7 @@ func main() {
 		Short: "Watch live Conclave messages in real time",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
+			id := url.PathEscape(args[0])
 			cli, base := httpClient(5 * time.Second)
 			streamCli, _ := httpClient(0)
 			var lastSeen int64
@@ -890,7 +907,7 @@ func main() {
 				content = string(raw)
 			}
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/relics", map[string]string{
+			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+url.PathEscape(args[0])+"/relics", map[string]string{
 				"name":        args[1],
 				"contentType": relicType,
 				"body":        content,
@@ -914,7 +931,7 @@ func main() {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+args[0]+"/relics/"+args[1])
+			body, err := fetchGET(cli, base+"/api/v1/conclaves/"+url.PathEscape(args[0])+"/relics/"+url.PathEscape(args[1]))
 			if err != nil {
 				return err
 			}
@@ -938,8 +955,7 @@ func main() {
 		Short: "Close a Conclave session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cli, base := httpClient(5 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/conclaves/"+args[0]+"/close", map[string]string{"state": "completed"})
+			body, err := closeConclaveAndStopTasks(cmd.Context(), httpClient, "", args[0], domain.ConclaveStateCompleted)
 			if err != nil {
 				return err
 			}
@@ -1014,7 +1030,7 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/devices/"+args[0]+"/revoke", map[string]string{})
+			body, err := fetchPOST(cli, base+"/api/v1/devices/"+url.PathEscape(args[0])+"/revoke", map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -1099,52 +1115,108 @@ func main() {
 		},
 	}
 
+	councilCmd := buildCouncilCmd(httpClient, &jsonOut)
 	doctorCmd, initCmd, taskDiffCmd, memoryCmd := buildDXCommands(httpClient, &jsonOut)
 	serviceCmd, tsCmd := buildOpsCommands()
 	taskCmd.AddCommand(taskDiffCmd)
 
-	rootCmd.AddCommand(doctorCmd, initCmd, serviceCmd, tsCmd, validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, voiceCmd, memoryCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
+	rootCmd.AddCommand(councilCmd, doctorCmd, initCmd, serviceCmd, tsCmd, validateCmd, applyCmd, promoteCmd, authCmd, pairCmd, deviceCmd, voiceCmd, memoryCmd, mcpServerCmd, workloadCmd, taskCmd, conclaveCmd, budgetCmd, approvalCmd, auditCmd, providerCmd, secretCmd, versionCmd)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
-func fetchGET(client *http.Client, url string) ([]byte, error) {
-	resp, err := client.Get(url)
+const maxHTTPResponseBytes = 8 << 20
+
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+func readBoundedHTTPResponse(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if len(body) > maxHTTPResponseBytes {
+		if resp.StatusCode >= 400 {
+			return nil, &httpStatusError{
+				StatusCode: resp.StatusCode,
+				Body:       strings.TrimSpace(string(body[:maxHTTPResponseBytes])),
+			}
+		}
+		return nil, fmt.Errorf("HTTP response exceeded %d bytes", maxHTTPResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 	return body, nil
 }
 
-func fetchPOST(client *http.Client, url string, payload any) ([]byte, error) {
+func fetchGET(client *http.Client, rawURL string) ([]byte, error) {
+	return fetchGETContext(context.Background(), client, rawURL)
+}
+
+func fetchGETContext(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return readBoundedHTTPResponse(resp)
+}
+
+func streamGETContext(ctx context.Context, client *http.Client, rawURL string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes))
+		return &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+		}
+	}
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func fetchPOST(client *http.Client, rawURL string, payload any) ([]byte, error) {
+	return fetchPOSTContext(context.Background(), client, rawURL, payload)
+}
+
+func fetchPOSTContext(ctx context.Context, client *http.Client, rawURL string, payload any) ([]byte, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return body, nil
+	return readBoundedHTTPResponse(resp)
 }
 
 func writeJSONOut(w io.Writer, v any) error {
