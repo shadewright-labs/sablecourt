@@ -10,6 +10,37 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 )
 
+type taskMemoryKey struct{}
+
+// CreateTaskWithMemory publishes a task and its registration in one transaction.
+func CreateTaskWithMemory(ctx context.Context, st Store, task domain.Task, entry domain.MemoryEntry) error {
+	if entry.Key != task.ID {
+		return errors.New("registration does not match task")
+	}
+	return st.CreateTask(context.WithValue(ctx, taskMemoryKey{}, entry), task)
+}
+
+func insertRegisteredTask(ctx context.Context, db *sql.DB, entry domain.MemoryEntry, insert func(TaskInserter) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insert(tx); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO court_memory (namespace, key, value, author, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT(namespace, key) DO UPDATE SET
+			value = excluded.value, author = excluded.author, updated_at = excluded.updated_at
+	`, entry.Namespace, entry.Key, entry.Value, entry.Author, entry.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func ListTasks(ctx context.Context, db *sql.DB) ([]domain.Task, error) {
 	return queryTasks(ctx, db, "")
 }
