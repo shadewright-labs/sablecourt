@@ -871,3 +871,29 @@ func TestAuthorRetryUsesCommit(t *testing.T) {
 		t.Fatalf("retry checkout = %q, read-only = %t", a.pin, a.readOnly)
 	}
 }
+
+func TestTickReplaysExistingRemediationWithoutHistory(t *testing.T) {
+	r, st, _, unused := regressionFixture(t)
+	ctx := t.Context()
+	if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := r.SubmitTask(ctx, "worker", "original-attempt", `{"auto_remediate":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateFailed, "runtime_exit_observed", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := r.RetryTaskWithHandoff(ctx, task.ID, true, "runtime_failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.store = forbidHistory{st}
+	reconcile(t, r)
+	requireState(t, st, retry.ID, domain.TaskStateWorking)
+	events, err := st.ListTaskEvents(ctx, task.ID)
+	if err != nil || len(events) == 0 || events[len(events)-1].Reason != "runtime_failed" {
+		t.Fatalf("pending exit after replay: %v, %v", events, err)
+	}
+}

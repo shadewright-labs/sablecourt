@@ -1,0 +1,184 @@
+package store_test
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
+	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
+)
+
+func TestReconcileStore(t *testing.T) {
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var st store.Store
+			var err error
+			if backend == "sqlite" {
+				st, err = sqlite.Open(filepath.Join(t.TempDir(), "state.db"))
+			} else {
+				dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("SABLECOURT_TEST_POSTGRES_DSN is unset")
+				}
+				st, err = postgres.Open(isolatedPostgresDSN(t, dsn))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Migrate(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.UpsertWorkload(t.Context(), domain.WorkloadRecord{Name: "worker"}); err != nil {
+				t.Fatal(err)
+			}
+			t.Run("candidates", func(t *testing.T) { testCandidates(t, st) })
+			t.Run("renewal", func(t *testing.T) { testRenewal(t, st) })
+		})
+	}
+}
+
+func isolatedPostgresDSN(t *testing.T, dsn string) string {
+	t.Helper()
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { _ = db.Close() })
+	schema := pgx.Identifier{"reconcile_" + rand.Text()}.Sanitize()
+	if _, err := db.ExecContext(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Error(err)
+		}
+	})
+	cfg.RuntimeParams["search_path"] = schema
+	key := stdlib.RegisterConnConfig(cfg)
+	t.Cleanup(func() { stdlib.UnregisterConnConfig(key) })
+	return key
+}
+
+func createTask(t *testing.T, st store.Store, id string, state domain.TaskState) {
+	t.Helper()
+	if err := st.CreateTask(t.Context(), domain.Task{ID: id, IdempotencyKey: id, WorkloadName: "worker", State: state}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createLease(t *testing.T, st store.Store, taskID string, expiry time.Time) {
+	t.Helper()
+	if err := st.CreateLease(t.Context(), domain.Lease{
+		TokenSHA256: taskID, TaskID: taskID, WorkloadName: "worker", ExpiresAt: expiry,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testCandidates(t *testing.T, st store.Store) {
+	ctx := t.Context()
+	for _, tc := range []struct {
+		id     string
+		state  domain.TaskState
+		reason string
+	}{
+		{"queued", domain.TaskStateSubmitted, ""},
+		{"running", domain.TaskStateWorking, ""},
+		{"waiting", domain.TaskStateInputRequired, ""},
+		{"suspended", domain.TaskStateSuspended, ""},
+		{"advance", domain.TaskStateCompleted, "runtime_exit_observed"},
+		{"remediate", domain.TaskStateFailed, "runtime_exit_observed"},
+		{"cleanup", domain.TaskStateCancelled, "cancelled"},
+		{"stop", domain.TaskStateFailed, "launch_failed"},
+		{"history", domain.TaskStateCompleted, "runtime_completed"},
+	} {
+		createTask(t, st, tc.id, tc.state)
+		if tc.reason != "" {
+			if err := st.UpdateTaskState(ctx, tc.id, tc.state, tc.state, tc.reason, "{}"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	createLease(t, st, "cleanup", time.Now())
+	check := func(handles, want []string) {
+		t.Helper()
+		tasks, err := st.ListReconcileTasks(ctx, handles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, task := range tasks {
+			ids = append(ids, task.ID)
+		}
+		slices.Sort(ids)
+		if !slices.Equal(ids, want) {
+			t.Errorf("reconcile candidates = %v, want %v", ids, want)
+		}
+	}
+	check([]string{"running", "stop"}, []string{"advance", "cleanup", "queued", "remediate", "running", "stop", "waiting"})
+	if err := st.RevokeTaskLeases(ctx, "cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateTaskState(ctx, "advance", domain.TaskStateCompleted, domain.TaskStateCompleted, "runtime_completed", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	check(nil, []string{"queued", "remediate", "running", "waiting"})
+}
+
+func testRenewal(t *testing.T, st store.Store) {
+	ctx := t.Context()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		id              string
+		state           domain.TaskState
+		old, next, want time.Duration
+		revoked         bool
+	}{
+		{"extend", domain.TaskStateWorking, time.Nanosecond, time.Hour, time.Hour, false},
+		{"await-input", domain.TaskStateInputRequired, time.Minute, time.Hour, time.Hour, false},
+		{"keep-longer", domain.TaskStateWorking, 2 * time.Hour, time.Hour, 2 * time.Hour, false},
+		{"at-expiry", domain.TaskStateWorking, 0, time.Hour, 0, false},
+		{"already-expired", domain.TaskStateWorking, -time.Nanosecond, time.Hour, -time.Nanosecond, false},
+		{"revoked", domain.TaskStateWorking, time.Minute, time.Hour, time.Minute, true},
+		{"not-launched", domain.TaskStateSubmitted, time.Minute, time.Hour, time.Minute, false},
+		{"paused", domain.TaskStateSuspended, time.Minute, time.Hour, time.Minute, false},
+		{"finished", domain.TaskStateCompleted, time.Minute, time.Hour, time.Minute, false},
+		{"cancelled", domain.TaskStateCancelled, time.Minute, time.Hour, time.Minute, false},
+		{"failed", domain.TaskStateFailed, time.Minute, time.Hour, time.Minute, false},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			createTask(t, st, tc.id, tc.state)
+			createLease(t, st, tc.id, now.Add(tc.old))
+			if tc.revoked {
+				if err := st.RevokeTaskLeases(ctx, tc.id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.RenewTaskLeases(ctx, tc.id, now, now.Add(tc.next)); err != nil {
+				t.Fatal(err)
+			}
+			lease, err := st.GetActiveLeaseByTokenHash(ctx, tc.id, now.Add(-time.Minute))
+			if tc.revoked {
+				if !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("revoked token lookup = %v", err)
+				}
+				return
+			}
+			if err != nil || !lease.ExpiresAt.Equal(now.Add(tc.want)) {
+				t.Errorf("expiry = %v, err = %v, want %v", lease.ExpiresAt, err, now.Add(tc.want))
+			}
+		})
+	}
+}

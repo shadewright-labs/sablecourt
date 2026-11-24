@@ -171,3 +171,46 @@ func TestWorkloadTaskApprovalBudgetAndAuditFlow(t *testing.T) {
 		t.Fatalf("WorkloadDailyBudgetTotals: %+v err=%v", daily, err)
 	}
 }
+
+func TestMigratePendingRuntimeExits(t *testing.T) {
+	ctx := t.Context()
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	schema, err := migrationFS.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, string(schema)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id      string
+		reasons []string
+	}{
+		{"processed", []string{"runtime_exit_observed", "runtime_completed"}},
+		{"pending", []string{"runtime_exit_observed"}},
+	} {
+		if err := st.CreateTask(ctx, domain.Task{ID: tc.id, IdempotencyKey: tc.id, State: domain.TaskStateCompleted, WorkloadName: "worker"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, reason := range tc.reasons {
+			if _, err := st.db.ExecContext(ctx, `INSERT INTO task_events(task_id, from_state, to_state, reason, created_at)
+				VALUES (?, 'completed', 'completed', ?, ?)`, tc.id, reason, nowRFC3339()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := st.ListReconcileTasks(ctx, nil)
+	if err != nil || len(tasks) != 1 || tasks[0].ID != "pending" {
+		t.Fatalf("migrated candidates = %v, err = %v", tasks, err)
+	}
+}

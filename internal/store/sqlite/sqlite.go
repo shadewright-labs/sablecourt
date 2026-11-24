@@ -162,13 +162,16 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 	artifactsJSON := defaultJSON(t.ArtifactsJSON, "[]")
 	budgetJSON := defaultJSON(t.BudgetCeilingJSON, "{}")
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (
-			id, parent_task_id, idempotency_key, workload_name, state,
-			input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
-		inputJSON, artifactsJSON, budgetJSON, created, updated)
+	err := store.InsertTask(ctx, s.db, t, func(inserter store.TaskInserter) error {
+		_, err := inserter.ExecContext(ctx, `
+			INSERT INTO tasks (
+				id, parent_task_id, idempotency_key, workload_name, state,
+				input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
+			inputJSON, artifactsJSON, budgetJSON, created, updated)
+		return err
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
@@ -179,74 +182,19 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 }
 
 func (s *SQLiteStore) GetTask(ctx context.Context, id string) (domain.Task, error) {
-	var t domain.Task
-	var state, created, updated string
-	var hb sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, parent_task_id, idempotency_key, workload_name, state,
-		       input_json, artifacts_json, budget_ceiling_json, last_heartbeat_at,
-		       created_at, updated_at
-		FROM tasks WHERE id = ?
-	`, id).Scan(
-		&t.ID, &t.ParentTaskID, &t.IdempotencyKey, &t.WorkloadName, &state,
-		&t.InputJSON, &t.ArtifactsJSON, &t.BudgetCeilingJSON, &hb,
-		&created, &updated,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Task{}, store.ErrNotFound
-	}
-	if err != nil {
-		return domain.Task{}, err
-	}
-	t.State = domain.TaskState(state)
-	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	if hb.Valid {
-		parsed, err := time.Parse(time.RFC3339Nano, hb.String)
-		if err == nil {
-			t.LastHeartbeatAt = &parsed
-		}
-	}
-	return t, nil
+	return store.GetTask(ctx, s.db, id)
+}
+
+func (s *SQLiteStore) GetTaskByIdempotencyKey(ctx context.Context, key string) (domain.Task, error) {
+	return store.GetTaskByIdempotencyKey(ctx, s.db, key)
 }
 
 func (s *SQLiteStore) ListTasks(ctx context.Context) ([]domain.Task, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, parent_task_id, idempotency_key, workload_name, state,
-		       input_json, artifacts_json, budget_ceiling_json, last_heartbeat_at,
-		       created_at, updated_at
-		FROM tasks
-		ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	return store.ListTasks(ctx, s.db)
+}
 
-	var out []domain.Task
-	for rows.Next() {
-		var t domain.Task
-		var state, created, updated string
-		var hb sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.ParentTaskID, &t.IdempotencyKey, &t.WorkloadName, &state,
-			&t.InputJSON, &t.ArtifactsJSON, &t.BudgetCeilingJSON, &hb,
-			&created, &updated,
-		); err != nil {
-			return nil, err
-		}
-		t.State = domain.TaskState(state)
-		t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-		if hb.Valid {
-			parsed, err := time.Parse(time.RFC3339Nano, hb.String)
-			if err == nil {
-				t.LastHeartbeatAt = &parsed
-			}
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+func (s *SQLiteStore) ListReconcileTasks(ctx context.Context, handleIDs []string) ([]domain.Task, error) {
+	return store.ListReconcileTasks(ctx, s.db, handleIDs, "SELECT value FROM json_each($1)")
 }
 
 func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error) {
@@ -310,14 +258,14 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 }
 
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, to, reason)
 	if err != nil {
 		return err
 	}
 	now := nowRFC3339()
 	res, err := tx.ExecContext(ctx, `
-		UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state = ?
-	`, string(to), now, taskID, string(from))
+		UPDATE tasks SET state = ?, updated_at = ?, exit_pending = ? WHERE id = ? AND state = ?
+	`, string(to), now, reason == "runtime_exit_observed" && (to == domain.TaskStateCompleted || to == domain.TaskStateFailed), taskID, string(from))
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -532,6 +480,10 @@ func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256
 	return lease, nil
 }
 
+func (s *SQLiteStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
+}
+
 func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE leases SET revoked_at = ? WHERE task_id = ? AND revoked_at IS NULL
@@ -586,9 +538,20 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := s.appendAuditTx(ctx, tx, rec); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
 	prevHash := "genesis"
 	var last string
-	if err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last); err == nil && last != "" {
+	err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if last != "" {
 		prevHash = last
 	}
 	rec.DetailJSON = defaultJSON(rec.DetailJSON, "{}")
@@ -602,7 +565,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 		rec.DetailJSON, prevHash, rowHash, createdStr); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error) {

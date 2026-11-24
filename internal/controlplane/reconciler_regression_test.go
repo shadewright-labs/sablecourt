@@ -722,3 +722,101 @@ func TestLaunchFailureDuringApproval(t *testing.T) {
 		t.Fatal("approval lost its runtime")
 	}
 }
+
+func TestQueuedCouncilTurnChecksDeadline(t *testing.T) {
+	for _, elapsed := range []time.Duration{14 * time.Minute, 15 * time.Minute, 16 * time.Minute} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			ctx := context.Background()
+			r, st, a, unrelated := regressionFixture(t)
+			if err := r.CancelTask(ctx, unrelated.ID, "test"); err != nil {
+				t.Fatal(err)
+			}
+			clock := time.Now().UTC()
+			r.now = func() time.Time { return clock }
+			r.bundle.Conclaves = map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{
+				{Role: "reader", Workload: "worker", Activation: domain.ActivationAlwaysOn},
+			}}}}
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", TemplateName: "council", State: domain.ConclaveStateActive, CreatedAt: clock}); err != nil {
+				t.Fatal(err)
+			}
+			key := "conclave-room-init-reader"
+			task, err := store.SubmitConclaveTurn(ctx, "room", key, store.ConclaveLimits{MaxMessages: 2, MaxPingPong: 2, MaxRuns: 6, MaxAge: 15 * time.Minute, Now: r.now}, func(ctx context.Context) (domain.Task, error) {
+				return r.SubmitTask(ctx, "worker", key, `{"conclaveId":"room","role":"reader","activation":"always-on"}`)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock = clock.Add(elapsed)
+			reconcile(t, r)
+			want := domain.TaskStateWorking
+			if elapsed >= 15*time.Minute {
+				want = domain.TaskStateCancelled
+				if a.lastSpec.TaskID == task.ID {
+					t.Error("expired turn reached adapter.Start")
+				}
+				room, err := st.GetConclave(ctx, "room")
+				if err != nil || room.WardReason != "wall_time_reached" {
+					t.Errorf("deadline left room %+v, %v", room, err)
+				}
+			}
+			requireState(t, st, task.ID, want)
+		})
+	}
+}
+
+type blockingStopAdapter struct {
+	*controlledAdapter
+	entered chan context.Context
+	release chan struct{}
+}
+
+func (a blockingStopAdapter) Stop(ctx context.Context, handle scruntime.Handle) error {
+	a.entered <- ctx
+	<-a.release
+	return a.controlledAdapter.Stop(ctx, handle)
+}
+
+func TestCancelStopKeepsDeadlineAndAllowsSubmit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, _, adapter, task := regressionFixture(t)
+	a := blockingStopAdapter{adapter, make(chan context.Context, 1), make(chan struct{})}
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(a.release) }) }
+	defer unblock()
+	r.adapters[domain.ClassDeterministicController] = a
+	reconcile(t, r)
+	done := make(chan error, 1)
+	go func() { done <- r.CancelTask(ctx, task.ID, "conclave_open_failed") }()
+	select {
+	case stopCtx := <-a.entered:
+		want, _ := ctx.Deadline()
+		if got, ok := stopCtx.Deadline(); !ok || got != want {
+			t.Errorf("adapter Stop deadline = %v, want %v", got, want)
+		}
+	case <-ctx.Done():
+		t.Fatal("adapter Stop did not start")
+	}
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := r.SubmitTask(ctx, "worker", "unrelated", "{}")
+		submitted <- err
+	}()
+	select {
+	case err := <-submitted:
+		if err != nil {
+			t.Errorf("unrelated submit: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("adapter Stop blocked an unrelated submission")
+	}
+	unblock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("cancel did not finish")
+	}
+}
