@@ -145,7 +145,7 @@ func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
 	if !t.UpdatedAt.IsZero() {
 		updated = t.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	err := store.InsertTask(ctx, s.db, t, func(inserter store.TaskInserter) error {
+	err := store.InsertTask(ctx, s.db, nil, t, func(inserter store.TaskInserter) error {
 		_, err := inserter.ExecContext(ctx, `
 			INSERT INTO tasks (
 				id, parent_task_id, idempotency_key, workload_name, state,
@@ -234,7 +234,7 @@ func (s *PostgresStore) ListTaskMessages(ctx context.Context, taskID string) ([]
 }
 
 func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, to, reason)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, nil, to, reason)
 	if err != nil {
 		return err
 	}

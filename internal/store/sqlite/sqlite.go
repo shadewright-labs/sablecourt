@@ -162,14 +162,26 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 	artifactsJSON := defaultJSON(t.ArtifactsJSON, "[]")
 	budgetJSON := defaultJSON(t.BudgetCeilingJSON, "{}")
 
-	err := store.InsertTask(ctx, s.db, t, func(inserter store.TaskInserter) error {
-		_, err := inserter.ExecContext(ctx, `
-			INSERT INTO tasks (
-				id, parent_task_id, idempotency_key, workload_name, state,
-				input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
-			inputJSON, artifactsJSON, budgetJSON, created, updated)
+	query := `INSERT INTO tasks (
+		id, parent_task_id, idempotency_key, workload_name, state,
+		input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
+	) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`
+	args := []any{t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State), inputJSON, artifactsJSON, budgetJSON, created, updated}
+	if a, assigned := store.TaskConclaveAssignment(t); assigned {
+		// Use the same decoded assignment as the dispatcher, including for bare imports.
+		query += ` WHERE NOT EXISTS (SELECT 1 FROM councils WHERE id=?)
+			OR EXISTS (SELECT 1 FROM council_attempts WHERE council_id=? AND round=? AND role=? AND attempt=? AND task_id=?)`
+		args = append(args, a.ConclaveID, a.ConclaveID, a.Round, a.Role, a.Attempt, t.ID)
+	}
+	err := store.InsertTask(ctx, s.db, readCouncilPolicy, t, func(inserter store.TaskInserter) error {
+		res, err := inserter.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err == nil && n != 1 {
+			return errors.New("council task requires a reserved attempt")
+		}
 		return err
 	})
 	if err != nil {
@@ -258,7 +270,7 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 }
 
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, to, reason)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, readCouncilPolicy, to, reason)
 	if err != nil {
 		return err
 	}
