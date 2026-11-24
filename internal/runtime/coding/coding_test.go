@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -517,4 +518,160 @@ func TestCancelPreservesIndexAndWorktreeVersions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHarnessFinalResponse(t *testing.T) {
+	for _, tc := range []struct{ name, command, want string }{
+		{"answer", "printf 'review complete\\nVERDICT: PASS\\n'; printf 'diagnostic\\n' >&2", "review complete\nVERDICT: PASS"},
+		{"redacted", "printf pass; printf 'word=fixture-value\\n'", "password=[REDACTED:secret]"},
+		{"unfinished key", "printf '%s\\n' '-----BEGIN PRIVATE KEY-----' 'fixture payload'", ""},
+		{"stderr only", "printf 'VERDICT: PASS\\n' >&2", ""},
+		{"failed", "printf 'VERDICT: PASS\\n'; exit 1", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shellHarness(t, tc.command)
+			a, spec := codingFixture(t)
+			h := startTestTask(t, a, spec)
+			waitUntil(t, func() bool { return outputClosed(a.running[h.WorkDir]) })
+			if _, err := a.Observe(context.Background(), h); err != nil {
+				t.Fatal(err)
+			}
+			arts, err := NewAdapter(a.WorktreeRoot).CollectArtifacts(context.Background(), h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var final string
+			for _, art := range arts {
+				if art.Name == "final-message" {
+					final = strings.TrimRight(art.Text, "\n")
+				}
+			}
+			if final != tc.want {
+				t.Fatalf("final response = %q", final)
+			}
+		})
+	}
+}
+
+func TestPinnedWorktrees(t *testing.T) {
+	ctx := context.Background()
+	a, spec := codingFixture(t)
+	a.DryRun = true
+	h := startTestTask(t, a, spec)
+	testWrite(t, h.WorkDir, "change", "author content", 0o600)
+	if err := a.Stop(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	tip := strings.TrimSpace(testGit(t, spec.Workload.Spec.Coding.RepoPath, "rev-parse", h.Branch))
+	arts, err := a.CollectArtifacts(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved string
+	for _, art := range arts {
+		if art.Name == "git-commit" {
+			saved = art.Text
+		}
+	}
+	if saved != tip {
+		t.Fatalf("recorded author commit = %q, want %q", saved, tip)
+	}
+	testGit(t, spec.Workload.Spec.Coding.RepoPath, "branch", "-f", h.Branch, "HEAD")
+	for _, tc := range []struct {
+		name, commit    string
+		readOnly, valid bool
+	}{
+		{"verifier", tip, true, true}, {"remediation", tip, false, true}, {"missing", strings.Repeat("0", 40), true, false}, {"mutable ref", "HEAD", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec.TaskID = tc.name
+			h, err := a.StartAtCommit(ctx, spec, tc.commit, tc.readOnly)
+			if !tc.valid {
+				if err == nil {
+					t.Fatal("accepted invalid pin")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(h.WorkDir, "change"))
+			if err != nil || string(got) != "author content" || strings.TrimSpace(testGit(t, h.WorkDir, "rev-parse", "HEAD")) != tip {
+				t.Fatalf("author content=%q, err=%v", got, err)
+			}
+			if !tc.readOnly {
+				testWrite(t, h.WorkDir, "change", "remediation", 0o600)
+			}
+			if err := a.Stop(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestVerifierSandbox(t *testing.T) {
+	shellHarness(t, "exit 0")
+	work, scratch := t.TempDir(), t.TempDir()
+	bin, args, err := buildCommand("claude", "", work, "Review", scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		if bin != "/usr/bin/sandbox-exec" || !strings.Contains(args[1], "(deny file-write*)") || strings.Contains(args[1], work) || !strings.Contains(args[1], scratch) {
+			t.Fatalf("verifier policy = %v", args)
+		}
+	case "linux":
+		flags := strings.Join(args, "\n")
+		if bin != "bwrap" || !strings.Contains(flags, "--ro-bind\n/\n/\n") || strings.Contains(flags, "--bind\n"+work+"\n") {
+			t.Fatalf("verifier mounts = %v", args)
+		}
+	}
+	if _, _, err := buildCommand("claude", "unsupported", work, "Review", scratch); err == nil {
+		t.Fatal("verifier started without a read-only sandbox")
+	}
+}
+
+func TestVerifierCannotWriteCheckout(t *testing.T) {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true").CombinedOutput(); err != nil {
+			if strings.Contains(string(out), "Operation not permitted") {
+				t.Skip("nested Seatbelt denied by sandbox")
+			}
+			t.Fatalf("Seatbelt probe: %v (%s)", err, out)
+		}
+	case "linux":
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			t.Skip("bubblewrap unavailable")
+		}
+	default:
+		t.Skip("no native verifier sandbox")
+	}
+	shellHarness(t, `if test "$(cat change)" = "author content" && ! (echo modified >change) && ! touch new-file; then echo "verified read-only"; fi`)
+	a, spec := codingFixture(t)
+	a.DryRun = true
+	h := startTestTask(t, a, spec)
+	testWrite(t, h.WorkDir, "change", "author content", 0o600)
+	if err := a.Stop(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	tip := strings.TrimSpace(testGit(t, spec.Workload.Spec.Coding.RepoPath, "rev-parse", h.Branch))
+	spec.TaskID = "check"
+	a.DryRun = false
+	h, err := a.StartAtCommit(context.Background(), spec, tip, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return outputClosed(a.running[h.WorkDir]) })
+	arts, err := a.CollectArtifacts(context.Background(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, art := range arts {
+		if art.Name == "final-message" && strings.TrimSpace(art.Text) == "verified read-only" {
+			return
+		}
+	}
+	t.Fatal("verifier did not confirm a read-only checkout")
 }

@@ -3,10 +3,12 @@ package controlplane
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -197,7 +199,24 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 }
 
 // ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.
-func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) error {
+func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr error) {
+	r.mu.Lock()
+	if r.launching[taskID] != nil {
+		r.mu.Unlock()
+		return store.ErrConflict
+	}
+	attempt := &launchReservation{done: make(chan struct{})}
+	r.launching[taskID] = attempt
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.launching, taskID)
+		close(attempt.done)
+		r.mu.Unlock()
+	}()
+
+	attempt.tokenMu.Lock()
+	defer attempt.tokenMu.Unlock()
 	task, err := r.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -219,9 +238,17 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) error {
 	if _, err := model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, time.Hour); err != nil {
 		return err
 	}
+	defer func() {
+		if resumeErr != nil {
+			resumeErr = errors.Join(resumeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), taskID))
+		}
+	}()
 	if hasHandle && adapter != nil {
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		err := adapter.Resume(callCtx, handle, cp)
+		if callCtx.Err() != nil {
+			err = callCtx.Err()
+		}
 		cancel()
 		if err != nil {
 			return errors.New("runtime resume failed")
@@ -273,6 +300,10 @@ func NewReconciler(opts Options) *Reconciler {
 }
 
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
+	return r.submitTask(ctx, workloadName, idempotencyKey, inputJSON, "", nil)
+}
+
+func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON, parentID string, step *workflowStepRecord) (domain.Task, error) {
 	r.mu.Lock()
 	bundle := r.bundle
 	r.mu.Unlock()
@@ -286,12 +317,26 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 	if err != nil {
 		return domain.Task{}, err
 	}
+	if step != nil {
+		if idempotencyKey != "" {
+			digest := sha256.Sum256([]byte(idempotencyKey))
+			id = "task_" + hex.EncodeToString(digest[:16])
+		}
+		if step.RunID == "" {
+			step.RunID = id
+		}
+		// Publish membership before the submitted task can become visible to a worker.
+		if err := r.recordWorkflowStep(ctx, id, *step); err != nil {
+			return domain.Task{}, err
+		}
+	}
 	if idempotencyKey == "" {
 		idempotencyKey = id
 	}
 	now := r.now()
 	task := domain.Task{
 		ID:             id,
+		ParentTaskID:   parentID,
 		IdempotencyKey: idempotencyKey,
 		WorkloadName:   workloadName,
 		State:          domain.TaskStateSubmitted,
@@ -301,13 +346,20 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 	}
 	if err := r.store.CreateTask(ctx, task); err != nil {
 		if errors.Is(err, store.ErrConflict) {
+			if step != nil {
+				existing, getErr := r.store.GetTask(ctx, id)
+				if getErr == nil && existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
+					return existing, nil
+				}
+				return domain.Task{}, err
+			}
 			// The unique key selects the winner even when submissions race.
 			tasks, listErr := r.store.ListTasks(ctx)
 			if listErr != nil {
 				return domain.Task{}, listErr
 			}
 			for _, existing := range tasks {
-				if existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == "" {
+				if existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
 					return existing, nil
 				}
 			}
@@ -389,7 +441,7 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
-	return r.SubmitTask(ctx, step.Workload, "", string(raw))
+	return r.submitTask(ctx, step.Workload, "", string(raw), "", &workflowStepRecord{Workflow: workflowName})
 }
 
 // RetryTaskWithHandoff retries a task, optionally attaching a standardized failure-handoff.md
@@ -442,7 +494,16 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 		return domain.Task{}, err
 	}
 	idem := fmt.Sprintf("retry-%s-%d", orig.ID, attempt)
-	retried, err := r.SubmitTask(ctx, orig.WorkloadName, idem, string(raw))
+	member, err := r.workflowStep(ctx, orig.ID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if member != nil && payload["role"] != "verifier" {
+		if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
+			member.AuthorCommit = commit
+		}
+	}
+	retried, err := r.submitTask(ctx, orig.WorkloadName, idem, string(raw), orig.ParentTaskID, member)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -524,26 +585,25 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	// Only one pass at a time can observe and reserve task slots.
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
-	tasks, err := r.store.ListTasks(ctx)
-	if err != nil {
-		return err
-	}
 	r.mu.Lock()
+	launching := maps.Clone(r.launching)
 	bundle := r.bundle
 	passErr := r.launchErrors
 	r.launchErrors = nil
 	r.mu.Unlock()
+
+	tasks, err := r.store.ListTasks(ctx)
+	if err != nil {
+		return errors.Join(passErr, err)
+	}
 	activeWorking := 0
 	for _, task := range tasks {
-		if task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired {
+		if launching[task.ID] != nil || task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired {
 			activeWorking++
 		}
 	}
 	for _, task := range tasks {
-		r.mu.Lock()
-		launching := r.launching[task.ID] != nil
-		r.mu.Unlock()
-		if launching {
+		if launching[task.ID] != nil {
 			continue
 		}
 		if terminalTaskState(task.State) {
@@ -571,11 +631,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			if r.maxConcurrent > 0 && activeWorking >= r.maxConcurrent {
 				continue
 			}
-			claimed, err := r.claimLaunch(ctx, task.ID)
-			if err != nil && !errors.Is(err, store.ErrConflict) {
-				passErr = errors.Join(passErr, err)
-			}
-			if claimed {
+			if r.claimLaunch(task.ID) {
 				activeWorking++
 				go r.launchTask(ctx, task, wl, adapter)
 			}
@@ -706,10 +762,12 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, "runtime_exit_observed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
 			return err
 		}
-		r.mu.Lock()
-		delete(r.handles, task.ID)
-		delete(r.handleAdapters, task.ID)
-		r.mu.Unlock()
+		if handle.AdapterName != "docker" {
+			r.mu.Lock()
+			delete(r.handles, task.ID)
+			delete(r.handleAdapters, task.ID)
+			r.mu.Unlock()
+		}
 		task.State = target
 		return r.reconcileTerminal(context.WithoutCancel(ctx), task)
 	case scruntime.StateRunning:
@@ -747,24 +805,21 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 	return nil
 }
 
-func (r *Reconciler) claimLaunch(ctx context.Context, taskID string) (bool, error) {
+func (r *Reconciler) claimLaunch(taskID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.launching) >= maxParallelLaunches {
-		return false, nil
-	}
-	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`); err != nil {
-		return false, err
+	if len(r.launching) >= maxParallelLaunches || r.launching[taskID] != nil {
+		return false
 	}
 	r.launching[taskID] = &launchReservation{done: make(chan struct{})}
-	return true, nil
+	return true
 }
 
 func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
-	task.State = domain.TaskStateWorking
+	claimed := false
 	startFailed := false
 	defer func() {
-		if launchErr != nil {
+		if launchErr != nil && claimed {
 			cleanupCtx := context.WithoutCancel(ctx)
 			reason := "launch_failed"
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
@@ -789,9 +844,35 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		r.mu.Unlock()
 	}()
 
+	if err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`); err != nil {
+		return err
+	}
+	claimed = true
+	task.State = domain.TaskStateWorking
+
+	commit, readOnly, err := r.workflowCheckout(ctx, task, wl)
+	if err != nil {
+		return err
+	}
+	starter, supportsPin := adapter.(pinnedStarter)
+	if commit != "" && !supportsPin {
+		return errAuthorCheckoutUnavailable
+	}
 	inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
 	if err != nil {
 		return err
+	}
+	if readOnly {
+		var payload struct {
+			Packet string `json:"context_packet"`
+		}
+		if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil || payload.Packet == "" {
+			return errors.New("missing verifier prompt")
+		}
+		facts, _ := json.Marshal(verifierLaunch{Commit: commit, PromptDigest: promptDigest(payload.Packet)})
+		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, "verifier_checkout_pinned", string(facts)); err != nil {
+			return err
+		}
 	}
 	token, err := r.issueLaunchToken(ctx, task.ID)
 	if err != nil {
@@ -812,7 +893,13 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, adapterStartTimeout)
-	handle, startErr := adapter.Start(callCtx, spec)
+	var handle scruntime.Handle
+	var startErr error
+	if commit != "" {
+		handle, startErr = starter.StartAtCommit(callCtx, spec, commit, readOnly)
+	} else {
+		handle, startErr = adapter.Start(callCtx, spec)
+	}
 	if callCtx.Err() != nil {
 		startErr = callCtx.Err()
 	}
@@ -901,6 +988,23 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if err := json.Unmarshal([]byte(completedTask.InputJSON), &meta); err != nil || meta.Workflow == "" {
 		return nil
 	}
+	member, err := r.workflowStep(ctx, completedTask.ID)
+	if err != nil || member == nil {
+		return err
+	}
+	if member.Workflow != meta.Workflow || member.Index != meta.StepIndex {
+		return errors.New("workflow step does not match its registration")
+	}
+	rootStep, err := r.workflowStep(ctx, member.RunID)
+	if err != nil {
+		return err
+	}
+	if rootStep == nil || rootStep.Index != 0 || rootStep.RunID != member.RunID || rootStep.Workflow != member.Workflow {
+		return errors.New("missing workflow run registration")
+	}
+	if rootStep.Status == "halted" {
+		return nil
+	}
 	r.mu.Lock()
 	b := r.bundle
 	r.mu.Unlock()
@@ -917,13 +1021,25 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	}
 
 	if step.Role == "verifier" || meta.Role == "verifier" {
-		verdict, findings := finalVerifierVerdict(completedTask.ArtifactsJSON, meta.Prompt)
+		digest, err := r.verifierDigest(ctx, completedTask.ID, member.AuthorCommit)
+		if err != nil {
+			return err
+		}
+		verdict, findings := finalVerifierVerdict(completedTask.ArtifactsJSON, meta.Prompt, digest)
 		if verdict == "" {
 			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
 				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
 				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
 			})
-			return nil
+			root, err := r.store.GetTask(ctx, member.RunID)
+			if err != nil {
+				return err
+			}
+			if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, "workflow_halted_verdict_missing", fmt.Sprintf(`{"verifier_task_id":%q}`, completedTask.ID)); err != nil {
+				return err
+			}
+			rootStep.Status, rootStep.Reason = "halted", "verdict_missing"
+			return r.recordWorkflowStep(ctx, root.ID, *rootStep)
 		}
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
@@ -952,11 +1068,13 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 					"prompt":          authorStep.Prompt,
 					"input":           meta.Input,
 					"role":            authorStep.Role,
-					"tier":            authorStep.Tier,
 					"max_retries":     meta.MaxRetries,
 					"retry_count":     meta.RetryCount + 1,
 					"auto_remediate":  true,
 					"failure_handoff": handoff,
+				}
+				if authorStep.Tier != "" {
+					payload["tier"] = authorStep.Tier
 				}
 				if prov != "" {
 					payload["provider"] = prov
@@ -966,7 +1084,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				remTask, err := r.SubmitTask(ctx, authorStep.Workload, idem, string(raw))
+				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit})
 				if err != nil {
 					return err
 				}
@@ -1028,27 +1146,16 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
-	nextID, err := newTaskID()
+	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
+	if nextStep.Role == "verifier" {
+		next.AuthorCommit = authorCommit(completedTask.ArtifactsJSON)
+	}
+	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
+	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)
 	if err != nil {
 		return err
 	}
 	now := r.now()
-	child := domain.Task{
-		ID:             nextID,
-		ParentTaskID:   completedTask.ID,
-		IdempotencyKey: fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx),
-		WorkloadName:   nextStep.Workload,
-		State:          domain.TaskStateSubmitted,
-		InputJSON:      string(raw),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := r.store.CreateTask(ctx, child); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return nil
-		}
-		return err
-	}
 	_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
 		TaskID:    child.ID,
 		Role:      "system",

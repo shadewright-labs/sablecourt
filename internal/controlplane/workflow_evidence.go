@@ -2,12 +2,15 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"strings"
 
+	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
@@ -19,7 +22,67 @@ const maxFinalMessage = 64 * 1024
 
 var errAuthorCheckoutUnavailable = errors.New("runtime cannot guarantee the author's checkout for this step")
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
+// Only the control plane writes step registrations in the reserved system namespace.
+const workflowStepsNamespace = "system:workflow-steps"
+
+type workflowStepRecord struct {
+	RunID        string
+	Workflow     string
+	Index        int
+	AuthorCommit string
+	Status       string `json:",omitempty"`
+	Reason       string `json:",omitempty"`
+}
+
+func (r *Reconciler) recordWorkflowStep(ctx context.Context, id string, step workflowStepRecord) error {
+	raw, err := json.Marshal(step)
+	if err != nil {
+		return err
+	}
+	return r.store.PutMemory(ctx, domain.MemoryEntry{Namespace: workflowStepsNamespace, Key: id, Value: string(raw), Author: "controlplane", UpdatedAt: r.now()})
+}
+
+func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStepRecord, error) {
+	entry, err := r.store.GetMemory(ctx, workflowStepsNamespace, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var step workflowStepRecord
+	if err := json.Unmarshal([]byte(entry.Value), &step); err != nil || entry.Author != "controlplane" || step.RunID == "" || step.Workflow == "" || step.Index < 0 {
+		return nil, errors.New("invalid workflow step registration")
+	}
+	return &step, nil
+}
+
+func authorCommit(artifacts string) string {
+	var items []scruntime.Artifact
+	if json.Unmarshal([]byte(artifacts), &items) != nil {
+		return ""
+	}
+	commit := ""
+	for _, item := range items {
+		if item.Name != "git-commit" {
+			continue
+		}
+		if commit != "" || item.ContentType != "text/plain" || (len(item.Text) != 40 && len(item.Text) != 64) {
+			return ""
+		}
+		if _, err := hex.DecodeString(item.Text); err != nil {
+			return ""
+		}
+		commit = item.Text
+	}
+	return commit
+}
+
+type pinnedStarter interface {
+	StartAtCommit(context.Context, scruntime.LaunchSpec, string, bool) (scruntime.Handle, error)
+}
+
+func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl domain.Workload) (string, bool, error) {
 	var meta struct {
 		Workflow       string `json:"workflow"`
 		Role           string `json:"role"`
@@ -42,11 +105,22 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 			}
 		}
 		remediation := strings.HasPrefix(task.IdempotencyKey, "wf:"+meta.Workflow+":remediate:") ||
-			(role == "author" && meta.RetryCount > 0 && meta.FailureHandoff != "")
+			((role == "author" || wl.Spec.Class == domain.ClassCodingAgent) && meta.RetryCount > 0 && meta.FailureHandoff != "")
 		if role == "verifier" || remediation {
-			return "", errAuthorCheckoutUnavailable
+			member, err := r.workflowStep(ctx, task.ID)
+			if err != nil {
+				return "", false, err
+			}
+			if member == nil || member.Workflow != meta.Workflow || member.Index != meta.StepIndex || member.AuthorCommit == "" || wl.Spec.Class != domain.ClassCodingAgent {
+				return "", false, errAuthorCheckoutUnavailable
+			}
+			return member.AuthorCommit, role == "verifier", nil
 		}
 	}
+	return "", false, nil
+}
+
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
 	if wl.Spec.Class == domain.ClassDeterministicController {
 		return task.InputJSON, nil
 	}
@@ -127,48 +201,41 @@ func resolveTierRoute(ctx context.Context, st store.Store, wl domain.Workload, t
 			provider, model = route.Provider, route.Model
 		}
 	}
-	if !validRouteID(provider, 64) || !validRouteID(model, 128) {
-		return "", "", errors.New("invalid tier provider or model")
-	}
-	switch wl.Spec.Class {
-	case domain.ClassDeterministicController:
-		return "", "", errors.New("deterministic workload cannot use a model tier")
-	case domain.ClassCodingAgent:
-		if wl.Spec.Coding == nil || provider != "cli:"+wl.Spec.Coding.Harness || !harnessAcceptsModel(wl.Spec.Coding.Harness, model) {
-			return "", "", errors.New("tier model is incompatible with the workload harness")
-		}
+	if err := config.ValidateTierRoute(wl, provider, model); err != nil {
+		return "", "", err
 	}
 	return provider, model, nil
 }
 
-func validRouteID(value string, maxLen int) bool {
-	if len(value) == 0 || len(value) > maxLen || value[0] == '-' {
-		return false
-	}
-	for _, c := range value {
-		if ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || strings.ContainsRune("-._:/", c) {
-			continue
-		}
-		return false
-	}
-	return true
+type verifierLaunch struct {
+	Commit       string
+	PromptDigest string
 }
 
-func harnessAcceptsModel(harness, model string) bool {
-	switch harness {
-	case "claude":
-		return strings.HasPrefix(model, "claude-") || model == "opus" || model == "sonnet" || model == "haiku"
-	case "codex":
-		return strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "codex-")
-	case "agy":
-		return strings.HasPrefix(model, "gemini-") || strings.HasPrefix(model, "claude-")
-	default:
-		return false
+func promptDigest(text string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (r *Reconciler) verifierDigest(ctx context.Context, taskID, commit string) (string, error) {
+	events, err := r.store.ListTaskEvents(ctx, taskID)
+	if err != nil {
+		return "", err
 	}
+	for _, event := range events {
+		if event.Reason != "verifier_checkout_pinned" {
+			continue
+		}
+		var evidence verifierLaunch
+		if json.Unmarshal([]byte(event.FactJSON), &evidence) == nil && evidence.Commit == commit && commit != "" {
+			return evidence.PromptDigest, nil
+		}
+	}
+	return "", nil
 }
 
 // The adapter must identify the final message separately from logs and intermediate messages.
-func finalVerifierVerdict(artifactsJSON, prompt string) (verdict, findings string) {
+func finalVerifierVerdict(artifactsJSON, prompt, digest string) (verdict, findings string) {
 	if len(artifactsJSON) > 8*maxFinalMessage {
 		return "", ""
 	}
@@ -189,7 +256,7 @@ func finalVerifierVerdict(artifactsJSON, prompt string) (verdict, findings strin
 		return "", ""
 	}
 	text := strings.TrimRight(final.Text, "\r\n")
-	if strings.TrimSpace(text) == strings.TrimSpace(prompt) {
+	if digest == "" || promptDigest(text) == digest || strings.TrimSpace(text) == strings.TrimSpace(prompt) {
 		return "", ""
 	}
 	line := text[strings.LastIndexByte(text, '\n')+1:]

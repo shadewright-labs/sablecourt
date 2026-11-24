@@ -212,3 +212,38 @@ func TestVassalRoleIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestManifestTierHarness(t *testing.T) {
+	const manifest = `
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: author, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: claude, repoPath: repo}
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workflow
+metadata: {name: review}
+spec:
+  steps:
+    - {name: edit, workload: author, ROUTE}
+`
+	for _, tc := range []struct {
+		route string
+		valid bool
+	}{
+		{"tier: coding, provider: 'cli:claude', model: sonnet", true},
+		{"tier: coding, provider: 'cli:claude', model: gemini-test", false},
+		{"tier: coding, provider: 'cli:agy', model: gemini-test", false},
+		{"tier: fast", false},
+	} {
+		t.Run(tc.route, func(t *testing.T) {
+			_, err := LoadPath(writeTempManifest(t, strings.Replace(manifest, "ROUTE", tc.route, 1)))
+			if (err == nil) != tc.valid {
+				t.Fatalf("load returned %v", err)
+			}
+		})
+	}
+}
