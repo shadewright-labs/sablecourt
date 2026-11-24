@@ -2,15 +2,20 @@ package coding
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
-const maxSessionLine = 1024 * 1024
+const (
+	maxSessionLine = 1024 * 1024
+	maxSessionLog  = 1024 * 1024
+)
 
 var (
 	privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
@@ -19,13 +24,19 @@ var (
 )
 
 type sessionOutput struct {
-	file       *os.File
+	file       io.StringWriter
+	tail       *diagnosticTail
 	hub        *attach.Hub
 	taskID     string
 	pending    []byte
 	lineStart  int
 	privateKey bool
 	suppressed bool
+}
+
+func hasUnfinishedPrivateKey(text string) bool {
+	starts := privateKeyStart.FindAllStringIndex(text, -1)
+	return len(starts) > 0 && !privateKeyEnd.MatchString(text[starts[len(starts)-1][1]:])
 }
 
 func (s *sessionOutput) Write(chunk []byte) (int, error) {
@@ -99,9 +110,51 @@ func (s *sessionOutput) emit(clean string) error {
 	if clean == "" {
 		return nil
 	}
+	if s.tail != nil {
+		s.tail.add(clean)
+	}
 	if s.hub != nil {
 		s.hub.WriteOutput(s.taskID, []byte(clean))
 	}
 	_, err := s.file.WriteString(clean)
 	return err
+}
+
+type boundedLog struct {
+	mu      sync.Mutex
+	file    *os.File
+	hub     *attach.Hub
+	taskID  string
+	written int
+	full    bool
+	partial bool
+}
+
+func (l *boundedLog) WriteString(record string) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// A later record can come from the other stream after an incomplete line.
+	line := record
+	if l.partial {
+		line = "\n" + line
+	}
+	l.partial = !strings.HasSuffix(line, "\n")
+	if l.hub != nil {
+		l.hub.WriteOutput(l.taskID, []byte(line))
+	}
+	if l.full {
+		return len(record), nil
+	}
+	if l.written+len(line) > maxSessionLog {
+		l.full = true
+		const marker = "\n...[truncated]\n"
+		if l.written+len(marker) <= maxSessionLog {
+			_, err := l.file.WriteString(marker)
+			return len(record), err
+		}
+		return len(record), nil
+	}
+	n, err := l.file.WriteString(line)
+	l.written += n
+	return len(record), err
 }
