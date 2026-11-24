@@ -216,7 +216,7 @@ func (g *Gate) MCPHandler() http.Handler {
 			return nil
 		}
 		return g.NewServerForWorkload(ac.Lease, ac.Workload)
-	}, nil)
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := g.snapshot()
