@@ -3,462 +3,134 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sablecourt · Control Plane</title>
-  <link rel="icon" href="/favicon.ico?v=2" sizes="any">
-  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png?v=2">
-  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2">
+  <title>SableCourt · Control Plane</title>
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png?v=3">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=3">
+  <link rel="stylesheet" href="/assets/sablecourt.css?v=3">
   <style>
-    :root {
-      --bg-night: #08060E;
-      --bg-slate: #111422;
-      --bg-elevated: #171B2E;
-      --accent-indigo: #4C1D95;
-      --text-bone: #EFE9DC;
-      --text-muted: #B9B2A6;
-      --accent-jade: #2DD4BF;
-      --status-amber: #F0B86A;
-      --status-red: #F87171;
-      --border: #25203A;
-      --serif: "Iowan Old Style", Georgia, "Times New Roman", serif;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg-night);
-      color: var(--text-bone);
-      font-family: var(--sans);
-      line-height: 1.5;
-      -webkit-font-smoothing: antialiased;
-    }
-    .shell {
-      max-width: 1680px;
-      margin: 0 auto;
-      padding: 20px 24px 56px;
-    }
-
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 20px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 14px;
-      margin-bottom: 20px;
-    }
-    .brand img { height: 52px; width: auto; display: block; }
-    .header-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      height: 32px;
-      padding: 0 10px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg-slate);
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-    .dot-live {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--accent-jade);
-      display: inline-block;
-    }
-    .icon-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      height: 32px;
-      padding: 0 11px;
-      border-radius: 7px;
-      border: 1px solid rgba(255, 255, 255, 0.09);
-      background: linear-gradient(180deg, #1B1F35 0%, #131627 100%);
-      color: var(--text-bone);
-      font-family: var(--sans);
-      font-size: 12px;
-      font-weight: 500;
-      text-decoration: none;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-      transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
-    }
-    .icon-btn svg {
-      width: 14px;
-      height: 14px;
-      stroke: #8FE5D9;
-      fill: none;
-      stroke-width: 1.75;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-      flex-shrink: 0;
-    }
-    .icon-btn:hover {
-      border-color: rgba(45, 212, 191, 0.38);
-      background: linear-gradient(180deg, #232844 0%, #181C32 100%);
-      color: #FFFFFF;
-      text-decoration: none;
-    }
-    a { color: var(--accent-jade); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-
-    .banner {
-      font-family: var(--mono);
-      font-size: 12px;
-      padding: 10px 14px;
-      border-radius: 6px;
-      margin-bottom: 16px;
-      border: 1px solid;
-      background: var(--bg-slate);
-    }
-    .banner-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
-    .banner-err { color: var(--status-red); border-color: var(--status-red); }
-
-    /* 3-column command center layout */
-    .cockpit {
-      display: grid;
-      grid-template-columns: 280px minmax(0, 1fr) 340px;
-      gap: 20px;
-      align-items: start;
-    }
-    @media (max-width: 1180px) {
-      .cockpit { grid-template-columns: 1fr; }
-    }
-
-    .col-title {
-      font-family: var(--mono);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--text-muted);
-      margin: 0 0 10px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .panel {
-      background: var(--bg-slate);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 16px;
-    }
-    .panel-accent { border-top: 2px solid var(--accent-indigo); }
-    .panel-amber { border-top: 2px solid var(--status-amber); }
-
-    .kpi-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    .kpi {
-      background: var(--bg-night);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px;
-    }
-    .kpi-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; color: var(--text-muted); }
-    .kpi-val { font-family: var(--serif); font-size: 20px; color: var(--text-bone); margin-top: 2px; }
-    .kpi-sub { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
-
-    .house-item {
-      display: block;
-      padding: 10px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg-night);
-      margin-bottom: 8px;
-      color: var(--text-bone);
-    }
-    .house-item:last-child { margin-bottom: 0; }
-    .house-item:hover { border-color: var(--accent-jade); text-decoration: none; }
-    .house-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-    .house-name { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text-bone); }
-    .house-class { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-top: 4px; }
-
-    .badge {
-      display: inline-block;
-      font-family: var(--mono);
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      border: 1px solid;
-      background: var(--bg-night);
-      white-space: nowrap;
-    }
-    .b-ok { color: var(--accent-jade); border-color: var(--accent-jade); }
-    .b-wait { color: var(--status-amber); border-color: var(--status-amber); }
-    .b-err { color: var(--status-red); border-color: var(--status-red); }
-    .b-muted { color: var(--text-muted); border-color: var(--border); }
-
-    /* Center workspace */
-    .composer {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
     .composer-row {
       display: flex;
+      gap: 8px;
       flex-wrap: wrap;
-      gap: 10px;
       align-items: center;
-    }
-    select, textarea {
-      background: var(--bg-night);
-      color: var(--text-bone);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 9px 11px;
-      font-family: var(--mono);
-      font-size: 12px;
-    }
-    select:focus, textarea:focus { outline: none; border-color: var(--accent-jade); }
-    textarea { width: 100%; min-height: 68px; resize: vertical; }
-
-    button {
-      font-family: var(--sans);
-      font-size: 12px;
-      font-weight: 500;
-      padding: 8px 14px;
-      border-radius: 7px;
-      border: 1px solid rgba(45, 212, 191, 0.36);
-      background: linear-gradient(180deg, rgba(45, 212, 191, 0.20) 0%, rgba(76, 29, 149, 0.32) 100%);
-      color: #F5F2EA;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-      cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
-    }
-    button:hover {
-      background: linear-gradient(180deg, rgba(45, 212, 191, 0.28) 0%, rgba(76, 29, 149, 0.42) 100%);
-      border-color: rgba(45, 212, 191, 0.55);
-    }
-    button:active { transform: translateY(1px); }
-    button.btn-deny {
-      background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(248, 113, 113, 0.06) 100%);
-      border-color: rgba(248, 113, 113, 0.28);
-      color: #FCA5A5;
-      padding: 5px 10px;
-      font-size: 11px;
-    }
-    button.btn-deny:hover {
-      background: linear-gradient(180deg, rgba(248, 113, 113, 0.22) 0%, rgba(248, 113, 113, 0.10) 100%);
-      border-color: rgba(248, 113, 113, 0.45);
-    }
-    button.btn-approve {
-      background: linear-gradient(180deg, rgba(240, 184, 106, 0.18) 0%, rgba(240, 184, 106, 0.08) 100%);
-      border-color: rgba(240, 184, 106, 0.34);
-      color: #F6D29E;
-      padding: 5px 10px;
-      font-size: 11px;
-    }
-    button.btn-approve:hover {
-      background: linear-gradient(180deg, rgba(240, 184, 106, 0.26) 0%, rgba(240, 184, 106, 0.12) 100%);
-      border-color: rgba(240, 184, 106, 0.50);
-    }
-    button.btn-sm { padding: 4px 9px; font-size: 11px; }
-
-    .task-card {
-      background: var(--bg-night);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 12px;
-    }
-    .task-card:last-child { margin-bottom: 0; }
-    .task-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-    .task-meta {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--text-muted);
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-bottom: 8px;
-    }
-    .task-body {
-      background: var(--bg-slate);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 12px;
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--text-muted);
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 180px;
-      overflow-y: auto;
-    }
-    .filter-tabs { display: flex; gap: 6px; align-items: center; }
-    .filter-tab {
-      font-family: var(--mono); font-size: 10px; padding: 3px 8px; border-radius: 5px;
-      border: 1px solid var(--border); background: var(--bg-night); color: var(--text-muted);
-      text-decoration: none;
-    }
-    .filter-tab:hover { border-color: rgba(45,212,191,0.38); color: var(--text-bone); text-decoration: none; }
-    .filter-tab.active { border-color: rgba(45,212,191,0.45); background: rgba(45,212,191,0.10); color: #5EEAD4; }
-    .task-reply {
-      margin-top: 8px;
-      background: rgba(76, 29, 149, 0.14);
-      border: 1px solid rgba(167, 139, 250, 0.25);
-      border-left: 3px solid #A78BFA;
-      border-radius: 6px;
-      padding: 9px 11px;
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--text-bone);
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .task-actions { display: flex; gap: 8px; align-items: center; }
-    .task-actions form { margin: 0; }
-
-    /* Right rail */
-    .apr-card {
-      background: var(--bg-night);
-      border: 1px solid var(--status-amber);
-      border-radius: 6px;
-      padding: 12px;
       margin-bottom: 10px;
     }
-    .apr-card:last-child { margin-bottom: 0; }
-    .apr-cap { font-family: var(--mono); font-size: 12px; color: var(--text-bone); font-weight: 600; }
-    .apr-meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin: 4px 0 10px; }
-    .actions-inline { display: flex; gap: 8px; }
-    .actions-inline form { margin: 0; }
-
-    .audit-row {
-      padding: 8px 0;
-      border-bottom: 1px solid var(--border);
-      font-family: var(--mono);
-      font-size: 11px;
-    }
-    .audit-row:last-child { border-bottom: none; padding-bottom: 0; }
-    .audit-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    .audit-sub { color: var(--text-muted); margin-top: 2px; word-break: break-all; }
-
-    .empty { color: var(--text-muted); font-size: 12px; font-family: var(--mono); margin: 4px 0; }
-
-    footer {
-      margin-top: 32px;
-      padding-top: 14px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-    .footer-mark { display: flex; align-items: center; gap: 8px; }
-    .footer-mark img { height: 20px; width: auto; }
+    .composer-row select { flex: 1; min-width: 150px; }
+    .task-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .task-actions form, .actions-inline form { margin: 0; }
+    .actions-inline { display: flex; gap: 8px; flex-wrap: wrap; }
+    .empty { color: var(--muted-dim); font-size: 12px; font-family: var(--mono); margin: 4px 0; }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header>
-      <div class="brand">
-        <a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt - Shadewright Labs"></a>
-      </div>
-      <div class="header-actions">
-        <span class="status-pill" title="Last observation timestamp (UTC)">
-          <span class="dot-live"></span>
-          <span>{{.ObservedAt}}</span>
-        </span>
-        <a class="icon-btn" href="/conclaves" title="Multi-agent Conclaves, Wards, and Decrees">
+  <header class="sc-topbar">
+    <div class="sc-topbar-inner">
+      <a class="sc-brand" href="/" title="SableCourt · The Court">
+        <img src="/assets/logo-horizontal-nolabs-dark.png?v=3" alt="SableCourt">
+      </a>
+      <nav class="sc-nav" aria-label="Primary navigation">
+        <a href="/" class="active">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>Cockpit</span>
+        </a>
+        <a href="/conclaves">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M10.5 7.5 6.5 16.5"/><path d="M13.5 7.5 17.5 16.5"/><path d="M8 19h8"/></svg>
           <span>Conclaves</span>
         </a>
-        <a class="icon-btn" href="/schedules" title="Cron schedules and manual triggers">
+        <a href="/schedules">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
           <span>Schedules</span>
         </a>
-        <a class="icon-btn" href="/memory" title="Persistent FTS5 Court Memory">
+        <a href="/memory">
           <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>
           <span>Memory</span>
         </a>
-        <a class="icon-btn" href="/audit" title="Tamper-evident audit tribunal and SHA-256 chain verifier">
+        <a href="/audit">
           <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
           <span>Audit</span>
         </a>
-        <a class="icon-btn" href="/studio" title="Define agents and fixed workflows">
+        <a href="/studio">
           <svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
           <span>Studio</span>
         </a>
-        <a class="icon-btn" href="/providers" title="Connect LLM providers and sync models">
+        <a href="/providers">
           <svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="4"/></svg>
           <span>Providers</span>
         </a>
-        <a class="icon-btn" href="/" title="Refresh observed facts">
-          <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
-          <span>Refresh</span>
-        </a>
-        <a class="icon-btn" href="/.well-known/agent-card.json" title="A2A Agent Card JSON">
-          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M15 8h2"/><path d="M15 12h2"/><path d="M7 16h10"/></svg>
-          <span>Agent Card</span>
-        </a>
-        <a class="icon-btn" href="/healthz" title="Control plane health endpoint">
-          <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-          <span>Health</span>
-        </a>
+      </nav>
+      <div class="sc-top-right">
+        <span class="sc-live-pill" title="Last observation timestamp (UTC)">
+          <span class="sc-pulse"></span>
+          <span>{{.ObservedAt}}</span>
+        </span>
+        <button type="button" class="sc-cmdk-btn" data-open-cmdk title="Open Command Palette">
+          <span>Jump</span>
+          <span class="sc-kbd">⌘K</span>
+        </button>
       </div>
-    </header>
+    </div>
+  </header>
 
-    {{if .Notice}}<div class="banner banner-ok">{{.Notice}}</div>{{end}}
-    {{if .ErrMsg}}<div class="banner banner-err">{{.ErrMsg}}</div>{{end}}
+  <div class="sc-shell sc-enter">
+    {{if .Notice}}<div class="sc-banner sc-banner-ok">{{.Notice}}</div>{{end}}
+    {{if .ErrMsg}}<div class="sc-banner sc-banner-err">{{.ErrMsg}}</div>{{end}}
 
-    <div class="cockpit">
-      <!-- LEFT RAIL: Houses & Budget -->
-      <aside>
-        <div class="panel panel-accent">
-          <div class="col-title"><span>Control plane</span></div>
-          <div class="kpi-grid">
-            <div class="kpi">
-              <div class="kpi-label">Active</div>
-              <div class="kpi-val">{{.ActiveTasks}}</div>
-              <div class="kpi-sub">{{len .Tasks}} total</div>
-            </div>
-            <div class="kpi">
-              <div class="kpi-label">Approvals</div>
-              <div class="kpi-val">{{len .Approvals}}</div>
-              <div class="kpi-sub">pending</div>
-            </div>
-            <div class="kpi" style="grid-column: span 2;">
-              <div class="kpi-label">Observed model spend</div>
-              <div class="kpi-val">${{.TotalCostUSD}}</div>
-              <div class="kpi-sub">{{.TotalTokens}} tokens recorded</div>
-            </div>
-          </div>
+    <!-- BENTO KPI STRIP -->
+    <section class="sc-bento-kpis" aria-label="Control plane overview">
+      <div class="sc-kpi-card">
+        <div class="sc-kpi-head">
+          <span>Active Tasks</span>
+          <i class="sc-glyph sc-glyph-working" aria-hidden="true"></i>
         </div>
+        <div class="sc-kpi-val">{{.ActiveTasks}}</div>
+        <div class="sc-kpi-sub">{{.TotalTasks}} recorded · {{len .Tasks}} shown</div>
+      </div>
 
-        <div class="panel">
-          <div class="col-title">
-            <span>Houses (workloads)</span>
-            <span>{{len .Workloads}}</span>
+      <div class="sc-kpi-card {{if gt (len .Approvals) 0}}is-alert{{end}}">
+        <div class="sc-kpi-head">
+          <span>Tribunal Approvals</span>
+          <i class="sc-glyph {{if gt (len .Approvals) 0}}sc-glyph-approval{{else}}sc-glyph-idle{{end}}" aria-hidden="true"></i>
+        </div>
+        <div class="sc-kpi-val">{{len .Approvals}}</div>
+        <div class="sc-kpi-sub">{{if gt (len .Approvals) 0}}awaiting human signature{{else}}all capability gates clear{{end}}</div>
+      </div>
+
+      <div class="sc-kpi-card">
+        <div class="sc-kpi-head">
+          <span>Observed Model Spend</span>
+          <i class="sc-glyph sc-glyph-idle" aria-hidden="true"></i>
+        </div>
+        <div class="sc-kpi-val">${{.TotalCostUSD}}</div>
+        <div class="sc-kpi-sub">{{.TotalTokens}} tokens metered</div>
+      </div>
+
+      <div class="sc-kpi-card">
+        <div class="sc-kpi-head">
+          <span>Declared Houses</span>
+          <i class="sc-glyph sc-glyph-idle" aria-hidden="true"></i>
+        </div>
+        <div class="sc-kpi-val">{{len .Workloads}}</div>
+        <div class="sc-kpi-sub">runtime &amp; sandbox workloads</div>
+      </div>
+    </section>
+
+    <div class="sc-cockpit">
+      <!-- LEFT RAIL: Houses (Workloads) -->
+      <aside>
+        <div class="sc-panel sc-panel-indigo">
+          <div class="sc-panel-head">
+            <h2 class="sc-panel-title">Houses (Workloads)</h2>
+            <span class="sc-badge">{{len .Workloads}}</span>
           </div>
           {{if .Workloads}}
             {{range .Workloads}}
-            <a class="house-item" href="/?workload={{.Name}}">
-              <div class="house-top">
-                <span class="house-name">{{.Name}}</span>
-                <span class="badge {{if eq (printf "%s" .Zone) "sandbox"}}b-wait{{else}}b-ok{{end}}">{{.Zone}}</span>
+            <a class="sc-house" href="/?workload={{.Name}}">
+              <div class="sc-house-top">
+                <span class="sc-house-name">{{.Name}}</span>
+                <span class="sc-badge {{if eq (printf "%s" .Zone) "sandbox"}}sc-badge-amber{{else}}sc-badge-jade{{end}}">{{.Zone}}</span>
               </div>
-              <div class="house-class">{{.Class}}</div>
+              <div class="sc-house-class">{{.Class}}</div>
             </a>
             {{end}}
           {{else}}
@@ -467,15 +139,15 @@
         </div>
       </aside>
 
-      <!-- CENTER WORKSPACE: Dispatch + Task Stream & Threads -->
+      <!-- CENTER WORKSPACE: Dispatch Composer + Task Stream -->
       <main>
         {{if .Workloads}}
-        <div class="panel panel-accent">
-          <div class="col-title">
-            <span>Dispatch task</span>
-            <span>plain text or JSON</span>
+        <div class="sc-panel sc-panel-jade">
+          <div class="sc-panel-head">
+            <h2 class="sc-panel-title">Dispatch Task</h2>
+            <span class="sc-badge">plain text or JSON</span>
           </div>
-          <form class="composer" method="POST" action="/ui/tasks">
+          <form method="POST" action="/ui/tasks">
             <div class="composer-row">
               <select id="wl-select" name="workload" required>
                 {{range .Workloads}}
@@ -493,61 +165,67 @@
                 <option value="">default model</option>
               </select>
               {{end}}
-              <button type="button" id="btn-voice-prompt" title="Dictate task prompt via local STT" style="background:transparent; color:var(--text-muted); border:1px solid var(--border);">Mic</button>
-              <button type="submit">Dispatch task</button>
+              <button type="button" id="btn-voice-prompt" class="sc-btn" title="Dictate task prompt via local STT">Mic</button>
+              <button type="submit" class="sc-btn sc-btn-primary">Dispatch</button>
             </div>
             <textarea id="task-prompt-input" name="input_json" placeholder="Describe the task or paste JSON payload (e.g. Fix timeout in sqlite store)..."></textarea>
           </form>
         </div>
         {{end}}
 
-        <div class="panel">
-          <div class="col-title">
-            <span>Tasks &amp; threads ({{len .Tasks}} / {{.TotalTasks}})</span>
-            <div class="filter-tabs">
-              <a class="filter-tab {{if eq .StateFilter "all"}}active{{end}}" href="/?state=all">all</a>
-              <a class="filter-tab {{if eq .StateFilter "active"}}active{{end}}" href="/?state=active">active</a>
-              <a class="filter-tab {{if eq .StateFilter "completed"}}active{{end}}" href="/?state=completed">completed</a>
-              <a class="filter-tab {{if eq .StateFilter "failed"}}active{{end}}" href="/?state=failed">failed</a>
+        <div class="sc-panel">
+          <div class="sc-panel-head">
+            <h2 class="sc-panel-title">Tasks &amp; Threads ({{len .Tasks}} / {{.TotalTasks}})</h2>
+            <div class="sc-tabs">
+              <a class="sc-tab {{if eq .StateFilter "all"}}active{{end}}" href="/?state=all">all</a>
+              <a class="sc-tab {{if eq .StateFilter "active"}}active{{end}}" href="/?state=active">active</a>
+              <a class="sc-tab {{if eq .StateFilter "completed"}}active{{end}}" href="/?state=completed">completed</a>
+              <a class="sc-tab {{if eq .StateFilter "failed"}}active{{end}}" href="/?state=failed">failed</a>
             </div>
           </div>
           {{if .Tasks}}
             {{range .Tasks}}
-            <div class="task-card">
-              <div class="task-head">
+            <article class="sc-task">
+              <div class="sc-task-head">
                 <div>
-                  <a href="/tasks/{{.Task.ID}}" style="font-family:var(--mono);font-size:13px;font-weight:600;">{{.Task.ID}}</a>
-                  <span style="font-family:var(--mono);font-size:12px;color:var(--text-muted);margin-left:8px;">{{.Task.WorkloadName}}</span>
+                  <a class="sc-task-id" href="/tasks/{{.Task.ID}}">{{.Task.ID}}</a>
+                  <span class="sc-task-wl">{{.Task.WorkloadName}}</span>
                 </div>
                 <div class="task-actions">
-                  <span class="badge {{if eq (printf "%s" .Task.State) "failed"}}b-err{{else if eq (printf "%s" .Task.State) "input-required"}}b-wait{{else if eq (printf "%s" .Task.State) "working"}}b-ok{{else}}b-muted{{end}}">{{.Task.State}}</span>
-                  {{if .Stale}}<span class="badge b-wait">stale</span>{{end}}
+                  <span class="sc-badge {{if eq (printf "%s" .Task.State) "failed"}}sc-badge-red{{else if eq (printf "%s" .Task.State) "input-required"}}sc-badge-amber{{else if eq (printf "%s" .Task.State) "working"}}sc-badge-jade{{end}}">
+                    <i class="sc-glyph {{if eq (printf "%s" .Task.State) "working"}}sc-glyph-working{{else if eq (printf "%s" .Task.State) "input-required"}}sc-glyph-approval{{else if eq (printf "%s" .Task.State) "failed"}}sc-glyph-failed{{else}}sc-glyph-idle{{end}}"></i>
+                    {{.Task.State}}
+                  </span>
+                  {{if .Stale}}<span class="sc-badge sc-badge-amber"><i class="sc-glyph sc-glyph-stale"></i>stale</span>{{end}}
                   {{if .Suspendable}}
                   <form method="POST" action="/ui/tasks/{{.Task.ID}}/suspend">
-                    <button type="submit" class="btn-approve">Suspend</button>
+                    <button type="submit" class="sc-btn sc-btn-amber sc-btn-sm">Suspend</button>
                   </form>
                   {{end}}
                   {{if .Resumable}}
                   <form method="POST" action="/ui/tasks/{{.Task.ID}}/resume">
-                    <button type="submit" class="btn-sm">Resume</button>
+                    <button type="submit" class="sc-btn sc-btn-sm">Resume</button>
                   </form>
                   {{end}}
                   {{if .Cancelable}}
                   <form method="POST" action="/ui/tasks/{{.Task.ID}}/cancel">
-                    <button type="submit" class="btn-deny">Cancel</button>
+                    <button type="submit" class="sc-btn sc-btn-danger sc-btn-sm">Cancel</button>
                   </form>
                   {{end}}
-                  <a href="/tasks/{{.Task.ID}}" style="font-family:var(--mono);font-size:11px;">Open &rarr;</a>
+                  <form method="POST" action="/ui/tasks/{{.Task.ID}}/retry">
+                    <button type="submit" class="sc-btn sc-btn-sm" title="Re-submit with original input">Retry</button>
+                  </form>
+                  <a class="sc-btn sc-btn-sm" href="/tasks/{{.Task.ID}}">Open &rarr;</a>
                 </div>
               </div>
-              <div class="task-meta">
+              <div class="sc-task-meta">
                 <span>created {{.Task.CreatedAt.Format "15:04:05Z"}}</span>
                 <span>heartbeat {{if .Task.LastHeartbeatAt}}{{.Task.LastHeartbeatAt.Format "15:04:05Z"}}{{else}}none{{end}}</span>
                 {{if .Task.ParentTaskID}}<span>parent {{.Task.ParentTaskID}}</span>{{end}}
               </div>
-              <div class="task-body">{{.Task.InputJSON}}</div>
-              {{if .LastReply}}<div class="task-reply">{{.LastReply}}</div>{{end}}
-            </div>
+              <div class="sc-task-body">{{.Task.InputJSON}}</div>
+              {{if .LastReply}}<div class="sc-task-reply">{{.LastReply}}</div>{{end}}
+            </article>
             {{end}}
           {{else}}
             <p class="empty">No tasks dispatched yet. Pick a workload above to start a thread.</p>
@@ -555,18 +233,18 @@
         </div>
       </main>
 
-      <!-- RIGHT RAIL: Tribunal (Approvals + Audit Stream) -->
+      <!-- RIGHT RAIL: Tribunal Approvals & Audit Stream -->
       <aside>
-        <div class="panel panel-amber">
-          <div class="col-title">
-            <span>Tribunal · Approvals</span>
-            <span>{{len .Approvals}}</span>
+        <div class="sc-panel sc-panel-amber">
+          <div class="sc-panel-head">
+            <h2 class="sc-panel-title">Tribunal · Approvals</h2>
+            <span class="sc-badge {{if gt (len .Approvals) 0}}sc-badge-amber{{end}}">{{len .Approvals}}</span>
           </div>
           {{if .Approvals}}
             {{range .Approvals}}
-            <div class="apr-card">
-              <div class="apr-cap">{{.Capability}}</div>
-              <div class="apr-meta">
+            <div class="sc-apr">
+              <div class="sc-apr-cap">{{.Capability}}</div>
+              <div class="sc-apr-meta">
                 <div>{{.WorkloadName}} · {{.ID}}</div>
                 <div title="{{.PayloadSHA256}}">sha256: {{printf "%.16s" .PayloadSHA256}}...</div>
                 <div>expires {{.ExpiresAt.Format "15:04:05Z"}}</div>
@@ -574,10 +252,10 @@
               <div class="actions-inline">
                 <form method="POST" action="/ui/approvals/{{.ID}}/approve">
                   <input type="hidden" name="expected_sha256" value="{{.PayloadSHA256}}">
-                  <button type="submit" class="btn-approve">Approve (OOB)</button>
+                  <button type="submit" class="sc-btn sc-btn-amber sc-btn-sm">Approve (OOB)</button>
                 </form>
                 <form method="POST" action="/ui/approvals/{{.ID}}/deny">
-                  <button type="submit" class="btn-deny">Deny</button>
+                  <button type="submit" class="sc-btn sc-btn-danger sc-btn-sm">Deny</button>
                 </form>
               </div>
             </div>
@@ -587,19 +265,19 @@
           {{end}}
         </div>
 
-        <div class="panel">
-          <div class="col-title">
-            <span>Audit stream</span>
-            <span>latest {{len .Audit}}</span>
+        <div class="sc-panel">
+          <div class="sc-panel-head">
+            <h2 class="sc-panel-title">Audit Stream</h2>
+            <a class="sc-badge" href="/audit">latest {{len .Audit}} &rarr;</a>
           </div>
           {{if .Audit}}
             {{range .Audit}}
-            <div class="audit-row">
-              <div class="audit-top">
+            <div class="sc-audit-row">
+              <div class="sc-audit-top">
                 <span>{{.Action}}</span>
-                <span class="badge {{if eq .Outcome "denied"}}b-err{{else if eq .Outcome "pending"}}b-wait{{else}}b-ok{{end}}">{{.Outcome}}</span>
+                <span class="sc-badge {{if eq .Outcome "denied"}}sc-badge-red{{else if eq .Outcome "pending"}}sc-badge-amber{{else}}sc-badge-jade{{end}}">{{.Outcome}}</span>
               </div>
-              <div class="audit-sub">{{.CreatedAt.Format "15:04:05Z"}} · {{.Category}}{{if .WorkloadName}} · {{.WorkloadName}}{{end}}</div>
+              <div class="sc-audit-sub">{{.CreatedAt.Format "15:04:05Z"}} · {{.Category}}{{if .WorkloadName}} · {{.WorkloadName}}{{end}}</div>
             </div>
             {{end}}
           {{else}}
@@ -609,14 +287,16 @@
       </aside>
     </div>
 
-    <footer>
-      <div class="footer-mark">
-        <img src="/assets/mark-transparent.png" alt="Sablecourt mark">
-        <span>Sablecourt · Shadewright Labs</span>
+    <footer class="sc-footer">
+      <div class="sc-footer-house">
+        <img src="/assets/shadewright-labs-mark.svg?v=3" alt="ShadeWright Labs seal">
+        <span>SableCourt · by ShadeWright Labs · Many agents. One set of rules.</span>
       </div>
-      <span>127.0.0.1 local control plane · evidence over inference</span>
+      <span>Crafted in Shadow. Engineered with Purpose. · Press ⌘K to jump</span>
     </footer>
   </div>
+
+  <script src="/assets/app.js?v=3"></script>
   <script>
     (function () {
       const modelsByProvider = {{if .ModelsByProvider}}{{.ModelsByProvider}}{{else}}{}{{end}};
@@ -655,15 +335,10 @@
       let initial = null;
       const es = new EventSource("/api/v1/stream");
       es.addEventListener("state", function (ev) {
-        if (initial === null) {
-          initial = ev.data;
-          return;
-        }
+        if (initial === null) { initial = ev.data; return; }
         if (ev.data === initial) return;
         const active = document.activeElement;
-        if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.tagName === "SELECT")) {
-          return;
-        }
+        if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.tagName === "SELECT")) return;
         window.location.reload();
       });
     })();

@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sablecourt · Conclaves</title>
-  <link rel="icon" href="/favicon.ico?v=2" sizes="any">
+  <title>SableCourt · Conclaves</title>
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any">
+  <link rel="stylesheet" href="/assets/sablecourt.css?v=3">
   <style>
     :root {
       --bg-night: #08060E;
@@ -54,16 +55,24 @@
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header>
-      <div class="brand"><a href="/"><img src="/assets/logo-horizontal-dark.png?v=2" alt="Sablecourt"></a></div>
-      <div class="nav">
-        <a class="btn-nav" href="/">Cockpit</a>
-        <a class="btn-nav" href="/conclaves">Conclaves</a>
-        <a class="btn-nav" href="/studio">Studio</a>
-        <a class="btn-nav" href="/providers">Providers</a>
+  <header class="sc-topbar">
+    <div class="sc-topbar-inner">
+      <a class="sc-brand" href="/"><img src="/assets/logo-horizontal-nolabs-dark.png?v=3" alt="SableCourt"></a>
+      <nav class="sc-nav" aria-label="Primary navigation">
+        <a href="/">Cockpit</a>
+        <a href="/conclaves" class="active">Conclaves</a>
+        <a href="/schedules">Schedules</a>
+        <a href="/memory">Memory</a>
+        <a href="/audit">Audit</a>
+        <a href="/studio">Studio</a>
+        <a href="/providers">Providers</a>
+      </nav>
+      <div class="sc-top-right">
+        <button type="button" class="sc-cmdk-btn" data-open-cmdk><span>Jump</span><span class="sc-kbd">⌘K</span></button>
       </div>
-    </header>
+    </div>
+  </header>
+  <div class="shell sc-enter">
 
     {{if .Notice}}<div class="banner banner-ok">{{.Notice}}</div>{{end}}
     {{if .ErrMsg}}<div class="banner banner-err">{{.ErrMsg}}</div>{{end}}
@@ -108,5 +117,6 @@
       </section>
     </div>
   </div>
+    <script src="/assets/app.js?v=3"></script>
 </body>
 </html>
