@@ -44,8 +44,11 @@ type Reconciler struct {
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
 
-	mu      sync.Mutex
-	handles map[string]scruntime.Handle
+	reconcileMu    sync.Mutex
+	mu             sync.Mutex
+	handles        map[string]scruntime.Handle
+	handleAdapters map[string]scruntime.Adapter
+	launching      map[string]bool
 }
 
 func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
@@ -56,44 +59,55 @@ func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
 }
 
 func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) error {
+	// Serialize cancellation with publication of a newly started handle.
+	r.mu.Lock()
 	task, err := r.store.GetTask(ctx, taskID)
 	if err != nil {
+		r.mu.Unlock()
 		return err
 	}
-	if task.State == domain.TaskStateCompleted || task.State == domain.TaskStateFailed || task.State == domain.TaskStateCancelled {
+	if terminalTaskState(task.State) {
+		r.mu.Unlock()
 		return store.ErrConflict
 	}
-
-	r.mu.Lock()
-	handle, hasHandle := r.handles[taskID]
-	delete(r.handles, taskID)
-	var wl domain.Workload
-	if r.bundle != nil {
-		wl = r.bundle.Workloads[task.WorkloadName]
-	}
-	r.mu.Unlock()
-
-	if hasHandle {
-		if adapter := r.adapters[wl.Spec.Class]; adapter != nil {
-			_ = adapter.Stop(ctx, handle)
-		}
-	}
-	_ = r.store.RevokeTaskLeases(ctx, taskID)
 	if reason == "" {
 		reason = "operator_cancelled"
 	}
-	if err := r.store.UpdateTaskState(ctx, taskID, task.State, domain.TaskStateCancelled, reason, `{}`); err != nil {
+	err = r.store.UpdateTaskState(ctx, taskID, task.State, domain.TaskStateCancelled, reason, `{}`)
+	r.mu.Unlock()
+	if err != nil {
 		return err
 	}
+	cleanupCtx := context.WithoutCancel(ctx)
+	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, taskID), r.stopTask(cleanupCtx, taskID))
 	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-		Category:     "controlplane",
-		TaskID:       taskID,
-		WorkloadName: task.WorkloadName,
-		Action:       "task.cancel",
-		Outcome:      "cancelled",
-		DetailJSON:   fmt.Sprintf(`{"reason":%q}`, reason),
-		CreatedAt:    r.now(),
+		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
+		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
 	})
+	return cleanupErr
+}
+
+func terminalTaskState(state domain.TaskState) bool {
+	return state == domain.TaskStateCompleted || state == domain.TaskStateFailed || state == domain.TaskStateCancelled
+}
+
+// stopTask retains the handle if stopping fails so a later pass can retry cleanup.
+func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	handle, ok := r.handles[taskID]
+	if !ok {
+		return nil
+	}
+	adapter := r.handleAdapters[taskID]
+	if adapter == nil {
+		return errors.New("runtime adapter unavailable for cleanup")
+	}
+	if err := adapter.Stop(ctx, handle); err != nil {
+		return fmt.Errorf("stop task: %w", err)
+	}
+	delete(r.handles, taskID)
+	delete(r.handleAdapters, taskID)
 	return nil
 }
 
@@ -218,14 +232,19 @@ func NewReconciler(opts Options) *Reconciler {
 		onTaskFailed:    opts.OnTaskFailed,
 		now:             nowFn,
 		handles:         make(map[string]scruntime.Handle),
+		handleAdapters:  make(map[string]scruntime.Adapter),
+		launching:       make(map[string]bool),
 	}
 }
 
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
-	if r.bundle == nil {
+	r.mu.Lock()
+	bundle := r.bundle
+	r.mu.Unlock()
+	if bundle == nil {
 		return domain.Task{}, errors.New("no workload bundle loaded")
 	}
-	if _, ok := r.bundle.Workloads[workloadName]; !ok {
+	if _, ok := bundle.Workloads[workloadName]; !ok {
 		return domain.Task{}, fmt.Errorf("unknown workload %q", workloadName)
 	}
 	id, err := newTaskID()
@@ -246,6 +265,18 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 		UpdatedAt:      now,
 	}
 	if err := r.store.CreateTask(ctx, task); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			// The unique key selects the winner even when submissions race.
+			tasks, listErr := r.store.ListTasks(ctx)
+			if listErr != nil {
+				return domain.Task{}, listErr
+			}
+			for _, existing := range tasks {
+				if existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == "" {
+					return existing, nil
+				}
+			}
+		}
 		return domain.Task{}, err
 	}
 	if inputJSON != "" && inputJSON != "{}" {
@@ -323,38 +354,52 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	if err != nil {
 		return domain.Task{}, err
 	}
-	inputJSON := orig.InputJSON
-	if withHandoff {
-		events, _ := r.store.ListTaskEvents(ctx, orig.ID)
-		msgs, _ := r.store.ListTaskMessages(ctx, orig.ID)
-		handoff := contextpack.BuildFailureHandoff(orig, events, msgs, reason)
-		payload := make(map[string]any)
-		if err := json.Unmarshal([]byte(orig.InputJSON), &payload); err != nil {
-			payload = map[string]any{"prompt": orig.InputJSON}
-		}
-		retryCount := 0
-		if v, ok := payload["retry_count"].(float64); ok {
-			retryCount = int(v)
-		}
-		payload["retry_count"] = retryCount + 1
-		payload["retried_from"] = orig.ID
-		payload["failure_handoff"] = handoff
-		if raw, err := json.Marshal(payload); err == nil {
-			inputJSON = string(raw)
-		}
+	if !terminalTaskState(orig.State) {
+		return domain.Task{}, fmt.Errorf("%w: retry requires a terminal task", store.ErrConflict)
 	}
-	idem := fmt.Sprintf("retry-%s-%d", orig.ID, r.now().UnixNano())
-	retried, err := r.SubmitTask(ctx, orig.WorkloadName, idem, inputJSON)
+	r.mu.Lock()
+	_, hasHandle := r.handles[orig.ID]
+	launching := r.launching[orig.ID]
+	r.mu.Unlock()
+	if hasHandle || launching {
+		return domain.Task{}, fmt.Errorf("%w: runtime cleanup is pending", store.ErrConflict)
+	}
+	payload := make(map[string]any)
+	if err := json.Unmarshal([]byte(orig.InputJSON), &payload); err != nil || payload == nil {
+		payload = map[string]any{"prompt": orig.InputJSON}
+	}
+	// Each task can have one successor. Retrying that successor advances the attempt.
+	attempt := 1
+	var meta struct {
+		RetryCount int `json:"retry_count"`
+	}
+	if err := json.Unmarshal([]byte(orig.InputJSON), &meta); err == nil && meta.RetryCount > 0 {
+		if meta.RetryCount == int(^uint(0)>>1) {
+			return domain.Task{}, errors.New("retry count exhausted")
+		}
+		attempt += meta.RetryCount
+	}
+	payload["retry_count"] = attempt
+	payload["retried_from"] = orig.ID
+	if withHandoff {
+		events, err := r.store.ListTaskEvents(ctx, orig.ID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		msgs, err := r.store.ListTaskMessages(ctx, orig.ID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		payload["failure_handoff"] = contextpack.BuildFailureHandoff(orig, events, msgs, reason)
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if withHandoff {
-		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
-			TaskID:    retried.ID,
-			Role:      "system",
-			Content:   fmt.Sprintf("Closed-loop remediation started from failed task %s with failure-handoff.md.", orig.ID),
-			CreatedAt: r.now(),
-		})
+	idem := fmt.Sprintf("retry-%s-%d", orig.ID, attempt)
+	retried, err := r.SubmitTask(ctx, orig.WorkloadName, idem, string(raw))
+	if err != nil {
+		return domain.Task{}, err
 	}
 	return retried, nil
 }
@@ -366,16 +411,22 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("load parent task: %w", err)
 	}
-	parentWL, ok := r.bundle.Workloads[parent.WorkloadName]
+	r.mu.Lock()
+	bundle, pol := r.bundle, r.policy
+	r.mu.Unlock()
+	if bundle == nil || pol == nil {
+		return domain.Task{}, errors.New("delegation requires a workload bundle and policy")
+	}
+	parentWL, ok := bundle.Workloads[parent.WorkloadName]
 	if !ok {
 		return domain.Task{}, fmt.Errorf("parent workload %q not found", parent.WorkloadName)
 	}
-	if _, ok := r.bundle.Workloads[targetWorkload]; !ok {
+	if _, ok := bundle.Workloads[targetWorkload]; !ok {
 		return domain.Task{}, fmt.Errorf("target workload %q not found", targetWorkload)
 	}
 
 	capability := "delegate:" + targetWorkload
-	decision := r.policy.Evaluate(parentWL, capability)
+	decision := pol.Evaluate(parentWL, capability)
 	if decision.Effect != domain.EffectAllow {
 		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
 			Category:     "controlplane",
@@ -425,87 +476,208 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 
 // ReconcileOnce runs one pass of OBSERVE -> UPDATE -> DERIVE/ACT over all active tasks.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
+	// A second pass must not mistake a launch in progress for a lost runtime.
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
 	tasks, err := r.store.ListTasks(ctx)
 	if err != nil {
 		return err
 	}
-
+	r.mu.Lock()
+	bundle := r.bundle
+	r.mu.Unlock()
 	activeWorking := 0
-	for _, t := range tasks {
-		if t.State == domain.TaskStateWorking {
+	for _, task := range tasks {
+		if task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired {
 			activeWorking++
 		}
 	}
-
+	var passErr error
 	for _, task := range tasks {
-		wl, ok := r.bundle.Workloads[task.WorkloadName]
+		if terminalTaskState(task.State) {
+			passErr = errors.Join(passErr, r.stopTask(context.WithoutCancel(ctx), task.ID))
+			continue
+		}
+		if task.State != domain.TaskStateSubmitted && task.State != domain.TaskStateWorking && task.State != domain.TaskStateInputRequired {
+			continue
+		}
+		var wl domain.Workload
+		var ok bool
+		if bundle != nil {
+			wl, ok = bundle.Workloads[task.WorkloadName]
+		}
 		if !ok {
+			passErr = errors.Join(passErr, r.failTask(ctx, task, "workload_missing", `{}`))
 			continue
 		}
 		adapter := r.adapters[wl.Spec.Class]
 		if adapter == nil {
+			passErr = errors.Join(passErr, r.failTask(ctx, task, "adapter_missing", `{}`))
 			continue
 		}
-
-		switch task.State {
-		case domain.TaskStateSubmitted:
+		if task.State == domain.TaskStateSubmitted {
 			if r.maxConcurrent > 0 && activeWorking >= r.maxConcurrent {
 				continue
 			}
 			if err := r.launchTask(ctx, task, wl, adapter); err != nil {
-				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateFailed, "launch_failed", fmt.Sprintf(`{"error":%q}`, err.Error()))
-				if r.onTaskFailed != nil {
-					r.onTaskFailed(task, "launch_failed: "+err.Error())
+				if !errors.Is(err, store.ErrConflict) {
+					passErr = errors.Join(passErr, err)
 				}
 			} else {
 				activeWorking++
 			}
+			continue
+		}
+		err := r.observeTask(ctx, task)
+		if !errors.Is(err, store.ErrConflict) {
+			passErr = errors.Join(passErr, err)
+		}
+	}
+	return passErr
+}
 
-		case domain.TaskStateWorking:
-			r.mu.Lock()
-			handle, hasHandle := r.handles[task.ID]
-			r.mu.Unlock()
-			if !hasHandle {
-				continue
+func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, facts string) error {
+	cleanupCtx := context.WithoutCancel(ctx)
+	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, task.ID), r.stopTask(cleanupCtx, task.ID))
+	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return cleanupErr
+		}
+		return errors.Join(cleanupErr, err)
+	}
+	if r.onTaskFailed != nil {
+		r.onTaskFailed(task, reason)
+	}
+	return cleanupErr
+}
+
+func observationFailures(events []domain.TaskEvent) int {
+	count := 0
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Reason != "observe_error" && events[i].Reason != "runtime_unknown" {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
+	r.mu.Lock()
+	handle, hasHandle := r.handles[task.ID]
+	adapter := r.handleAdapters[task.ID]
+	r.mu.Unlock()
+	if !hasHandle || adapter == nil {
+		return r.failTask(ctx, task, "runtime_handle_missing", `{}`)
+	}
+	obs, observeErr := adapter.Observe(ctx, handle)
+	events, err := r.store.ListTaskEvents(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	failures := observationFailures(events)
+	reason := ""
+	if observeErr != nil {
+		reason = "observe_error"
+	} else {
+		switch obs.State {
+		case scruntime.StateRunning, scruntime.StateSuspended, scruntime.StateCompleted, scruntime.StateFailed:
+		default:
+			reason = "runtime_unknown"
+		}
+	}
+	if reason != "" {
+		facts := fmt.Sprintf(`{"consecutive_failures":%d}`, failures+1)
+		if failures+1 >= 3 {
+			return r.failTask(ctx, task, reason, facts)
+		}
+		// Failed observations never refresh the last known heartbeat.
+		return r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, reason, facts)
+	}
+	if failures > 0 {
+		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, "observation_recovered", `{}`); err != nil {
+			return err
+		}
+	}
+	if err := r.store.RecordHeartbeat(ctx, task.ID, obs.ObservedAt); err != nil {
+		return err
+	}
+	switch obs.State {
+	case scruntime.StateCompleted, scruntime.StateFailed:
+		r.persistArtifacts(ctx, task.ID, adapter, handle)
+		target, reason := domain.TaskStateCompleted, "runtime_completed"
+		if obs.State == scruntime.StateFailed {
+			target, reason = domain.TaskStateFailed, "runtime_failed"
+		}
+		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, reason, fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
+			return err
+		}
+		if err := r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		delete(r.handles, task.ID)
+		delete(r.handleAdapters, task.ID)
+		r.mu.Unlock()
+		if target == domain.TaskStateCompleted {
+			r.advanceWorkflowStep(ctx, task)
+		} else {
+			if r.onTaskFailed != nil {
+				r.onTaskFailed(task, reason)
 			}
-
-			// OBSERVE
-			obs, err := adapter.Observe(ctx, handle)
+			r.maybeAutoRemediate(ctx, task.ID, reason)
+		}
+	case scruntime.StateRunning:
+		if task.State == domain.TaskStateInputRequired {
+			approvals, err := r.store.ListApprovals(ctx, "")
 			if err != nil {
-				continue
+				return err
 			}
-			// UPDATE
-			_ = r.store.RecordHeartbeat(ctx, task.ID, obs.ObservedAt)
-
-			// DERIVE / ACT
-			switch obs.State {
-			case scruntime.StateCompleted:
-				r.persistArtifacts(ctx, task.ID, adapter, handle)
-				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateCompleted, "runtime_completed", `{}`)
-				_ = r.store.RevokeTaskLeases(ctx, task.ID)
-				r.mu.Lock()
-				delete(r.handles, task.ID)
-				r.mu.Unlock()
-				r.advanceWorkflowStep(ctx, task)
-			case scruntime.StateFailed:
-				r.persistArtifacts(ctx, task.ID, adapter, handle)
-				failReason := fmt.Sprintf("runtime_failed (exit_code=%d)", obs.ExitCode)
-				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateFailed, "runtime_failed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode))
-				_ = r.store.RevokeTaskLeases(ctx, task.ID)
-				r.mu.Lock()
-				delete(r.handles, task.ID)
-				r.mu.Unlock()
-				if r.onTaskFailed != nil {
-					r.onTaskFailed(task, failReason)
+			decided := false
+			for _, approval := range approvals {
+				if approval.TaskID != task.ID {
+					continue
 				}
-				r.maybeAutoRemediate(ctx, task.ID, failReason)
+				switch approval.Status {
+				case domain.ApprovalApproved, domain.ApprovalDenied, domain.ApprovalExpired:
+					decided = true
+				default:
+					return nil
+				}
+			}
+			if decided {
+				return r.store.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateWorking, "approval_decided", `{}`)
 			}
 		}
 	}
 	return nil
 }
 
-func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) error {
+func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
+	// Claim durably before issuing any runtime side effects.
+	r.mu.Lock()
+	err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
+	if err == nil {
+		r.launching[task.ID] = true
+	}
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if launchErr != nil {
+			task.State = domain.TaskStateWorking
+			cleanupErr := r.failTask(context.WithoutCancel(ctx), task, "launch_failed", `{}`)
+			if errors.Is(launchErr, store.ErrConflict) {
+				launchErr = cleanupErr
+			} else {
+				launchErr = errors.Join(launchErr, cleanupErr)
+			}
+		}
+		r.mu.Lock()
+		delete(r.launching, task.ID)
+		r.mu.Unlock()
+	}()
 	token, err := model.MintTaskToken(ctx, r.store, task.ID, wl.Metadata.Name, time.Hour)
 	if err != nil {
 		return err
@@ -561,12 +733,19 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 
 	r.mu.Lock()
 	r.handles[task.ID] = handle
+	r.handleAdapters[task.ID] = adapter
+	current, err := r.store.GetTask(ctx, task.ID)
 	r.mu.Unlock()
-
-	if err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatched", fmt.Sprintf(`{"adapter":%q}`, handle.AdapterName)); err != nil {
+	if err != nil {
 		return err
 	}
-	_ = r.store.RecordHeartbeat(ctx, task.ID, r.now())
+	// The gate may already have requested approval while Start was returning.
+	if current.State != domain.TaskStateWorking && current.State != domain.TaskStateInputRequired {
+		return store.ErrConflict
+	}
+	if err := r.store.RecordHeartbeat(ctx, task.ID, r.now()); err != nil {
+		return err
+	}
 	return nil
 }
 
