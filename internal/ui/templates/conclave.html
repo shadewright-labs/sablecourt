@@ -48,7 +48,7 @@
     .msg-head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
     .msg-body { white-space: pre-wrap; font-size: 13px; }
     label { display: block; font-size: 12px; color: var(--text-muted); margin: 8px 0 4px; }
-    select, textarea { width: 100%; background: var(--bg-night); color: var(--text-bone); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--sans); font-size: 13px; }
+    input[type="text"], input[type="file"], select, textarea { width: 100%; background: var(--bg-night); color: var(--text-bone); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--sans); font-size: 13px; }
     textarea { min-height: 76px; resize: vertical; }
     button { margin-top: 10px; background: var(--accent-jade); color: var(--bg-night); border: none; border-radius: 6px; padding: 8px 14px; font-weight: 600; cursor: pointer; }
     .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
@@ -170,6 +170,24 @@
         {{else}}
           <p class="meta">No Relics stored yet. Vassals publish diffs, logs, and reports via conclave.relic_put.</p>
         {{end}}
+
+        <form method="POST" action="/ui/conclaves/{{.Session.ID}}/relics" enctype="multipart/form-data" style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+          <h2 style="font-size:14px;">Upload Relic</h2>
+          <label for="relic-name">Name</label>
+          <input id="relic-name" type="text" name="name" placeholder="e.g. context.md or patch.diff">
+          <label for="relic-type">Content type</label>
+          <select id="relic-type" name="content_type">
+            <option value="text/plain" selected>text/plain</option>
+            <option value="text/markdown">text/markdown</option>
+            <option value="text/x-diff">text/x-diff</option>
+            <option value="application/json">application/json</option>
+          </select>
+          <label for="relic-file">File (optional, UTF-8 text up to 1 MiB)</label>
+          <input id="relic-file" type="file" name="file" accept=".txt,.md,.diff,.patch,.log,.json,.yaml,.yml,text/*,application/json">
+          <label for="relic-content">Content</label>
+          <textarea id="relic-content" name="content" placeholder="Paste diff, log, or context note..."></textarea>
+          <button type="submit">Upload Relic</button>
+        </form>
       </aside>
     </div>
   </div>
@@ -177,7 +195,18 @@
     (function() {
       let lastFp = null;
       const bodyEl = document.getElementById("body");
+      const relicNameEl = document.getElementById("relic-name");
+      const relicContentEl = document.getElementById("relic-content");
+      const relicFileEl = document.getElementById("relic-file");
       const es = new EventSource("/api/v1/conclaves/{{.Session.ID}}/stream");
+      function isEditingForm() {
+        const active = document.activeElement;
+        if (relicNameEl && (active === relicNameEl || relicNameEl.value.trim() !== "")) return true;
+        if (relicContentEl && (active === relicContentEl || relicContentEl.value.trim() !== "")) return true;
+        if (relicFileEl && relicFileEl.files && relicFileEl.files.length > 0) return true;
+        if (bodyEl && active === bodyEl && bodyEl.value.trim() !== "") return true;
+        return false;
+      }
       es.addEventListener("state", function(e) {
         if (lastFp === null) {
           lastFp = e.data;
@@ -185,7 +214,7 @@
         }
         if (e.data !== lastFp) {
           lastFp = e.data;
-          if (!bodyEl || document.activeElement !== bodyEl || bodyEl.value.trim() === "") {
+          if (!isEditingForm()) {
             window.location.reload();
           }
         }

@@ -1,13 +1,19 @@
 package ui
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -159,7 +165,7 @@ func parseConclaveMessageID(rawID, key string) int64 {
 func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, err.Error())
 		return
 	}
 	scope := strings.TrimSpace(r.FormValue("scope"))
@@ -175,19 +181,18 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 	}
 	rule := strings.TrimSpace(r.FormValue("rule"))
 	if rule == "" {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape("learning rule is required"), http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, "learning rule is required")
 		return
 	}
 	cleanRule := redact.String(rule)
 
-	sourceErrorURL := "/conclaves/" + url.PathEscape(id) + "?error=" + url.QueryEscape("source conclave message is unavailable")
 	if msgID == 0 || d.store == nil {
-		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, "source conclave message is unavailable")
 		return
 	}
 	msgs, err := d.store.ListConclaveMessages(r.Context(), id, msgID-1)
 	if err != nil {
-		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, "source conclave message is unavailable")
 		return
 	}
 	var src proposedLearningSource
@@ -206,7 +211,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if src.MessageID == 0 {
-		http.Redirect(w, r, sourceErrorURL, http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, "source conclave message is unavailable")
 		return
 	}
 
@@ -218,7 +223,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 	}
 	payload, err := json.MarshalIndent(proposal, "", "  ")
 	if err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, err.Error())
 		return
 	}
 
@@ -230,7 +235,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		UpdatedAt: now,
 	}
 	if err := d.store.PutMemory(r.Context(), entry); err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, err.Error())
 		return
 	}
 	detailBytes, _ := json.Marshal(map[string]any{
@@ -271,25 +276,139 @@ func (d *Dashboard) handleProviderSaveTiers(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/providers?notice="+url.QueryEscape("Saved role-based model tiers (fast / coding / critic)"), http.StatusSeeOther)
 }
 
+const (
+	maxRelicUploadBytes = 1 << 20
+	maxRelicFormBytes   = maxRelicUploadBytes + (256 << 10)
+)
+
 func (d *Dashboard) handleConclaveUploadRelic(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if d.conclave == nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err=conclave+disabled", http.StatusSeeOther)
+		redirectConclaveErr(w, r, id, "conclave disabled")
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRelicFormBytes)
+
+	name, contentType, content, err := parseRelicUploadForm(r)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			redirectConclaveErr(w, r, id, "relic exceeds maximum size (1 MiB)")
+			return
+		}
+		redirectConclaveErr(w, r, id, err.Error())
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("name"))
-	content := r.FormValue("content")
-	if name == "" || strings.TrimSpace(content) == "" {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err="+url.QueryEscape("relic name and content are required"), http.StatusSeeOther)
-		return
-	}
-	if _, err := d.conclave.PutRelic(r.Context(), id, "operator", name, "text/plain", content); err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+
+	if _, err := d.conclave.PutRelic(r.Context(), id, "operator", name, contentType, content); err != nil {
+		redirectConclaveErr(w, r, id, err.Error())
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Relic "+name+" added"), http.StatusSeeOther)
+}
+
+func parseRelicUploadForm(r *http.Request) (string, string, string, error) {
+	mediaType := ""
+	if rawCT := strings.TrimSpace(r.Header.Get("Content-Type")); rawCT != "" {
+		mt, _, err := mime.ParseMediaType(rawCT)
+		if err != nil {
+			return "", "", "", fmt.Errorf("invalid form content type")
+		}
+		mediaType = mt
+	}
+
+	var name, contentType, content string
+	switch mediaType {
+	case "multipart/form-data":
+		if err := r.ParseMultipartForm(maxRelicFormBytes); err != nil {
+			return "", "", "", err
+		}
+		if r.MultipartForm != nil {
+			defer func() { _ = r.MultipartForm.RemoveAll() }()
+		}
+		name = strings.TrimSpace(r.FormValue("name"))
+		contentType = strings.TrimSpace(r.FormValue("content_type"))
+		content = r.FormValue("content")
+
+		file, hdr, err := r.FormFile("file")
+		if err == nil {
+			defer func() { _ = file.Close() }()
+			if hdr.Filename != "" {
+				if strings.TrimSpace(content) != "" {
+					return "", "", "", fmt.Errorf("provide either relic content or a file, not both")
+				}
+				raw, readErr := io.ReadAll(io.LimitReader(file, maxRelicUploadBytes+1))
+				if readErr != nil {
+					return "", "", "", readErr
+				}
+				if len(raw) > maxRelicUploadBytes {
+					return "", "", "", fmt.Errorf("relic exceeds maximum size (1 MiB)")
+				}
+				if len(bytes.TrimSpace(raw)) == 0 {
+					return "", "", "", fmt.Errorf("uploaded relic file is empty")
+				}
+				content = string(raw)
+				if name == "" {
+					cleanFN := strings.ReplaceAll(hdr.Filename, "\\", "/")
+					name = strings.TrimSpace(path.Base(cleanFN))
+				}
+			}
+		} else if !errors.Is(err, http.ErrMissingFile) {
+			return "", "", "", err
+		}
+	case "", "application/x-www-form-urlencoded":
+		if err := r.ParseForm(); err != nil {
+			return "", "", "", err
+		}
+		name = strings.TrimSpace(r.FormValue("name"))
+		contentType = strings.TrimSpace(r.FormValue("content_type"))
+		content = r.FormValue("content")
+	default:
+		return "", "", "", fmt.Errorf("unsupported form content type")
+	}
+
+	if name == "" || strings.TrimSpace(content) == "" {
+		return "", "", "", fmt.Errorf("relic name and content are required")
+	}
+	if !validRelicName(name) {
+		return "", "", "", fmt.Errorf("invalid relic name")
+	}
+	if len(content) > maxRelicUploadBytes {
+		return "", "", "", fmt.Errorf("relic exceeds maximum size (1 MiB)")
+	}
+	if !utf8.ValidString(content) || strings.ContainsRune(content, 0) {
+		return "", "", "", fmt.Errorf("relic content must be valid UTF-8 text")
+	}
+	normalizedCT, err := normalizeRelicContentType(contentType)
+	if err != nil {
+		return "", "", "", err
+	}
+	return name, normalizedCT, content, nil
+}
+
+func validRelicName(name string) bool {
+	if name == "" || len(name) > 200 || name == "." || name == ".." {
+		return false
+	}
+	if strings.Contains(name, "..") || strings.ContainsAny(name, `/\?#%`) {
+		return false
+	}
+	return !hasControlChars(name)
+}
+
+func normalizeRelicContentType(raw string) (string, error) {
+	if raw == "" {
+		return "text/plain", nil
+	}
+	if hasControlChars(raw) {
+		return "", fmt.Errorf("unsupported relic content type")
+	}
+	mt, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return "", fmt.Errorf("unsupported relic content type")
+	}
+	if strings.HasPrefix(mt, "text/") || mt == "application/json" || mt == "application/yaml" || mt == "application/x-yaml" || mt == "application/xml" {
+		return mt, nil
+	}
+	return "", fmt.Errorf("unsupported relic content type")
 }
