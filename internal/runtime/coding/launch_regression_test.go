@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -199,6 +200,71 @@ printf 'stdin reached EOF\n'
 			})
 			if _, err := a.Observe(context.Background(), h); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSubscriptionHarnessKeepsOnlyTaskLease(t *testing.T) {
+	for _, harness := range []string{"claude", "codex", "agy"} {
+		t.Run(harness, func(t *testing.T) {
+			_, spec := codingFixture(t)
+			spec.Workload.Spec.Coding.Harness = harness
+			spec.Workload.Spec.Grants.ModelGate.Allowed = true
+			spec.ModelGateURL, spec.DataGateURL = "model-gate", "data-gate"
+			spec.TaskToken, spec.ModelGateToken = "task-lease", "task-lease"
+			for _, lease := range []string{"task-lease", ""} {
+				spec.TaskToken = lease
+				env := strings.Join(BuildStrippedEnv(spec), "\n")
+				if strings.Contains(env, "SABLECOURT_MODEL_GATE_") {
+					t.Error("subscription harness received Model Gate coordinates")
+				}
+				for _, want := range []string{"SABLECOURT_TASK_TOKEN=task-lease", "SABLECOURT_DATA_GATE_URL=data-gate"} {
+					if strings.Contains(env, want) != (lease != "") {
+						t.Errorf("%s exposure does not match task lease presence", want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSeatbeltLooseObjectNames(t *testing.T) {
+	for _, suffix := range []int{38, 62} {
+		t.Run(fmt.Sprint(suffix), func(t *testing.T) {
+			a, spec := codingFixture(t)
+			a.DryRun = true
+			h := startTestTask(t, a, spec)
+			state, err := a.worktreeState(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Base = strings.Repeat("a", suffix+2)
+			var profile strings.Builder
+			if err := allowGit(&profile, h.WorkDir, state, false); err != nil {
+				t.Fatal(err)
+			}
+			rule := regexp.MustCompile(`\(allow file-write-create \(regex #"([^"\n]+)"\)\)`).FindStringSubmatch(profile.String())
+			if len(rule) != 2 {
+				t.Fatal("missing loose object creation rule")
+			}
+			pattern := regexp.MustCompile(rule[1])
+			dir := filepath.Join(state.CommonDir, "objects", "ab")
+			for _, tc := range []struct {
+				path string
+				want bool
+			}{
+				{dir, true},
+				{dir + "/", false},
+				{filepath.Join(dir, strings.Repeat("a", suffix)), true},
+				{filepath.Join(dir, strings.Repeat("a", suffix-1)), false},
+				{filepath.Join(dir, strings.Repeat("a", suffix+1)), false},
+				{filepath.Join(dir, strings.Repeat("a", 100-suffix)), false},
+				{filepath.Join(dir, "g"+strings.Repeat("a", suffix-1)), false},
+			} {
+				if got := pattern.MatchString(tc.path); got != tc.want {
+					t.Errorf("object path %q matches = %t, want %t", tc.path, got, tc.want)
+				}
 			}
 		})
 	}
