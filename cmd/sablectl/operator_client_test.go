@@ -75,3 +75,32 @@ func TestDaemonClientOperatorCredential(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonClientWithCustomTransport(t *testing.T) {
+	loopback := "http://" + net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432")
+	credential := "op_" + strings.Repeat("b", 64)
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "operator.token"), []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SABLECOURT_STATE_DIR", dir)
+	t.Setenv("SABLECOURT_OPERATOR_TOKEN", "")
+
+	var gotAuth string
+	customRT := operatorTestTransport(func(r *http.Request) (*http.Response, error) {
+		gotAuth = r.Header.Get("Authorization")
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("[]"))}, nil
+	})
+	client, base := newDaemonClientWithTransport(time.Second, loopback, "", "", customRT)
+	res, err := client.Get(base + "/api/v1/tasks")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	_ = res.Body.Close()
+	if gotAuth != "Bearer "+credential {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer "+credential)
+	}
+}

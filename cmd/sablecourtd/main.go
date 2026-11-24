@@ -36,6 +36,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
@@ -71,6 +72,7 @@ func main() {
 		modelGatewayURL      string
 		allowedHosts         []string
 		incidentTemplate     string
+		branchRetention      time.Duration
 	)
 
 	rootCmd := &cobra.Command{
@@ -98,6 +100,7 @@ func main() {
 				modelGatewayURL:      modelGatewayURL,
 				allowedHosts:         allowedHosts,
 				incidentTemplate:     incidentTemplate,
+				branchRetention:      branchRetention,
 			})
 		},
 	}
@@ -110,6 +113,7 @@ func main() {
 	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
 	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
+	rootCmd.Flags().DurationVar(&branchRetention, "coding-branch-retention", 0, "Age before merged coding branches can be pruned (0 disables pruning)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum number of concurrently running tasks (0 = unlimited)")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
@@ -155,6 +159,14 @@ type daemonConfig struct {
 	modelGatewayURL      string
 	allowedHosts         []string
 	incidentTemplate     string
+	branchRetention      time.Duration
+}
+
+func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
+	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
+	adapter.BranchRetention = retention
+	adapter.AttachHub = hub
+	return adapter
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -341,8 +353,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
 	// Host harnesses need read isolation from the operator state before registration.
 	logger.Info("host coding adapter disabled until operator state is isolated")
-	if isCitadel && pgDSN == "" {
-		logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
+	if isCitadel {
+		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		if pgDSN == "" {
+			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
+		}
 	}
 	switch cfg.runtimeBackend {
 	case "k8s":
@@ -897,8 +912,14 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, voiceSvc.Status(r.Context()))
 	})
 	mux.HandleFunc("POST /api/v1/voice/transcribe", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, voiceTranscribeMaxBytes)
 		audioBytes, filename, lang, err := readUploadedAudio(r)
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "audio payload too large"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -922,6 +943,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			Voice string `json:"voice"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "voice request too large"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -939,6 +965,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			id := r.PathValue("id")
 			audioBytes, filename, lang, err := readUploadedAudio(r)
 			if err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "audio payload too large"})
+					return
+				}
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
@@ -1665,7 +1696,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(24 << 20); err != nil {
+		if err := r.ParseMultipartForm(voiceTranscribeMaxBytes); err != nil {
 			return nil, "", "", fmt.Errorf("parse multipart audio: %w", err)
 		}
 		f, hdr, err := r.FormFile("file")
@@ -1673,14 +1704,14 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 			return nil, "", "", fmt.Errorf("missing audio form field 'file': %w", err)
 		}
 		defer f.Close()
-		data, err := io.ReadAll(io.LimitReader(f, 24<<20))
+		data, err := io.ReadAll(f)
 		if err != nil {
 			return nil, "", "", err
 		}
 		lang := strings.TrimSpace(r.FormValue("language"))
 		return data, hdr.Filename, lang, nil
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, 24<<20))
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, "", "", err
 	}

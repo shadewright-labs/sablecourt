@@ -219,7 +219,7 @@ spec:
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(5 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/tasks/"+args[0])
+			body, err := fetchGET(cli, base+"/api/v1/tasks/"+url.PathEscape(args[0]))
 			if err != nil {
 				return err
 			}

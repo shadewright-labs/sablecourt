@@ -8,10 +8,13 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
@@ -20,25 +23,34 @@ import (
 )
 
 const (
-	operatorCookie = "sablecourt_session"
-	sessionTTL     = 30 * time.Minute
-	loginBodyLimit = 1024
-	maxBearerSize  = 512
+	operatorCookie          = "sablecourt_session"
+	sessionTTL              = 30 * time.Minute
+	loginBodyLimit          = 1024
+	maxBearerSize           = 512
+	loginMaxFailures        = 10
+	loginFailureWindow      = time.Minute
+	loginLimiterMaxClients  = 1024
+	voiceTranscribeMaxBytes = 24 << 20
 )
 
 type operatorAuth struct {
 	hasToken  bool
 	tokenHash [sha256.Size]byte
 	signKey   [32]byte
+	limiter   *loginLimiter
 }
 
-func newOperatorAuth(token string) operatorAuth {
-	auth := operatorAuth{hasToken: token != "", tokenHash: sha256.Sum256([]byte(token))}
+func newOperatorAuth(token string) *operatorAuth {
+	auth := &operatorAuth{
+		hasToken:  token != "",
+		tokenHash: sha256.Sum256([]byte(token)),
+		limiter:   newLoginLimiter(loginMaxFailures, loginFailureWindow, loginLimiterMaxClients),
+	}
 	rand.Read(auth.signKey[:])
 	return auth
 }
 
-func (a operatorAuth) matches(token string) bool {
+func (a *operatorAuth) matches(token string) bool {
 	if !a.hasToken || token == "" || len(token) > maxBearerSize || strings.HasPrefix(token, model.TokenPrefix) {
 		return false
 	}
@@ -46,9 +58,35 @@ func (a operatorAuth) matches(token string) bool {
 	return hmac.Equal(digest[:], a.tokenHash[:])
 }
 
-func (a operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler, secrets secret.SecretStore) http.Handler {
+func tokenDigestEqual(got, want string) bool {
+	if got == "" || want == "" {
+		return false
+	}
+	gotDigest := sha256.Sum256([]byte(got))
+	wantDigest := sha256.Sum256([]byte(want))
+	return hmac.Equal(gotDigest[:], wantDigest[:])
+}
+
+func isCanonicalPath(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	clean := path.Clean(p)
+	if p[len(p)-1] == '/' && clean != "/" {
+		clean += "/"
+	}
+	return p == clean
+}
+
+func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler, secrets secret.SecretStore) http.Handler {
 	scoped := integrations.RejectShadewrightTokenOnOtherRoutes(next, secrets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isCanonicalPath(r.URL.Path) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "canonical request path required"})
+			return
+		}
 		_, pattern := mux.Handler(r)
 		switch pattern {
 		case "GET /login", "POST /login",
@@ -74,7 +112,7 @@ func (a operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler,
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
 					!strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
 					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil &&
-						token != "" && hmac.Equal([]byte(token), []byte(strings.TrimSpace(want))) {
+						tokenDigestEqual(token, strings.TrimSpace(want)) {
 						scoped.ServeHTTP(w, r)
 						return
 					}
@@ -131,11 +169,19 @@ func operatorLoginPage(w http.ResponseWriter, _ *http.Request) {
 `)
 }
 
-func (a operatorAuth) login(w http.ResponseWriter, r *http.Request) {
+func (a *operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	scheme := browserOriginScheme(r)
-	if scheme == "" {
+	if scheme == "" || (r.TLS == nil && strings.TrimSpace(r.Header.Get("Origin")) == "") {
 		http.Error(w, "same-origin request required", http.StatusForbidden)
+		return
+	}
+	client := loginClientKey(r.RemoteAddr)
+	now := time.Now()
+	if ok, retryAfter := a.limiter.allow(client, now); !ok {
+		secs := max(int(retryAfter.Round(time.Second)/time.Second), 1)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		http.Error(w, "too many login attempts", http.StatusTooManyRequests)
 		return
 	}
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -160,9 +206,11 @@ func (a operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.matches(strings.TrimSpace(values.Get("token"))) {
+		a.limiter.recordFailure(client, now)
 		http.Error(w, "invalid operator token", http.StatusUnauthorized)
 		return
 	}
+	a.limiter.reset(client)
 	expires := time.Now().Add(sessionTTL)
 	http.SetCookie(w, &http.Cookie{
 		Name:     operatorCookie,
@@ -177,8 +225,8 @@ func (a operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (a operatorAuth) validSession(host, value string, now time.Time) bool {
-	if !a.hasToken || len(value) > 20+1+sha256.Size*2 {
+func (a *operatorAuth) validSession(host, value string, now time.Time) bool {
+	if !a.hasToken || strings.TrimSpace(host) == "" || len(value) > 20+1+sha256.Size*2 {
 		return false
 	}
 	expiry, _, ok := strings.Cut(value, ".")
@@ -187,11 +235,125 @@ func (a operatorAuth) validSession(host, value string, now time.Time) bool {
 		hmac.Equal([]byte(value), []byte(a.sessionValue(host, expires)))
 }
 
-func (a operatorAuth) sessionValue(host string, expires int64) string {
+func (a *operatorAuth) sessionValue(host string, expires int64) string {
 	expiry := strconv.FormatInt(expires, 10)
 	mac := hmac.New(sha256.New, a.signKey[:])
 	_, _ = io.WriteString(mac, expiry+"\n"+strings.ToLower(host))
 	return expiry + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
+type loginFailureEntry struct {
+	failures int
+	resetAt  time.Time
+}
+
+type loginLimiter struct {
+	mu         sync.Mutex
+	limit      int
+	window     time.Duration
+	maxEntries int
+	entries    map[string]loginFailureEntry
+}
+
+func newLoginLimiter(limit int, window time.Duration, maxEntries int) *loginLimiter {
+	return &loginLimiter{
+		limit:      limit,
+		window:     window,
+		maxEntries: maxEntries,
+		entries:    make(map[string]loginFailureEntry),
+	}
+}
+
+func (l *loginLimiter) allow(client string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.entries[client]; ok {
+		if !now.Before(e.resetAt) {
+			delete(l.entries, client)
+			return true, 0
+		}
+		if e.failures >= l.limit {
+			return false, e.resetAt.Sub(now)
+		}
+		return true, 0
+	}
+	if len(l.entries) >= l.maxEntries {
+		l.pruneLocked(now)
+		if len(l.entries) >= l.maxEntries && !l.hasEvictableLocked() {
+			return false, l.window
+		}
+	}
+	return true, 0
+}
+
+func (l *loginLimiter) recordFailure(client string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.entries[client]; ok {
+		if !now.Before(e.resetAt) {
+			l.entries[client] = loginFailureEntry{failures: 1, resetAt: now.Add(l.window)}
+			return
+		}
+		e.failures++
+		l.entries[client] = e
+		return
+	}
+	if len(l.entries) >= l.maxEntries {
+		l.pruneLocked(now)
+	}
+	if len(l.entries) >= l.maxEntries {
+		if victim, ok := l.oldestEvictableLocked(); ok {
+			delete(l.entries, victim)
+		} else {
+			return
+		}
+	}
+	l.entries[client] = loginFailureEntry{failures: 1, resetAt: now.Add(l.window)}
+}
+
+func (l *loginLimiter) reset(client string) {
+	l.mu.Lock()
+	delete(l.entries, client)
+	l.mu.Unlock()
+}
+
+func (l *loginLimiter) pruneLocked(now time.Time) {
+	for k, e := range l.entries {
+		if !now.Before(e.resetAt) {
+			delete(l.entries, k)
+		}
+	}
+}
+
+func (l *loginLimiter) hasEvictableLocked() bool {
+	_, ok := l.oldestEvictableLocked()
+	return ok
+}
+
+func (l *loginLimiter) oldestEvictableLocked() (string, bool) {
+	var (
+		victim string
+		oldest time.Time
+		found  bool
+	)
+	for k, e := range l.entries {
+		if e.failures >= l.limit {
+			continue
+		}
+		if !found || e.resetAt.Before(oldest) {
+			victim = k
+			oldest = e.resetAt
+			found = true
+		}
+	}
+	return victim, found
+}
+
+func loginClientKey(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
 }
 
 func isWrite(method string) bool {
@@ -199,6 +361,9 @@ func isWrite(method string) bool {
 }
 
 func browserOriginScheme(r *http.Request) string {
+	if strings.TrimSpace(r.Host) == "" {
+		return ""
+	}
 	fetch := r.Header.Values("Sec-Fetch-Site")
 	if len(fetch) > 1 || (len(fetch) == 1 && fetch[0] != "" && fetch[0] != "same-origin") {
 		return ""
@@ -219,7 +384,7 @@ func browserOriginScheme(r *http.Request) string {
 		return ""
 	}
 	u, err := url.Parse(origins[0])
-	if err != nil || !strings.EqualFold(u.Host, r.Host) || u.User != nil ||
+	if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) || u.User != nil ||
 		u.Path != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(origins[0], "#") {
 		return ""
 	}
@@ -250,8 +415,8 @@ func guardOperatorRequest(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
 				return
 			}
-			// The Model Gate and Voice endpoints enforce their own larger limits.
-			if !strings.HasPrefix(p, "/gate/model/") && !strings.HasPrefix(p, "/api/v1/voice/") && !strings.HasSuffix(p, "/voice-decree") {
+			// The Model Gate and voice transcribe endpoint enforce their own larger limits.
+			if !strings.HasPrefix(p, "/gate/model/") && p != "/api/v1/voice/transcribe" {
 				r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 			}
 		}

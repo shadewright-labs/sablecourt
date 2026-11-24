@@ -46,10 +46,14 @@ func Read(dir string) (string, error) {
 
 // LoadOrCreate publishes a new credential only after the complete file is ready.
 func LoadOrCreate(dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	safeDir, err := resolveSafeStateDir(dir, true)
+	if err != nil {
 		return "", err
 	}
-	root, err := openState(dir)
+	if err := os.MkdirAll(safeDir, 0o700); err != nil {
+		return "", err
+	}
+	root, err := openState(safeDir)
 	if err != nil {
 		return "", err
 	}
@@ -107,14 +111,18 @@ func LoadOrCreate(dir string) (string, error) {
 }
 
 func openState(dir string) (*os.Root, error) {
-	info, err := os.Lstat(dir)
+	safeDir, err := resolveSafeStateDir(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(safeDir)
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() || info.Mode() != os.ModeDir|0o700 || !ownedByCaller(info) {
 		return nil, errors.New("operator state directory must be owned by the current user with mode 0700")
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(safeDir)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +132,98 @@ func openState(dir string) (*os.Root, error) {
 		return nil, errors.New("operator state directory changed while opening it")
 	}
 	return root, nil
+}
+
+func resolveSafeStateDir(dir string, allowMissing bool) (string, error) {
+	clean := filepath.Clean(dir)
+	if !filepath.IsAbs(clean) {
+		return "", errors.New("operator state directory must be an absolute path")
+	}
+	rootInfo, err := os.Lstat(string(filepath.Separator))
+	if err != nil {
+		return "", err
+	}
+	if !safeAncestor(rootInfo) {
+		return "", errors.New("operator state root directory has unsafe ownership or permissions")
+	}
+	rel := strings.TrimPrefix(clean, string(filepath.Separator))
+	if rel == "" {
+		return "", errors.New("operator state directory must be owned by the current user with mode 0700")
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	cur := string(filepath.Separator)
+	symlinks := 0
+	for i := 0; i < len(parts); i++ {
+		isLeaf := i == len(parts)-1
+		next := filepath.Join(cur, parts[i])
+		info, err := os.Lstat(next)
+		if err != nil {
+			if allowMissing && errors.Is(err, os.ErrNotExist) {
+				remaining := append([]string{cur}, parts[i:]...)
+				return filepath.Join(remaining...), nil
+			}
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if isLeaf {
+				return "", errors.New("operator state directory must not be a symlink")
+			}
+			// Allow only root-owned OS directory symlinks (such as /var -> private/var on macOS).
+			if !ownedByRoot(info) || (os.Geteuid() == 0 && cur != string(filepath.Separator)) {
+				return "", errors.New("operator state path must not traverse a symlink")
+			}
+			symlinks++
+			if symlinks > 8 {
+				return "", errors.New("operator state path traverses too many symlinks")
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				return "", err
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cur, target)
+			}
+			target = filepath.Clean(target)
+			var nextParts []string
+			if trimmed := strings.TrimPrefix(target, string(filepath.Separator)); trimmed != "" {
+				nextParts = strings.Split(trimmed, string(filepath.Separator))
+			}
+			parts = append(nextParts, parts[i+1:]...)
+			cur = string(filepath.Separator)
+			i = -1
+			continue
+		}
+		if !info.IsDir() {
+			return "", errors.New("operator state path component is not a directory")
+		}
+		if isLeaf {
+			if info.Mode() != os.ModeDir|0o700 || !ownedByCaller(info) {
+				return "", errors.New("operator state directory must be owned by the current user with mode 0700")
+			}
+		} else if !safeAncestor(info) {
+			return "", errors.New("operator state parent directory has unsafe ownership or permissions")
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+func safeAncestor(info os.FileInfo) bool {
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if !ownedByCaller(info) && !ownedByRoot(info) {
+		return false
+	}
+	if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+		return false
+	}
+	return true
+}
+
+func ownedByRoot(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0
 }
 
 func readToken(root *os.Root) (string, error) {
