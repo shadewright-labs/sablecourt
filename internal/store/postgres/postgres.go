@@ -145,13 +145,16 @@ func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
 	if !t.UpdatedAt.IsZero() {
 		updated = t.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (
-			id, parent_task_id, idempotency_key, workload_name, state,
-			input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
-		defaultJSON(t.InputJSON, "{}"), defaultJSON(t.ArtifactsJSON, "[]"), defaultJSON(t.BudgetCeilingJSON, "{}"), created, updated)
+	err := store.InsertTask(ctx, s.db, t, func(inserter store.TaskInserter) error {
+		_, err := inserter.ExecContext(ctx, `
+			INSERT INTO tasks (
+				id, parent_task_id, idempotency_key, workload_name, state,
+				input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
+			defaultJSON(t.InputJSON, "{}"), defaultJSON(t.ArtifactsJSON, "[]"), defaultJSON(t.BudgetCeilingJSON, "{}"), created, updated)
+		return err
+	})
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return fmt.Errorf("%w: %v", store.ErrConflict, err)
 	}

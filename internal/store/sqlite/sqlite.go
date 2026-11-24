@@ -162,13 +162,16 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 	artifactsJSON := defaultJSON(t.ArtifactsJSON, "[]")
 	budgetJSON := defaultJSON(t.BudgetCeilingJSON, "{}")
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (
-			id, parent_task_id, idempotency_key, workload_name, state,
-			input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
-		inputJSON, artifactsJSON, budgetJSON, created, updated)
+	err := store.InsertTask(ctx, s.db, t, func(inserter store.TaskInserter) error {
+		_, err := inserter.ExecContext(ctx, `
+			INSERT INTO tasks (
+				id, parent_task_id, idempotency_key, workload_name, state,
+				input_json, artifacts_json, budget_ceiling_json, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
+			inputJSON, artifactsJSON, budgetJSON, created, updated)
+		return err
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
