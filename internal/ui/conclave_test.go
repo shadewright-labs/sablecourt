@@ -488,6 +488,7 @@ func TestConclaveRelicUploadFormAndHandler(t *testing.T) {
 		rawBody     string
 	}
 
+	syntheticToken := "sc_task_" + strings.Repeat("0", 24)
 	cases := []struct {
 		name           string
 		sessionState   domain.ConclaveState
@@ -498,6 +499,7 @@ func TestConclaveRelicUploadFormAndHandler(t *testing.T) {
 		wantName       string
 		wantCT         string
 		wantBody       string
+		secretName     bool
 	}{
 		{
 			name:         "urlencoded relic upload succeeds and displays on conclave page",
@@ -536,6 +538,29 @@ func TestConclaveRelicUploadFormAndHandler(t *testing.T) {
 			wantName: "evidence.log",
 			wantCT:   "text/plain",
 			wantBody: "stack trace ok",
+		},
+		{
+			name:         "secret in filename rejected",
+			sessionState: domain.ConclaveStateActive,
+			req: uploadRequest{
+				multipart: true,
+				fileName:  syntheticToken + ".log",
+				fileBody:  []byte("review notes"),
+			},
+			wantErr:        true,
+			wantErrContain: "invalid relic name",
+			secretName:     true,
+		},
+		{
+			name:         "secret in explicit name rejected",
+			sessionState: domain.ConclaveStateActive,
+			req: uploadRequest{
+				name:    syntheticToken + ".log",
+				content: "review notes",
+			},
+			wantErr:        true,
+			wantErrContain: "invalid relic name",
+			secretName:     true,
 		},
 		{
 			name:         "empty name and content shows error on conclave page",
@@ -712,6 +737,27 @@ func TestConclaveRelicUploadFormAndHandler(t *testing.T) {
 			}
 			loc := rec.Header().Get("Location")
 
+			if tc.secretName {
+				if strings.Contains(loc, syntheticToken) {
+					t.Error("redirect contains a task token")
+				}
+				relics, err := st.ListConclaveRelics(context.Background(), "cc-1")
+				if err != nil || len(relics) != 0 {
+					t.Errorf("secret name upload stored %d relics, err = %v", len(relics), err)
+				}
+				audit, err := st.ListAudit(context.Background(), 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, record := range audit {
+					if strings.Contains(record.DetailJSON, syntheticToken) {
+						t.Error("audit record contains a task token")
+					}
+				}
+				if t.Failed() {
+					return
+				}
+			}
 			if tc.wantErr {
 				if !strings.Contains(loc, "/conclaves/cc-1?err=") || strings.Contains(loc, "error=") {
 					t.Fatalf("expected ?err= redirect, got %q", loc)

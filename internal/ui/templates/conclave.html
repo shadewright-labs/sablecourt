@@ -212,11 +212,9 @@
           lastFp = e.data;
           return;
         }
-        if (e.data !== lastFp) {
+        if (e.data !== lastFp && !isEditingForm()) {
           lastFp = e.data;
-          if (!isEditingForm()) {
-            window.location.reload();
-          }
+          window.location.reload();
         }
       });
 
