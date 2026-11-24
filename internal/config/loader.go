@@ -297,6 +297,11 @@ func validateBundle(bundle *Bundle) error {
 	return nil
 }
 
+// ValidVassalRole accepts canonical participant names distinct from routing aliases.
+func ValidVassalRole(role string) bool {
+	return role != "" && role == strings.TrimSpace(role) && !strings.HasPrefix(role, "@") && role != "operator" && role != "all" && role != "system"
+}
+
 func validateConclave(name string, cc domain.Conclave, bundle *Bundle) error {
 	if len(cc.Spec.Vassals) == 0 {
 		return fmt.Errorf("conclave %q: at least one vassal is required", name)
@@ -311,8 +316,8 @@ func validateConclave(name string, cc domain.Conclave, bundle *Bundle) error {
 	}
 	roles := make(map[string]domain.Workload, len(cc.Spec.Vassals))
 	for i, v := range cc.Spec.Vassals {
-		role := strings.TrimSpace(v.Role)
-		if role == "" || role == "operator" || role == "all" || role == "system" {
+		role := v.Role
+		if !ValidVassalRole(role) {
 			return fmt.Errorf("conclave %q vassal %d: invalid role %q", name, i, v.Role)
 		}
 		if _, dup := roles[role]; dup {

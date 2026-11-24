@@ -71,13 +71,18 @@ func TestGitHubWebhookVerifiesHMACAndDispatchesIdempotently(t *testing.T) {
 		t.Fatalf("expected 202 for valid webhook, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// 3. Replaying same issue returns 409 conflict (idempotent).
+	first := rr.Body.String()
+
+	// 3. Replaying the same issue is accepted again and answers with the same task (idempotent).
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/hooks/github", strings.NewReader(payload))
 	req.Header.Set("X-GitHub-Event", "issues")
 	req.Header.Set("X-Hub-Signature-256", sign(payload, "top-secret-key"))
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("expected 409 on duplicate webhook replay, got %d", rr.Code)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on duplicate webhook replay, got %d", rr.Code)
+	}
+	if rr.Body.String() != first {
+		t.Fatalf("replay answered with a different task: %q, first %q", rr.Body.String(), first)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shadewright-labs/sablecourt/internal/domain"
 )
 
 func writeTempManifest(t *testing.T, content string) string {
@@ -197,5 +199,16 @@ spec:
 
 	if _, err := LoadPath(path); err == nil {
 		t.Fatal("expected unknown field error, got nil")
+	}
+}
+
+func TestVassalRoleIdentity(t *testing.T) {
+	for _, role := range []string{"@operator", "@system", "@all", " operator ", " coder "} {
+		t.Run(role, func(t *testing.T) {
+			cc := domain.Conclave{Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{{Role: role, Workload: "worker", Activation: domain.ActivationAlwaysOn}}}}
+			if validateConclave("room", cc, &Bundle{Workloads: map[string]domain.Workload{"worker": {}}}) == nil {
+				t.Error("accepted noncanonical role")
+			}
+		})
 	}
 }

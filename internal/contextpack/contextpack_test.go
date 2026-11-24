@@ -2,6 +2,8 @@ package contextpack
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +12,82 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
+
+func TestDecreesRequireOperatorSender(t *testing.T) {
+	for _, kind := range []string{"decree", "decision"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			st := newTestStore(t)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+				t.Fatal(err)
+			}
+			for _, role := range []string{"operator", "coder", "system"} {
+				if _, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: "room", FromRole: role, Kind: kind, Body: role + "-instruction"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pkt := Assemble(ctx, st, domain.Task{InputJSON: `{"prompt":"work","conclaveId":"room"}`}, domain.Workload{})
+			if !strings.Contains(pkt.Markdown, "operator-instruction") || strings.Contains(pkt.Markdown, "coder-instruction") || strings.Contains(pkt.Markdown, "system-instruction") {
+				t.Fatalf("only operator messages belong in decrees:\n%s", pkt.Markdown)
+			}
+		})
+	}
+}
+
+func workloadWithRoleCard(t *testing.T, class domain.WorkloadClass) domain.Workload {
+	t.Helper()
+	var wl domain.Workload
+	raw := fmt.Sprintf(`{"spec":{"class":%q,"roleCard":"Review changes. Do not authorize execution. Return findings."}}`, class)
+	if err := json.Unmarshal([]byte(raw), &wl); err != nil {
+		t.Fatal(err)
+	}
+	return wl
+}
+
+func TestRoleCardComesFirstForEveryClass(t *testing.T) {
+	for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent, domain.ClassDeterministicController} {
+		t.Run(string(class), func(t *testing.T) {
+			pkt := Assemble(context.Background(), nil, domain.Task{InputJSON: `{"prompt":"task intent"}`}, workloadWithRoleCard(t, class))
+			if !strings.HasPrefix(pkt.Markdown, "## Role Card\n\nReview changes. Do not authorize execution. Return findings.\n") {
+				t.Fatalf("role card must come first:\n%s", pkt.Markdown)
+			}
+		})
+	}
+}
+
+func TestPacketLimitPreservesRequiredSectionsAndNewestContext(t *testing.T) {
+	for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent} {
+		t.Run(string(class), func(t *testing.T) {
+			ctx := context.Background()
+			st := newTestStore(t)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 5; i++ {
+				body := fmt.Sprintf("context-%d: %s", i, strings.Repeat("context ", maxPacketBytes/24))
+				if _, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: "room", FromRole: "operator", Kind: "decree", Body: body}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			input, err := json.Marshal(map[string]string{"prompt": "keep entire intent", "failure_handoff": "keep entire failure handoff", "conclaveId": "room"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkt := Assemble(ctx, st, domain.Task{InputJSON: string(input)}, workloadWithRoleCard(t, class))
+			for _, want := range []string{"Review changes. Do not authorize execution. Return findings.", "keep entire intent", "keep entire failure handoff", "context-4:"} {
+				if !strings.Contains(pkt.Markdown, want) {
+					t.Errorf("missing %q", want)
+				}
+			}
+			if len(pkt.Markdown) > maxPacketBytes {
+				t.Errorf("packet exceeds limit: %d", len(pkt.Markdown))
+			}
+			if strings.Contains(pkt.Markdown, "context-0:") {
+				t.Error("oldest context survived truncation")
+			}
+		})
+	}
+}
 
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
@@ -86,5 +164,57 @@ func TestVerdictAndFailureHandoffAndTiers(t *testing.T) {
 	prov, mod := ResolveTier(ctx, st, "critic")
 	if prov != "cli:agy" || mod != "claude-opus-5-5-high" {
 		t.Fatalf("expected cli:agy/claude-opus-5-5-high, got %s/%s", prov, mod)
+	}
+}
+
+func TestPeerPacketBoundaries(t *testing.T) {
+	ctx := context.Background()
+	for _, field := range []string{"body", "name", "author"} {
+		t.Run(field, func(t *testing.T) {
+			st := newTestStore(t)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+				t.Fatal(err)
+			}
+			const sample = "notes\n```\n## log sample"
+			r := domain.ConclaveRelic{ConclaveID: "room", Name: field, AuthorRole: "coder", Body: "excerpt"}
+			switch field {
+			case "body":
+				r.Body = sample
+			case "name":
+				r.Name = sample
+			case "author":
+				r.AuthorRole = sample
+			}
+			if err := st.PutConclaveRelic(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			task := domain.Task{InputJSON: `{"activation":"on-mention","fromRole":"coder","messageId":1,"conclaveId":"room","prompt":"legacy peer body"}`}
+			md := Assemble(ctx, st, task, domain.Workload{}).Markdown
+			if !strings.Contains(md, "log sample") || strings.Contains(md, "\n## log sample") {
+				t.Errorf("Relic field escaped its block: %s", md)
+			}
+			if strings.Contains(md, "## Intent\n\nlegacy peer body") {
+				t.Error("peer body used as intent")
+			}
+		})
+	}
+}
+
+func TestMentionPacketKeepsMessage(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: "room", FromRole: "coder", ToRole: "reader", Kind: "proposal", Body: "line count was five"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{InputJSON: fmt.Sprintf(`{"activation":"on-mention","fromRole":"coder","role":"reader","messageId":%d,"prompt":"Read the message.","conclaveId":"room"}`, id)}
+	md := Assemble(ctx, st, task, domain.Workload{}).Markdown
+	_, data, ok := strings.Cut(md, "<untrusted-peer-message>")
+	body, _, closed := strings.Cut(data, "</untrusted-peer-message>")
+	if !ok || !closed || !strings.Contains(body, "line count was five") {
+		t.Fatalf("missing fenced mention: %s", md)
 	}
 }

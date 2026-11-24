@@ -83,6 +83,7 @@ type WorkloadSpec struct {
 	Runtime   RuntimeConfig `json:"runtime"`
 	Coding    *CodingConfig `json:"coding,omitempty"`
 	AgentCard AgentCard     `json:"agentCard"`
+	RoleCard  string        `json:"roleCard,omitempty"`
 	Grants    GrantSet      `json:"grants"`
 }
 

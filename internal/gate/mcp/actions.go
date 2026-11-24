@@ -158,7 +158,7 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		return map[string]string{"pr_url": prURL, "head": in.Head, "base": in.Base}, nil
 	})
 
-	g.RegisterAction("sandbox.propose_promotion", func(_ context.Context, _ domain.Workload, _ string, raw json.RawMessage) (any, error) {
+	g.RegisterAction("sandbox.propose_promotion", func(ctx context.Context, _ domain.Workload, _ string, raw json.RawMessage) (any, error) {
 		var in PromoteSandboxInput
 		if err := decodeStrict(raw, &in); err != nil {
 			return nil, err
@@ -166,10 +166,11 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		if err := validateSafeBranch(in.Branch); err != nil {
 			return nil, err
 		}
-		if g.bundle == nil {
+		snap := g.snapshotFromContext(ctx)
+		if snap.bundle == nil {
 			return nil, errors.New("no manifest bundle loaded")
 		}
-		target, ok := g.bundle.Workloads[in.Workload]
+		target, ok := snap.bundle.Workloads[in.Workload]
 		if !ok {
 			return nil, fmt.Errorf("workload %q not found", in.Workload)
 		}
