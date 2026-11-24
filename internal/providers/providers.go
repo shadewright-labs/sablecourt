@@ -82,6 +82,43 @@ var builtinProviders = []providerDef{
 	},
 }
 
+type cliDef struct {
+	ID            string
+	DisplayName   string
+	Bin           string
+	DefaultModels []string
+}
+
+var builtinCLIs = []cliDef{
+	{
+		ID:            "cli:claude",
+		DisplayName:   "Claude Code CLI (claude)",
+		Bin:           "claude",
+		DefaultModels: []string{"claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5", "sonnet", "opus"},
+	},
+	{
+		ID:            "cli:codex",
+		DisplayName:   "Codex CLI (codex)",
+		Bin:           "codex",
+		DefaultModels: []string{"gpt-5.3-codex", "gpt-5.2-codex", "o3", "gpt-5-mini"},
+	},
+	{
+		ID:            "cli:agy",
+		DisplayName:   "Antigravity CLI (agy)",
+		Bin:           "agy",
+		DefaultModels: []string{"gemini-2.5-pro", "gemini-2.5-flash", "claude-sonnet-4-6"},
+	},
+}
+
+func findCLIDef(id string) (cliDef, bool) {
+	for _, c := range builtinCLIs {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return cliDef{}, false
+}
+
 type Registry struct {
 	store   store.Store
 	secrets secret.SecretStore
@@ -137,7 +174,9 @@ func NewRegistry(opts Options) *Registry {
 }
 
 func (r *Registry) SavePrefs(ctx context.Context, providerID, defaultModel string, enabledModels []string) error {
-	if _, ok := findDef(providerID); !ok {
+	_, isAPI := findDef(providerID)
+	_, isCLI := findCLIDef(providerID)
+	if !isAPI && !isCLI {
 		return fmt.Errorf("unknown provider %q", providerID)
 	}
 	cleaned := make([]string, 0, len(enabledModels))
@@ -231,21 +270,39 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 	}
 
 	// Local coding CLI detection (presence in PATH only; never scans host processes or transcripts).
-	for _, cliDef := range []struct{ id, label, bin string }{
-		{"cli:claude", "Claude Code CLI (claude)", "claude"},
-		{"cli:codex", "Codex CLI (codex)", "codex"},
-		{"cli:agy", "Antigravity CLI (agy)", "agy"},
-	} {
+	for _, cliDef := range builtinCLIs {
 		st := ProviderStatus{
-			ID:          cliDef.id,
-			DisplayName: cliDef.label,
+			ID:          cliDef.ID,
+			DisplayName: cliDef.DisplayName,
 			Kind:        "cli",
 		}
-		if path, err := r.look(cliDef.bin); err == nil && path != "" {
+		if path, err := r.look(cliDef.Bin); err == nil && path != "" {
 			st.Connected = true
 			st.Detail = "installed at " + path
 		} else {
 			st.Detail = "binary not found in PATH"
+		}
+
+		pref := r.prefs[cliDef.ID]
+		st.DefaultModel = pref.DefaultModel
+		st.EnabledModels = append([]string(nil), pref.EnabledModels...)
+
+		rawModels := make([]ModelInfo, 0, len(cliDef.DefaultModels))
+		for _, m := range cliDef.DefaultModels {
+			rawModels = append(rawModels, ModelInfo{
+				ID:       m,
+				Provider: cliDef.ID,
+				Enabled:  len(pref.EnabledModels) == 0 || slices.Contains(pref.EnabledModels, m),
+			})
+		}
+		st.Models = rawModels
+		if st.DefaultModel == "" && len(st.Models) > 0 {
+			for _, m := range st.Models {
+				if m.Enabled {
+					st.DefaultModel = m.ID
+					break
+				}
+			}
 		}
 		out = append(out, st)
 	}
