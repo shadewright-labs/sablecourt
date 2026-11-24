@@ -179,11 +179,14 @@ type WorkflowSpec struct {
 }
 
 type WorkflowStep struct {
-	Name     string `json:"name"`
-	Workload string `json:"workload"`
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Prompt   string `json:"prompt,omitempty"`
+	Name       string `json:"name"`
+	Workload   string `json:"workload"`
+	Role       string `json:"role,omitempty"`       // author | verifier | fast
+	Tier       string `json:"tier,omitempty"`       // fast | coding | critic
+	MaxRetries int    `json:"maxRetries,omitempty"` // opt-in closed-loop remediation retries
+	Provider   string `json:"provider,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Prompt     string `json:"prompt,omitempty"`
 }
 
 type Schedule struct {

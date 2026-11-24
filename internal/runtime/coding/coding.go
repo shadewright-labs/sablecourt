@@ -276,18 +276,49 @@ func SeatbeltProfile(workDir string) string {
 }
 
 func buildCommand(harness, sandbox, workDir, prompt string) (string, []string, error) {
+	effectivePrompt := prompt
+	var modelOverride string
+	var meta struct {
+		ContextPacket string `json:"context_packet"`
+		Prompt        string `json:"prompt"`
+		Model         string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(prompt), &meta); err == nil {
+		if strings.TrimSpace(meta.ContextPacket) != "" {
+			effectivePrompt = meta.ContextPacket
+			if workDir != "" {
+				_ = os.WriteFile(filepath.Join(workDir, ".sablecourt-context.md"), []byte(meta.ContextPacket), 0o444)
+			}
+		} else if strings.TrimSpace(meta.Prompt) != "" {
+			effectivePrompt = meta.Prompt
+		}
+		modelOverride = strings.TrimSpace(meta.Model)
+	}
+
 	var baseBin string
 	var baseArgs []string
 	switch harness {
 	case "claude":
 		baseBin = "claude"
-		baseArgs = []string{"-p", prompt}
+		if modelOverride != "" {
+			baseArgs = []string{"--model", modelOverride, "-p", effectivePrompt}
+		} else {
+			baseArgs = []string{"-p", effectivePrompt}
+		}
 	case "codex":
 		baseBin = "codex"
-		baseArgs = []string{"exec", prompt}
+		if modelOverride != "" {
+			baseArgs = []string{"exec", "-m", modelOverride, effectivePrompt}
+		} else {
+			baseArgs = []string{"exec", effectivePrompt}
+		}
 	case "agy":
 		baseBin = "agy"
-		baseArgs = []string{"-p", prompt}
+		if modelOverride != "" {
+			baseArgs = []string{"--model", modelOverride, "-p", effectivePrompt}
+		} else {
+			baseArgs = []string{"-p", effectivePrompt}
+		}
 	default:
 		return "", nil, fmt.Errorf("unsupported harness %q", harness)
 	}

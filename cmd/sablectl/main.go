@@ -269,13 +269,18 @@ func main() {
 			return nil
 		},
 	})
-	taskCmd.AddCommand(&cobra.Command{
+	var retryHandoff bool
+	taskRetryCmd := &cobra.Command{
 		Use:   "retry <task-id>",
-		Short: "Re-submit an interrupted or failed task with its original workload and input",
+		Short: "Re-submit an interrupted or failed task (use --handoff to attach failure-handoff.md)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/tasks/"+args[0]+"/retry", map[string]string{})
+			urlPath := base + "/api/v1/tasks/" + args[0] + "/retry"
+			if retryHandoff {
+				urlPath += "?handoff=true"
+			}
+			body, err := fetchPOST(cli, urlPath, map[string]string{})
 			if err != nil {
 				return err
 			}
@@ -285,13 +290,19 @@ func main() {
 			}
 			var t domain.Task
 			if err := json.Unmarshal(body, &t); err == nil && t.ID != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s retried %s as %s (%s)\n", stJade.Render("↻"), args[0], t.ID, t.WorkloadName)
+				suffix := ""
+				if retryHandoff {
+					suffix = " with failure-handoff.md"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s retried %s as %s (%s)%s\n", stJade.Render("↻"), args[0], t.ID, t.WorkloadName, suffix)
 				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s retried task %s\n", stJade.Render("↻"), args[0])
 			return nil
 		},
-	})
+	}
+	taskRetryCmd.Flags().BoolVar(&retryHandoff, "handoff", false, "Attach standardized failure-handoff.md from artifacts and events")
+	taskCmd.AddCommand(taskRetryCmd)
 	taskCmd.AddCommand(&cobra.Command{
 		Use:   "scry <task-id>",
 		Short: "Stream live redacted output from a running task (read-only)",

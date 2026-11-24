@@ -104,11 +104,21 @@
 
     <div class="top-row">
       <h1>Task <span class="mono">{{.Task.ID}}</span></h1>
+      <div style="display:flex; gap:8px; align-items:center;">
       {{if .Cancelable}}
       <form method="POST" action="/ui/tasks/{{.Task.ID}}/cancel">
         <button type="submit" class="btn-deny">Cancel task</button>
       </form>
+      {{else}}
+      <form method="POST" action="/ui/tasks/{{.Task.ID}}/retry">
+        <button type="submit">Retry</button>
+      </form>
+      <form method="POST" action="/ui/tasks/{{.Task.ID}}/retry">
+        <input type="hidden" name="handoff" value="1">
+        <button type="submit">Fix from failure (handoff)</button>
+      </form>
       {{end}}
+      </div>
     </div>
 
     <div class="card">

@@ -274,6 +274,32 @@
       {{end}}
     </div>
 
+    {{if .Tiers}}
+    <div class="card" style="margin-top:18px;">
+      <div class="card-head">
+        <div class="brand-id">
+          <div>
+            <div class="card-title">Model tiers (role routing)</div>
+            <div class="card-kind">system:model-tiers · fast / coding / critic</div>
+          </div>
+        </div>
+      </div>
+      <div class="detail">
+        Workflow steps declaring <code>tier: fast|coding|critic</code> resolve to these provider and model pairs at dispatch time unless explicitly overridden.
+      </div>
+      <form method="POST" action="/ui/providers/tiers" style="display:flex; flex-direction:column; gap:10px;">
+        {{range .Tiers}}
+        <div class="default-row">
+          <label style="min-width:64px; text-transform:uppercase;">{{.Tier}}</label>
+          <input type="text" name="tier_{{.Tier}}_provider" value="{{.Provider}}" placeholder="provider (e.g. cli:claude)" style="flex:1; background:rgba(8,6,14,0.85); color:var(--text-bone); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-family:var(--mono); font-size:11px;">
+          <input type="text" name="tier_{{.Tier}}_model" value="{{.Model}}" placeholder="model ID (e.g. claude-opus-5-5)" style="flex:2; background:rgba(8,6,14,0.85); color:var(--text-bone); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-family:var(--mono); font-size:11px;">
+        </div>
+        {{end}}
+        <div class="row"><button type="submit" class="btn-primary">Save model tiers</button></div>
+      </form>
+    </div>
+    {{end}}
+
     <div class="card" style="margin-top:18px;">
       <div class="card-head">
         <div class="brand-id">

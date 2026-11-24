@@ -56,3 +56,17 @@ All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site
 | Multi-agent Conclaves | `sablectl conclave open\|list\|inspect\|watch\|decree\|relic\|close` |
 | Governance and audit | `sablectl approval list\|approve\|deny`, `sablectl audit verify\|export`, `sablectl pair`, `sablectl device list\|revoke` |
 | Memory, voice, and MCP | `sablectl memory list\|set\|delete`, `sablectl voice status\|speak`, `sablectl mcp-server` (stdio bridge for Claude/Codex/Cursor) |
+
+
+## Context, learnings, and model tier endpoints
+
+| Endpoint / Flag | Purpose |
+| --- | --- |
+| `GET /api/v1/learnings?repo=<name>&path=<paths>` | Return matching global, repo, and path-glob Scoped Learnings. |
+| `POST /api/v1/learnings` | Save a redacted Scoped Learning (`scope`, `key`, `rule`, `author`). |
+| `GET /api/v1/providers/tiers` | Read configured `fast`, `coding`, and `critic` model tier routes. |
+| `POST /api/v1/providers/tiers` | Persist role-based model tier routes (`[{"tier":"critic","provider":"cli:claude","model":"claude-opus-5-5"}]`). |
+| `POST /api/v1/tasks/{id}/retry?handoff=true` | Retry a task with a standardized `failure-handoff.md` built from artifacts and events. |
+| `sablectl task retry <id> --handoff` | CLI shortcut for closed-loop failure handoff retry. |
+
+`WorkflowStep` fields added in ADR-0010: `role` (`author` | `verifier` | `fast`), `tier` (`fast` | `coding` | `critic`), and `maxRetries` (opt-in closed-loop remediation limit).

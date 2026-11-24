@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
@@ -284,6 +285,10 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 	}
 
 	step := wf.Spec.Steps[0]
+	prov, mod := step.Provider, step.Model
+	if step.Tier != "" && prov == "" && mod == "" {
+		prov, mod = contextpack.ResolveTier(ctx, r.store, step.Tier)
+	}
 	payload := map[string]any{
 		"workflow":   workflowName,
 		"step":       step.Name,
@@ -291,14 +296,67 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 		"prompt":     step.Prompt,
 		"input":      userInput,
 	}
-	if step.Provider != "" {
-		payload["provider"] = step.Provider
+	if step.Role != "" {
+		payload["role"] = step.Role
 	}
-	if step.Model != "" {
-		payload["model"] = step.Model
+	if step.Tier != "" {
+		payload["tier"] = step.Tier
+	}
+	if step.MaxRetries > 0 {
+		payload["max_retries"] = step.MaxRetries
+		payload["auto_remediate"] = true
+	}
+	if prov != "" {
+		payload["provider"] = prov
+	}
+	if mod != "" {
+		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
 	return r.SubmitTask(ctx, step.Workload, "", string(raw))
+}
+
+// RetryTaskWithHandoff retries a task, optionally attaching a standardized failure-handoff.md
+// containing redacted artifacts, lifecycle events, and failure context.
+func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string, withHandoff bool, reason string) (domain.Task, error) {
+	orig, err := r.store.GetTask(ctx, origTaskID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	inputJSON := orig.InputJSON
+	if withHandoff {
+		events, _ := r.store.ListTaskEvents(ctx, orig.ID)
+		msgs, _ := r.store.ListTaskMessages(ctx, orig.ID)
+		handoff := contextpack.BuildFailureHandoff(orig, events, msgs, reason)
+		payload := make(map[string]any)
+		if err := json.Unmarshal([]byte(orig.InputJSON), &payload); err != nil {
+			payload = map[string]any{"prompt": orig.InputJSON}
+		}
+		retryCount := 0
+		if v, ok := payload["retry_count"].(float64); ok {
+			retryCount = int(v)
+		}
+		payload["retry_count"] = retryCount + 1
+		payload["retried_from"] = orig.ID
+		payload["failure_handoff"] = handoff
+		if raw, err := json.Marshal(payload); err == nil {
+			inputJSON = string(raw)
+		}
+	}
+	idem := fmt.Sprintf("retry-%s-%d", orig.ID, r.now().UnixNano())
+	retried, err := r.SubmitTask(ctx, orig.WorkloadName, idem, inputJSON)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if withHandoff {
+		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+			TaskID:    retried.ID,
+			Role:      "system",
+			Content:   fmt.Sprintf("Closed-loop remediation started from failed task %s with failure-handoff.md.", orig.ID),
+			CreatedAt: r.now(),
+		})
+	}
+	return retried, nil
 }
 
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
@@ -431,14 +489,16 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 				r.advanceWorkflowStep(ctx, task)
 			case scruntime.StateFailed:
 				r.persistArtifacts(ctx, task.ID, adapter, handle)
+				failReason := fmt.Sprintf("runtime_failed (exit_code=%d)", obs.ExitCode)
 				_ = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateWorking, domain.TaskStateFailed, "runtime_failed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode))
 				_ = r.store.RevokeTaskLeases(ctx, task.ID)
 				r.mu.Lock()
 				delete(r.handles, task.ID)
 				r.mu.Unlock()
 				if r.onTaskFailed != nil {
-					r.onTaskFailed(task, fmt.Sprintf("runtime_failed (exit_code=%d)", obs.ExitCode))
+					r.onTaskFailed(task, failReason)
 				}
+				r.maybeAutoRemediate(ctx, task.ID, failReason)
 			}
 		}
 	}
@@ -451,10 +511,39 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		return err
 	}
 
+	inputJSON := task.InputJSON
+	// Assemble bounded context-packet.md and resolve optional model tier for non-deterministic workloads.
+	if wl.Spec.Class != domain.ClassDeterministicController {
+		pkt := contextpack.Assemble(ctx, r.store, task, wl)
+		payload := make(map[string]any)
+		if err := json.Unmarshal([]byte(inputJSON), &payload); err == nil {
+			if tier, _ := payload["tier"].(string); tier != "" {
+				prov, _ := payload["provider"].(string)
+				mod, _ := payload["model"].(string)
+				if prov == "" && mod == "" {
+					if tp, tm := contextpack.ResolveTier(ctx, r.store, tier); tp != "" || tm != "" {
+						if tp != "" {
+							payload["provider"] = tp
+						}
+						if tm != "" {
+							payload["model"] = tm
+						}
+					}
+				}
+			}
+			if pkt.Markdown != "" {
+				payload["context_packet"] = pkt.Markdown
+			}
+			if raw, err := json.Marshal(payload); err == nil {
+				inputJSON = string(raw)
+			}
+		}
+	}
+
 	spec := scruntime.LaunchSpec{
 		TaskID:      task.ID,
 		Workload:    wl,
-		InputJSON:   task.InputJSON,
+		InputJSON:   inputJSON,
 		DataGateURL: r.dataGateURL,
 		TaskToken:   token,
 	}
@@ -482,10 +571,19 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) {
+	// Reload completedTask so ArtifactsJSON populated by persistArtifacts is visible.
+	if fresh, err := r.store.GetTask(ctx, completedTask.ID); err == nil {
+		completedTask = fresh
+	}
 	var meta struct {
-		Workflow  string `json:"workflow"`
-		StepIndex int    `json:"step_index"`
-		Input     string `json:"input"`
+		Workflow        string `json:"workflow"`
+		StepIndex       int    `json:"step_index"`
+		Input           string `json:"input"`
+		Role            string `json:"role"`
+		MaxRetries      int    `json:"max_retries"`
+		RetryCount      int    `json:"retry_count"`
+		AuthorTaskID    string `json:"author_task_id"`
+		AuthorStepIndex int    `json:"author_step_index"`
 	}
 	if err := json.Unmarshal([]byte(completedTask.InputJSON), &meta); err != nil || meta.Workflow == "" {
 		return
@@ -500,23 +598,114 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if !ok {
 		return
 	}
+
+	// If a verifier step rejected the author's output, trigger opt-in remediation or halt advancement.
+	if meta.Role == "verifier" {
+		msgs, _ := r.store.ListTaskMessages(ctx, completedTask.ID)
+		verdict, findings := contextpack.ParseVerdict(completedTask.ArtifactsJSON, msgs)
+		if verdict == contextpack.VerdictChangesRequested {
+			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+				TaskID:    completedTask.ID,
+				Role:      "system",
+				Content:   "Verifier returned VERDICT: CHANGES_REQUESTED.",
+				CreatedAt: r.now(),
+			})
+			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+				Category:     "workflow",
+				TaskID:       completedTask.ID,
+				WorkloadName: completedTask.WorkloadName,
+				Action:       "workflow.verify",
+				Outcome:      "changes_requested",
+				DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step_index":%d,"retry_count":%d,"max_retries":%d}`, meta.Workflow, meta.StepIndex, meta.RetryCount, meta.MaxRetries),
+				CreatedAt:    r.now(),
+			})
+			if meta.MaxRetries > 0 && meta.RetryCount < meta.MaxRetries && meta.AuthorStepIndex >= 0 && meta.AuthorStepIndex < len(wf.Spec.Steps) {
+				authorStep := wf.Spec.Steps[meta.AuthorStepIndex]
+				prov, mod := authorStep.Provider, authorStep.Model
+				if authorStep.Tier != "" && prov == "" && mod == "" {
+					prov, mod = contextpack.ResolveTier(ctx, r.store, authorStep.Tier)
+				}
+				handoff := fmt.Sprintf("# Verifier Feedback (CHANGES_REQUESTED)\n\nVerifier task: `%s`\n\n%s\n", completedTask.ID, findings)
+				payload := map[string]any{
+					"workflow":        meta.Workflow,
+					"step":            authorStep.Name,
+					"step_index":      meta.AuthorStepIndex,
+					"prompt":          authorStep.Prompt,
+					"input":           meta.Input,
+					"role":            authorStep.Role,
+					"tier":            authorStep.Tier,
+					"max_retries":     meta.MaxRetries,
+					"retry_count":     meta.RetryCount + 1,
+					"auto_remediate":  true,
+					"failure_handoff": handoff,
+				}
+				if prov != "" {
+					payload["provider"] = prov
+				}
+				if mod != "" {
+					payload["model"] = mod
+				}
+				raw, _ := json.Marshal(payload)
+				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
+				if remTask, err := r.SubmitTask(ctx, authorStep.Workload, idem, string(raw)); err == nil {
+					_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+						TaskID:    remTask.ID,
+						Role:      "system",
+						Content:   fmt.Sprintf("Closed-loop remediation attempt %d/%d triggered by verifier %s.", meta.RetryCount+1, meta.MaxRetries, completedTask.ID),
+						CreatedAt: r.now(),
+					})
+				}
+			}
+			return
+		}
+	}
+
 	nextIdx := meta.StepIndex + 1
 	if nextIdx >= len(wf.Spec.Steps) {
 		return
 	}
 	nextStep := wf.Spec.Steps[nextIdx]
+	prov, mod := nextStep.Provider, nextStep.Model
+	if nextStep.Tier != "" && prov == "" && mod == "" {
+		prov, mod = contextpack.ResolveTier(ctx, r.store, nextStep.Tier)
+	}
+	prompt := nextStep.Prompt
+	if nextStep.Role == "verifier" {
+		prompt = contextpack.BuildVerifierPrompt(completedTask, nextStep.Prompt)
+	}
 	payload := map[string]any{
 		"workflow":   meta.Workflow,
 		"step":       nextStep.Name,
 		"step_index": nextIdx,
-		"prompt":     nextStep.Prompt,
+		"prompt":     prompt,
 		"input":      meta.Input,
 	}
-	if nextStep.Provider != "" {
-		payload["provider"] = nextStep.Provider
+	if nextStep.Role != "" {
+		payload["role"] = nextStep.Role
 	}
-	if nextStep.Model != "" {
-		payload["model"] = nextStep.Model
+	if nextStep.Role == "verifier" {
+		payload["author_task_id"] = completedTask.ID
+		payload["author_step_index"] = meta.StepIndex
+		maxR := nextStep.MaxRetries
+		if maxR == 0 {
+			maxR = meta.MaxRetries
+		}
+		if maxR > 0 {
+			payload["max_retries"] = maxR
+			payload["retry_count"] = meta.RetryCount
+		}
+	} else if nextStep.MaxRetries > 0 {
+		payload["max_retries"] = nextStep.MaxRetries
+		payload["auto_remediate"] = true
+	}
+	if nextStep.Tier != "" {
+		payload["tier"] = nextStep.Tier
+	}
+	if prov != "" {
+		payload["provider"] = prov
+	}
+	if mod != "" {
+		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
 	nextID, err := newTaskID()
@@ -549,6 +738,39 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 			Outcome:      "submitted",
 			DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step":%q,"step_index":%d,"parent_task_id":%q}`, meta.Workflow, nextStep.Name, nextIdx, completedTask.ID),
 			CreatedAt:    now,
+		})
+	}
+}
+
+func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failedTaskID, reason string) {
+	failed, err := r.store.GetTask(ctx, failedTaskID)
+	if err != nil {
+		return
+	}
+	var meta struct {
+		AutoRemediate bool `json:"auto_remediate"`
+		MaxRetries    int  `json:"max_retries"`
+		RetryCount    int  `json:"retry_count"`
+	}
+	if err := json.Unmarshal([]byte(failed.InputJSON), &meta); err != nil {
+		return
+	}
+	maxR := meta.MaxRetries
+	if meta.AutoRemediate && maxR == 0 {
+		maxR = 1
+	}
+	if maxR <= 0 || meta.RetryCount >= maxR {
+		return
+	}
+	if rem, err := r.RetryTaskWithHandoff(ctx, failedTaskID, true, reason); err == nil {
+		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+			Category:     "controlplane",
+			TaskID:       rem.ID,
+			WorkloadName: rem.WorkloadName,
+			Action:       "task.auto_remediate",
+			Outcome:      "submitted",
+			DetailJSON:   fmt.Sprintf(`{"failed_task_id":%q,"attempt":%d,"max_retries":%d}`, failedTaskID, meta.RetryCount+1, maxR),
+			CreatedAt:    r.now(),
 		})
 	}
 }

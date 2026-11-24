@@ -121,6 +121,12 @@
               </span>
             </div>
             <div class="msg-body">{{.Body}}</div>
+            <form method="POST" action="/ui/conclaves/{{$.Session.ID}}/learning" style="margin-top:6px; display:inline-flex; gap:6px; align-items:center;">
+              <input type="hidden" name="scope" value="global">
+              <input type="hidden" name="key" value="conclave-msg-{{.ID}}">
+              <input type="hidden" name="rule" value="{{.Body}}">
+              <button type="submit" class="btn-ghost" style="margin:0; padding:3px 8px; font-size:11px;">Save as learning</button>
+            </form>
           </div>
           {{end}}
         {{else}}
