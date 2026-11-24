@@ -76,7 +76,7 @@ func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, stat
 }
 
 func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
-	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg, s.appendAuditTx); handled {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, nil, msg, s.appendAuditTx); handled {
 		return id, err
 	}
 	var id int64

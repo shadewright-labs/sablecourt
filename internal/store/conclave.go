@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -64,9 +65,13 @@ func LimitsForConclave(tpl domain.Conclave, hasTemplate bool, budgets map[string
 	return limits
 }
 
+const councilKeyPrefix = "conclave-round:"
+
 const MaxConclaveTurnInput = 1 << 20
 
 type ConclaveAssignment struct {
+	Round      int                       `json:"round,omitempty"`
+	Attempt    int                       `json:"attempt,omitempty"`
 	ConclaveID string                    `json:"conclaveId"`
 	Role       string                    `json:"role"`
 	MessageID  int64                     `json:"messageId,omitempty"`
@@ -74,6 +79,9 @@ type ConclaveAssignment struct {
 }
 
 func (a ConclaveAssignment) TurnKey() string {
+	if a.Round != 0 || a.Attempt != 0 {
+		return fmt.Sprintf(councilKeyPrefix+"%d:%s:%d:%d:%s", len(a.ConclaveID), a.ConclaveID, a.Round, a.Attempt, a.Role)
+	}
 	if a.MessageID == 0 {
 		return fmt.Sprintf("conclave-%s-init-%s", a.ConclaveID, a.Role)
 	}
@@ -85,16 +93,36 @@ func (a ConclaveAssignment) RetryKey(taskID string, attempt int) string {
 }
 
 func TaskConclaveAssignment(task domain.Task) (ConclaveAssignment, bool) {
-	var input struct {
-		ConclaveAssignment
-		RetriedFrom string `json:"retried_from"`
-		RetryCount  int    `json:"retry_count"`
-	}
-	if task.ParentTaskID != "" || !strings.HasPrefix(task.IdempotencyKey, "conclave-") ||
-		len(task.InputJSON) > MaxConclaveTurnInput || json.Unmarshal([]byte(task.InputJSON), &input) != nil {
+	if task.ParentTaskID != "" || !strings.HasPrefix(task.IdempotencyKey, "conclave-") || len(task.InputJSON) > MaxConclaveTurnInput {
 		return ConclaveAssignment{}, false
 	}
-	a := input.ConclaveAssignment
+	if strings.HasPrefix(task.IdempotencyKey, councilKeyPrefix) {
+		var input struct {
+			ConclaveAssignment
+			RetriedFrom string `json:"retried_from"`
+			RetryCount  int    `json:"retry_count"`
+		}
+		if json.Unmarshal([]byte(task.InputJSON), &input) == nil {
+			a := input.ConclaveAssignment
+			if a.Round > 0 && a.Attempt > 0 && a.ConclaveID != "" && a.Role != "" && a.MessageID == 0 && a.Activation == "" &&
+				input.RetriedFrom == "" && input.RetryCount == 0 && a.TurnKey() == task.IdempotencyKey {
+				return a, true
+			}
+		}
+	}
+	// Ordinary workloads may use round and attempt in their own input.
+	var input struct {
+		ConclaveID  string                    `json:"conclaveId"`
+		Role        string                    `json:"role"`
+		MessageID   int64                     `json:"messageId"`
+		Activation  domain.ConclaveActivation `json:"activation"`
+		RetriedFrom string                    `json:"retried_from"`
+		RetryCount  int                       `json:"retry_count"`
+	}
+	if json.Unmarshal([]byte(task.InputJSON), &input) != nil {
+		return ConclaveAssignment{}, false
+	}
+	a := ConclaveAssignment{ConclaveID: input.ConclaveID, Role: input.Role, MessageID: input.MessageID, Activation: input.Activation}
 	if a.ConclaveID == "" || a.Role == "" ||
 		!(a.Activation == domain.ActivationAlwaysOn && a.MessageID == 0 ||
 			a.Activation == domain.ActivationOnMention && a.MessageID > 0) {
@@ -176,18 +204,18 @@ func runConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, 
 
 // AppendGuardedConclavePost handles broker writes. Bare Store appends are also
 // used for importing stored messages and do not carry a guard.
-func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (bool, int64, error) {
+func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (bool, int64, error) {
 	post, ok := ctx.Value(conclavePostKey{}).(*conclavePost)
 	if !ok {
 		return false, 0, nil
 	}
-	id, err := appendConclavePost(ctx, db, msg, post, audit)
+	id, err := appendConclavePost(ctx, db, policy, msg, post, audit)
 	post.applied = true
 	return true, id, err
 }
 
-func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMessage, post *conclavePost, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (int64, error) {
-	tx, room, err := lockConclave(ctx, db, msg.ConclaveID)
+func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, post *conclavePost, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (int64, error) {
+	tx, room, err := lockConclave(ctx, db, policy, msg.ConclaveID)
 	if err != nil {
 		return 0, err
 	}
@@ -196,9 +224,16 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 	if room.State != domain.ConclaveStateActive && room.State != domain.ConclaveStateInputRequired {
 		return 0, ErrConclaveClosed
 	}
-	limits := post.limits
-	now := limits.Now().UTC()
 	operator := msg.FromRole == "operator"
+	if room.policy != nil && operator && (msg.Kind == "decree" || msg.Kind == "decision") {
+		if !ValidCouncilText(msg.Body) || msg.ToRole != "all" && !slices.ContainsFunc(room.policy.Members, func(m CouncilMember) bool {
+			return m.Vassal.Role == msg.ToRole
+		}) {
+			return 0, errors.New("invalid operator decree")
+		}
+	}
+	limits := room.limits(post.limits)
+	now := limits.Now().UTC()
 	expired := conclaveExpired(room, limits, now)
 	paused := room.State == domain.ConclaveStateInputRequired
 	var admitted bool
@@ -267,7 +302,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 		reason = post.budgetReason
 		if reason == "" {
 			// Usage can grow between the Store evidence reads and this transaction.
-			reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
+			reason, err = conclaveBudgetWard(ctx, tx, room, limits.Budget)
 			if err != nil {
 				return 0, err
 			}
@@ -291,7 +326,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 			return 0, err
 		}
 		if reason == "" && !post.report {
-			reason, err = conclaveBudgetWard(ctx, tx, msg.ConclaveID, limits.Budget)
+			reason, err = conclaveBudgetWard(ctx, tx, room, limits.Budget)
 			if err != nil {
 				return 0, err
 			}
@@ -314,7 +349,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, msg domain.ConclaveMess
 			return 0, err
 		}
 	case paused: // A successful operator decree opens one new run window.
-		runs, err := conclaveRunCount(ctx, tx, room.ID)
+		runs, err := conclaveRunCount(ctx, tx, room)
 		if err != nil {
 			return 0, err
 		}
@@ -458,8 +493,13 @@ type TaskInserter interface {
 
 // InsertTask applies the council guard to the task insert in the same transaction.
 // The persisted task is the run reservation. Failed inserts consume no slots.
-func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(TaskInserter) error) error {
+func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, task domain.Task, insert func(TaskInserter) error) error {
 	turn, ok := ctx.Value(conclaveTurnKey{}).(*conclaveTurn)
+	if !ok && strings.HasPrefix(task.IdempotencyKey, councilKeyPrefix) {
+		if a, assigned := TaskConclaveAssignment(task); !assigned || a.Round != 0 {
+			return errors.New("council attempt requires a reservation")
+		}
+	}
 	if entry, hasMemory := ctx.Value(taskMemoryKey{}).(domain.MemoryEntry); hasMemory {
 		if ok || entry.Key != task.ID {
 			return errors.New("invalid task registration")
@@ -474,20 +514,19 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 	if !assigned || a.ConclaveID != turn.id || task.IdempotencyKey != turn.key {
 		return errors.New("task does not match the conclave turn reservation")
 	}
-	tx, room, err := lockConclave(ctx, db, turn.id)
+	tx, room, err := lockConclave(ctx, db, policy, turn.id)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// The reconciler handles idempotent conflicts after this transaction ends.
-	var existing int
-	err = tx.QueryRowContext(ctx, "SELECT 1 FROM tasks WHERE idempotency_key = $1", turn.key).Scan(&existing)
-	if err == nil {
-		return ErrConflict
+	if (room.policy != nil) != (a.Round > 0) {
+		return errors.New("turn does not match room mode")
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+	if room.policy == nil {
+		if err := checkTurnKey(ctx, tx, turn.key); err != nil {
+			return err
+		}
 	}
 	switch room.State {
 	case domain.ConclaveStateActive:
@@ -497,18 +536,18 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 		return ErrConclaveClosed
 	}
 
-	limits := turn.limits
-	now := limits.Now().UTC()
-	if conclaveExpired(room, limits, now) {
-		if err := pauseConclave(ctx, tx, room, conclaveDeadline, now); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	if room.policy != nil && room.WardReason != "" {
 		return ErrConclavePaused
 	}
+	limits := room.limits(turn.limits)
+	now := limits.Now().UTC()
+	if conclaveExpired(room, limits, now) {
+		return refuseTurn(ctx, tx, room, conclaveDeadline, now, ErrConclavePaused)
+	}
 	if limits.BudgetMissing {
+		if room.policy != nil {
+			return refuseTurn(ctx, tx, room, "budget_evidence_unavailable", now, ErrConclavePaused)
+		}
 		return ErrConclavePaused
 	}
 	decree, count, err := conclaveMessageCount(ctx, tx, turn.id)
@@ -516,32 +555,36 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 		return err
 	}
 	reason, err := conclaveMessageWard(ctx, tx, turn.id, decree, count, limits)
+	if err == nil && reason == "" {
+		reason, err = conclaveBudgetWard(ctx, tx, room, limits.Budget)
+	}
 	if err != nil {
 		return err
 	}
 	if reason != "" {
-		return ErrConclavePaused
-	}
-	reason, err = conclaveBudgetWard(ctx, tx, turn.id, limits.Budget)
-	if err != nil {
-		return err
-	}
-	if reason != "" {
+		if room.policy != nil {
+			return refuseTurn(ctx, tx, room, reason, now, ErrConclavePaused)
+		}
 		return ErrConclavePaused
 	}
 
-	runs, err := conclaveRunCount(ctx, tx, turn.id)
+	runs, err := conclaveRunCount(ctx, tx, room)
 	if err != nil {
 		return err
 	}
-	if runs-room.baseline >= min(limits.MaxRuns, domain.ConclaveRunCeiling) {
-		if err := pauseConclave(ctx, tx, room, ConclaveMaxRunsWard, limits.Now().UTC()); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	if room.policy != nil && runs >= room.policy.MaxStarts {
 		return ErrConclaveRunLimit
+	}
+	if runs-room.baseline >= min(limits.MaxRuns, domain.ConclaveRunCeiling) {
+		return refuseTurn(ctx, tx, room, ConclaveMaxRunsWard, now, ErrConclaveRunLimit)
+	}
+	if room.policy != nil {
+		if err := checkTurnKey(ctx, tx, turn.key); err != nil {
+			return err
+		}
+		if err := reserveCouncilAttempt(ctx, tx, room, task, a); err != nil {
+			return err
+		}
 	}
 	if err := insert(tx); err != nil {
 		return err
@@ -552,6 +595,29 @@ func InsertTask(ctx context.Context, db *sql.DB, task domain.Task, insert func(T
 		}
 	}
 	return tx.Commit()
+}
+
+func refuseTurn(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time, refusal error) error {
+	if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return refusal
+}
+
+// The reconciler recovers an existing task on ErrConflict.
+func checkTurnKey(ctx context.Context, tx *sql.Tx, key string) error {
+	var existing int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM tasks WHERE idempotency_key = $1", key).Scan(&existing)
+	if err == nil {
+		return ErrConflict
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 // HasConclaveReservation reports whether submission is inside the council guard.
@@ -584,18 +650,18 @@ func ClaimConclaveTask(ctx context.Context, st Store, taskID, roomID string, now
 	return nil
 }
 
-func BeginTaskTransition(ctx context.Context, db *sql.DB, to domain.TaskState, reason string) (*sql.Tx, domain.TaskState, string, error) {
+func BeginTaskTransition(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, to domain.TaskState, reason string) (*sql.Tx, domain.TaskState, string, error) {
 	claim, guarded := ctx.Value(conclaveClaimKey{}).(*conclaveClaim)
 	if !guarded {
 		tx, err := db.BeginTx(ctx, nil)
 		return tx, to, reason, err
 	}
-	tx, room, err := lockConclave(ctx, db, claim.roomID)
+	tx, room, err := lockConclave(ctx, db, policy, claim.roomID)
 	if err != nil {
 		return nil, to, reason, err
 	}
 	claim.applied = true
-	now := claim.now().UTC()
+	now := room.limits(ConclaveLimits{Now: claim.now}).Now().UTC()
 	if room.State != domain.ConclaveStateActive {
 		reason = "conclave_inactive"
 	}
@@ -627,9 +693,10 @@ func BeginTaskTransition(ctx context.Context, db *sql.DB, to domain.TaskState, r
 type lockedConclave struct {
 	domain.ConclaveSession
 	baseline int
+	policy   *CouncilPolicy
 }
 
-func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, lockedConclave, error) {
+func lockConclave(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, id string) (*sql.Tx, lockedConclave, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, lockedConclave{}, err
@@ -645,6 +712,9 @@ func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, lockedCo
 	if err == nil {
 		room.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
 	}
+	if err == nil && policy != nil {
+		room.policy, err = policy(ctx, tx, id)
+	}
 	if err != nil {
 		_ = tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
@@ -656,6 +726,9 @@ func lockConclave(ctx context.Context, db *sql.DB, id string) (*sql.Tx, lockedCo
 }
 
 func conclaveExpired(room lockedConclave, limits ConclaveLimits, now time.Time) bool {
+	if room.policy != nil {
+		return !now.Before(room.policy.Deadline)
+	}
 	return limits.MaxAge > 0 && !now.Before(room.CreatedAt.Add(limits.MaxAge))
 }
 
@@ -717,7 +790,13 @@ func conclaveMessageWard(ctx context.Context, tx *sql.Tx, id string, decree int6
 	return "", nil
 }
 
-func conclaveRunCount(ctx context.Context, tx *sql.Tx, id string) (int, error) {
+func conclaveRunCount(ctx context.Context, tx *sql.Tx, room lockedConclave) (int, error) {
+	if room.policy != nil {
+		var n int
+		err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM council_attempts WHERE council_id=$1", room.ID).Scan(&n)
+		return n, err
+	}
+	id := room.ID
 	init, mentions, retries := conclaveTaskPatterns(id)
 	var runs int
 	err := tx.QueryRowContext(ctx, `
@@ -732,19 +811,22 @@ func conclaveTaskPatterns(id string) (string, string, string) {
 	return prefix + "-init-%", prefix + "-msg-%", prefix + "-retry-%"
 }
 
-func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, id string, budget *domain.PerTaskBudget) (string, error) {
+func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, room lockedConclave, budget *domain.PerTaskBudget) (string, error) {
 	if budget == nil {
 		return "", nil
 	}
-	init, mentions, retries := conclaveTaskPatterns(id)
 	var totals domain.BudgetTotals
+	tasks := `SELECT id FROM tasks WHERE parent_task_id = '' AND
+		(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')`
+	init, mentions, retries := conclaveTaskPatterns(room.ID)
+	args := []any{init, mentions, retries}
+	if room.policy != nil {
+		tasks = "SELECT task_id FROM council_attempts WHERE council_id=$1"
+		args = []any{room.ID}
+	}
 	err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
-		FROM budget_ledger WHERE task_id IN (
-			SELECT id FROM tasks WHERE parent_task_id = '' AND
-				(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')
-		)
-	`, init, mentions, retries).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+		FROM budget_ledger WHERE task_id IN (`+tasks+")", args...).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	if err != nil {
 		return "", err
 	}
