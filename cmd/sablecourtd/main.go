@@ -74,6 +74,7 @@ func main() {
 		modelGatewayURL      string
 		allowedHosts         []string
 		incidentTemplate     string
+		branchRetention      time.Duration
 	)
 
 	rootCmd := &cobra.Command{
@@ -102,6 +103,7 @@ func main() {
 				modelGatewayURL:      modelGatewayURL,
 				allowedHosts:         allowedHosts,
 				incidentTemplate:     incidentTemplate,
+				branchRetention:      branchRetention,
 			})
 		},
 	}
@@ -114,6 +116,7 @@ func main() {
 	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
 	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
+	rootCmd.Flags().DurationVar(&branchRetention, "coding-branch-retention", 0, "Age before merged coding branches can be pruned (0 disables pruning)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum number of concurrently running tasks (0 = unlimited)")
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "127.0.0.1:7432", "HTTP listen address")
 	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
@@ -159,6 +162,14 @@ type daemonConfig struct {
 	modelGatewayURL      string
 	allowedHosts         []string
 	incidentTemplate     string
+	branchRetention      time.Duration
+}
+
+func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
+	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
+	adapter.BranchRetention = retention
+	adapter.AttachHub = hub
+	return adapter
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
@@ -340,8 +351,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
 	if !isCitadel {
-		codingAdapter := coding.NewAdapter(os.TempDir())
-		codingAdapter.AttachHub = attachHub
+		codingAdapter := newCodingAdapter(attachHub, dbPath, cfg.branchRetention)
 		adapters[domain.ClassCodingAgent] = codingAdapter
 	} else {
 		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
