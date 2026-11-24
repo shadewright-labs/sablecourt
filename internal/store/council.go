@@ -5,9 +5,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 )
@@ -95,20 +97,29 @@ type CouncilSnapshot struct {
 // A nil reader denotes a backend that cannot create councils.
 type CouncilPolicyReader func(context.Context, *sql.Tx, string) (*CouncilPolicy, error)
 
+const MaxCouncilText = 64 << 10
+
+// ValidCouncilText reports whether text is nonblank, valid UTF-8, and within MaxCouncilText.
+func ValidCouncilText(s string) bool {
+	return len(s) <= MaxCouncilText && utf8.ValidString(s) && strings.TrimSpace(s) != ""
+}
+
 func (room lockedConclave) limits(limits ConclaveLimits) ConclaveLimits {
 	if p := room.policy; p != nil {
 		limits.Now = time.Now
 		limits.MaxMessages = lowerCeiling(limits.MaxMessages, p.Wards.MaxMessages)
 		limits.MaxPingPong = lowerCeiling(limits.MaxPingPong, p.Wards.MaxPingPong)
 		limits.MaxRuns = lowerCeiling(limits.MaxRuns, p.Wards.MaxRuns)
-		switch {
-		case limits.Budget == nil:
+		switch b := limits.Budget; {
+		case b != nil && (math.IsNaN(b.MaxCostUSD) || b.MaxCostUSD < 0 || b.MaxInputTokens < 0 || b.MaxOutputTokens < 0):
+			limits.BudgetMissing = true
+		case b == nil:
 			limits.Budget = p.Budget
 		case p.Budget != nil:
 			limits.Budget = &domain.PerTaskBudget{
-				MaxCostUSD:      lowerCeiling(limits.Budget.MaxCostUSD, p.Budget.MaxCostUSD),
-				MaxInputTokens:  lowerCeiling(limits.Budget.MaxInputTokens, p.Budget.MaxInputTokens),
-				MaxOutputTokens: lowerCeiling(limits.Budget.MaxOutputTokens, p.Budget.MaxOutputTokens),
+				MaxCostUSD:      lowerCeiling(b.MaxCostUSD, p.Budget.MaxCostUSD),
+				MaxInputTokens:  lowerCeiling(b.MaxInputTokens, p.Budget.MaxInputTokens),
+				MaxOutputTokens: lowerCeiling(b.MaxOutputTokens, p.Budget.MaxOutputTokens),
 			}
 		}
 	}
@@ -169,7 +180,8 @@ func reserveCouncilAttempt(ctx context.Context, tx *sql.Tx, room lockedConclave,
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if a.Attempt != previous+1 || previous > 0 && (answered || state != domain.TaskStateFailed && state != domain.TaskStateCancelled) {
+	retryable := !answered && (state == domain.TaskStateFailed || state == domain.TaskStateCancelled || state == domain.TaskStateCompleted)
+	if a.Attempt != previous+1 || previous > 0 && !retryable {
 		return errors.New("council attempt is stale or turn cannot retry")
 	}
 	res, err := tx.ExecContext(ctx, `

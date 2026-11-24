@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -223,9 +224,16 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 	if room.State != domain.ConclaveStateActive && room.State != domain.ConclaveStateInputRequired {
 		return 0, ErrConclaveClosed
 	}
+	operator := msg.FromRole == "operator"
+	if room.policy != nil && operator && (msg.Kind == "decree" || msg.Kind == "decision") {
+		if !ValidCouncilText(msg.Body) || msg.ToRole != "all" && !slices.ContainsFunc(room.policy.Members, func(m CouncilMember) bool {
+			return m.Vassal.Role == msg.ToRole
+		}) {
+			return 0, errors.New("invalid operator decree")
+		}
+	}
 	limits := room.limits(post.limits)
 	now := limits.Now().UTC()
-	operator := msg.FromRole == "operator"
 	expired := conclaveExpired(room, limits, now)
 	paused := room.State == domain.ConclaveStateInputRequired
 	var admitted bool

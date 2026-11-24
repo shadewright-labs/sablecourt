@@ -18,14 +18,8 @@ import (
 
 var _ store.CouncilStore = (*SQLiteStore)(nil)
 
-const maxCouncilText = 64 << 10
-
-func councilText(s string) bool {
-	return strings.TrimSpace(s) != "" && utf8.ValidString(s) && len(s) <= maxCouncilText
-}
-
 func validPolicy(p *store.CouncilPolicy) error {
-	if !councilText(p.Question) || p.MaxRounds < 1 || p.MaxStarts < 1 || p.Deadline.IsZero() || len(p.Members) == 0 ||
+	if !store.ValidCouncilText(p.Question) || p.MaxRounds < 1 || p.MaxStarts < 1 || p.MaxStarts > domain.ConclaveRunCeiling || p.Deadline.IsZero() || len(p.Members) == 0 ||
 		p.Wards.MaxRuns <= 0 || p.Wards.MaxRuns > domain.ConclaveRunCeiling || p.Wards.MaxMessages < 1 || p.Wards.MaxPingPong < 1 {
 		return errors.New("invalid council policy or ceilings")
 	}
@@ -36,9 +30,9 @@ func validPolicy(p *store.CouncilPolicy) error {
 	hasRuntime := false
 	for _, m := range p.Members {
 		v := m.Vassal
-		if !councilText(v.Role) || strings.TrimSpace(v.Role) != v.Role || strings.HasPrefix(v.Role, "@") ||
-			v.Role == "all" || v.Role == "system" || v.Role == "operator" || zones[v.Role] != "" || !councilText(v.Workload) ||
-			(m.Zone != domain.ZoneSandbox && m.Zone != domain.ZoneRuntime) || len(m.RoleCard) > maxCouncilText ||
+		if !store.ValidCouncilText(v.Role) || strings.TrimSpace(v.Role) != v.Role || strings.HasPrefix(v.Role, "@") ||
+			v.Role == "all" || v.Role == "system" || v.Role == "operator" || zones[v.Role] != "" || !store.ValidCouncilText(v.Workload) ||
+			(m.Zone != domain.ZoneSandbox && m.Zone != domain.ZoneRuntime) || len(m.RoleCard) > store.MaxCouncilText || !utf8.ValidString(m.RoleCard) ||
 			(v.Activation != "" && v.Activation != domain.ActivationAlwaysOn && v.Activation != domain.ActivationOnMention) {
 			return errors.New("invalid council member")
 		}
@@ -88,11 +82,12 @@ func councilPolicy(created time.Time, spec store.CouncilSpec) (store.CouncilPoli
 	if p.Wards.MaxRuns == 0 {
 		p.Wards.MaxRuns = domain.ConclaveRunCeiling
 	}
+	defaultMessageCeiling := max(2*len(p.Members), p.MaxStarts+1)
 	if p.Wards.MaxMessages == 0 {
-		p.Wards.MaxMessages = 2 * len(p.Members)
+		p.Wards.MaxMessages = defaultMessageCeiling
 	}
 	if p.Wards.MaxPingPong == 0 {
-		p.Wards.MaxPingPong = 2 * len(p.Members)
+		p.Wards.MaxPingPong = defaultMessageCeiling
 	}
 	if err := validPolicy(&p); err != nil {
 		return p, err
@@ -105,7 +100,7 @@ func councilPolicy(created time.Time, spec store.CouncilSpec) (store.CouncilPoli
 }
 
 func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSession, spec store.CouncilSpec) error {
-	if !councilText(room.ID) || room.State != domain.ConclaveStateActive || room.WardReason != "" {
+	if !store.ValidCouncilText(room.ID) || room.State != domain.ConclaveStateActive || room.WardReason != "" {
 		return errors.New("invalid opening council state")
 	}
 	if room.CreatedAt.IsZero() {

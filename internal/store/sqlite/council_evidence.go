@@ -75,15 +75,28 @@ func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, mess
 	if err != nil {
 		return err
 	}
-	if !councilText(body) || redact.String(body) != body {
+	if !store.ValidCouncilText(body) || redact.String(body) != body {
 		return errors.New("invalid council answer text")
 	}
 	if !permittedRecipient(a.policy, a.role, recipient) {
 		return errors.New("invalid council answer recipient")
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE council_attempts SET answer_id=?,nothing_to_add=? WHERE task_id=?", message, vote, task)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE council_attempts AS a SET answer_id=?,nothing_to_add=? WHERE task_id=?
+		AND NOT EXISTS (
+			SELECT 1 FROM council_attempts newer WHERE newer.council_id=a.council_id
+			AND newer.round=a.round AND newer.role=a.role AND newer.attempt>a.attempt
+		)
+	`, message, vote, task)
 	if err != nil {
 		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return store.ErrConflict
 	}
 	return tx.Commit()
 }
@@ -104,7 +117,7 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	if r.ContentType == "" {
 		r.ContentType = "text/plain"
 	}
-	if !councilText(r.Name) || !councilText(r.ContentType) || redact.String(r.Name) != r.Name || redact.String(r.ContentType) != r.ContentType {
+	if !store.ValidCouncilText(r.Name) || !store.ValidCouncilText(r.ContentType) || redact.String(r.Name) != r.Name || redact.String(r.ContentType) != r.ContentType {
 		return errors.New("invalid council relic metadata")
 	}
 	if len(r.Body) > store.MaxConclaveTurnInput || !utf8.ValidString(r.Body) || strings.TrimSpace(r.Body) == "" {
