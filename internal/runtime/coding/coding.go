@@ -58,9 +58,6 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (_ scrun
 		}
 	}()
 
-	if err := excludeSessionFiles(ctx, dir, state); err != nil {
-		return scruntime.Handle{}, err
-	}
 	if err := writeSessionMarker(dir, spec); err != nil {
 		return scruntime.Handle{}, err
 	}

@@ -83,7 +83,7 @@ func TestGitCallsUseSafeConfiguration(t *testing.T) {
 			for _, args := range gitCalls(t, trace) {
 				for _, config := range []string{
 					"core.fsmonitor=false", "core.hooksPath=" + os.DevNull,
-					"core.sshCommand=false", "protocol.file.allow=never",
+					"core.sshCommand=false", "protocol.file.allow=never", "core.excludesFile=",
 				} {
 					i := slices.Index(args, config)
 					if i < 1 || args[i-1] != "-c" {
@@ -168,7 +168,7 @@ func TestGitCallsDropGitEnvironment(t *testing.T) {
 	for _, name := range []string{
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
 		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-		"GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+		"GIT_CONFIG", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
 		"GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_FIXTURE",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -176,7 +176,11 @@ func TestGitCallsDropGitEnvironment(t *testing.T) {
 			adapter.DryRun = true
 			t.Setenv(name, "fixture")
 			t.Setenv("TEST_GIT_KEEP", "fixture")
-			interceptGit(t, fmt.Sprintf(`[ "${%s+x}" != x ] && [ "$TEST_GIT_KEEP" = fixture ] || exit 97`, name))
+			check := fmt.Sprintf(`[ "${%s+x}" != x ]`, name)
+			if name == "GIT_CONFIG_GLOBAL" || name == "GIT_CONFIG_NOSYSTEM" {
+				check = ":"
+			}
+			interceptGit(t, check+` && [ "$GIT_CONFIG_GLOBAL" = /dev/null ] && [ "$GIT_CONFIG_NOSYSTEM" = 1 ] && [ "$TEST_GIT_KEEP" = fixture ] || exit 97`)
 			handle := startTestTask(t, adapter, spec)
 			if err := adapter.Stop(context.Background(), handle); err != nil {
 				t.Fatal(err)
@@ -359,6 +363,17 @@ func TestCancelHandlesNestedRepositories(t *testing.T) {
 				}
 			}
 			testWrite(t, handle.WorkDir, "notes.txt", "task edit\n", 0o600)
+			if !tc.initModule && !tc.commit {
+				// The unborn repository still has an untracked file. Rescue it
+				// before retrying cleanup of the now empty repository.
+				if err := adapter.Stop(context.Background(), handle); err == nil || !strings.Contains(err.Error(), "nested Git repository") {
+					t.Fatalf("Stop with nested edit = %v", err)
+				}
+				file := filepath.Join(handle.WorkDir, "nested[fixture]", "empty", "uncommitted.txt")
+				if err := os.Rename(file, filepath.Join(handle.WorkDir, "rescued.txt")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			err := adapter.Stop(context.Background(), handle)
 			if tc.commit {
 				if err == nil || !strings.Contains(err.Error(), "nested Git repository") {
@@ -373,6 +388,11 @@ func TestCancelHandlesNestedRepositories(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertWorktreeRemoved(t, repo, handle.WorkDir)
+			if !tc.initModule && !tc.commit {
+				if got := testGit(t, repo, "show", handle.Branch+":rescued.txt"); got != "nested edit\n" {
+					t.Errorf("rescued nested edit = %q", got)
+				}
+			}
 			if got := testGit(t, repo, "show", handle.Branch+":notes.txt"); got != "task edit\n" {
 				t.Errorf("task edit = %q", got)
 			}
