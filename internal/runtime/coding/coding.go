@@ -1,23 +1,17 @@
 package coding
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -27,11 +21,15 @@ type Adapter struct {
 	WorktreeRoot    string // Directory for worktrees and their state.
 	DryRun          bool
 	AttachHub       *attach.Hub
-	BranchRetention time.Duration // Prune merged branches after this age on the next start.
+	BranchRetention time.Duration     // Prune merged branches after this age on the next start.
+	HarnessPaths    map[string]string // Absolute executable paths supplied by the operator.
+	WallTime        time.Duration     // Zero uses the default task limit.
 
-	mu        sync.Mutex
-	running   map[string]<-chan struct{}
-	responses map[string]*harnessResponse
+	allowUnconfined bool // In-process fixture only.
+
+	mu      sync.Mutex
+	gates   map[string]*taskGate
+	running sync.Map // Worktree path to *codingProcess.
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -60,8 +58,28 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, fmt.Errorf("unsupported coding harness %q", cfg.Harness)
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	input, err := parseLaunchInput(spec.InputJSON)
+	if err != nil {
+		return scruntime.Handle{}, err
+	}
+	limit := a.WallTime
+	if limit == 0 {
+		limit = defaultWallTime
+	}
+	if limit < 0 {
+		return scruntime.Handle{}, errors.New("coding wall time must be positive")
+	}
+	if !a.DryRun {
+		if err := a.validateSandbox(cfg.Sandbox, readOnly); err != nil {
+			return scruntime.Handle{}, err
+		}
+	}
+
+	release, err := a.lockTask(ctx, spec.TaskID, false)
+	if err != nil {
+		return scruntime.Handle{}, err
+	}
+	defer release()
 
 	dir, state, err := a.prepareWorktree(ctx, cfg.RepoPath, spec.TaskID)
 	if err != nil {
@@ -78,7 +96,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			return scruntime.Handle{}, err
 		}
 	}
-	if err := writeSessionMarker(dir, spec); err != nil {
+	if err := writeSessionMarker(dir, spec, input); err != nil {
 		return scruntime.Handle{}, err
 	}
 	handle := scruntime.Handle{
@@ -91,89 +109,40 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return handle, nil
 	}
 
-	var scratch string
-	if readOnly {
-		scratch, err = os.MkdirTemp("", "sablecourt-verifier-")
-		if err != nil {
+	if input.context != "" {
+		if err := writeSessionFile(dir, sessionContextFile, []byte(input.context)); err != nil {
 			return scruntime.Handle{}, err
 		}
-		defer func() {
-			if startErr != nil {
-				_ = os.RemoveAll(scratch)
-			}
-		}()
 	}
-	bin, argv, err := buildCommand(cfg.Harness, cfg.Sandbox, dir, spec.InputJSON, scratch)
+	scratch, err := os.MkdirTemp(filepath.Dir(dir), ".coding-scratch-")
 	if err != nil {
 		return scruntime.Handle{}, err
-	}
-	cmd := exec.Command(bin, argv...)
-	cmd.Dir = dir
-	cmd.Env = BuildStrippedEnv(spec)
-	if scratch != "" {
-		cmd.Env = append(cmd.Env, "TMPDIR="+scratch, "HOME="+scratch)
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = processGracePeriod
-
-	logFile, err := os.OpenFile(dir+".log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return scruntime.Handle{}, fmt.Errorf("open session log: %w", err)
 	}
 	defer func() {
 		if startErr != nil {
-			_ = logFile.Close()
-			startErr = errors.Join(startErr, os.Remove(logFile.Name()))
+			startErr = errors.Join(startErr, os.RemoveAll(scratch))
 		}
 	}()
-	output := &sessionOutput{file: logFile, hub: a.AttachHub, taskID: spec.TaskID}
-	stderr := &sessionOutput{file: logFile, hub: a.AttachHub, taskID: spec.TaskID}
-	response := &harnessResponse{}
-	// Print mode and exec send the final answer to stdout and diagnostics to stderr.
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(output, response), stderr
+
+	cmd, profile, err := a.buildCommand(spec, input, dir, scratch, state, readOnly)
+	if err != nil {
+		return scruntime.Handle{}, err
+	}
+	if profile != "" {
+		if err := checkSeatbelt(ctx, profile, cmd.Dir); err != nil {
+			return scruntime.Handle{}, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return scruntime.Handle{}, err
 	}
-	if output.hub != nil {
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return scruntime.Handle{}, fmt.Errorf("stdin pipe: %w", err)
-		}
-		output.hub.Register(spec.TaskID, stdin)
-		defer func() {
-			if startErr != nil {
-				output.hub.Close(spec.TaskID)
-			}
-		}()
-	}
-	if err := cmd.Start(); err != nil {
-		return scruntime.Handle{}, fmt.Errorf("start coding harness %q: %w", cfg.Harness, err)
-	}
 
-	handle.PID = cmd.Process.Pid
-	done := make(chan struct{})
-	if a.running == nil {
-		a.running = make(map[string]<-chan struct{})
-		a.responses = make(map[string]*harnessResponse)
+	process, err := startProcess(cmd, dir, scratch, state, limit, a.AttachHub)
+	if err != nil {
+		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, cmd.Path, err)
 	}
-	a.running[dir] = done
-	a.responses[dir] = response
-	go func() {
-		defer close(done)
-		if scratch != "" {
-			defer os.RemoveAll(scratch)
-		}
-		if err := cmd.Wait(); err != nil {
-			response.invalid = true
-		}
-		if err := errors.Join(output.Flush(), stderr.Flush()); err != nil {
-			response.invalid = true
-		}
-		_ = logFile.Close()
-		if output.hub != nil {
-			output.hub.Close(spec.TaskID)
-		}
-	}()
+	handle.PID = cmd.Process.Pid
+	a.running.Store(dir, process)
 	return handle, nil
 }
 
@@ -196,6 +165,9 @@ func pinWorktree(ctx context.Context, dir string, state *worktreeState, commit s
 	if _, err := checkout.run(ctx, "read-tree", "--reset", "-u", "--end-of-options", commit); err != nil {
 		return err
 	}
+	if err := state.checkSessionExcludes(ctx, dir); err != nil {
+		return err
+	}
 	if _, err := checkout.run(ctx, "update-ref", "--end-of-options", "HEAD", commit, state.Base); err != nil {
 		return err
 	}
@@ -203,37 +175,7 @@ func pinWorktree(ctx context.Context, dir string, state *worktreeState, commit s
 	return writeWorktreeState(dir, state)
 }
 
-type harnessResponse struct {
-	buf     bytes.Buffer
-	invalid bool
-}
-
-func (h *harnessResponse) Write(p []byte) (int, error) {
-	if !h.invalid && h.buf.Len()+len(p) <= 64*1024 {
-		return h.buf.Write(p)
-	}
-	h.invalid = true
-	return len(p), nil
-}
-
-func (h *harnessResponse) text() string {
-	if h.invalid {
-		return ""
-	}
-	raw := h.buf.Bytes()
-	starts := privateKeyStart.FindAllIndex(raw, -1)
-	if len(starts) > 0 && !privateKeyEnd.Match(raw[starts[len(starts)-1][1]:]) {
-		return ""
-	}
-	return redact.String(h.buf.String())
-}
-
-func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) error {
-	var meta struct {
-		ConclaveID string `json:"conclaveId"`
-		Role       string `json:"role"`
-	}
-	_ = json.Unmarshal([]byte(spec.InputJSON), &meta)
+func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec, input launchInput) error {
 	marker := map[string]any{
 		"managed_by": "sablecourt",
 		"task_id":    spec.TaskID,
@@ -241,9 +183,9 @@ func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec) error {
 		"zone":       string(spec.Workload.Metadata.Zone),
 		"started_at": time.Now().UTC().Format(time.RFC3339),
 	}
-	if meta.ConclaveID != "" {
-		marker["conclave_id"] = meta.ConclaveID
-		marker["role"] = meta.Role
+	if input.conclaveID != "" {
+		marker["conclave_id"] = input.conclaveID
+		marker["role"] = input.role
 	}
 	raw, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
@@ -262,27 +204,27 @@ func writeSessionFile(dir, name string, data []byte) error {
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	obs := scruntime.Observation{State: scruntime.StateRunning, ObservedAt: time.Now().UTC()}
+	release, err := a.lockTask(ctx, handle.ExternalID, false)
+	if err != nil {
+		return scruntime.Observation{}, err
+	}
+	defer release()
 	state, err := a.worktreeState(handle)
 	if err != nil {
 		return scruntime.Observation{}, err
 	}
-	if state.FinishedAt.IsZero() {
-		running, err := processGroupRunning(handle.PID)
-		if err != nil {
-			return scruntime.Observation{}, err
-		}
-		if running || !outputClosed(a.running[handle.WorkDir]) {
-			return obs, nil
-		}
+	obs := scruntime.Observation{State: scruntime.StateRunning, ObservedAt: time.Now().UTC()}
+	ready, err := a.loadResult(handle, state)
+	if err != nil || !ready {
+		return obs, err
 	}
-	if err := a.finishSession(ctx, handle.WorkDir, state); err != nil {
+	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
 		return scruntime.Observation{}, err
 	}
 	obs.State = scruntime.StateCompleted
+	if state.Result != nil && state.Result.ExitCode != 0 {
+		obs.State, obs.ExitCode, obs.Message = scruntime.StateFailed, state.Result.ExitCode, state.Result.Message
+	}
 	return obs, nil
 }
 
@@ -295,172 +237,147 @@ func (a *Adapter) Resume(_ context.Context, _ scruntime.Handle, _ scruntime.Chec
 }
 
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	release, err := a.lockTask(ctx, handle.ExternalID, false)
+	if err != nil {
+		return err
+	}
+	defer release()
 	state, err := a.worktreeState(handle)
 	if err != nil {
 		return err
 	}
-	if state.FinishedAt.IsZero() {
-		if err := stopProcessGroup(ctx, handle.PID, a.running[handle.WorkDir]); err != nil {
-			return err
+	if !state.FinishedAt.IsZero() {
+		return a.finishWorktree(ctx, handle.WorkDir, state)
+	}
+	if process := a.process(handle.WorkDir); process != nil {
+		process.requestStop()
+		select {
+		case <-process.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if process.stopErr != nil {
+			if err := process.shutdown(ctx); err != nil {
+				return err
+			}
+			process.stopErr = nil
 		}
 	}
-	return a.finishSession(ctx, handle.WorkDir, state)
+	if _, err := a.loadResult(handle, state); err != nil {
+		return err
+	}
+	return a.finishWorktree(ctx, handle.WorkDir, state)
 }
 
 func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle) ([]scruntime.Artifact, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
+	release, err := a.lockTask(ctx, handle.ExternalID, false)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	state, err := a.worktreeState(handle)
 	if err != nil {
 		return nil, err
 	}
 	if state.FinishedAt.IsZero() {
-		running, err := processGroupRunning(handle.PID)
+		ready, err := a.loadResult(handle, state)
 		if err != nil {
 			return nil, err
 		}
-		if running || !outputClosed(a.running[handle.WorkDir]) {
+		if !ready {
 			return nil, errors.New("coding worktree is still running")
 		}
 	}
-	if err := a.finishSession(ctx, handle.WorkDir, state); err != nil {
+	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
 		return nil, err
 	}
 	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
 }
 
-// finishSession saves the successful harness response alongside the worktree artifacts.
-func (a *Adapter) finishSession(ctx context.Context, dir string, state *worktreeState) error {
-	if err := a.finishWorktree(ctx, dir, state); err != nil {
-		return err
-	}
-	if response := a.responses[dir]; response != nil {
-		if text := response.text(); text != "" {
-			state.Artifacts = append(state.Artifacts, scruntime.Artifact{Name: "final-message", ContentType: "text/plain", Text: text})
-			if err := writeWorktreeState(dir, state); err != nil {
-				return err
+// loadResult waits for the local waiter to finish publishing before using its result.
+func (a *Adapter) loadResult(handle scruntime.Handle, state *worktreeState) (bool, error) {
+	if process := a.process(handle.WorkDir); process != nil {
+		if !outputClosed(process.done) {
+			return false, nil
+		}
+		if process.stopErr != nil {
+			return false, process.stopErr
+		}
+		if err := process.cleanScratch(); err != nil {
+			return false, err
+		}
+		if state.Result == nil {
+			state.Result = &process.result
+			if err := writeWorktreeState(handle.WorkDir, state); err != nil {
+				return false, err
 			}
 		}
-		delete(a.responses, dir)
 	}
-	return nil
+	if handle.PID != 0 && (state.Result == nil || state.Result.PID != handle.PID) {
+		return false, errors.New("coding process exit was not recorded")
+	}
+	return true, nil
 }
 
-// BuildStrippedEnv constructs a minimal allowlisted environment with zero raw provider keys
-// and sets read-only starter metadata so Nightloom can identify Sablecourt-managed sessions.
-func BuildStrippedEnv(spec scruntime.LaunchSpec) []string {
-	env := []string{
-		"PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
-		"LANG=en_US.UTF-8",
-		"SABLECOURT_MANAGED=1",
-		"SABLECOURT_TASK_ID=" + spec.TaskID,
-		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
-	}
-	if spec.ModelGateURL != "" && spec.ModelGateToken != "" {
-		env = append(env,
-			"SABLECOURT_MODEL_GATE_URL="+spec.ModelGateURL,
-			"SABLECOURT_TASK_TOKEN="+spec.ModelGateToken,
-		)
-	}
-	if spec.DataGateURL != "" && spec.TaskToken != "" {
-		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)
-	}
-	return env
+func (a *Adapter) process(dir string) *codingProcess {
+	value, _ := a.running.Load(dir)
+	process, _ := value.(*codingProcess)
+	return process
 }
 
-// SeatbeltProfile returns a macOS sandbox-exec profile restricting writes to workDir and /tmp.
-func SeatbeltProfile(workDir string) string {
-	clean := filepath.Clean(workDir)
-	return fmt.Sprintf(`(version 1)
-(allow default)
-(deny file-write*)
-(allow file-write* (subpath %q) (subpath "/tmp") (subpath "/private/tmp"))
-`, clean)
+type taskGate struct {
+	token chan struct{}
+	users int
 }
 
-func buildCommand(harness, sandbox, workDir, prompt, scratch string) (string, []string, error) {
-	effectivePrompt := prompt
-	var modelOverride string
-	var meta struct {
-		ContextPacket string `json:"context_packet"`
-		Prompt        string `json:"prompt"`
-		Model         string `json:"model"`
-	}
-	if err := json.Unmarshal([]byte(prompt), &meta); err == nil {
-		if strings.TrimSpace(meta.ContextPacket) != "" {
-			effectivePrompt = meta.ContextPacket
-			if workDir != "" {
-				if err := writeSessionFile(workDir, sessionContextFile, []byte(meta.ContextPacket)); err != nil {
-					return "", nil, err
-				}
-			}
-		} else if strings.TrimSpace(meta.Prompt) != "" {
-			effectivePrompt = meta.Prompt
-		}
-		modelOverride = strings.TrimSpace(meta.Model)
-	}
+// Only operations on the same worktree wait for each other.
+func (a *Adapter) lockTask(ctx context.Context, id string, try bool) (func(), error) {
+	return a.lockScope(ctx, "task:"+sanitizeSegment(id), try)
+}
 
-	var baseBin string
-	var baseArgs []string
-	switch harness {
-	case "claude":
-		baseBin = "claude"
-		if modelOverride != "" {
-			baseArgs = []string{"--model", modelOverride, "-p", effectivePrompt}
-		} else {
-			baseArgs = []string{"-p", effectivePrompt}
-		}
-	case "codex":
-		baseBin = "codex"
-		if modelOverride != "" {
-			baseArgs = []string{"exec", "-m", modelOverride, effectivePrompt}
-		} else {
-			baseArgs = []string{"exec", effectivePrompt}
-		}
-	case "agy":
-		baseBin = "agy"
-		if modelOverride != "" {
-			baseArgs = []string{"--model", modelOverride, "-p", effectivePrompt}
-		} else {
-			baseArgs = []string{"-p", effectivePrompt}
-		}
-	default:
-		return "", nil, fmt.Errorf("unsupported harness %q", harness)
+func (a *Adapter) lockScope(ctx context.Context, key string, try bool) (func(), error) {
+	a.mu.Lock()
+	if a.gates == nil {
+		a.gates = make(map[string]*taskGate)
 	}
+	gate := a.gates[key]
+	if gate == nil {
+		gate = &taskGate{token: make(chan struct{}, 1)}
+		a.gates[key] = gate
+	}
+	gate.users++
+	a.mu.Unlock()
 
-	if scratch != "" {
-		bin, err := exec.LookPath(baseBin)
-		if err != nil {
-			return "", nil, err
+	drop := func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		gate.users--
+		if gate.users == 0 {
+			delete(a.gates, key)
 		}
-		switch {
-		case goruntime.GOOS == "darwin" && (sandbox == "" || sandbox == "seatbelt"):
-			profile := fmt.Sprintf(`(version 1)(allow default)(deny file-write*)(allow file-write* (subpath %q) (literal "/dev/null"))`, scratch)
-			return "/usr/bin/sandbox-exec", append([]string{"-p", profile, bin}, baseArgs...), nil
-		case goruntime.GOOS == "linux" && (sandbox == "" || sandbox == "bubblewrap"):
-			args := []string{"--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--bind", scratch, scratch, "--", bin}
-			return "bwrap", append(args, baseArgs...), nil
+	}
+	release := func() {
+		<-gate.token
+		drop()
+	}
+	if try {
+		select {
+		case gate.token <- struct{}{}:
+			return release, nil
 		default:
-			return "", nil, errors.New("read-only verifier sandbox unavailable")
+			drop()
+			return nil, errors.New("coding worktree is busy")
 		}
 	}
-	switch sandbox {
-	case "seatbelt":
-		if goruntime.GOOS == "darwin" {
-			args := append([]string{"-p", SeatbeltProfile(workDir), baseBin}, baseArgs...)
-			return "/usr/bin/sandbox-exec", args, nil
-		}
-	case "bubblewrap":
-		if goruntime.GOOS == "linux" {
-			args := append([]string{"--ro-bind", "/", "/", "--bind", workDir, workDir, "--tmpfs", "/tmp", "--", baseBin}, baseArgs...)
-			return "bwrap", args, nil
-		}
+	select {
+	case gate.token <- struct{}{}:
+		return release, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
 	}
-	return baseBin, baseArgs, nil
 }
 
 func sanitizeSegment(s string) string {

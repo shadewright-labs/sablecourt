@@ -116,3 +116,134 @@ func TestUnsafeTokenStateIsRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsafeTokenStateAncestorsRefused(t *testing.T) {
+	validToken := "op_" + strings.Repeat("a", 64) + "\n"
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, base string) string
+		wantAllow bool
+	}{
+		{
+			name: "symlinked parent",
+			setup: func(t *testing.T, base string) string {
+				realParent := filepath.Join(base, "real")
+				state := filepath.Join(realParent, "state")
+				if err := os.MkdirAll(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, Filename), []byte(validToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				sym := filepath.Join(base, "sym")
+				if err := os.Symlink(realParent, sym); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(sym, "state")
+			},
+		},
+		{
+			name: "trailing slash symlink",
+			setup: func(t *testing.T, base string) string {
+				state := filepath.Join(base, "state")
+				if err := os.Mkdir(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, Filename), []byte(validToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(base, "linked")
+				if err := os.Symlink(state, link); err != nil {
+					t.Fatal(err)
+				}
+				return link + string(os.PathSeparator)
+			},
+		},
+		{
+			name: "world-writable non-sticky parent",
+			setup: func(t *testing.T, base string) string {
+				parent := filepath.Join(base, "open")
+				state := filepath.Join(parent, "state")
+				if err := os.MkdirAll(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(parent, 0o777); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, Filename), []byte(validToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return state
+			},
+		},
+		{
+			name: "group-writable non-sticky parent",
+			setup: func(t *testing.T, base string) string {
+				parent := filepath.Join(base, "group")
+				state := filepath.Join(parent, "state")
+				if err := os.MkdirAll(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(parent, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, Filename), []byte(validToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return state
+			},
+		},
+		{
+			name: "sticky writable parent",
+			setup: func(t *testing.T, base string) string {
+				parent := filepath.Join(base, "sticky")
+				state := filepath.Join(parent, "state")
+				if err := os.MkdirAll(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(parent, os.ModeSticky|0o777); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(state, Filename), []byte(validToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return state
+			},
+			wantAllow: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.setup(t, t.TempDir())
+			for _, open := range []func(string) (string, error){Read, LoadOrCreate} {
+				token, err := open(dir)
+				if tc.wantAllow {
+					if err != nil || token != strings.TrimSpace(validToken) {
+						t.Fatalf("expected valid sticky parent to succeed, got token=%q err=%v", token, err)
+					}
+					continue
+				}
+				if err == nil || os.IsNotExist(err) || token != "" {
+					t.Fatalf("unsafe ancestor path %q must be refused, got token=%q err=%v", dir, token, err)
+				}
+			}
+		})
+	}
+
+	t.Run("LoadOrCreate does not create leaf under unsafe parent", func(t *testing.T) {
+		base := t.TempDir()
+		openParent := filepath.Join(base, "open")
+		if err := os.Mkdir(openParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(openParent, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(openParent, "newstate")
+		if token, err := LoadOrCreate(target); err == nil || token != "" {
+			t.Fatalf("LoadOrCreate accepted unsafe parent: token=%q err=%v", token, err)
+		}
+		if _, err := os.Lstat(target); !os.IsNotExist(err) {
+			t.Fatalf("LoadOrCreate created directory inside unsafe parent: %v", err)
+		}
+	})
+}

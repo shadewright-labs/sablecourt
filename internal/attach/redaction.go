@@ -153,6 +153,7 @@ var credentialPrefixes = []struct {
 	kind   credentialKind
 }{
 	{"sc_task_", "sablecourt_token"},
+	{"op_", "sablecourt_token"},
 	{"sk-", openAI},
 	{"ghp_", "github_token"},
 	{"gho_", "github_token"},
@@ -166,7 +167,7 @@ var credentialPrefixes = []struct {
 }
 
 var (
-	secretLabel = regexp.MustCompile(`(?i)(?:api[_-]?key|secret|password|passwd|access[_-]?token)$`)
+	secretLabel = regexp.MustCompile(`(?i)(?:api[_-]?key|secret|password|passwd|access[_-]?token|operator[_-]?token)$`)
 	bearerLabel = regexp.MustCompile(`(?i)authorization$`)
 )
 

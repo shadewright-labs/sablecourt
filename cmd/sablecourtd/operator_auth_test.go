@@ -259,3 +259,241 @@ func TestOperatorSessionLifetime(t *testing.T) {
 		})
 	}
 }
+
+func TestOperatorLoginRateLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+			handlerConfig{operatorToken: testOperatorToken})
+		authority := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432")
+		origin := "http://" + authority
+		doLogin := func(remoteAddr, token string) *httptest.ResponseRecorder {
+			body := url.Values{"token": {token}}.Encode()
+			req := httptest.NewRequest(http.MethodPost, origin+"/login", strings.NewReader(body))
+			req.RemoteAddr = remoteAddr
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			return w
+		}
+
+		clientA := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "40001")
+		clientB := net.JoinHostPort(net.IPv4(127, 0, 0, 2).String(), "40002")
+
+		limited := false
+		for i := range 50 {
+			w := doLogin(clientA, "wrong")
+			if w.Code == http.StatusTooManyRequests {
+				if w.Header().Get("Retry-After") == "" {
+					t.Fatal("429 response missing Retry-After header")
+				}
+				limited = true
+				break
+			}
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("attempt %d: status = %d, want 401 or 429", i, w.Code)
+			}
+		}
+		if !limited {
+			t.Fatal("repeated wrong login attempts were never rate limited")
+		}
+
+		// Valid credentials from the same client remain blocked during the window.
+		blocked := doLogin(clientA, testOperatorToken)
+		if blocked.Code != http.StatusTooManyRequests || len(blocked.Result().Cookies()) != 0 {
+			t.Fatalf("blocked client status = %d, cookies = %d, want 429 and 0 cookies", blocked.Code, len(blocked.Result().Cookies()))
+		}
+
+		// An independent client is unaffected.
+		other := doLogin(clientB, testOperatorToken)
+		if other.Code != http.StatusSeeOther {
+			t.Fatalf("other client status = %d, want 303", other.Code)
+		}
+
+		// After the window elapses, the blocked client can authenticate again.
+		time.Sleep(2 * time.Minute)
+		recovered := doLogin(clientA, testOperatorToken)
+		if recovered.Code != http.StatusSeeOther {
+			t.Fatalf("recovered client status = %d, want 303", recovered.Code)
+		}
+	})
+}
+
+func TestOperatorLoginOriginAndHostValidation(t *testing.T) {
+	h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		handlerConfig{operatorToken: testOperatorToken})
+	authority := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432")
+	validBody := url.Values{"token": {testOperatorToken}}.Encode()
+
+	for _, tc := range []struct {
+		name       string
+		host       string
+		origin     string
+		fetchSite  string
+		wantStatus int
+		wantSecure bool
+	}{
+		{"empty host with bare http origin", "", "http://", "", http.StatusForbidden, false},
+		{"empty host with fetch site only", "", "", "same-origin", http.StatusForbidden, false},
+		{"tls nil fetch site without origin", authority, "", "same-origin", http.StatusForbidden, false},
+		{"tls nil https origin with fetch site", authority, "https://" + authority, "same-origin", http.StatusSeeOther, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://"+authority+"/login", strings.NewReader(validBody))
+			req.Host = tc.host
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			cookies := w.Result().Cookies()
+			if tc.wantStatus != http.StatusSeeOther {
+				if len(cookies) != 0 {
+					t.Fatal("refused login set a cookie")
+				}
+				return
+			}
+			if len(cookies) != 1 || cookies[0].Secure != tc.wantSecure {
+				t.Fatalf("cookie count = %d, secure = %v, want 1 and %v", len(cookies), len(cookies) == 1 && cookies[0].Secure, tc.wantSecure)
+			}
+		})
+	}
+}
+
+func TestNonCanonicalPathsRefusedBeforeExemptions(t *testing.T) {
+	st, _, _, sanctum, citadel := newIntegrationTestEnv(t, domain.ConclaveWards{}, defaultIntegrationSecrets())
+	addMessageTestLease(t, st)
+	taskToken, err := model.MintTaskToken(t.Context(), st, "task", "worker", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := []string{
+		"GET /api/../healthz",
+		"GET /ui/../login",
+		"POST /api/v1/./hooks/github",
+		"POST /ui/../gate/mcp",
+		"GET //healthz",
+		"POST /api/v1/./a2a",
+	}
+	for _, mode := range []struct {
+		name string
+		h    http.Handler
+	}{{"sanctum", sanctum}, {"citadel", citadel}} {
+		for _, cred := range []struct{ name, token string }{
+			{"missing", ""},
+			{"task lease", taskToken},
+			{"operator", testOperatorToken},
+		} {
+			for _, route := range routes {
+				t.Run(mode.name+"/"+cred.name+"/"+route, func(t *testing.T) {
+					method, rawPath, _ := strings.Cut(route, " ")
+					req := httptest.NewRequest(method, rawPath, strings.NewReader("{}"))
+					if cred.token != "" {
+						req.Header.Set("Authorization", "Bearer "+cred.token)
+					}
+					w := httptest.NewRecorder()
+					mode.h.ServeHTTP(w, req)
+					if w.Code != http.StatusUnauthorized {
+						t.Fatalf("status = %d, want 401 (location=%q)", w.Code, w.Header().Get("Location"))
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestVoiceBodyLimits(t *testing.T) {
+	h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		handlerConfig{operatorToken: testOperatorToken})
+
+	t.Run("speak enforces 2 MiB limit", func(t *testing.T) {
+		oversized := `{"text":"` + strings.Repeat("a", (2<<20)+1024) + `"}`
+		req := operatorRequest(http.MethodPost, "/api/v1/voice/speak", strings.NewReader(oversized))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("speak oversized status = %d, want 413 (body=%s)", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("transcribe enforces its own limit", func(t *testing.T) {
+		oversized := strings.Repeat("a", (24<<20)+1024)
+		req := operatorRequest(http.MethodPost, "/api/v1/voice/transcribe", strings.NewReader(oversized))
+		req.Header.Set("Content-Type", "audio/webm")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("transcribe oversized status = %d, want 413 (body=%s)", w.Code, w.Body.String())
+		}
+	})
+}
+
+func TestLoginLimiterMemoryBound(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := newLoginLimiter(3, time.Minute, 4)
+
+	// Block client-0.
+	for range 3 {
+		lim.recordFailure("client-0", now)
+	}
+	if ok, _ := lim.allow("client-0", now); ok {
+		t.Fatal("client-0 should be blocked")
+	}
+
+	// Fill and overflow with single failures from distinct clients.
+	for i := 1; i <= 20; i++ {
+		client := "client-" + string(rune('a'+i))
+		lim.recordFailure(client, now.Add(time.Duration(i)*time.Second))
+		if len(lim.entries) > 4 {
+			t.Fatalf("limiter entries = %d, exceeds bound 4", len(lim.entries))
+		}
+	}
+
+	// Blocked client-0 must not have been evicted by low-count churn.
+	if ok, _ := lim.allow("client-0", now.Add(30*time.Second)); ok {
+		t.Fatal("blocked client-0 was evicted before its window expired")
+	}
+
+	// If all slots are blocked, new unknown clients fail closed until expiry.
+	for i := 1; i < 4; i++ {
+		c := "blocked-" + string(rune('0'+i))
+		for range 3 {
+			lim.recordFailure(c, now)
+		}
+	}
+	if ok, _ := lim.allow("fresh-client", now.Add(10*time.Second)); ok {
+		t.Fatal("saturated limiter should fail closed for new clients")
+	}
+	if ok, _ := lim.allow("fresh-client", now.Add(2*time.Minute)); !ok {
+		t.Fatal("limiter should recover after entries expire")
+	}
+}
+
+func TestObserverTokenDigestEqual(t *testing.T) {
+	for _, tc := range []struct {
+		name, got, want string
+		expect          bool
+	}{
+		{"matching", "obs-secret-token", "obs-secret-token", true},
+		{"same length mismatch", "obs-secret-tokeX", "obs-secret-token", false},
+		{"different length mismatch", "short", "obs-secret-token", false},
+		{"empty got", "", "obs-secret-token", false},
+		{"empty want", "obs-secret-token", "", false},
+		{"both empty", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tokenDigestEqual(tc.got, tc.want); got != tc.expect {
+				t.Errorf("tokenDigestEqual = %v, want %v", got, tc.expect)
+			}
+		})
+	}
+}

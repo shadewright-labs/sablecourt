@@ -26,6 +26,7 @@ const (
 
 type worktreeState struct {
 	beforeGit    func() error
+	configLock   func(context.Context) (func(), error)
 	TaskID       string
 	Repo         string
 	CommonDir    string
@@ -38,6 +39,7 @@ type worktreeState struct {
 	Tip          string
 	FinishedAt   time.Time
 	Artifacts    []scruntime.Artifact
+	Result       *processResult `json:",omitempty"`
 }
 
 func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (string, *worktreeState, error) {
@@ -64,19 +66,29 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 	if err != nil {
 		return "", nil, err
 	}
-	owner := gitRepo{dir: repo}
-	common, err := owner.run(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	owner, err := sourceGit(repo)
 	if err != nil {
 		return "", nil, err
+	}
+	list, err := owner.run(ctx, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", nil, err
+	}
+	primary, _, _ := strings.Cut(list, "\x00\x00")
+	fields := strings.Split(primary, "\x00")
+	if fields[0] != "worktree "+repo || len(fields) < 2 || !strings.HasPrefix(fields[1], "HEAD ") {
+		return "", nil, errors.New("configured repository is not the registered primary worktree")
 	}
 	base, err := owner.commitID(ctx, "HEAD")
 	if err != nil {
 		return "", nil, err
 	}
 	state := &worktreeState{
-		TaskID: taskID, Repo: repo, CommonDir: strings.TrimSuffix(common, "\n"),
+		beforeGit: owner.beforeRun,
+		TaskID:    taskID, Repo: repo, CommonDir: owner.gitDir,
 		Branch: "sablecourt/" + sanitizeSegment(taskID), Base: base,
 	}
+	a.bindConfigLock(state)
 	a.pruneFinishedBranches(ctx, filepath.Dir(dir), state)
 
 	if err := ctx.Err(); err != nil {
@@ -96,6 +108,7 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 	if err := writeWorktreeState(dir, state); err != nil {
 		return "", nil, errors.Join(err, rollbackWorktree(setupCtx, dir, state))
 	}
+	state.beforeGit = nil
 	return dir, state, nil
 }
 
@@ -139,8 +152,7 @@ func (s *worktreeState) checkoutGit(dir string) gitRepo {
 
 func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) error {
 	checkout := state.checkoutGit(dir)
-	files := []string{sessionMarkerFile, sessionContextFile}
-	out, err := checkout.run(ctx, append([]string{"ls-files", "--"}, files...)...)
+	out, err := checkout.run(ctx, "ls-files", "--", sessionMarkerFile, sessionContextFile)
 	if err != nil {
 		return err
 	}
@@ -152,7 +164,7 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 		return err
 	}
 	exclude := filepath.Join(infoDir, "exclude")
-	if err := os.WriteFile(exclude, []byte("/"+strings.Join(files, "\n/")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(exclude, []byte("/"+sessionMarkerFile+"\n/"+sessionContextFile+"\n"), 0o600); err != nil {
 		return err
 	}
 	// Plain Git looks in the common info directory. Select the private exclude
@@ -172,14 +184,20 @@ func excludeSessionFiles(ctx context.Context, dir string, state *worktreeState) 
 	if err := state.validateRegistration(dir); err != nil {
 		return err
 	}
-	if _, err := state.commonGit().run(ctx, "config", "--local", "--add", state.excludeIncludeKey(), config); err != nil {
+	if err := state.updateCommonConfig(ctx, "--add", state.excludeIncludeKey(), config); err != nil {
 		return err
 	}
-	ignored, err := checkout.run(ctx, append([]string{"-c", "core.excludesFile=" + exclude, "check-ignore", "--no-index", "--"}, files...)...)
+	return state.checkSessionExcludes(ctx, dir)
+}
+
+func (s *worktreeState) checkSessionExcludes(ctx context.Context, dir string) error {
+	exclude := filepath.Join(s.GitDir, "info", "exclude")
+	ignored, err := s.checkoutGit(dir).run(ctx, "-c", "core.excludesFile="+exclude,
+		"check-ignore", "--no-index", "--", sessionMarkerFile, sessionContextFile)
 	if err != nil && !gitExitCode(err, 1) {
 		return err
 	}
-	if ignored != strings.Join(files, "\n")+"\n" {
+	if ignored != sessionMarkerFile+"\n"+sessionContextFile+"\n" {
 		return errors.New("repository ignore rules override the session excludes")
 	}
 	return nil
@@ -276,7 +294,26 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	if state.TaskID != handle.ExternalID || state.Branch != handle.Branch {
 		return nil, errors.New("coding worktree state does not match handle")
 	}
+	a.bindConfigLock(state)
 	return state, nil
+}
+
+func (a *Adapter) bindConfigLock(state *worktreeState) {
+	state.configLock = func(ctx context.Context) (func(), error) {
+		return a.lockScope(ctx, "config:"+state.CommonDir, false)
+	}
+}
+
+func (s *worktreeState) updateCommonConfig(ctx context.Context, args ...string) error {
+	if s.configLock != nil {
+		release, err := s.configLock(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	_, err := s.commonGit().run(ctx, append([]string{"config", "--local"}, args...)...)
+	return err
 }
 
 func readWorktreeState(path string) (*worktreeState, error) {
@@ -476,7 +513,7 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 	if err := removeFile(dir + ".log"); err != nil {
 		return err
 	}
-	delete(a.running, dir)
+	a.running.Delete(dir)
 	if state.CleanupError != "" {
 		state.CleanupError = ""
 		return writeWorktreeState(dir, state)
@@ -520,7 +557,32 @@ func worktreeArtifacts(ctx context.Context, dir string, state *worktreeState, st
 		}
 		artifacts = append(artifacts, scruntime.Artifact{Name: "session-log", ContentType: "text/plain", Text: strings.TrimSpace(clean)})
 	}
+	if state.Result != nil && state.Result.Response != "" {
+		artifacts = append(artifacts, scruntime.Artifact{Name: "final-message", ContentType: "text/plain", Text: state.Result.Response})
+	}
 	return artifacts, nil
+}
+
+func verifySavedWorktree(ctx context.Context, dir string, state *worktreeState) error {
+	checkout, err := state.checkoutGit(dir).withoutFilters(ctx)
+	if err != nil {
+		return err
+	}
+	exclude, err := inspectNested(ctx, checkout, state.Tip, state.Base, filepath.Join(state.GitDir, "modules"))
+	if err != nil {
+		return err
+	}
+	// Git's snapshot skips ignored files. List individual files before force removal.
+	args := append([]string{"-c", "core.untrackedCache=false", "status", "--porcelain=v1", "-z",
+		"--untracked-files=all", "--ignored=traditional", "--ignore-submodules=all", "--"}, exclude...)
+	status, err := checkout.run(ctx, args...)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return errors.New("coding worktree has unsaved files")
+	}
+	return nil
 }
 
 func removeWorktree(ctx context.Context, dir string, state *worktreeState, launched bool) error {
@@ -531,11 +593,6 @@ func removeWorktree(ctx context.Context, dir string, state *worktreeState, launc
 		}
 		if err := state.validateCheckout(ctx, dir, launched); err != nil {
 			return err
-		}
-		if launched {
-			if _, err := inspectNested(ctx, state.checkoutGit(dir), state.Tip, state.Base, filepath.Join(state.GitDir, "modules")); err != nil {
-				return err
-			}
 		}
 	}
 	if errors.Is(statErr, os.ErrNotExist) && launched {
@@ -550,6 +607,11 @@ func removeWorktree(ctx context.Context, dir string, state *worktreeState, launc
 	}
 	for _, field := range strings.Split(list, "\x00") {
 		if field == "worktree "+dir {
+			if launched && statErr == nil {
+				if err := verifySavedWorktree(ctx, dir, state); err != nil {
+					return err
+				}
+			}
 			if _, err := common.run(ctx, "worktree", "remove", "--force", "--", dir); err != nil {
 				return err
 			}
@@ -567,7 +629,7 @@ func removeWorktree(ctx context.Context, dir string, state *worktreeState, launc
 		if err != nil {
 			return err
 		}
-		if _, err := common.run(ctx, "config", "--local", "--fixed-value", "--unset-all", state.excludeIncludeKey(), config); err != nil && !gitExitCode(err, 5) {
+		if err := state.updateCommonConfig(ctx, "--fixed-value", "--unset-all", state.excludeIncludeKey(), config); err != nil && !gitExitCode(err, 5) {
 			return err
 		}
 		return removeFile(config)
@@ -614,23 +676,32 @@ func (a *Adapter) pruneFinishedBranches(ctx context.Context, root string, curren
 		if !strings.HasSuffix(entry.Name(), stateSuffix) || entry.Type() != 0 {
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		state, err := readWorktreeState(path)
-		if err != nil || state.CommonDir != current.CommonDir ||
-			state.CleanupError != "" || state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
-			state.Branch != "sablecourt/"+sanitizeSegment(state.TaskID) {
+		id := strings.TrimSuffix(entry.Name(), stateSuffix)
+		release, err := a.lockTask(ctx, id, true)
+		if err != nil {
 			continue
 		}
-		owner := gitRepo{dir: current.Repo}
-		tip, err := owner.commitID(ctx, "refs/heads/"+state.Branch)
-		if err != nil || strings.TrimSpace(tip) != state.Tip {
-			continue
-		}
-		if _, err := owner.run(ctx, "merge-base", "--is-ancestor", "--end-of-options", state.Tip, "HEAD"); err != nil {
-			continue
-		}
-		if _, err := owner.run(ctx, "branch", "-d", "--", state.Branch); err == nil {
-			_ = removeFile(path)
-		}
+		pruneFinishedBranch(ctx, filepath.Join(root, entry.Name()), id, current, cutoff)
+		release()
+	}
+}
+
+func pruneFinishedBranch(ctx context.Context, path, id string, current *worktreeState, cutoff time.Time) {
+	state, err := readWorktreeState(path)
+	if err != nil || state.CommonDir != current.CommonDir ||
+		state.CleanupError != "" || state.FinishedAt.IsZero() || state.FinishedAt.After(cutoff) ||
+		id != sanitizeSegment(state.TaskID) || state.Branch != "sablecourt/"+id {
+		return
+	}
+	owner := current.commonGit()
+	tip, err := owner.commitID(ctx, "refs/heads/"+state.Branch)
+	if err != nil || strings.TrimSpace(tip) != state.Tip {
+		return
+	}
+	if _, err := owner.run(ctx, "merge-base", "--is-ancestor", "--end-of-options", state.Tip, "HEAD"); err != nil {
+		return
+	}
+	if _, err := owner.run(ctx, "branch", "-d", "--", state.Branch); err == nil {
+		_ = removeFile(path)
 	}
 }
