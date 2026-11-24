@@ -42,7 +42,7 @@ func TestDashboardRendersFactsAndServesBrandAssets(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "/assets/logo-horizontal-nolabs-dark.png") || !strings.Contains(body, "/assets/sablecourt.css") || !strings.Contains(body, "/assets/shadewright-labs-mark.svg") || !strings.Contains(body, "triage-agent") {
+	if !strings.Contains(body, "/assets/logo-topbar.png") || !strings.Contains(body, "/assets/sablecourt.css") || !strings.Contains(body, "/assets/shadewright-labs-mark.svg") || !strings.Contains(body, "triage-agent") {
 		t.Fatalf("expected branded dashboard HTML, got:\n%s", body)
 	}
 
