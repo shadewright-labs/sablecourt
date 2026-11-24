@@ -316,7 +316,7 @@ func TestSessionOutputFlushesOnExit(t *testing.T) {
 			shellHarness(t, "printf '%s' '"+tc.payload+"'\n")
 			adapter, spec := codingFixture(t)
 			handle := startTestTask(t, adapter, spec)
-			waitUntil(t, func() bool { return outputClosed(adapter.running[handle.WorkDir]) })
+			waitUntil(t, func() bool { return outputClosed(adapter.process(handle.WorkDir).done) })
 			got, err := os.ReadFile(handle.WorkDir + ".log")
 			if err != nil {
 				t.Fatal(err)
@@ -412,7 +412,7 @@ func TestStopKillsWithDoneContext(t *testing.T) {
 			shellHarness(t, "trap '' TERM\nprintf ready > ready.txt\nwhile :; do :; done\n")
 			adapter, spec := codingFixture(t)
 			handle := startTestTask(t, adapter, spec)
-			done := adapter.running[handle.WorkDir]
+			done := adapter.process(handle.WorkDir).done
 			t.Cleanup(func() {
 				if !outputClosed(done) {
 					_ = syscall.Kill(-handle.PID, syscall.SIGKILL)
