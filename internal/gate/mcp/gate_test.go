@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -208,5 +209,147 @@ func TestTypedActionRequiresApprovalAndVerifiesPinnedDigest(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with exact approved payload, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGateReloadConcurrentRequestsNoRace(t *testing.T) {
+	makeConfig := func() (*config.Bundle, *policy.Engine) {
+		b := &config.Bundle{
+			Policies: map[string]domain.Policy{
+				"default": {
+					Metadata: domain.ObjectMeta{Name: "default"},
+					Spec: domain.PolicySpec{
+						DefaultEffect: domain.EffectDeny,
+						Rules: []domain.PolicyRule{
+							{Workload: "ops-agent", Capability: "mcp:ping", Effect: domain.EffectAllow},
+							{Workload: "ops-agent", Capability: "action:sandbox.propose_promotion", Effect: domain.EffectAllow},
+						},
+					},
+				},
+			},
+			Workloads: map[string]domain.Workload{
+				"ops-agent": {
+					Metadata: domain.ObjectMeta{Name: "ops-agent", Zone: domain.ZoneRuntime},
+					Spec: domain.WorkloadSpec{
+						Class: domain.ClassLongLivedAgent,
+						Grants: domain.GrantSet{
+							MCPTools: []string{"ping"},
+							Actions:  []string{"sandbox.propose_promotion"},
+						},
+					},
+				},
+				"exp-sandbox": {
+					Metadata: domain.ObjectMeta{Name: "exp-sandbox", Zone: domain.ZoneSandbox},
+					Spec:     domain.WorkloadSpec{Class: domain.ClassDeterministicController},
+				},
+			},
+		}
+		return b, policy.NewEngine([]domain.Policy{b.Policies["default"]}, nil)
+	}
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T, gate *Gate, token string, lease domain.Lease, wl domain.Workload)
+	}{
+		{
+			name: "invokeTool",
+			run: func(t *testing.T, gate *Gate, _ string, lease domain.Lease, wl domain.Workload) {
+				def := ToolDef{
+					Name: "ping",
+					Handler: func(_ context.Context, _ domain.Workload, _ string, _ json.RawMessage) (string, error) {
+						return "pong", nil
+					},
+				}
+				res, err := gate.invokeTool(context.Background(), lease, wl, def, json.RawMessage(`{}`))
+				if err != nil || res == nil || res.IsError {
+					t.Errorf("invokeTool failed: res=%+v err=%v", res, err)
+				}
+			},
+		},
+		{
+			name: "authenticate",
+			run: func(t *testing.T, gate *Gate, token string, _ domain.Lease, _ domain.Workload) {
+				req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/mcp", nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				rec := httptest.NewRecorder()
+				if _, ok := gate.authenticate(rec, req); !ok {
+					t.Errorf("authenticate failed: code=%d body=%s", rec.Code, rec.Body.String())
+				}
+			},
+		},
+		{
+			name: "ActionHandler and sandbox.propose_promotion",
+			run: func(t *testing.T, gate *Gate, token string, _ domain.Lease, _ domain.Workload) {
+				h := gate.ActionHandler()
+				body := `{"payload":{"workload":"exp-sandbox","branch":"sablecourt/promote-exp","reason":"ready"}}`
+				req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/sandbox.propose_promotion", strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer "+token)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Errorf("ActionHandler failed: code=%d body=%s", rec.Code, rec.Body.String())
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+
+			initBundle, initPol := makeConfig()
+			_ = st.UpsertWorkload(ctx, domain.WorkloadRecord{
+				Name: "ops-agent", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent,
+				ManifestDigest: "m1", AgentCardJSON: "{}",
+			})
+			_ = st.CreateTask(ctx, domain.Task{
+				ID: "task-race-1", IdempotencyKey: "idem-race-1", WorkloadName: "ops-agent", State: domain.TaskStateWorking,
+			})
+			token, err := model.MintTaskToken(ctx, st, "task-race-1", "ops-agent", time.Hour)
+			if err != nil {
+				t.Fatalf("MintTaskToken: %v", err)
+			}
+
+			gate := New(Options{
+				Store:  st,
+				Bundle: initBundle,
+				Policy: initPol,
+			})
+			RegisterBuiltinGitOps(gate, "", nil)
+
+			lease := domain.Lease{TaskID: "task-race-1", WorkloadName: "ops-agent"}
+			wl := initBundle.Workloads["ops-agent"]
+
+			const iterations = 60
+			stop := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						b, pol := makeConfig()
+						gate.Reload(b, pol)
+					}
+				}
+			}()
+
+			for range iterations {
+				tc.run(t, gate, token, lease, wl)
+			}
+			close(stop)
+			wg.Wait()
+		})
 	}
 }
