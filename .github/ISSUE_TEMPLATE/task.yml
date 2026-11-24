@@ -1,0 +1,79 @@
+name: Task
+description: Propose one bounded work package
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: Assign one task to one repository and list the files it may change.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should this task deliver?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Background and evidence for the task.
+    validations:
+      required: true
+  - type: textarea
+    id: adrs
+    attributes:
+      label: ADRs
+      description: Link relevant architecture decisions.
+  - type: dropdown
+    id: slice
+    attributes:
+      label: Slice
+      options:
+        - P1
+        - P2
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Name the repository and list the files this task may change. State exclusions.
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions
+      description: Decisions made and any still open.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable completion checks, one per checkbox.
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: How to verify
+      description: Commands, manual checks, or evidence needed.
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants touched
+      description: List the hard invariants affected, or write None.
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Depends on
+      description: Link blocking issues with a "blocked by" reference.
+  - type: input
+    id: labels
+    attributes:
+      label: Labels
+      description: Add one area/ label and the appropriate P1 or P2 slice label.
+      placeholder: area/docs, P2
+    validations:
+      required: true

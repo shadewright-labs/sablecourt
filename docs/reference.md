@@ -11,7 +11,7 @@ This document describes the YAML manifest schema (`sablecourt.io/v1alpha1`), HTT
 | `Budget` | Token and USD spend ceilings | `spec.perTask` (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`), `spec.daily.maxCostUSD` |
 | `Workflow` | Multi-step task DAG | `spec.steps[]` referencing declared `Workload` names |
 | `Schedule` | Cron-driven recurring task trigger | `spec.cron`, `spec.workload`, `spec.input`, `spec.enabled` |
-| `Conclave` | Multi-agent room with governance breakers | `spec.vassals[]` (`role`, `workload`, `activation`: `always-on` or `on-mention`, `canMessage[]`), `spec.wards` (`maxMessages`, `maxPingPong`, `budgetRef`) |
+| `Conclave` | Multi-agent room with governance breakers | `spec.vassals[]` (`role`, `workload`, `activation`: `always-on` or `on-mention`, `canMessage[]`), `spec.wards` (`maxMessages`, `maxPingPong`), `spec.budgetRef` |
 
 ## HTTP and SSE API endpoints (`sablecourtd`)
 
@@ -32,7 +32,7 @@ All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site
 | `POST /api/v1/conclaves/{id}/decree`, `/voice-decree`, `/relics`, `/close` | Operator | Inject text or voice Decree, attach operator Relic, or close Conclave |
 | `GET /api/v1/approvals`, `POST /api/v1/approvals/{id}/approve`, `/deny` | Operator or Paired Device | List pending approvals and approve (including ECDSA P-256 signature) or deny |
 | `GET /api/v1/audit`, `GET /api/v1/audit/verify` | Operator | Query audit log and verify SHA-256 hash chain integrity |
-| `GET /api/v1/memory`, `POST /api/v1/memory`, `DELETE /api/v1/memory/{id}` | Operator | List, search (FTS5), set, or delete `Court Memory` entries |
+| `GET /api/v1/memory`, `POST /api/v1/memory`, `DELETE /api/v1/memory/{id}` | Operator | List, search with SQL `LIKE`/`ILIKE`, set, or delete `Court Memory` entries. FTS5 search is parked under tracking [epic #1](https://github.com/shadewright-labs/sablecourt/issues/1). |
 | `POST /api/v1/schedules/{name}/trigger` | Operator | Manually trigger a declared `Schedule` immediately |
 | `POST /api/v1/devices/pair`, `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}` | Operator | Pair, list, or revoke ECDSA P-256 approval devices |
 
