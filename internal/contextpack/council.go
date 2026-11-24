@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
@@ -63,7 +64,7 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 		if len(blocks) < len(rounds) {
 			summary := CouncilRound{Number: latest.Number}
 			for _, a := range latest.Answers {
-				a.Body, _, _ = strings.Cut(a.Body, "\n")
+				a.Body, _, _ = strings.Cut(strings.TrimLeftFunc(a.Body, unicode.IsSpace), "\n")
 				summary.Answers = append(summary.Answers, a)
 			}
 			summaries = append(summaries, renderCouncilRound(summary)+"[older detail omitted]\n")
@@ -87,7 +88,7 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 		blocks[i] = ""
 		if i == 0 {
 			b.WriteString(omitted)
-			budget = min(councilPeerBudget, maxPacketBytes-b.Len())
+			budget = min(councilPeerBudget-len(omitted), maxPacketBytes-b.Len())
 		}
 	}
 	if total > budget {
@@ -107,8 +108,8 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 			return renderCouncilRound(latest) + marker
 		}
 		limit := sort.Search(longest+1, func(n int) bool { return len(excerpt(n)) > budget }) - 1
-		if limit < 0 {
-			return Packet{}, errors.New("council role labels exceed remaining peer budget")
+		if limit <= 0 {
+			return Packet{}, errors.New("no peer text fits within the remaining council budget")
 		}
 		blocks[len(blocks)-1] = excerpt(limit)
 	}

@@ -69,15 +69,18 @@ func (c CouncilSnapshot) Next(now time.Time) (CouncilStep, error) {
 	if !now.Before(c.Deadline) {
 		return CouncilStep{Action: "cancel", Reason: "deadline"}, nil
 	}
+	rounds, remaining, err := c.indexTurns()
+	if err != nil {
+		return CouncilStep{}, err
+	}
 	if c.Session.State == domain.ConclaveStateInputRequired {
+		if c.Session.WardReason == "" {
+			return CouncilStep{}, errors.New("paused council has no Ward reason")
+		}
 		return CouncilStep{Action: "wait", Reason: c.Session.WardReason}, nil
 	}
 	if c.Session.WardReason != "" {
 		return CouncilStep{}, errors.New("active council has an unresolved Ward")
-	}
-	rounds, remaining, err := c.indexTurns()
-	if err != nil {
-		return CouncilStep{}, err
 	}
 	for round := 1; ; round++ {
 		turns := rounds[round]
@@ -92,8 +95,9 @@ func (c CouncilSnapshot) Next(now time.Time) (CouncilStep, error) {
 				continue
 			}
 			complete = false
-			retryable := !started || t.State == domain.TaskStateFailed || t.State == domain.TaskStateCancelled
-			if !retryable && t.State != domain.TaskStateCompleted {
+			retryable := !started || t.State == domain.TaskStateFailed ||
+				t.State == domain.TaskStateCancelled || t.State == domain.TaskStateCompleted
+			if !retryable {
 				live = true
 			}
 			if retryable && len(step.Starts) < remaining {
@@ -185,15 +189,23 @@ func (c CouncilSnapshot) indexTurns() (turnsByRound, int, error) {
 	}
 	for round, turns := range rounds {
 		gap := false
+		unanimous := round > 1
 		for _, m := range c.Members {
-			if round > 1 && rounds[round-1][m.Vassal.Role].Answer == nil {
-				return nil, 0, errors.New("turn recorded beyond an incomplete round")
+			if round > 1 {
+				previous := rounds[round-1][m.Vassal.Role]
+				if previous.Answer == nil {
+					return nil, 0, errors.New("turn recorded beyond an incomplete round")
+				}
+				unanimous = unanimous && previous.NothingToAdd
 			}
 			t, ok := turns[m.Vassal.Role]
 			if c.Sequential && ok && gap {
 				return nil, 0, errors.New("turn recorded beyond an incomplete predecessor")
 			}
 			gap = gap || t.Answer == nil
+		}
+		if unanimous {
+			return nil, 0, errors.New("turn recorded beyond a unanimous stop")
 		}
 	}
 	return rounds, remaining, nil

@@ -111,7 +111,12 @@ func TestCouncilBarrier(t *testing.T) {
 		attempt        int
 	}{
 		{"working", func(c *CouncilSnapshot) { c.Turns[0].State = domain.TaskStateWorking; c.Turns[0].Answer = nil }, "wait", "", 0},
-		{"silent", func(c *CouncilSnapshot) { c.Turns[0].Answer = nil }, "wait", "", 0},
+		{"silent", func(c *CouncilSnapshot) { c.Turns[0].Answer = nil }, "start", "", 2},
+		{"silent sequential", func(c *CouncilSnapshot) {
+			c.Sequential = true
+			c.Turns = c.Turns[:1]
+			c.Turns[0].Answer = nil
+		}, "start", "", 2},
 		{"failed", func(c *CouncilSnapshot) { c.Turns[0].State = domain.TaskStateFailed; c.Turns[0].Answer = nil }, "start", "", 2},
 		{"timeout", func(c *CouncilSnapshot) { c.Turns[0].State = domain.TaskStateCancelled; c.Turns[0].Answer = nil }, "start", "", 2},
 		{"silent at cap", func(c *CouncilSnapshot) { c.MaxStarts = 3; c.Turns[0].Answer = nil }, "close", "start_cap", 0},
@@ -152,6 +157,33 @@ func TestCouncilBarrier(t *testing.T) {
 	}
 }
 
+func TestCouncilParallelRetryPacket(t *testing.T) {
+	c := testCouncil()
+	for _, m := range c.Members {
+		c.Turns = append(c.Turns, recorded(1, m.Vassal.Role, "earlier answer from "+m.Vassal.Role))
+	}
+	c.Turns = append(c.Turns,
+		recorded(2, "reader", "same-round answer"),
+		CouncilTurn{Round: 2, Role: "writer", Starts: 1, TaskID: "task-2-writer", State: domain.TaskStateFailed},
+		CouncilTurn{Round: 2, Role: "critic", Starts: 1, TaskID: "task-2-critic", State: domain.TaskStateWorking},
+	)
+	c.MaxStarts++
+	step, err := c.Next(opened)
+	if err != nil || step.Action != "start" || step.Round != 2 || len(step.Starts) != 1 ||
+		step.Starts[0].Role != "writer" || step.Starts[0].Attempt != 2 {
+		t.Fatalf("retry = %+v, %v", step, err)
+	}
+	md := step.Starts[0].Packet.Markdown
+	for _, m := range c.Members {
+		if !strings.Contains(md, "earlier answer from "+m.Vassal.Role) {
+			t.Errorf("retry packet lacks prior answer from %s", m.Vassal.Role)
+		}
+	}
+	if strings.Contains(md, "same-round answer") {
+		t.Error("retry packet contains a same-round answer")
+	}
+}
+
 func TestCouncilEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -166,10 +198,30 @@ func TestCouncilEvidence(t *testing.T) {
 		{"unread turns", func(c *CouncilSnapshot) { c.Turns = nil }},
 		{"zero rounds", func(c *CouncilSnapshot) { c.MaxRounds = 0 }},
 		{"negative starts", func(c *CouncilSnapshot) { c.MaxStarts = -1 }},
+		{"ward without reason", func(c *CouncilSnapshot) { c.Session.State = domain.ConclaveStateInputRequired }},
+		{"ward with unread turns", func(c *CouncilSnapshot) {
+			c.Session.State = domain.ConclaveStateInputRequired
+			c.Session.WardReason = "max_runs"
+			c.Turns = nil
+		}},
+		{"ward with invalid ceiling", func(c *CouncilSnapshot) {
+			c.Session.State = domain.ConclaveStateInputRequired
+			c.Session.WardReason = "max_runs"
+			c.MaxRounds = 0
+		}},
 		{"missing seat", func(c *CouncilSnapshot) { c.Members = nil }},
 		{"unknown zone", func(c *CouncilSnapshot) { c.Members[0].Zone = "" }},
 		{"duplicate", func(c *CouncilSnapshot) { c.Turns = append(c.Turns, c.Turns[0]) }},
 		{"future round", func(c *CouncilSnapshot) { c.Turns[0].Round = 2 }},
+		{"round after unanimous stop", func(c *CouncilSnapshot) {
+			c.Turns = nil
+			for _, m := range c.Members {
+				turn := recorded(1, m.Vassal.Role, "nothing to add")
+				turn.NothingToAdd = true
+				c.Turns = append(c.Turns, turn)
+			}
+			c.Turns = append(c.Turns, CouncilTurn{Round: 2, Role: "reader", Starts: 1, TaskID: "task-2-reader", State: domain.TaskStateWorking})
+		}},
 		{"sequential gap", func(c *CouncilSnapshot) { c.Sequential = true; c.Turns[0] = recorded(1, "writer", "answer") }},
 		{"wrong task", func(c *CouncilSnapshot) { c.Turns[0].Answer.TaskID = "foreign" }},
 		{"wrong room", func(c *CouncilSnapshot) { c.Turns[0].Answer.ConclaveID = "foreign" }},
