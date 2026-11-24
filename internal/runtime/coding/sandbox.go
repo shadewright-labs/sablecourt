@@ -180,8 +180,12 @@ func allowGit(profile *strings.Builder, work string, state *worktreeState, readO
 	if strings.ContainsAny(objectsDir, "\"\r\n") {
 		return errors.New("coding sandbox Git objects path contains unsupported characters")
 	}
+	if !isCommitID(state.Base) {
+		return errors.New("coding sandbox has no valid base commit ID")
+	}
 	objects := regexp.QuoteMeta(objectsDir)
-	fmt.Fprintf(profile, "(allow file-write-create (regex #\"^%s/[0-9a-f][0-9a-f](/[0-9a-f]+)?$\"))\n", objects)
+	suffix := strings.Repeat("[0-9a-f]", len(state.Base)-2)
+	fmt.Fprintf(profile, "(allow file-write-create (regex #\"^%s/[0-9a-f][0-9a-f](/%s)?$\"))\n", objects, suffix)
 	fmt.Fprintf(profile, "(allow file-write* (regex #\"^%s/[0-9a-f][0-9a-f]/tmp_obj_[a-zA-Z0-9]+$\"))\n", objects)
 	return nil
 }

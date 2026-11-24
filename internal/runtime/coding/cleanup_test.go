@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
@@ -82,6 +83,65 @@ func TestSnapshotIgnoresExternalExcludes(t *testing.T) {
 			if got := testGit(t, repo, "show", handle.Branch+":notes"); got != "keep" {
 				t.Errorf("snapshot = %q", got)
 			}
+		})
+	}
+}
+
+func TestCleanupKeepsUnsavedFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		finished   bool
+	}{
+		{name: "ignored before snapshot", path: "drafts/notes"},
+		{name: "ignored after snapshot", path: "drafts/notes", finished: true},
+		{name: "untracked after snapshot", path: "notes", finished: true},
+		{name: "tracked after snapshot", path: "README.md", finished: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, spec := codingFixture(t)
+			a.DryRun = true
+			repo := spec.Workload.Spec.Coding.RepoPath
+			testWrite(t, repo, ".gitignore", "drafts/\n", 0o600)
+			testGit(t, repo, "add", ".gitignore")
+			testGit(t, repo, "commit", "-m", "ignore drafts")
+			h := startTestTask(t, a, spec)
+			if tc.finished {
+				state, err := a.worktreeState(h)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := removeSessionFiles(t.Context(), state.checkoutGit(h.WorkDir), h.WorkDir); err != nil {
+					t.Fatal(err)
+				}
+				state.Tip = state.Base
+				state.FinishedAt = time.Now().UTC()
+				if err := writeWorktreeState(h.WorkDir, state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(h.WorkDir, tc.path)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testWrite(t, h.WorkDir, tc.path, "only copy\n", 0o600)
+			if err := a.Stop(t.Context(), h); err == nil || !strings.Contains(err.Error(), "unsaved") {
+				t.Errorf("cleanup = %v, want refusal for unsaved files", err)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != "only copy\n" {
+				t.Errorf("unsaved file = %q, %v", got, err)
+			}
+			if state, err := a.worktreeState(h); err != nil || state.CleanupError == "" {
+				t.Errorf("missing recorded cleanup error: %v", err)
+			}
+			if tc.path == "README.md" {
+				testGit(t, h.WorkDir, "restore", "--", tc.path)
+			} else if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Stop(t.Context(), h); err != nil {
+				t.Fatal(err)
+			}
+			assertWorktreeRemoved(t, repo, h.WorkDir)
 		})
 	}
 }
