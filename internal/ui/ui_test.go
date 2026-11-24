@@ -249,8 +249,8 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 
 			if tc.wantErr {
 				loc := rec.Header().Get("Location")
-				if !strings.Contains(loc, "error=") && !strings.Contains(loc, "err=") {
-					t.Errorf("expected error redirect, got Location=%q", loc)
+				if !strings.Contains(loc, "err=") || strings.Contains(loc, "error=") {
+					t.Errorf("expected ?err= error redirect, got Location=%q", loc)
 				}
 				if _, err := st.GetMemory(ctx, "proposed:learning:global", form.Get("key")); !errors.Is(err, store.ErrNotFound) {
 					t.Errorf("expected no proposal after rejection, got %v", err)
