@@ -96,3 +96,17 @@ flowchart TB
 | 5. Capability mediation | Model requests hit `/gate/model/{provider}/...` with `Authorization: Bearer sc_task_...` (checked against leases, grants, and budgets). Tool and action requests hit `/gate/mcp` or `/gate/action/{name}` and pass through deterministic policy (`allow`, `approve`, `deny`) and the Approval Queue. |
 | 6. Observation and steering | Operators watch live redacted output via `Scry`, claim exclusive `stdin` via `Takeover`, or steer multi-agent rooms via `Decree` (text or voice). |
 | 7. Tamper-evident audit | Every state transition, policy decision, approval, and model call is appended to `audit_log` chained with `SHA-256(prev_hash \|\| record \|\| created_at)`. `sablectl audit verify` recomputes the chain from `genesis`. |
+
+
+## Agentic context, learnings, and verification pipeline (ADR-0010)
+
+Before dispatching any non-deterministic workload, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped `context-packet.md` (also written to `.sablecourt-context.md` inside coding worktrees). The packet combines four inputs:
+
+1. Task intent (`prompt`, `input`, workflow step metadata, and any failure handoff).
+2. Scoped learnings matched from `Court Memory` under `learning:global`, `learning:repo:<name>`, and `learning:path:<glob>` namespaces.
+3. Recent Conclave Decrees and Relics when the task runs inside a Conclave.
+4. A read-only repository pre-check (10-second timeout, 16 KiB cap) running `git status --short`, `git diff --stat`, `go vet ./...` for Go modules, and `sg scan` when `sgconfig.yml` is present.
+
+Workflows can pair an authoring step with an independent `role: verifier` step running on a separate model or CLI harness. The reconciler wraps the verifier prompt with author artifacts and expects `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. On verifier rejection or runtime failure, opt-in remediation (`maxRetries` on `WorkflowStep`, or manual `Fix from failure` / `sablectl task retry --handoff`) packages redacted artifacts and events into `failure-handoff.md` for the next attempt.
+
+Role-based model tiering (`fast`, `coding`, `critic`) is stored in `system:model-tiers` and editable in `/providers` or via `/api/v1/providers/tiers`. Workflow steps declaring `tier` without explicit `provider`/`model` fields resolve from this table at dispatch time.

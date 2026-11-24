@@ -19,6 +19,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/approval"
 	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
@@ -184,9 +185,12 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /audit", d.handleAuditPage)
 	mux.HandleFunc("GET /memory", d.handleMemoryPage)
 	mux.HandleFunc("POST /ui/memory/set", d.handleSetMemory)
+	mux.HandleFunc("POST /ui/memory/learning", d.handleSetLearning)
 	mux.HandleFunc("POST /ui/memory/delete", d.handleDeleteMemory)
 	mux.HandleFunc("POST /ui/tasks/{id}/retry", d.handleRetryTask)
 	mux.HandleFunc("POST /ui/conclaves/{id}/relics", d.handleConclaveUploadRelic)
+	mux.HandleFunc("POST /ui/conclaves/{id}/learning", d.handleConclaveSaveLearning)
+	mux.HandleFunc("POST /ui/providers/tiers", d.handleProviderSaveTiers)
 	mux.HandleFunc("POST /ui/schedules/{name}/run", d.handleRunSchedule)
 	mux.HandleFunc("POST /ui/conclaves", d.handleOpenConclave)
 	mux.HandleFunc("POST /ui/conclaves/{id}/decree", d.handlePostDecree)
@@ -491,6 +495,7 @@ func (d *Dashboard) handleProvidersPage(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = d.providersTmpl.Execute(w, map[string]any{
 		"Providers": list,
+		"Tiers":     contextpack.GetModelTiers(r.Context(), d.store),
 		"Notice":    r.URL.Query().Get("notice"),
 		"ErrMsg":    r.URL.Query().Get("err"),
 	})

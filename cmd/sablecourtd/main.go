@@ -26,6 +26,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
@@ -570,6 +571,47 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		writeJSON(w, http.StatusOK, provReg.List(r.Context()))
 	})
+	mux.HandleFunc("GET /api/v1/providers/tiers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, contextpack.GetModelTiers(r.Context(), st))
+	})
+	mux.HandleFunc("POST /api/v1/providers/tiers", func(w http.ResponseWriter, r *http.Request) {
+		var routes []contextpack.TierRoute
+		if err := json.NewDecoder(r.Body).Decode(&routes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+			return
+		}
+		if err := contextpack.SaveModelTiers(r.Context(), st, routes); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, contextpack.GetModelTiers(r.Context(), st))
+	})
+	mux.HandleFunc("GET /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
+		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+		var paths []string
+		if p := strings.TrimSpace(r.URL.Query().Get("path")); p != "" {
+			paths = strings.Split(p, ",")
+		}
+		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
+	})
+	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Scope  string `json:"scope"`
+			Key    string `json:"key"`
+			Rule   string `json:"rule"`
+			Author string `json:"author"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+			return
+		}
+		entry, err := contextpack.PutLearning(r.Context(), st, req.Scope, req.Key, req.Rule, req.Author)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, entry)
+	})
 	mux.HandleFunc("POST /api/v1/providers/{id}/sync", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "provider registry unavailable"})
@@ -633,15 +675,14 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	})
 	mux.HandleFunc("POST /api/v1/tasks/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		orig, err := st.GetTask(r.Context(), id)
+		withHandoff := r.URL.Query().Get("handoff") == "true" || r.URL.Query().Get("handoff") == "1"
+		retried, err := reconciler.RetryTaskWithHandoff(r.Context(), id, withHandoff, "api_retry")
 		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-			return
-		}
-		idem := fmt.Sprintf("retry-%s-%d", orig.ID, time.Now().UTC().UnixNano())
-		retried, err := reconciler.SubmitTask(r.Context(), orig.WorkloadName, idem, orig.InputJSON)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
@@ -650,7 +691,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			WorkloadName: retried.WorkloadName,
 			Action:       "task.retry",
 			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"retried_from":%q}`, orig.ID),
+			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 			CreatedAt:    time.Now().UTC(),
 		})
 		writeJSON(w, http.StatusCreated, retried)
