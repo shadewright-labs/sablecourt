@@ -2,6 +2,7 @@ package conclave
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -19,14 +20,6 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
-
-type brokerReadFailure struct {
-	store.Store
-}
-
-func (s brokerReadFailure) ListConclaveMessages(context.Context, string, int64) ([]domain.ConclaveMessage, error) {
-	return nil, errors.New("messages unavailable")
-}
 
 func brokerTestStore(t *testing.T) store.Store {
 	t.Helper()
@@ -73,31 +66,41 @@ func TestWardMessageReadFailsClosed(t *testing.T) {
 	for _, wards := range []domain.ConclaveWards{{}, {MaxMessages: 1}, {MaxPingPong: 1}} {
 		t.Run(fmt.Sprintf("%+v", wards), func(t *testing.T) {
 			ctx := context.Background()
-			st := brokerTestStore(t)
-			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", TemplateName: "template", State: domain.ConclaveStateActive}); err != nil {
-				t.Fatal(err)
-			}
-			b := NewBroker(Options{Store: brokerReadFailure{st}, GetBundle: func() *config.Bundle {
-				return &config.Bundle{Conclaves: map[string]domain.Conclave{"template": {Spec: domain.ConclaveSpec{
-					Wards: wards, Vassals: []domain.ConclaveVassal{{Role: "coder", CanMessage: []string{"all"}}},
-				}}}}
-			}})
-			_, err := b.PostMessage(ctx, "room", "coder", "all", "proposal", "must not persist", "")
-			if !errors.Is(err, ErrWardTripped) {
-				t.Errorf("want Ward refusal, got %v", err)
-			}
-			msgs, err := st.ListConclaveMessages(ctx, "room", 0)
+			path := filepath.Join(t.TempDir(), "test.db")
+			st, err := sqlite.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, msg := range msgs {
-				if msg.FromRole == "coder" {
-					t.Error("participant message persisted despite unreadable Ward evidence")
-				}
+			defer st.Close()
+			if err := st.Migrate(ctx); err != nil {
+				t.Fatal(err)
 			}
-			session, err := st.GetConclave(ctx, "room")
-			if err != nil || session.State != domain.ConclaveStateInputRequired {
-				t.Fatalf("want paused session, got %+v, %v", session, err)
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			bundle := limitsBundle(wards, domain.ConclaveVassal{Role: "coder", CanMessage: []string{"all"}})
+			b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, "ALTER TABLE conclave_messages RENAME TO unavailable_messages"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.PostMessage(ctx, room.ID, "coder", "all", "proposal", "must not persist", ""); err == nil {
+				t.Error("participant message accepted without Ward evidence")
+			}
+			if _, err := db.ExecContext(ctx, "ALTER TABLE unavailable_messages RENAME TO conclave_messages"); err != nil {
+				t.Fatal(err)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, room.ID, 0)
+			if err != nil || len(msgs) != 0 {
+				t.Fatalf("failed evidence read changed the room: %v, %v", msgs, err)
+			}
+			if _, err := b.PostMessage(ctx, room.ID, "coder", "all", "proposal", "retry", ""); err != nil {
+				t.Fatalf("post after restoring evidence: %v", err)
 			}
 		})
 	}
@@ -229,10 +232,10 @@ func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 		t.Fatalf("PostMessage reviewer->coder: %v", err)
 	}
 
-	// 4. 3rd ping-pong message trips MaxPingPong=2 Ward and pauses Conclave.
+	// 4. The second reply paused the Conclave. The next post is refused.
 	_, err = broker.PostMessage(ctx, sess.ID, "coder", "reviewer", "question", "Which timeout?", "")
-	if !errors.Is(err, ErrWardTripped) {
-		t.Fatalf("expected ErrWardTripped, got %v", err)
+	if !errors.Is(err, ErrConclavePaused) {
+		t.Fatalf("expected ErrConclavePaused, got %v", err)
 	}
 	updated, _ := st.GetConclave(ctx, sess.ID)
 	if updated.State != domain.ConclaveStateInputRequired {
@@ -283,9 +286,13 @@ func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordBudgetUsage: %v", err)
 	}
-	_, err = broker.PostMessage(ctx, sess.ID, "coder", "reviewer", "proposal", "Another turn after budget cap", tasks[0].ID)
-	if !errors.Is(err, ErrWardTripped) || !strings.Contains(err.Error(), "budget_exceeded") {
-		t.Fatalf("expected budget_exceeded ErrWardTripped, got %v", err)
+	paid, err := broker.PostMessage(ctx, sess.ID, "coder", "reviewer", "proposal", "Reply at budget cap", tasks[0].ID)
+	if err != nil || paid.ID == 0 {
+		t.Fatalf("paid reply: %+v, %v", paid, err)
+	}
+	paused, err := st.GetConclave(ctx, sess.ID)
+	if err != nil || paused.State != domain.ConclaveStateInputRequired || !strings.Contains(paused.WardReason, "budget_exceeded") {
+		t.Fatalf("expected budget pause, got %+v, %v", paused, err)
 	}
 }
 
@@ -293,12 +300,24 @@ func TestMCPPostKind(t *testing.T) {
 	ctx := context.Background()
 	st := brokerTestStore(t)
 	wl := domain.Workload{Metadata: domain.ObjectMeta{Name: "worker"}, Spec: domain.WorkloadSpec{Grants: domain.GrantSet{MCPTools: []string{"conclave.post"}}}}
-	bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{{Role: "reader", Workload: "worker", CanMessage: []string{"all"}}}}}}}
+	bundle := limitsBundle(domain.ConclaveWards{MaxMessages: 3, MaxPingPong: 3}, domain.ConclaveVassal{Role: "reader", Workload: "worker", CanMessage: []string{"all"}})
 	b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
 	session, err := b.Open(ctx, "council", "test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{
+		ID: "worker-task", WorkloadName: "worker", State: domain.TaskStateWorking,
+		IdempotencyKey: "conclave-" + session.ID + "-init-reader",
+		InputJSON:      fmt.Sprintf(`{"conclaveId":%q,"role":"reader","activation":"always-on"}`, session.ID),
+	}
+	if err := st.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
 	eng := policy.NewEngine([]domain.Policy{{Spec: domain.PolicySpec{Rules: []domain.PolicyRule{{Workload: "worker", Capability: "mcp:conclave.post", Effect: domain.EffectAllow}}}}}, nil)
 	g := mcpgate.New(mcpgate.Options{Store: st, Policy: eng})
 	b.RegisterMCPTools(g)
@@ -343,6 +362,79 @@ func TestResolveReservedVassal(t *testing.T) {
 			}
 			if _, err = b.ResolveRoleForWorkload(ctx, sess.ID, "worker"); !errors.Is(err, ErrMessageDenied) {
 				t.Errorf("invalid participant role returned: %v", err)
+			}
+		})
+	}
+}
+
+func TestMCPPostUsesTaskAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		taskInput func(string) string
+		key       func(string) string
+		want      string
+	}{
+		{"second role", func(id string) string {
+			return fmt.Sprintf(`{"conclaveId":%q,"role":"second","activation":"always-on"}`, id)
+		},
+			func(id string) string { return "conclave-" + id + "-init-second" }, "second"},
+		{"other council", func(string) string { return `{"conclaveId":"other","role":"first","activation":"always-on"}` },
+			func(id string) string { return "conclave-" + id + "-init-first" }, ""},
+		{"unassigned task", func(id string) string {
+			return fmt.Sprintf(`{"conclaveId":%q,"role":"first","activation":"always-on"}`, id)
+		},
+			func(string) string { return "unrelated" }, ""},
+		{"wrong type", func(string) string { return `{"conclaveId":123,"role":true}` }, func(string) string { return "wrong-type" }, ""},
+		{"empty", func(string) string { return "" }, func(string) string { return "empty" }, ""},
+		{"null", func(string) string { return "null" }, func(string) string { return "null" }, ""},
+		{"oversized", func(id string) string {
+			return fmt.Sprintf(`{"conclaveId":%q,"role":"first","activation":"always-on","prompt":%q}`, id, strings.Repeat("x", 2<<20))
+		},
+			func(id string) string { return "conclave-" + id + "-init-first" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := brokerTestStore(t)
+			wl := domain.Workload{Metadata: domain.ObjectMeta{Name: "worker"}, Spec: domain.WorkloadSpec{Grants: domain.GrantSet{MCPTools: []string{"conclave.post"}}}}
+			bundle := limitsBundle(domain.ConclaveWards{},
+				domain.ConclaveVassal{Role: "first", Workload: "worker", CanMessage: []string{"all"}},
+				domain.ConclaveVassal{Role: "second", Workload: "worker", CanMessage: []string{"all"}},
+			)
+			b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker"}); err != nil {
+				t.Fatal(err)
+			}
+			task := domain.Task{ID: "task", WorkloadName: "worker", IdempotencyKey: tc.key(room.ID), State: domain.TaskStateWorking, InputJSON: tc.taskInput(room.ID)}
+			if err := st.CreateTask(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			eng := policy.NewEngine([]domain.Policy{{Spec: domain.PolicySpec{Rules: []domain.PolicyRule{{Workload: "worker", Capability: "mcp:conclave.post", Effect: domain.EffectAllow}}}}}, nil)
+			g := mcpgate.New(mcpgate.Options{Store: st, Policy: eng})
+			b.RegisterMCPTools(g)
+			srv := g.NewServerForWorkload(domain.Lease{TaskID: task.ID}, wl)
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			ss, err := srv.Connect(ctx, serverTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ss.Close()
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			cs, err := client.Connect(ctx, clientTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cs.Close()
+			res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conclave.post", Arguments: map[string]string{"conclave_id": room.ID, "to": "all", "body": "reply"}})
+			if err != nil || res.IsError != (tc.want == "") {
+				t.Errorf("post returned %+v, %v", res, err)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, room.ID, 0)
+			if err != nil || (tc.want == "" && len(msgs) != 0) || (tc.want != "" && (len(msgs) != 1 || msgs[0].FromRole != tc.want)) {
+				t.Errorf("expected role %q, stored %+v, error %v", tc.want, msgs, err)
 			}
 		})
 	}

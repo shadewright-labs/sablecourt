@@ -51,3 +51,16 @@ func TestTextCleanInputHasZeroHits(t *testing.T) {
 		t.Fatalf("unexpected redaction on clean text: %+v", res)
 	}
 }
+
+func TestQuotedSecretFields(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{`{"api_key":"fixture with spaces"}`, `{"api_key":"[REDACTED:secret]"}`},
+		{`{"password":"a\"b"}`, `{"password":"[REDACTED:secret]"}`},
+		{`{"api_key":"x","status":"ready"}`, `{"api_key":"[REDACTED:secret]","status":"ready"}`},
+		{`{"api_key_count":123456}`, `{"api_key_count":123456}`},
+	} {
+		if got := String(tc.input); got != tc.want {
+			t.Errorf("String(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

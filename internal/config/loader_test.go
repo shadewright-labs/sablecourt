@@ -212,3 +212,46 @@ func TestVassalRoleIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestConclaveManifestMaxRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		max  string
+		ok   bool
+	}{
+		{"default", "", true},
+		{"one", "  wards: {maxRuns: 1}\n", true},
+		{"ceiling", "  wards: {maxRuns: 6}\n", true},
+		{"above ceiling", "  wards: {maxRuns: 7}\n", false},
+		{"negative", "  wards: {maxRuns: -1}\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			data := `apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: worker
+  zone: runtime
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: worker:0.1.0
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Conclave
+metadata:
+  name: council
+spec:
+  vassals:
+    - {role: reader, workload: worker, activation: on-mention}
+` + tc.max
+			if err := os.WriteFile(filepath.Join(root, "conclave.yaml"), []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadPath(root); (err == nil) != tc.ok {
+				t.Errorf("manifest error = %v, want valid = %v", err, tc.ok)
+			}
+		})
+	}
+}
