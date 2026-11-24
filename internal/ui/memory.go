@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,27 +123,122 @@ func (d *Dashboard) handleSetLearning(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/memory?notice="+url.QueryEscape(fmt.Sprintf("Saved learning %s/%s", entry.Namespace, entry.Key)), http.StatusSeeOther)
 }
 
+const proposedLearningPrefix = "proposed:"
+
+type proposedLearningSource struct {
+	Kind        string `json:"kind"`
+	ConclaveID  string `json:"conclave_id"`
+	MessageID   int64  `json:"message_id,omitempty"`
+	FromRole    string `json:"from_role,omitempty"`
+	ToRole      string `json:"to_role,omitempty"`
+	MessageKind string `json:"message_kind,omitempty"`
+	MessageBody string `json:"message_body"`
+}
+
+type proposedLearningRecord struct {
+	Status          string                 `json:"status"`
+	TargetNamespace string                 `json:"target_namespace"`
+	Rule            string                 `json:"rule"`
+	Source          proposedLearningSource `json:"source"`
+}
+
+func parseConclaveMessageID(rawID, key string) int64 {
+	if s := strings.TrimSpace(rawID); s != "" {
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
+			return id
+		}
+	}
+	if strings.HasPrefix(key, "conclave-msg-") {
+		if id, err := strconv.ParseInt(strings.TrimPrefix(key, "conclave-msg-"), 10, 64); err == nil && id > 0 {
+			return id
+		}
+	}
+	return 0
+}
+
 func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 	scope := strings.TrimSpace(r.FormValue("scope"))
-	if scope == "" {
-		scope = "global"
-	}
+	scope = strings.TrimPrefix(scope, proposedLearningPrefix)
+	targetNS := contextpack.NormalizeLearningNamespace(scope)
+	proposalNS := proposedLearningPrefix + targetNS
+
+	now := time.Now().UTC()
 	key := strings.TrimSpace(r.FormValue("key"))
 	if key == "" {
-		key = fmt.Sprintf("conclave-%s-%d", id, time.Now().UTC().Unix())
+		key = fmt.Sprintf("conclave-%s-%d", id, now.Unix())
 	}
 	rule := strings.TrimSpace(r.FormValue("rule"))
-	entry, err := contextpack.PutLearning(r.Context(), d.store, scope, key, rule, "operator")
-	if err != nil {
-		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+	if rule == "" {
+		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape("learning rule is required"), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Saved as learning: "+entry.Namespace+"/"+entry.Key), http.StatusSeeOther)
+	cleanRule := redact.String(rule)
+
+	msgID := parseConclaveMessageID(r.FormValue("message_id"), key)
+	src := proposedLearningSource{
+		Kind:        "conclave_message",
+		ConclaveID:  id,
+		MessageID:   msgID,
+		MessageBody: cleanRule,
+	}
+	if msgID > 0 && d.store != nil {
+		if msgs, err := d.store.ListConclaveMessages(r.Context(), id, 0); err == nil {
+			for _, m := range msgs {
+				if m.ID == msgID {
+					src.FromRole = m.FromRole
+					src.ToRole = m.ToRole
+					src.MessageKind = m.Kind
+					src.MessageBody = redact.String(strings.TrimSpace(m.Body))
+					break
+				}
+			}
+		}
+	}
+
+	proposal := proposedLearningRecord{
+		Status:          "proposed",
+		TargetNamespace: targetNS,
+		Rule:            cleanRule,
+		Source:          src,
+	}
+	payload, err := json.MarshalIndent(proposal, "", "  ")
+	if err != nil {
+		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+
+	entry := domain.MemoryEntry{
+		Namespace: proposalNS,
+		Key:       key,
+		Value:     string(payload),
+		Author:    "operator",
+		UpdatedAt: now,
+	}
+	if err := d.store.PutMemory(r.Context(), entry); err != nil {
+		http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	detailBytes, _ := json.Marshal(map[string]any{
+		"namespace":        entry.Namespace,
+		"target_namespace": targetNS,
+		"key":              entry.Key,
+		"conclave_id":      id,
+		"message_id":       msgID,
+	})
+	_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
+		Category:     "memory",
+		WorkloadName: "operator",
+		Action:       "learning.propose",
+		Outcome:      "proposed",
+		DetailJSON:   string(detailBytes),
+		CreatedAt:    now,
+	})
+	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Proposed learning saved (pending review): "+entry.Namespace+"/"+entry.Key), http.StatusSeeOther)
 }
 
 func (d *Dashboard) handleProviderSaveTiers(w http.ResponseWriter, r *http.Request) {
