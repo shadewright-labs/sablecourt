@@ -11,9 +11,13 @@ import (
 )
 
 func (s *SQLiteStore) CreateConclave(ctx context.Context, c domain.ConclaveSession) error {
+	return createConclave(ctx, s.db, c)
+}
+
+func createConclave(ctx context.Context, db store.TaskInserter, c domain.ConclaveSession) error {
 	now := formatTime(c.CreatedAt)
 	upd := formatTime(c.UpdatedAt)
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO conclaves (id, template_name, title, state, ward_reason, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, c.ID, c.TemplateName, c.Title, string(c.State), c.WardReason, now, upd)
@@ -78,7 +82,7 @@ func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state 
 }
 
 func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
-	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg, s.appendAuditTx); handled {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, readCouncilPolicy, msg, s.appendAuditTx); handled {
 		return id, err
 	}
 	res, err := s.db.ExecContext(ctx, `
