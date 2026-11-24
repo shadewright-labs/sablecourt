@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Sablecourt browser test</title>
+<p id="result">Running</p>
+<iframe id="page" title="Sablecourt page" width="100%" height="650" srcdoc="{{.Page}}"></iframe>
+<script>
+  const frame = document.getElementById("page");
+  const result = document.getElementById("result");
+
+  function check(condition, message) {
+    if (!condition) throw new Error(message);
+  }
+
+  function checkVassalRows() {
+    const page = frame.contentDocument;
+    const form = page.querySelector('form[action="/ui/studio/conclave"]');
+    const fields = ["vassal_role", "vassal_workload", "vassal_activation"];
+    const before = new FormData(form);
+    page.getElementById("add-vassal-btn").click();
+    const rows = page.querySelectorAll("#vassal-rows .vassal-row");
+    check(rows.length === 4, "Add vassal should create a fourth row");
+    const added = rows[3];
+    added.querySelector('[name="vassal_role"]').value = "reader";
+    added.querySelector('[name="vassal_workload"]').value = "extra-worker";
+    const afterAdd = new FormData(form);
+    ["reader", "extra-worker", "on-mention"].forEach(function(value, i) {
+      const values = afterAdd.getAll(fields[i]);
+      check(values.length === 4 && values[3] === value, "Added row should submit " + fields[i]);
+    });
+
+    rows[1].querySelector(".remove-vassal-btn").click();
+    check(!rows[1].isConnected, "Remove should delete the clicked row");
+    check(added.querySelector(".vassal-label").textContent === "Vassal 3", "Remaining rows should be renumbered");
+    const afterRemove = new FormData(form);
+    fields.forEach(function(field) {
+      const values = afterRemove.getAll(field);
+      const expected = afterAdd.getAll(field);
+      expected.splice(1, 1);
+      check(values[0] === before.get(field), "First row should keep " + field);
+      check(JSON.stringify(values) === JSON.stringify(expected), "Remove should update submitted " + field);
+    });
+  }
+
+  async function checkConclaveHeartbeat() {
+    const page = frame.contentDocument;
+    const name = page.getElementById("relic-name");
+    const stream = frame.contentWindow.testStream;
+    const state = data => stream.dispatchEvent(new MessageEvent("state", {data}));
+    state("initial");
+    name.focus();
+    name.value = "draft";
+    state("changed");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    check(frame.contentDocument === page && name.value === "draft", "State update should preserve the Relic draft");
+
+    name.value = "";
+    name.blur();
+    const reloaded = new Promise(resolve => frame.addEventListener("load", () => resolve(true), {once: true}));
+    state("changed");
+    const timeout = new Promise(resolve => setTimeout(() => resolve(false), 1000));
+    check(await Promise.race([reloaded, timeout]), "Repeated state should reload after the draft is cleared");
+  }
+
+  window.addEventListener("load", async function() {
+    try {
+      if ({{.Name}} === "studio") checkVassalRows();
+      else await checkConclaveHeartbeat();
+      result.textContent = "PASS";
+    } catch (error) {
+      result.textContent = "FAIL: " + error.message;
+    }
+  });
+</script>
+</html>

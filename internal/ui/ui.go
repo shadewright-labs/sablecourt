@@ -1,17 +1,20 @@
 package ui
 
 import (
+	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -52,7 +55,7 @@ type Dashboard struct {
 	getBundle       func() *config.Bundle
 	reload          func() error
 	manifestsPath   string
-	manifestMu      sync.Mutex
+	manifestLock    chan struct{}
 	stalenessWindow time.Duration
 	tmpl            *template.Template
 	taskTmpl        *template.Template
@@ -159,6 +162,7 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 		getBundle:       opts.GetBundle,
 		reload:          opts.Reload,
 		manifestsPath:   opts.ManifestsPath,
+		manifestLock:    make(chan struct{}, 1),
 		stalenessWindow: win,
 		tmpl:            tmpl,
 		taskTmpl:        taskTmpl,
@@ -639,7 +643,7 @@ func (d *Dashboard) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := d.appendManifestDoc(wl); err != nil {
+	if err := d.appendManifestDoc(r.Context(), wl); err != nil {
 		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
@@ -679,7 +683,7 @@ func (d *Dashboard) handleCreateWorkflow(w http.ResponseWriter, r *http.Request)
 		Metadata: domain.ObjectMeta{Name: name, Zone: domain.ZoneSandbox},
 		Spec:     domain.WorkflowSpec{Description: desc, Steps: steps},
 	}
-	if err := d.appendManifestDoc(wf); err != nil {
+	if err := d.appendManifestDoc(r.Context(), wf); err != nil {
 		http.Redirect(w, r, "/studio?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
@@ -715,7 +719,7 @@ func (d *Dashboard) defaultBudgetRef() string {
 	return ""
 }
 
-func (d *Dashboard) appendManifestDoc(doc any) error {
+func (d *Dashboard) appendManifestDoc(ctx context.Context, doc any) error {
 	if d.manifestsPath == "" {
 		return fmt.Errorf("sablecourtd was started without --manifests; cannot persist YAML")
 	}
@@ -724,8 +728,15 @@ func (d *Dashboard) appendManifestDoc(doc any) error {
 		return err
 	}
 
-	d.manifestMu.Lock()
-	defer d.manifestMu.Unlock()
+	select {
+	case d.manifestLock <- struct{}{}:
+		defer func() { <-d.manifestLock }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	info, err := os.Stat(d.manifestsPath)
 	if err != nil {
@@ -736,48 +747,64 @@ func (d *Dashboard) appendManifestDoc(doc any) error {
 		if err != nil {
 			return err
 		}
-		outFile := f.Name()
-		if _, err := f.Write(raw); err != nil {
-			_ = f.Close()
-			_ = os.Remove(outFile)
-			return err
+		err = ctx.Err()
+		if err == nil {
+			_, err = f.Write(raw)
 		}
-		if err := f.Close(); err != nil {
-			_ = os.Remove(outFile)
-			return err
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
 		}
-		if d.reload != nil {
-			if err := d.reload(); err != nil {
-				_ = os.Remove(outFile)
-				return err
-			}
+		if err == nil && d.reload != nil {
+			err = d.reload()
 		}
-		return nil
+		if err != nil {
+			_ = os.Remove(f.Name())
+		}
+		return err
 	}
 
-	origSize := info.Size()
-	f, err := os.OpenFile(d.manifestsPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("manifest path must be a regular file or directory")
+	}
+	f, err := os.OpenFile(d.manifestsPath, os.O_APPEND|os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
-	prefix := "\n---\n"
-	if origSize == 0 {
-		prefix = ""
-	}
-	if _, err := f.WriteString(prefix + string(raw)); err != nil {
-		_ = f.Close()
-		_ = os.Truncate(d.manifestsPath, origSize)
+	defer func() { _ = f.Close() }()
+	original, err := io.ReadAll(f)
+	if err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Truncate(d.manifestsPath, origSize)
+	if len(original) > 0 {
+		raw = append([]byte("\n---\n"), raw...)
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if d.reload != nil {
-		if err := d.reload(); err != nil {
-			_ = os.Truncate(d.manifestsPath, origSize)
-			return err
-		}
+
+	written, err := f.Write(raw)
+	if err == nil && d.reload != nil {
+		err = d.reload()
+	}
+	if err != nil && written > 0 {
+		err = errors.Join(err, rollbackManifestAppend(f, original, raw[:written]))
+	}
+	return err
+}
+
+func rollbackManifestAppend(f *os.File, original, appended []byte) error {
+	wantSize := int64(len(original)) + int64(len(appended))
+	current, err := io.ReadAll(io.NewSectionReader(f, 0, wantSize+1))
+	if err != nil {
+		return fmt.Errorf("read manifest before rollback: %w", err)
+	}
+	if int64(len(current)) != wantSize ||
+		!bytes.Equal(current[:len(original)], original) ||
+		!bytes.Equal(current[len(original):], appended) {
+		return fmt.Errorf("manifest changed during save; rollback skipped")
+	}
+	if err := f.Truncate(int64(len(original))); err != nil {
+		return fmt.Errorf("roll back manifest append: %w", err)
 	}
 	return nil
 }

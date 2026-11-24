@@ -191,7 +191,7 @@ func (d *Dashboard) handleStudioCreateConclave(w http.ResponseWriter, r *http.Re
 			Vassals:     vassals,
 		},
 	}
-	if err := d.appendManifestDoc(cc); err != nil {
+	if err := d.appendManifestDoc(r.Context(), cc); err != nil {
 		redirectStudioErr(w, r, err.Error())
 		return
 	}

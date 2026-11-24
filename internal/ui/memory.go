@@ -370,7 +370,7 @@ func parseRelicUploadForm(r *http.Request) (string, string, string, error) {
 	if name == "" || strings.TrimSpace(content) == "" {
 		return "", "", "", fmt.Errorf("relic name and content are required")
 	}
-	if !validRelicName(name) {
+	if !validRelicName(name) || redact.ContainsSensitive(name) {
 		return "", "", "", fmt.Errorf("invalid relic name")
 	}
 	if len(content) > maxRelicUploadBytes {
