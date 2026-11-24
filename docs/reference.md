@@ -40,7 +40,7 @@ All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site
 
 | Method and path | Auth token | Purpose |
 | :--- | :--- | :--- |
-| `GET /api/v1/observer/snapshot`, `GET /api/v1/observer/stream` | `observer_bearer_token` (read-only) | Nightloom Watchman bridge (active tasks, Conclaves, pending approvals, budget totals) |
+| `GET /api/v1/observer/snapshot`, `GET /api/v1/observer/stream` | `observer_bearer_token` (read-only) | Nightloom Watcher bridge (active tasks, Conclaves, pending approvals, budget totals) |
 | `POST /api/v1/integrations/shadewright/incidents` | `shadewright_bearer_token` | Contract 3: escalate a Kubernetes code-level `Incident` to a Conclave and attach evidence as a `Relic` |
 | `POST /api/v1/integrations/shadewright/verifications` | `shadewright_bearer_token` | Contract 3: post a `VerificationReport` (`RolledOut` / `Cleared`) back into the Conclave as a `Relic` |
 | `POST /gate/model/{provider}/*` | `sc_task_...` lease | Model Gate proxy (`openai`, `anthropic`, `gemini`, `local`) with budget accounting and fallback |

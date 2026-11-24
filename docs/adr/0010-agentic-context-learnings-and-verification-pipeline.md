@@ -9,7 +9,7 @@ Launching a coding or reasoning agent with only a raw user prompt leaves the age
 
 ## Decision
 
-SableCourt adopts a five-part context and verification pipeline inside the control plane.
+Sablecourt adopts a five-part context and verification pipeline inside the control plane.
 
 ### 1. Scoped learnings on Court Memory
 
@@ -25,7 +25,7 @@ Before dispatching a non-deterministic workload, `Reconciler.launchTask` builds 
 
 ### 4. Closed-loop failure handoff
 
-On task failure or verifier rejection, SableCourt builds a standardized `failure-handoff.md` with failure reason, redacted artifacts, and recent events. Automatic remediation is opt-in (`maxRetries` or `auto_remediate`, defaulting to 1 retry when enabled). Operators can also trigger a handoff retry manually via `POST /api/v1/tasks/{id}/retry?handoff=true`, the Web UI ("Fix from failure"), or `sablectl task retry --handoff`.
+On task failure or verifier rejection, Sablecourt builds a standardized `failure-handoff.md` with failure reason, redacted artifacts, and recent events. Automatic remediation is opt-in (`maxRetries` or `auto_remediate`, defaulting to 1 retry when enabled). Operators can also trigger a handoff retry manually via `POST /api/v1/tasks/{id}/retry?handoff=true`, the Web UI ("Fix from failure"), or `sablectl task retry --handoff`.
 
 ### 5. Role-based model tiering
 
@@ -35,5 +35,5 @@ On task failure or verifier rejection, SableCourt builds a standardized `failure
 
 - Agents start with repository state, team rules, and prior artifacts without manual copy-paste from the operator.
 - Authoring and verification can run on different models or CLI harnesses with deterministic pass/fail gating.
-- All pre-checks remain read-only, time-bounded, and redacted through `internal/redact`, preserving SableCourt's secret-isolation invariant.
+- All pre-checks remain read-only, time-bounded, and redacted through `internal/redact`, preserving Sablecourt's secret-isolation invariant.
 - Automatic remediation stays opt-in and retry-capped, avoiding runaway loops or unexpected model spend.
