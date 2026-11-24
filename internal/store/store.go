@@ -22,7 +22,9 @@ type Store interface {
 
 	CreateTask(ctx context.Context, t domain.Task) error
 	GetTask(ctx context.Context, id string) (domain.Task, error)
+	GetTaskByIdempotencyKey(ctx context.Context, key string) (domain.Task, error)
 	ListTasks(ctx context.Context) ([]domain.Task, error)
+	ListReconcileTasks(ctx context.Context, handleIDs []string) ([]domain.Task, error)
 	ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error)
 	AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error
 	ListTaskMessages(ctx context.Context, taskID string) ([]domain.TaskMessage, error)
@@ -37,6 +39,7 @@ type Store interface {
 
 	CreateLease(ctx context.Context, lease domain.Lease) error
 	GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error)
+	RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error
 	RevokeTaskLeases(ctx context.Context, taskID string) error
 
 	RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error

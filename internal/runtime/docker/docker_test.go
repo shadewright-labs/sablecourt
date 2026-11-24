@@ -119,3 +119,41 @@ func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 		t.Fatalf("expected StateCompleted, got %+v err=%v", obs, err)
 	}
 }
+
+type timedOutEngine struct {
+	fakeEngine
+	removed bool
+}
+
+func (f *timedOutEngine) ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error) {
+	return client.ContainerStartResult{}, context.DeadlineExceeded
+}
+func (f *timedOutEngine) ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+	f.removed = true
+	return client.ContainerRemoveResult{}, nil
+}
+
+func TestStartTimeoutKeepsHandle(t *testing.T) {
+	e := &timedOutEngine{}
+	a := NewAdapter(e, "")
+	var spec scruntime.LaunchSpec
+	spec.Workload.Spec.Runtime.Image = "fixture"
+	h, err := a.Start(context.Background(), spec)
+	if !errors.Is(err, context.DeadlineExceeded) || h.ExternalID != "ctr-123" {
+		t.Fatalf("handle=%+v err=%v", h, err)
+	}
+	if err := a.Stop(context.Background(), h); err != nil || !e.removed {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+}
+
+func TestCollectPreservesExit(t *testing.T) {
+	e := &timedOutEngine{}
+	a := NewAdapter(e, "")
+	if _, err := a.CollectArtifacts(context.Background(), scruntime.Handle{ExternalID: "ctr-123"}); err != nil {
+		t.Fatal(err)
+	}
+	if e.removed {
+		t.Fatal("collection removed container before exit was recorded")
+	}
+}
