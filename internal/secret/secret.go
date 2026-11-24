@@ -141,7 +141,8 @@ func (f *FileStore) saveLocked(data map[string]string) error {
 	return os.WriteFile(f.Path, raw, 0o600)
 }
 
-// ChainStore tries stores in order on Get and Set, and removes from every store on Delete.
+// ChainStore tries stores in order on Get, falls back on Set only when earlier
+// stores confirm the key is absent, and removes from every store on Delete.
 type ChainStore struct {
 	Stores []SecretStore
 }
@@ -176,6 +177,9 @@ func (c *ChainStore) Set(ctx context.Context, name, value string) error {
 		err := st.Set(ctx, name, value)
 		if err == nil {
 			return nil
+		}
+		if _, getErr := st.Get(ctx, name); !errors.Is(getErr, ErrSecretNotFound) {
+			return err
 		}
 		lastErr = err
 	}

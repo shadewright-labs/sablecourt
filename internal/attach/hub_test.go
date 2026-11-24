@@ -175,3 +175,173 @@ func TestHubSplitChunkRedactionAndFlushOnClose(t *testing.T) {
 		})
 	}
 }
+
+func TestHubStreamsRedactedOutput(t *testing.T) {
+	const (
+		limit     = 16 * 1024
+		pemHeader = "-----BEGIN RSA PRIVATE KEY-----\n"
+		pemFooter = "-----END RSA PRIVATE KEY-----"
+		pemMarker = "[REDACTED:private_key]"
+	)
+	longBody := strings.Repeat("synthetic body\n", limit/14+1)
+	longToken := strings.Repeat("x", limit)
+	cases := []struct {
+		name      string
+		chunks    []string
+		wantLive  []string
+		wantClose string
+	}{
+		{
+			name:     "complete PEM at EOF",
+			chunks:   []string{pemHeader + "synthetic body\n-----END RSA ", "PRIVATE KEY-----"},
+			wantLive: []string{"", pemMarker},
+		},
+		{
+			name:      "unfinished PEM at EOF",
+			chunks:    []string{pemHeader + "synthetic body\n"},
+			wantLive:  []string{""},
+			wantClose: pemMarker,
+		},
+		{
+			name:     "PEM over limit resumes after footer",
+			chunks:   []string{pemHeader + longBody, "continued body\n" + pemFooter[:8], pemFooter[8:] + "\nready> "},
+			wantLive: []string{"", "", pemMarker + "\nready> "},
+		},
+		{
+			name:      "PEM over limit at EOF",
+			chunks:    []string{pemHeader + longBody},
+			wantLive:  []string{""},
+			wantClose: pemMarker,
+		},
+		{
+			name:     "PEM resumes only at its own footer",
+			chunks:   []string{pemHeader + "synthetic body\n-----END EC PRIVATE KEY-----\n", "continued body\n" + pemFooter + "\n"},
+			wantLive: []string{"", pemMarker + "\n"},
+		},
+		{
+			name:     "token crossing old size cut",
+			chunks:   []string{strings.Repeat(".", limit-512) + "sk-" + strings.Repeat("x", 600), "suffix!"},
+			wantLive: []string{strings.Repeat(".", limit-512), "[REDACTED:openai_key]!"},
+		},
+		{
+			name:     "token over limit continues across writes",
+			chunks:   []string{"sk-" + longToken, "continued-token", "\nready> "},
+			wantLive: []string{"", "", "[REDACTED:openai_key]\nready> "},
+		},
+		{
+			name:     "prompt without newline",
+			chunks:   []string{"Continue? ", "[y/N] "},
+			wantLive: []string{"Continue? ", "[y/N] "},
+		},
+		{
+			name:     "assignment with split label and oversized value",
+			chunks:   []string{"db_pass", "word  \n", "= \"" + longToken, "suffix\" ready> "},
+			wantLive: []string{"db_pass", "word  \n", "= \"", "[REDACTED:secret]\" ready> "},
+		},
+		{
+			name:     "bearer header split across lines and writes",
+			chunks:   []string{"Authori", "zation:\nBea", "rer \t", "synthetic", "token!"},
+			wantLive: []string{"Authori", "zation:\nBea", "rer \t", "", "[REDACTED:bearer_token]!"},
+		},
+		{
+			name:     "bearer label overlaps an assignment value",
+			chunks:   []string{"password=Authorization:Bearer ", "syntheticbearer!"},
+			wantLive: []string{"password=[REDACTED:secret] ", "[REDACTED:bearer_token]!"},
+		},
+		{
+			name:      "unfinished token at EOF",
+			chunks:    []string{"token sk-ant-123"},
+			wantLive:  []string{"token "},
+			wantClose: "[REDACTED:anthropic_key]",
+		},
+		{
+			name:     "public PEM stays visible",
+			chunks:   []string{"-----BE", "GIN CERTIFICATE-----\npublic body\n-----END CERTIFICATE-----\n"},
+			wantLive: []string{"", "-----BEGIN CERTIFICATE-----\npublic body\n-----END CERTIFICATE-----\n"},
+		},
+		{
+			name:      "ambiguous fragment becomes visible on close",
+			chunks:    []string{"hello ", "sk"},
+			wantLive:  []string{"hello ", ""},
+			wantClose: "sk",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := NewHub()
+			const task = "task-stream"
+			hub.Register(task, nil)
+			_, ch, _, unsubscribe, err := hub.Subscribe(task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unsubscribe()
+			var expected strings.Builder
+			for i, chunk := range tc.chunks {
+				hub.WriteOutput(task, []byte(chunk))
+				var live strings.Builder
+				for len(ch) > 0 {
+					live.WriteString(<-ch)
+				}
+				want := tc.wantLive[i]
+				if live.String() != want {
+					t.Errorf("write %d live output differs from expected (%d bytes, want %d)", i+1, live.Len(), len(want))
+				}
+				expected.WriteString(want)
+				history, _, _, unsub, err := hub.Subscribe(task)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unsub()
+				if history != expected.String() {
+					t.Errorf("write %d history differs from expected (%d bytes, want %d)", i+1, len(history), expected.Len())
+				}
+			}
+			hub.Close(task)
+			var final strings.Builder
+			for chunk := range ch {
+				final.WriteString(chunk)
+			}
+			if final.String() != tc.wantClose {
+				t.Errorf("close output differs from expected (%d bytes, want %d)", final.Len(), len(tc.wantClose))
+			}
+			expected.WriteString(tc.wantClose)
+			history, _, _, unsub, err := hub.Subscribe(task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unsub()
+			if history != expected.String() {
+				t.Errorf("closed history differs from expected (%d bytes, want %d)", len(history), expected.Len())
+			}
+		})
+	}
+}
+
+func TestStreamRedactorPreservesCredentialRulesAcrossWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"task token", "task=sc_task_0123456789abcdef!", "task=[REDACTED:sablecourt_token]!"},
+		{"Anthropic", "key sk-ant-synthetic1234567!", "key [REDACTED:anthropic_key]!"},
+		{"OpenAI project", "key sk-proj-synthetic1234567890!", "key [REDACTED:openai_key]!"},
+		{"GitHub PAT", "key github_pat_synthetic1234567890x!", "key [REDACTED:github_token]!"},
+		{"Google", "key Aiza AIzaSynthetic1234567890x!", "key Aiza [REDACTED:google_api_key]!"},
+		{"AWS", "key ASIASYNTHETIC1234567!", "key [REDACTED:aws_access_key]!"},
+		{"bearer", "AUTHORIZATION \n: bEaReR\t synthetic.token!", "AUTHORIZATION \n: bEaReR\t [REDACTED:bearer_token]!"},
+		{"assignment", "test_api-key\n= 'synthetic'", "test_api-key\n= '[REDACTED:secret]'"},
+		{"PEM", "-----BEGIN EC PRIVATE KEY-----\nsynthetic\n-----END EC PRIVATE KEY-----!", "[REDACTED:private_key]!"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range len(tc.input) + 1 {
+				var stream streamRedactor
+				got := stream.write([]byte(tc.input[:i]), false) + stream.write([]byte(tc.input[i:]), false) + stream.write(nil, true)
+				if got != tc.want {
+					t.Fatalf("split at byte %d: got %q, want %q", i, got, tc.want)
+				}
+			}
+		})
+	}
+}

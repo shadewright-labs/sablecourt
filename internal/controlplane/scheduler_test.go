@@ -2,12 +2,15 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -66,6 +69,109 @@ func TestSchedulerIdempotentFireAndReload(t *testing.T) {
 	}
 	if len(tasks) != 1 {
 		t.Fatalf("two Fires in one minute slot made %d tasks, want 1", len(tasks))
+	}
+}
+
+type blockingScheduleStore struct {
+	store.Store
+	blocked atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+	fail    error
+}
+
+func (s *blockingScheduleStore) CreateTask(ctx context.Context, task domain.Task) error {
+	if task.WorkloadName == "slow" && s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+		return s.fail
+	}
+	return s.Store.CreateTask(ctx, task)
+}
+
+func TestSchedulerBlockedWorkflowDoesNotStallOtherSlots(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bundle := &config.Bundle{
+		Workloads: make(map[string]domain.Workload),
+		Workflows: make(map[string]domain.Workflow),
+	}
+	for _, name := range []string{"slow", "fast"} {
+		bundle.Workloads[name] = domain.Workload{Metadata: domain.ObjectMeta{Name: name}}
+		bundle.Workflows[name] = domain.Workflow{Spec: domain.WorkflowSpec{
+			Steps: []domain.WorkflowStep{{Name: "step", Workload: name}},
+		}}
+		if err := db.UpsertWorkload(ctx, domain.WorkloadRecord{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := &blockingScheduleStore{
+		Store: db, entered: make(chan struct{}), release: make(chan struct{}), fail: errors.New("submission rejected"),
+	}
+	scheduler := NewScheduler(NewReconciler(Options{Store: st, Bundle: bundle}))
+	scheduler.now = func() time.Time { return time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC) }
+	fire := func(name string) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			result <- scheduler.Fire(ctx, domain.Schedule{
+				Metadata: domain.ObjectMeta{Name: name},
+				Spec:     domain.ScheduleSpec{TargetKind: "workflow", TargetName: name},
+			})
+		}()
+		return result
+	}
+	slow := fire("slow")
+	select {
+	case <-st.entered:
+	case err := <-slow:
+		t.Fatalf("slow submission returned before entering store: %v", err)
+	case <-time.After(5 * time.Second):
+		close(st.release)
+		<-slow
+		t.Fatal("slow submission did not enter store")
+	}
+	fast, duplicate := fire("fast"), fire("slow")
+	for _, run := range []struct {
+		name   string
+		result <-chan error
+	}{
+		{name: "unrelated schedule", result: fast},
+		{name: "duplicate trigger", result: duplicate},
+	} {
+		select {
+		case err := <-run.result:
+			if err != nil {
+				t.Errorf("%s: %v", run.name, err)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("%s stalled behind the blocked submission", run.name)
+			defer func() { <-run.result }()
+		}
+	}
+	close(st.release)
+	if err := <-slow; !errors.Is(err, st.fail) {
+		t.Errorf("slow submission error = %v, want %v", err, st.fail)
+	}
+	if t.Failed() {
+		return
+	}
+	tasks, err := db.ListTasks(ctx)
+	if err != nil || len(tasks) != 1 || tasks[0].WorkloadName != "fast" {
+		t.Fatalf("before retry: tasks=%v, err=%v", tasks, err)
+	}
+	if err := <-fire("slow"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	tasks, err = db.ListTasks(ctx)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("after retry: got %d tasks, want 2, err=%v", len(tasks), err)
 	}
 }
 

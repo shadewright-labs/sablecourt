@@ -62,6 +62,7 @@ func TestChainStoreFallsBack(t *testing.T) {
 
 type faultSecretStore struct {
 	inner     *MemoryStore
+	getErr    error
 	setErr    error
 	deleteErr error
 	setCalls  int
@@ -69,6 +70,9 @@ type faultSecretStore struct {
 }
 
 func (f *faultSecretStore) Get(ctx context.Context, name string) (string, error) {
+	if f.getErr != nil {
+		return "", f.getErr
+	}
 	return f.inner.Get(ctx, name)
 }
 
@@ -271,4 +275,31 @@ func TestChainStoreSetAndDelete(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestChainStoreSetRequiresAbsentHigherPriorityKey(t *testing.T) {
+	writeErr := errors.New("write rejected")
+	readErr := errors.New("read unavailable")
+	for _, tc := range []struct {
+		name    string
+		initial map[string]string
+		getErr  error
+	}{
+		{name: "primary would return stale value", initial: map[string]string{"k": "old"}},
+		{name: "higher priority read fails", getErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			absent := &faultSecretStore{inner: NewMemoryStore(nil), setErr: writeErr}
+			blocked := &faultSecretStore{inner: NewMemoryStore(tc.initial), setErr: writeErr, getErr: tc.getErr}
+			fallback := NewMemoryStore(nil)
+			chain := &ChainStore{Stores: []SecretStore{absent, nil, blocked, fallback}}
+			if err := chain.Set(ctx, "k", "new"); !errors.Is(err, writeErr) {
+				t.Errorf("Set error = %v, want %v", err, writeErr)
+			}
+			if _, err := fallback.Get(ctx, "k"); !errors.Is(err, ErrSecretNotFound) {
+				t.Errorf("fallback Get error = %v, want ErrSecretNotFound", err)
+			}
+		})
+	}
 }
