@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,11 +31,11 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
+	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
-	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
@@ -65,7 +63,6 @@ func main() {
 		k8sNamespace         string
 		k8sRuntimeClass      string
 		kubeconfigPath       string
-		operatorAuthRequired bool
 		manifestsGitRepo     string
 		manifestsGitBranch   string
 		manifestsGitInterval time.Duration
@@ -93,7 +90,6 @@ func main() {
 				k8sNamespace:         k8sNamespace,
 				k8sRuntimeClass:      k8sRuntimeClass,
 				kubeconfigPath:       kubeconfigPath,
-				operatorAuthRequired: operatorAuthRequired,
 				manifestsGitRepo:     manifestsGitRepo,
 				manifestsGitBranch:   manifestsGitBranch,
 				manifestsGitInterval: manifestsGitInterval,
@@ -126,7 +122,8 @@ func main() {
 	rootCmd.Flags().StringVar(&k8sNamespace, "k8s-namespace", "default", "Kubernetes namespace when --runtime=k8s")
 	rootCmd.Flags().StringVar(&k8sRuntimeClass, "k8s-runtime-class", "", "Optional Kubernetes RuntimeClassName (e.g. gvisor, kata)")
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
-	rootCmd.Flags().BoolVar(&operatorAuthRequired, "operator-auth-required", false, "Require Authorization: Bearer <operator_bearer_token> on operator UI and API routes")
+	rootCmd.Flags().Bool("operator-auth-required", true, "Require operator authentication")
+	_ = rootCmd.Flags().MarkDeprecated("operator-auth-required", "operator authentication is always required")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -150,7 +147,6 @@ type daemonConfig struct {
 	k8sNamespace         string
 	k8sRuntimeClass      string
 	kubeconfigPath       string
-	operatorAuthRequired bool
 	manifestsGitRepo     string
 	manifestsGitBranch   string
 	manifestsGitInterval time.Duration
@@ -170,7 +166,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 	isCitadel := mode == "citadel" || mode == "enterprise"
 	if isCitadel {
-		cfg.operatorAuthRequired = true
 		if cfg.runtimeBackend == "" || cfg.runtimeBackend == "docker" {
 			cfg.runtimeBackend = "k8s"
 		}
@@ -190,6 +185,14 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	secretFile := cfg.secretFile
 	repoRoot := cfg.repoRoot
 
+	dir, err := operatortoken.StateDir()
+	if err != nil {
+		return fmt.Errorf("resolve operator state directory: %w", err)
+	}
+	operatorToken, err := operatortoken.LoadOrCreate(dir)
+	if err != nil {
+		return fmt.Errorf("initialize operator credential: %w", err)
+	}
 	logger := telemetry.NewLogger()
 
 	var gitSyncer *config.GitSyncer
@@ -215,10 +218,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if pgDSN == "" {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
-	var (
-		st  store.Store
-		err error
-	)
+	var st store.Store
 	if pgDSN != "" {
 		st, err = postgres.Open(pgDSN)
 		if err == nil {
@@ -339,15 +339,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	if !isCitadel {
-		codingAdapter := coding.NewAdapter(os.TempDir())
-		codingAdapter.AttachHub = attachHub
-		adapters[domain.ClassCodingAgent] = codingAdapter
-	} else {
-		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
-		if pgDSN == "" {
-			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
-		}
+	// Host harnesses need read isolation from the operator state before registration.
+	logger.Info("host coding adapter disabled until operator state is isolated")
+	if isCitadel && pgDSN == "" {
+		logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 	}
 	switch cfg.runtimeBackend {
 	case "k8s":
@@ -495,11 +490,8 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	if cfg.operatorAuthRequired {
-		logger.Info("operator bearer authentication enabled on UI and API routes")
-	}
 	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
-		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorAuthRequired: cfg.operatorAuthRequired})
+		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorToken: operatorToken})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
@@ -556,8 +548,8 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 }
 
 type handlerConfig struct {
-	incidentTemplate     string
-	operatorAuthRequired bool
+	incidentTemplate string
+	operatorToken    string
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
@@ -1225,42 +1217,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		writeJSON(w, http.StatusOK, apr)
 	})
-	pairingMgr := approval.NewPairingManager(st)
-	mux.HandleFunc("POST /api/v1/devices/pair/start", func(w http.ResponseWriter, r *http.Request) {
-		code, exp, err := pairingMgr.StartPairing(5 * time.Minute)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		pubURL := strings.TrimRight(os.Getenv("SABLECOURT_PUBLIC_URL"), "/")
-		uri := fmt.Sprintf("sablecourt://pair?code=%s", code)
-		if pubURL != "" {
-			uri += "&api=" + pubURL
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"code":      code,
-			"expiresAt": exp,
-			"uri":       uri,
-		})
-	})
-	mux.HandleFunc("POST /api/v1/devices/pair/complete", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Code         string `json:"code"`
-			Name         string `json:"name"`
-			Platform     string `json:"platform"`
-			PublicKeyPEM string `json:"publicKeyPem"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		dev, err := pairingMgr.CompletePairing(r.Context(), body.Code, body.Name, body.Platform, body.PublicKeyPEM)
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, dev)
-	})
+	pairingUnavailable := func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "device enrollment requires independent confirmation"})
+	}
+	mux.HandleFunc("POST /api/v1/devices/pair/start", pairingUnavailable)
+	mux.HandleFunc("POST /api/v1/devices/pair/complete", pairingUnavailable)
 	mux.HandleFunc("GET /api/v1/devices", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListDevices(r.Context())
 		if err != nil {
@@ -1605,62 +1566,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusOK, relic)
 		})
 	}
-	authenticated := requireOperatorAuth(mux, secrets)
-	if cfg.operatorAuthRequired {
-		return requireOperatorAuth(securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(mux, secrets)), secrets)
-	}
-	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			_, pattern := mux.Handler(r)
-			switch pattern {
-			case "POST /api/v1/conclaves", "POST /ui/conclaves",
-				"POST /api/v1/conclaves/{id}/decree", "POST /ui/conclaves/{id}/decree",
-				"POST /api/v1/conclaves/{id}/voice-decree":
-				authenticated.ServeHTTP(w, r)
-				return
-			}
-		}
-		mux.ServeHTTP(w, r)
-	})
-	return securityHardeningMiddleware(integrations.RejectShadewrightTokenOnOtherRoutes(routes, secrets))
-}
-
-func securityHardeningMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Security response headers (clickjacking and MIME sniffing protection).
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:")
-
-		// 2. Same-origin CSRF guard for state-changing requests on UI and operator API routes.
-		p := r.URL.Path
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			isNonBrowserAuthRoute := strings.HasPrefix(p, "/gate/") ||
-				p == "/api/v1/hooks/github" ||
-				p == "/a2a" ||
-				p == "/api/v1/devices/pair/complete"
-			if !isNonBrowserAuthRoute {
-				if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-site request blocked"})
-					return
-				}
-				if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && origin != "null" {
-					if u, err := url.Parse(origin); err != nil || !strings.EqualFold(u.Host, r.Host) {
-						writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
-						return
-					}
-				}
-			}
-			// 3. Enforce bounded request body size (2 MiB default; Model Gate and Voice enforce their own larger caps).
-			if !strings.HasPrefix(p, "/gate/model/") && !strings.HasPrefix(p, "/api/v1/voice/") && !strings.HasSuffix(p, "/voice-decree") {
-				r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-			}
-		}
-
-		next.ServeHTTP(w, r)
-	})
+	auth := newOperatorAuth(cfg.operatorToken)
+	mux.HandleFunc("GET /login", operatorLoginPage)
+	mux.HandleFunc("POST /login", auth.login)
+	return securityHeadersMiddleware(auth.requireOperatorAuth(mux, guardOperatorRequest(mux), secrets))
 }
 
 // Gate requests can arrive after a terminal transition and before lease cleanup.
@@ -1776,58 +1685,4 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		return nil, "", "", err
 	}
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
-}
-
-func requireOperatorAuth(next http.Handler, secrets secret.SecretStore) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		if p == "/healthz" ||
-			p == "/.well-known/agent-card.json" ||
-			p == "/favicon.ico" ||
-			p == "/apple-touch-icon.png" ||
-			strings.HasPrefix(p, "/assets/") ||
-			strings.HasPrefix(p, "/gate/") ||
-			p == "/api/v1/hooks/github" ||
-			p == "/api/v1/devices/pair/complete" ||
-			p == "/a2a" ||
-			integrations.IsShadewrightRequest(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if secrets == nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
-			return
-		}
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator bearer token required"})
-			return
-		}
-		got := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-
-		// Allow read-only observer_bearer_token strictly on observer and Scry endpoints.
-		if r.Method == http.MethodGet && (p == "/api/v1/observer/snapshot" || p == "/api/v1/observer/stream" || (strings.HasPrefix(p, "/api/v1/tasks/") && strings.HasSuffix(p, "/scry"))) {
-			if obsTok, obsErr := secrets.Get(r.Context(), "observer_bearer_token"); obsErr == nil && strings.TrimSpace(obsTok) != "" {
-				if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(obsTok))) == 1 {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-		}
-
-		want, err := secrets.Get(r.Context(), "operator_bearer_token")
-		if err != nil || strings.TrimSpace(want) == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator_bearer_token not configured"})
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(want))) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid operator bearer token"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
