@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -69,7 +70,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	}
 
 	attachHub := attach.NewHub()
-	h := newHandler(st, defaultIntegrationSecrets(), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), conclaveBroker, attachHub, nil, dash)
+	h := newHandler(st, defaultIntegrationSecrets(), func() *config.Bundle { return bundle }, nil, modelGate, dataGate, approvals, reconciler, controlplane.NewScheduler(reconciler), conclaveBroker, attachHub, nil, dash, handlerConfig{operatorToken: testOperatorToken})
 
 	// 1. /healthz
 	rec := httptest.NewRecorder()
@@ -91,7 +92,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 
 	// 3. POST /api/v1/tasks
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(`{"workload":"triage-agent","idempotencyKey":"smoke-1","inputJson":"{}"}`)))
+	h.ServeHTTP(rec, operatorRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(`{"workload":"triage-agent","idempotencyKey":"smoke-1","inputJson":"{}"}`)))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("POST /api/v1/tasks expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -102,34 +103,34 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 
 	// 4. GET /tasks/{id} detail page and GET /api/v1/tasks/{id}
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tasks/"+created.ID, nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodGet, "/tasks/"+created.ID, nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
 		t.Fatalf("task detail page failed: code=%d", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+created.ID, nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodGet, "/api/v1/tasks/"+created.ID, nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), created.ID) {
 		t.Fatalf("GET /api/v1/tasks/{id} failed: code=%d", rec.Code)
 	}
 
 	// 5. POST /api/v1/tasks/{id}/cancel
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/tasks/"+created.ID+"/cancel", nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodPost, "/api/v1/tasks/"+created.ID+"/cancel", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cancel task failed: code=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 6. GET /api/v1/budget
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/budget", nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodGet, "/api/v1/budget", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/budget failed: code=%d", rec.Code)
 	}
 
 	// 7. Web UI renders workloads and cancelled task
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "triage-agent") {
 		t.Fatalf("Web UI failed: code=%d", rec.Code)
 	}
@@ -145,10 +146,16 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 		t.Fatalf("decode conclave session: %v (%s)", err, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/conclaves/"+sess.ID, nil))
+	h.ServeHTTP(rec, operatorRequest(http.MethodGet, "/conclaves/"+sess.ID, nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Smoke conclave") {
 		t.Fatalf("GET /conclaves/{id} failed: code=%d", rec.Code)
 	}
+}
+
+func operatorRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Authorization", "Bearer "+testOperatorToken)
+	return req
 }
 
 func TestOperatorAuthRequiredMiddleware(t *testing.T) {
@@ -156,9 +163,16 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// 1. Fail closed when operator_bearer_token is missing.
-	emptyStore := secret.NewMemoryStore(nil)
-	hEmpty := requireOperatorAuth(okHandler, emptyStore)
+	mux := http.NewServeMux()
+	for _, pattern := range []string{
+		"GET /healthz", "GET /.well-known/agent-card.json", "/gate/model/",
+		"POST /api/v1/hooks/github", "POST /a2a", "GET /api/v1/workloads", "POST /api/v1/tasks",
+		"GET /api/v1/observer/snapshot", "GET /api/v1/tasks/{id}/scry",
+	} {
+		mux.Handle(pattern, okHandler)
+	}
+
+	hEmpty := newOperatorAuth("").requireOperatorAuth(mux, mux, nil)
 	rec := httptest.NewRecorder()
 	hEmpty.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil))
 	if rec.Code != http.StatusUnauthorized {
@@ -166,12 +180,16 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 	}
 
 	// 2. Configured token allows public/self-authenticated routes and enforces bearer on operator routes.
-	sec := secret.NewMemoryStore(map[string]string{"operator_bearer_token": "op-secret-123"})
-	h := requireOperatorAuth(okHandler, sec)
+	auth := newOperatorAuth("op-secret-123")
+	h := auth.requireOperatorAuth(mux, mux, nil)
 
 	for _, openPath := range []string{"/healthz", "/.well-known/agent-card.json", "/gate/model/v1/chat/completions", "/api/v1/hooks/github", "/a2a"} {
+		method := http.MethodGet
+		if openPath == "/api/v1/hooks/github" || openPath == "/a2a" {
+			method = http.MethodPost
+		}
 		rec = httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, openPath, nil))
+		h.ServeHTTP(rec, httptest.NewRequest(method, openPath, nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected %s to bypass operator auth, got %d", openPath, rec.Code)
 		}
@@ -204,7 +222,7 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 		"operator_bearer_token": "op-secret-123",
 		"observer_bearer_token": "obs-readonly-456",
 	})
-	hObs := requireOperatorAuth(okHandler, secWithObs)
+	hObs := auth.requireOperatorAuth(mux, mux, secWithObs)
 
 	for _, allowed := range []string{"/api/v1/observer/snapshot", "/api/v1/tasks/t1/scry"} {
 		req := httptest.NewRequest(http.MethodGet, allowed, nil)
@@ -228,7 +246,7 @@ func TestSecurityHardeningCSRFAndHeaders(t *testing.T) {
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	h := securityHardeningMiddleware(okHandler)
+	h := securityHeadersMiddleware(guardOperatorRequest(okHandler))
 
 	// 1. Security headers present on GET.
 	rec := httptest.NewRecorder()

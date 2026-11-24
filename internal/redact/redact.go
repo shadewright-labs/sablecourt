@@ -13,7 +13,7 @@ type rule struct {
 }
 
 // Go's regexp package implements RE2, guaranteeing linear O(n) scan time with no backtracking.
-const sensitiveField = `[a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token)`
+const sensitiveField = `[a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token|operator[_-]?token)`
 
 var rules = []rule{
 	{
@@ -23,7 +23,7 @@ var rules = []rule{
 	},
 	{
 		category: "sablecourt_token",
-		re:       regexp.MustCompile(`\bsc_task_[0-9a-fA-F]{16,}\b`),
+		re:       regexp.MustCompile(`\bsc_task_[0-9a-fA-F]{16,}\b|\bop_[0-9a-fA-F]{64}\b`),
 		replace:  "[REDACTED:sablecourt_token]",
 	},
 	{
