@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -23,14 +24,17 @@ func TestReconcileStore(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			var st store.Store
 			var err error
+			var driver, dsn string
 			if backend == "sqlite" {
-				st, err = sqlite.Open(filepath.Join(t.TempDir(), "state.db"))
+				driver, dsn = "sqlite", filepath.Join(t.TempDir(), "state.db")
+				st, err = sqlite.Open(dsn)
 			} else {
-				dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
+				dsn = os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
 				if dsn == "" {
 					t.Skip("SABLECOURT_TEST_POSTGRES_DSN is unset")
 				}
-				st, err = postgres.Open(isolatedPostgresDSN(t, dsn))
+				driver, dsn = "pgx", isolatedPostgresDSN(t, dsn)
+				st, err = postgres.Open(dsn)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -43,7 +47,14 @@ func TestReconcileStore(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Run("candidates", func(t *testing.T) { testCandidates(t, st) })
-			t.Run("renewal", func(t *testing.T) { testRenewal(t, st) })
+			t.Run("renewal", func(t *testing.T) {
+				db, err := sql.Open(driver, dsn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				testRenewal(t, st, db)
+			})
 		})
 	}
 }
@@ -137,7 +148,7 @@ func testCandidates(t *testing.T, st store.Store) {
 	check(nil, []string{"queued", "remediate", "running", "waiting"})
 }
 
-func testRenewal(t *testing.T, st store.Store) {
+func testRenewal(t *testing.T, st store.Store, db *sql.DB) {
 	ctx := t.Context()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -173,6 +184,13 @@ func testRenewal(t *testing.T, st store.Store) {
 			if tc.revoked {
 				if !errors.Is(err, store.ErrNotFound) {
 					t.Fatalf("revoked token lookup = %v", err)
+				}
+				var expiry string
+				if err := db.QueryRowContext(ctx, "SELECT expires_at FROM leases WHERE token_sha256 = $1", tc.id).Scan(&expiry); err != nil {
+					t.Fatal(err)
+				}
+				if want := now.Add(tc.want).Format(time.RFC3339Nano); expiry != want {
+					t.Errorf("revoked lease expiry = %s, want %s", expiry, want)
 				}
 				return
 			}
