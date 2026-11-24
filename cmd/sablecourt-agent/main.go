@@ -17,6 +17,8 @@ import (
 const maxAgentTurns = 4
 
 type taskInput struct {
+	FromRole      string `json:"fromRole"`
+	Activation    string `json:"activation"`
 	Prompt        string `json:"prompt"`
 	Input         string `json:"input"`
 	Provider      string `json:"provider"`
@@ -24,6 +26,10 @@ type taskInput struct {
 	ConclaveID    string `json:"conclaveId"`
 	Role          string `json:"role"`
 	ContextPacket string `json:"context_packet"`
+}
+
+func (in taskInput) peerWake() bool {
+	return in.Activation == "on-mention" && in.FromRole != "operator"
 }
 
 type chatMessage struct {
@@ -88,6 +94,9 @@ func main() {
 		}
 		if prompt == "" {
 			prompt = fmt.Sprintf("Hello from Sablecourt task %s (%s). Report readiness briefly.", taskID, workload)
+		}
+		if in.peerWake() {
+			prompt = markedPeerData(prompt)
 		}
 		history = append(history, chatMessage{Role: "user", Content: prompt})
 	}
@@ -174,8 +183,11 @@ func loadThreadHistory(gateRoot, token string) []chatMessage {
 		content := m.Content
 		if m.Role == "agent" {
 			role = "assistant"
-		} else if m.Role != "user" {
-			content = markedPeerData(m)
+		} else {
+			var wake taskInput
+			if m.Role != "user" || (json.Unmarshal([]byte(content), &wake) == nil && wake.peerWake()) {
+				content = markedPeerData(m)
+			}
 		}
 		out = append(out, chatMessage{Role: role, Content: content})
 	}

@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -41,6 +44,7 @@ func brokerTestStore(t *testing.T) store.Store {
 func TestPostMessageDerivesKindFromSender(t *testing.T) {
 	for _, tc := range []struct{ role, kind, want string }{
 		{"coder", "decree", "proposal"},
+		{"coder", "decision", "proposal"},
 		{"coder", "system", "proposal"},
 		{"coder", "review", "review"},
 		{"operator", "proposal", "decree"},
@@ -214,6 +218,12 @@ func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 		t.Fatalf("expected on-mention reviewer task to be dispatched, got %d tasks", len(tasks))
 	}
 
+	for _, wake := range tasks {
+		if wake.WorkloadName == "reviewer-wl" && strings.Contains(wake.InputJSON, "Ready for review") {
+			t.Error("wake input copied peer message into task intent")
+		}
+	}
+
 	// 3. Reviewer replies to coder (2nd message between same 2 roles).
 	if _, err := broker.PostMessage(ctx, sess.ID, "reviewer", "coder", "review", "Please add timeout test", ""); err != nil {
 		t.Fatalf("PostMessage reviewer->coder: %v", err)
@@ -276,5 +286,64 @@ func TestConclaveLifecycleWardsAndActivation(t *testing.T) {
 	_, err = broker.PostMessage(ctx, sess.ID, "coder", "reviewer", "proposal", "Another turn after budget cap", tasks[0].ID)
 	if !errors.Is(err, ErrWardTripped) || !strings.Contains(err.Error(), "budget_exceeded") {
 		t.Fatalf("expected budget_exceeded ErrWardTripped, got %v", err)
+	}
+}
+
+func TestMCPPostKind(t *testing.T) {
+	ctx := context.Background()
+	st := brokerTestStore(t)
+	wl := domain.Workload{Metadata: domain.ObjectMeta{Name: "worker"}, Spec: domain.WorkloadSpec{Grants: domain.GrantSet{MCPTools: []string{"conclave.post"}}}}
+	bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{{Role: "reader", Workload: "worker", CanMessage: []string{"all"}}}}}}}
+	b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
+	session, err := b.Open(ctx, "council", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := policy.NewEngine([]domain.Policy{{Spec: domain.PolicySpec{Rules: []domain.PolicyRule{{Workload: "worker", Capability: "mcp:conclave.post", Effect: domain.EffectAllow}}}}}, nil)
+	g := mcpgate.New(mcpgate.Options{Store: st, Policy: eng})
+	b.RegisterMCPTools(g)
+	srv := g.NewServerForWorkload(domain.Lease{TaskID: "worker-task"}, wl)
+	ct, transport := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	for _, kind := range []string{"decision", "proposal"} {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conclave.post", Arguments: map[string]string{"conclave_id": session.ID, "to": "all", "kind": kind, "body": "notes"}})
+		if err != nil || res.IsError {
+			t.Fatalf("post %s: %+v, %v", kind, res, err)
+		}
+		msgs, err := st.ListConclaveMessages(ctx, session.ID, 0)
+		if err != nil || len(msgs) == 0 || msgs[len(msgs)-1].Kind != "proposal" {
+			t.Errorf("%s produced %+v, %v", kind, msgs, err)
+		}
+	}
+}
+
+func TestResolveReservedVassal(t *testing.T) {
+	for _, role := range []string{"@operator", "operator", "@system"} {
+		t.Run(role, func(t *testing.T) {
+			ctx := context.Background()
+			st := brokerTestStore(t)
+			vassal := domain.ConclaveVassal{Role: role, Workload: "worker"}
+			council := domain.Conclave{Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{vassal}}}
+			b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle {
+				return &config.Bundle{Conclaves: map[string]domain.Conclave{"council": council}}
+			}})
+			sess, err := b.Open(ctx, "council", "test", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = b.ResolveRoleForWorkload(ctx, sess.ID, "worker"); !errors.Is(err, ErrMessageDenied) {
+				t.Errorf("invalid participant role returned: %v", err)
+			}
+		})
 	}
 }

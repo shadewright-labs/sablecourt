@@ -247,3 +247,84 @@ func TestIncidentStorageFailuresFailClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestIncidentRetryAfterFault(t *testing.T) {
+	for _, failure := range []string{"relic", "message", "wake", "audit"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			base := daemonTestStore(t)
+			st := &incidentFailureStore{Store: base, failure: failure}
+			b := &config.Bundle{Workloads: map[string]domain.Workload{}, Conclaves: map[string]domain.Conclave{
+				"primary": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{
+					{Role: "worker", Workload: "worker", Activation: domain.ActivationAlwaysOn},
+					{Role: "reader", Workload: "reader", Activation: domain.ActivationOnMention},
+				}}},
+			}}
+			for _, name := range []string{"worker", "reader"} {
+				if err := base.UpsertWorkload(ctx, domain.WorkloadRecord{Name: name, Class: domain.ClassLongLivedAgent}); err != nil {
+					t.Fatal(err)
+				}
+				b.Workloads[name] = domain.Workload{Metadata: domain.ObjectMeta{Name: name}}
+			}
+			build := func() http.Handler {
+				get := func() *config.Bundle { return b }
+				r := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: b})
+				return incidentHandler(st, get, conclave.NewBroker(conclave.Options{Store: st, GetBundle: get, Reconciler: r}), r, "")
+			}
+			if w := postIncident(build(), "incident", "primary"); w.Code < 500 {
+				t.Errorf("fault returned %d", w.Code)
+			}
+			tasks, err := base.ListTasks(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failure == "relic" && len(tasks) > 0 {
+				t.Error("dispatched before Relic")
+			}
+			st.failure = ""
+			for range 2 {
+				w := postIncident(build(), "incident", "primary")
+				if w.Code != 200 && w.Code != 201 {
+					t.Fatalf("retry returned %d: %s", w.Code, w.Body.String())
+				}
+			}
+			tasks, err = base.ListTasks(ctx)
+			if err != nil || len(tasks) != 2 {
+				t.Errorf("tasks=%d err=%v", len(tasks), err)
+			}
+			sessions, err := base.ListConclaves(ctx)
+			if err != nil || len(sessions) != 1 {
+				t.Fatalf("sessions=%d err=%v", len(sessions), err)
+			}
+			msgs, err := base.ListConclaveMessages(ctx, sessions[0].ID, 0)
+			if err != nil || len(msgs) != 1 {
+				t.Errorf("messages=%d err=%v", len(msgs), err)
+			}
+			audits, err := base.ListAudit(ctx, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for _, row := range audits {
+				if row.Action == "shadewright.incident_escalated" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("escalation audits=%d", count)
+			}
+		})
+	}
+}
+func (s incidentFailureStore) CreateTask(ctx context.Context, t domain.Task) error {
+	if s.failure == "wake" && t.WorkloadName == "reader" {
+		return fmt.Errorf("wake unavailable")
+	}
+	return s.Store.CreateTask(ctx, t)
+}
+func (s incidentFailureStore) AppendAudit(ctx context.Context, a domain.AuditRecord) error {
+	if s.failure == "audit" && a.Action == "shadewright.incident_escalated" {
+		return fmt.Errorf("audit unavailable")
+	}
+	return s.Store.AppendAudit(ctx, a)
+}

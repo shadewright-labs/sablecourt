@@ -116,3 +116,25 @@ func TestHostAllowlistConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestContainerGateAuthority(t *testing.T) {
+	for _, host := range []string{"", net.JoinHostPort("gate", "8888")} {
+		cfg := daemonConfig{listenAddr: net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432"), gateHost: host}
+		h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			path string
+			want int
+		}{{"/gate/mcp", 204}, {"/api/v1/tasks", 403}} {
+			r := httptest.NewRequest("GET", tc.path, nil)
+			r.Host = cfg.containerGateHost()
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Errorf("host %q path %s: got %d want %d", host, tc.path, w.Code, tc.want)
+			}
+		}
+	}
+}
