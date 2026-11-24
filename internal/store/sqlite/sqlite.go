@@ -313,7 +313,7 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 }
 
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, to, reason)
 	if err != nil {
 		return err
 	}
@@ -589,9 +589,20 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := s.appendAuditTx(ctx, tx, rec); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
 	prevHash := "genesis"
 	var last string
-	if err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last); err == nil && last != "" {
+	err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if last != "" {
 		prevHash = last
 	}
 	rec.DetailJSON = defaultJSON(rec.DetailJSON, "{}")
@@ -605,7 +616,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 		rec.DetailJSON, prevHash, rowHash, createdStr); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *SQLiteStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error) {

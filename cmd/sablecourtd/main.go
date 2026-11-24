@@ -1520,7 +1520,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			role, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName)
+			role, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID)
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
@@ -1549,7 +1549,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			if _, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName); err != nil {
+			if _, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID); err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
@@ -1567,7 +1567,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			role, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName)
+			role, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID)
 			if err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
@@ -1593,7 +1593,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			if _, err := conclaveBroker.ResolveRoleForWorkload(r.Context(), r.PathValue("id"), lease.WorkloadName); err != nil {
+			if _, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID); err != nil {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}

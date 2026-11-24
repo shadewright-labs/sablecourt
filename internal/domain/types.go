@@ -116,12 +116,12 @@ type GrantSet struct {
 // Sablecourt's Data & Action Gate so credentials stay inside sablecourtd's SecretStore
 // and every tool call passes through Policy Engine + Approval Queue + Redactor.
 type UpstreamMCPServer struct {
-	Name          string   `json:"name"`
-	URL           string   `json:"url"`
-	SecretName    string   `json:"secretName,omitempty"`
-	AuthHeader    string   `json:"authHeader,omitempty"` // default: Authorization
-	AuthPrefix    string   `json:"authPrefix,omitempty"` // default: "Bearer "
-	AllowedTools  []string `json:"allowedTools,omitempty"`
+	Name         string   `json:"name"`
+	URL          string   `json:"url"`
+	SecretName   string   `json:"secretName,omitempty"`
+	AuthHeader   string   `json:"authHeader,omitempty"` // default: Authorization
+	AuthPrefix   string   `json:"authPrefix,omitempty"` // default: "Bearer "
+	AllowedTools []string `json:"allowedTools,omitempty"`
 }
 
 type ModelGateGrant struct {
@@ -347,7 +347,10 @@ type ConclaveSpec struct {
 	Vassals     []ConclaveVassal `json:"vassals"`
 }
 
+const ConclaveRunCeiling = 6
+
 type ConclaveWards struct {
+	MaxRuns     int `json:"maxRuns,omitempty"`
 	MaxMessages int `json:"maxMessages,omitempty"`
 	MaxPingPong int `json:"maxPingPong,omitempty"`
 }

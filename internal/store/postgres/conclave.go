@@ -76,7 +76,7 @@ func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, stat
 }
 
 func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
-	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg); handled {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg, s.appendAuditTx); handled {
 		return id, err
 	}
 	var id int64
@@ -167,4 +167,8 @@ func (s *PostgresStore) ListConclaveRelics(ctx context.Context, conclaveID strin
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) FinishConclaveWake(ctx context.Context, id int64) error {
+	return store.FinishConclaveWake(ctx, s.db, id)
 }

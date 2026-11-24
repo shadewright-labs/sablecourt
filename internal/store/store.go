@@ -60,6 +60,7 @@ type Store interface {
 	UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error
 	AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error)
 	ListConclaveMessages(ctx context.Context, conclaveID string, sinceID int64) ([]domain.ConclaveMessage, error)
+	FinishConclaveWake(ctx context.Context, messageID int64) error
 	PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error
 	GetConclaveRelic(ctx context.Context, conclaveID, name string) (domain.ConclaveRelic, error)
 	ListConclaveRelics(ctx context.Context, conclaveID string) ([]domain.ConclaveRelic, error)

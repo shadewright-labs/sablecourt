@@ -78,7 +78,7 @@ func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state 
 }
 
 func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
-	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg); handled {
+	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, msg, s.appendAuditTx); handled {
 		return id, err
 	}
 	res, err := s.db.ExecContext(ctx, `
@@ -171,4 +171,8 @@ func (s *SQLiteStore) ListConclaveRelics(ctx context.Context, conclaveID string)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) FinishConclaveWake(ctx context.Context, id int64) error {
+	return store.FinishConclaveWake(ctx, s.db, id)
 }

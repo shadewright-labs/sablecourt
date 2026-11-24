@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,6 +118,21 @@ func TestConcurrentPostsAtWardLimit(t *testing.T) {
 	}
 }
 
+type concurrentDecreeStore struct {
+	store.Store
+	read  sync.WaitGroup
+	reads atomic.Int32
+}
+
+func (s *concurrentDecreeStore) GetConclave(ctx context.Context, id string) (domain.ConclaveSession, error) {
+	room, err := s.Store.GetConclave(ctx, id)
+	if s.reads.Add(-1) >= 0 {
+		s.read.Done()
+		s.read.Wait()
+	}
+	return room, err
+}
+
 func TestDefaultRunAndWallTimeLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -142,6 +158,11 @@ func TestDefaultRunAndWallTimeLimits(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock = clock.Add(tc.elapse)
+			// Each concurrent decree starts from the active room, so none is a resume.
+			barrier := &concurrentDecreeStore{Store: st}
+			barrier.read.Add(tc.steps)
+			barrier.reads.Store(int32(tc.steps))
+			opts.Store = barrier
 			var posts sync.WaitGroup
 			for range tc.steps {
 				posts.Go(func() {
@@ -245,8 +266,12 @@ func TestDecreeAppendFailureDoesNotResume(t *testing.T) {
 }
 
 func TestOpeningPromptIsRedacted(t *testing.T) {
-	for _, tc := range []string{"api_key", "access_token"} {
-		t.Run(tc, func(t *testing.T) {
+	for _, tc := range []struct{ name, format string }{
+		{"api_key", "api_key=%s"},
+		{"access_token", "access_token=%s"},
+		{"quoted api key", `{"api_key":%q}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			st := brokerTestStore(t)
 			bundle := limitsBundle(domain.ConclaveWards{}, domain.ConclaveVassal{Role: "reader", Workload: "worker", Activation: domain.ActivationAlwaysOn})
@@ -256,7 +281,7 @@ func TestOpeningPromptIsRedacted(t *testing.T) {
 			b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle },
 				Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})})
 			value := "fixture-sensitive-text-1234567"
-			if _, err := b.Open(ctx, "council", "", tc+"="+value); err != nil {
+			if _, err := b.Open(ctx, "council", "", fmt.Sprintf(tc.format, value)); err != nil {
 				t.Fatal(err)
 			}
 			tasks, err := st.ListTasks(ctx)
@@ -426,5 +451,333 @@ func TestBudgetBlocksWakingStoredMessage(t *testing.T) {
 				t.Errorf("wake added a task at the budget Ward: %d total, %v", len(tasks), err)
 			}
 		})
+	}
+}
+
+func runLimitFixture(t *testing.T, wards domain.ConclaveWards, roles ...domain.ConclaveVassal) (store.Store, *Broker, *controlplane.Reconciler, *config.Bundle, *time.Time) {
+	t.Helper()
+	st := brokerTestStore(t)
+	if err := st.UpsertWorkload(context.Background(), domain.WorkloadRecord{Name: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := limitsBundle(wards, roles...)
+	clock := time.Now().UTC()
+	now := func() time.Time { return clock }
+	r := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle, Now: now})
+	b := NewBroker(Options{Store: st, Reconciler: r, GetBundle: func() *config.Bundle { return bundle }, Now: now})
+	return st, b, r, bundle, &clock
+}
+
+func TestRunExhaustionPausesAndKeepsReply(t *testing.T) {
+	for _, externalWake := range []bool{false, true} {
+		t.Run(fmt.Sprint(externalWake), func(t *testing.T) {
+			ctx := context.Background()
+			st, b, _, bundle, _ := runLimitFixture(t, domain.ConclaveWards{},
+				domain.ConclaveVassal{Role: "reader", Workload: "worker", Activation: domain.ActivationOnMention, CanMessage: []string{"reader", "operator"}})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range 6 {
+				if _, err := b.PostMessage(ctx, room.ID, "operator", "all", "decree", fmt.Sprint(i), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tasks, err := st.ListTasks(ctx)
+			if err != nil || len(tasks) != 6 {
+				t.Fatalf("reserved %d tasks, %v", len(tasks), err)
+			}
+			if externalWake {
+				msg := domain.ConclaveMessage{ConclaveID: room.ID, FromRole: "operator", ToRole: "all", Kind: "decree", Body: "seventh decree"}
+				msg.ID, err = st.AppendConclaveMessage(ctx, msg)
+				if err == nil {
+					err = b.WakeMentions(ctx, bundle.Conclaves["council"], msg)
+				}
+			} else {
+				_, err = b.PostMessage(ctx, room.ID, "operator", "all", "decree", "seventh decree", "")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			room, err = st.GetConclave(ctx, room.ID)
+			if err != nil || room.State != domain.ConclaveStateInputRequired || room.WardReason != "max_runs" {
+				t.Errorf("run exhaustion left room %+v, %v", room, err)
+			}
+			reply, err := b.PostMessage(ctx, room.ID, "reader", "operator", "review", "paid reply", tasks[0].ID)
+			if err != nil || reply.ID == 0 {
+				t.Errorf("paid reply = %+v, %v", reply, err)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, room.ID, 0)
+			if err != nil || len(msgs) != 9 || msgs[7].FromRole != "system" || msgs[8] != reply {
+				t.Errorf("want seventh decree, Ward notice and paid reply, got %+v, %v", msgs, err)
+			}
+			tasks, err = st.ListTasks(ctx)
+			if err != nil || len(tasks) != 6 {
+				t.Errorf("reserved %d tasks, %v", len(tasks), err)
+			}
+		})
+	}
+}
+
+func TestCouncilRetryReservesAttempt(t *testing.T) {
+	ctx := context.Background()
+	st, b, r, _, _ := runLimitFixture(t, domain.ConclaveWards{},
+		domain.ConclaveVassal{Role: "reader", Workload: "worker", Activation: domain.ActivationAlwaysOn})
+	room, err := b.Open(ctx, "council", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := st.ListTasks(ctx)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("opening tasks = %d, %v", len(tasks), err)
+	}
+	current := tasks[0]
+	for attempt := 2; attempt <= 7; attempt++ {
+		if err := r.CancelTask(ctx, current.ID, "test"); err != nil {
+			t.Fatal(err)
+		}
+		next, err := r.RetryTaskWithHandoff(ctx, current.ID, false, "")
+		if attempt == 7 {
+			if !errors.Is(err, store.ErrConclaveRunLimit) {
+				t.Errorf("seventh attempt error = %v", err)
+			}
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if role, err := b.ResolveRoleForTask(ctx, room.ID, "worker", next.ID); err != nil || role != "reader" {
+			t.Errorf("attempt %d role = %q, %v", attempt, role, err)
+		}
+		replay, err := r.RetryTaskWithHandoff(ctx, current.ID, false, "")
+		if err != nil || replay.ID != next.ID {
+			t.Fatalf("attempt %d repeated as %q, %v", attempt, replay.ID, err)
+		}
+		current = next
+	}
+	if tasks, err := st.ListTasks(ctx); err != nil || len(tasks) != 6 {
+		t.Errorf("reserved %d tasks, %v", len(tasks), err)
+	}
+}
+
+func TestPaidReplyAtDeadline(t *testing.T) {
+	for _, elapsed := range []time.Duration{15 * time.Minute, 16 * time.Minute} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			ctx := context.Background()
+			st, b, _, _, clock := runLimitFixture(t, domain.ConclaveWards{},
+				domain.ConclaveVassal{Role: "reader", Workload: "worker", Activation: domain.ActivationAlwaysOn, CanMessage: []string{"all"}},
+				domain.ConclaveVassal{Role: "reviewer", Workload: "worker", Activation: domain.ActivationOnMention})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := st.ListTasks(ctx)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("opening tasks = %d, %v", len(tasks), err)
+			}
+			*clock = clock.Add(elapsed)
+			reply, err := b.PostMessage(ctx, room.ID, "reader", "all", "review", "paid reply", tasks[0].ID)
+			if err != nil || reply.ID == 0 {
+				t.Errorf("paid reply = %+v, %v", reply, err)
+			}
+			if _, err := b.PostMessage(ctx, room.ID, "reader", "all", "review", "unassigned reply", ""); !errors.Is(err, ErrConclavePaused) {
+				t.Errorf("unassigned reply error = %v", err)
+			}
+			msgs, err := st.ListConclaveMessages(ctx, room.ID, 0)
+			if err != nil || len(msgs) != 2 || msgs[0] != reply || msgs[1].FromRole != "system" {
+				t.Errorf("want paid reply and Ward notice, got %+v, %v", msgs, err)
+			}
+			room, err = st.GetConclave(ctx, room.ID)
+			if err != nil || room.State != domain.ConclaveStateInputRequired || room.WardReason != "wall_time_reached" {
+				t.Errorf("deadline left room %+v, %v", room, err)
+			}
+			if tasks, err := st.ListTasks(ctx); err != nil || len(tasks) != 1 {
+				t.Errorf("reserved %d tasks, %v", len(tasks), err)
+			}
+		})
+	}
+}
+
+func TestLegacyRoomUsesThreeSeatDefaults(t *testing.T) {
+	ctx := context.Background()
+	st := brokerTestStore(t)
+	if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "legacy", State: domain.ConclaveStateActive, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	b := NewBroker(Options{Store: st})
+	for i := 1; i <= 6; i++ {
+		if _, err := b.PostMessage(ctx, "legacy", "reader", "operator", "review", fmt.Sprint(i), ""); err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+	}
+	if _, err := b.PostMessage(ctx, "legacy", "reader", "operator", "review", "extra", ""); !errors.Is(err, ErrConclavePaused) {
+		t.Errorf("seventh post error = %v", err)
+	}
+	if limits := b.limits(nil, domain.Conclave{}, false); limits.MaxMessages != 6 || limits.MaxPingPong != 6 {
+		t.Errorf("legacy limits = %+v", limits)
+	}
+}
+
+func TestDecreeResumesRunWindow(t *testing.T) {
+	for _, maxRuns := range []int{1, 6} {
+		t.Run(fmt.Sprint(maxRuns), func(t *testing.T) {
+			ctx := context.Background()
+			st, b, _, _, _ := runLimitFixture(t, domain.ConclaveWards{MaxRuns: maxRuns},
+				domain.ConclaveVassal{Role: "reader", Workload: "worker", Activation: domain.ActivationOnMention})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.UpdateConclaveState(ctx, room.ID, domain.ConclaveStateInputRequired, "max_runs"); err != nil {
+				t.Fatal(err)
+			}
+			for i := range maxRuns + 1 {
+				if _, err := b.PostMessage(ctx, room.ID, "operator", "all", "decree", fmt.Sprint(i), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if paused, err := st.GetConclave(ctx, room.ID); err != nil || paused.WardReason != "max_runs" {
+				t.Fatalf("run window did not pause: %+v, %v", paused, err)
+			}
+			if _, err := b.PostMessage(ctx, room.ID, "operator", "all", "decree", "resume", ""); err != nil {
+				t.Fatal(err)
+			}
+			if tasks, err := st.ListTasks(ctx); err != nil || len(tasks) != maxRuns+1 {
+				t.Errorf("reserved %d tasks after resume, %v", len(tasks), err)
+			}
+			audit, err := st.ListAudit(ctx, 100)
+			var resumes int
+			for _, rec := range audit {
+				if rec.Action == "conclave.run_window_reset" {
+					resumes++
+				}
+			}
+			if err != nil || resumes != 2 {
+				t.Errorf("recorded %d resets, %v", resumes, err)
+			}
+		})
+	}
+}
+
+func TestMessageBodySize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"exact limit", strings.Repeat("x", 64<<10), true},
+		{"over limit", strings.Repeat("x", 64<<10+1), false},
+		{"oversize before trim", strings.Repeat(" ", 64<<10) + "x", false},
+		{"bytes not runes", strings.Repeat("\u00e9", 32<<10) + "x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, b, _, _, _ := runLimitFixture(t, domain.ConclaveWards{})
+			room, err := b.Open(ctx, "council", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = b.PostMessage(ctx, room.ID, "operator", "all", "decree", tc.body, "")
+			if (err == nil) != tc.want {
+				t.Errorf("post error = %v, want success = %v", err, tc.want)
+			}
+			_, err = b.Open(ctx, "council", "", tc.body)
+			if (err == nil) != tc.want {
+				t.Errorf("opening decree error = %v, want success = %v", err, tc.want)
+			}
+		})
+	}
+}
+
+type turnFailureStore struct {
+	store.Store
+	beforeCreate func(context.Context, domain.Task) error
+}
+
+func (s turnFailureStore) CreateTask(ctx context.Context, task domain.Task) error {
+	if err := s.beforeCreate(ctx, task); err != nil {
+		return err
+	}
+	return s.Store.CreateTask(ctx, task)
+}
+
+func TestRetryWakesUseOriginalMessage(t *testing.T) {
+	ctx := context.Background()
+	base, _, _, bundle, _ := runLimitFixture(t, domain.ConclaveWards{},
+		domain.ConclaveVassal{Role: "first", Workload: "worker", Activation: domain.ActivationOnMention},
+		domain.ConclaveVassal{Role: "second", Workload: "worker", Activation: domain.ActivationOnMention})
+	fault := errors.New("second mention unavailable")
+	failOnce := true
+	st := turnFailureStore{Store: base, beforeCreate: func(_ context.Context, task domain.Task) error {
+		if strings.HasSuffix(task.IdempotencyKey, "-second") && failOnce {
+			failOnce = false
+			return fault
+		}
+		return nil
+	}}
+	opts := Options{Store: st, GetBundle: func() *config.Bundle { return bundle },
+		Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})}
+	b := NewBroker(opts)
+	room, err := b.Open(ctx, "council", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := b.PostMessage(ctx, room.ID, "operator", "all", "decree", "review", "")
+	if !errors.Is(err, fault) || first.ID == 0 {
+		t.Fatalf("initial post = %+v, %v", first, err)
+	}
+	retry, err := NewBroker(opts).PostMessage(ctx, room.ID, "operator", "all", "decree", "review", "")
+	if err != nil || retry != first {
+		t.Errorf("retry = %+v, %v, want %+v", retry, err, first)
+	}
+	if msgs, err := st.ListConclaveMessages(ctx, room.ID, 0); err != nil || len(msgs) != 1 {
+		t.Errorf("stored %d messages, %v", len(msgs), err)
+	}
+	if tasks, err := st.ListTasks(ctx); err != nil || len(tasks) != 2 {
+		t.Errorf("reserved %d tasks, %v", len(tasks), err)
+	}
+}
+
+func TestFailedOpenCancelsConcurrentWake(t *testing.T) {
+	ctx := context.Background()
+	base, _, _, bundle, _ := runLimitFixture(t, domain.ConclaveWards{},
+		domain.ConclaveVassal{Role: "first", Workload: "worker", Activation: domain.ActivationAlwaysOn},
+		domain.ConclaveVassal{Role: "second", Workload: "worker", Activation: domain.ActivationOnMention})
+	fault := errors.New("initial turn unavailable")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	st := turnFailureStore{Store: base, beforeCreate: func(_ context.Context, task domain.Task) error {
+		if strings.HasSuffix(task.IdempotencyKey, "-init-first") {
+			close(entered)
+			<-release
+			return fault
+		}
+		return nil
+	}}
+	b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle },
+		Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})})
+	done := make(chan error, 1)
+	go func() { _, err := b.Open(ctx, "council", "", ""); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("opening turn did not reach the store")
+	}
+	rooms, err := st.ListConclaves(ctx)
+	if err != nil || len(rooms) != 1 {
+		t.Fatalf("opening rooms = %d, %v", len(rooms), err)
+	}
+	if _, err := b.PostMessage(ctx, rooms[0].ID, "operator", "all", "decree", "wake second", ""); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	if err := <-done; !errors.Is(err, fault) {
+		t.Errorf("open error = %v", err)
+	}
+	tasks, err := st.ListTasks(ctx)
+	if err != nil || len(tasks) != 1 || tasks[0].State != domain.TaskStateCancelled {
+		t.Errorf("failed open left tasks %+v, %v", tasks, err)
 	}
 }
