@@ -24,6 +24,7 @@ type Store interface {
 	GetTask(ctx context.Context, id string) (domain.Task, error)
 	GetTaskByIdempotencyKey(ctx context.Context, key string) (domain.Task, error)
 	ListTasks(ctx context.Context) ([]domain.Task, error)
+	ClaimRecovery(ctx context.Context, taskID, previous, owner string) (bool, error)
 	ListReconcileTasks(ctx context.Context, handleIDs []string) ([]domain.Task, error)
 	ListTaskEvents(ctx context.Context, taskID string) ([]domain.TaskEvent, error)
 	AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error

@@ -72,6 +72,7 @@ func ListReconcileTasks(ctx context.Context, db *sql.DB, handleIDs []string, han
 	const candidates = `WHERE id IN (
 		SELECT id FROM tasks WHERE state IN ('submitted', 'working', 'input-required') OR exit_pending
 		UNION ALL SELECT task_id FROM leases WHERE revoked_at IS NULL
+		UNION ALL SELECT key FROM court_memory WHERE namespace = 'system:runtime-handles'
 		UNION ALL `
 	return queryTasks(ctx, db, candidates+handleQuery+")", string(handles))
 }
@@ -127,4 +128,31 @@ func RenewTaskLeases(ctx context.Context, db *sql.DB, taskID string, now, expire
 		  AND EXISTS (SELECT 1 FROM tasks WHERE id = $2 AND state IN ('working', 'input-required'))
 	`, expiresAt.UTC().Format(time.RFC3339Nano), taskID, now.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+const RecoveryOwners = "system:recovery-owners"
+
+// ClaimRecovery replaces only the exact owner the caller verified had exited.
+func ClaimRecovery(ctx context.Context, db *sql.DB, taskID, previous, owner string) (bool, error) {
+	result, err := db.ExecContext(ctx, `
+		INSERT INTO court_memory (namespace,key,value,author,updated_at)
+		VALUES ($1,$2,$3,'controlplane',$4)
+		ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+		WHERE court_memory.value=$5 AND court_memory.author='controlplane'
+	`, RecoveryOwners, taskID, owner, time.Now().UTC().Format(time.RFC3339Nano), previous)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+func CommitTaskTransition(ctx context.Context, tx *sql.Tx, taskID string, to domain.TaskState, now string) error {
+	defer tx.Rollback()
+	if to == domain.TaskStateFailed {
+		if _, err := tx.ExecContext(ctx, "UPDATE leases SET revoked_at=$1 WHERE task_id=$2 AND revoked_at IS NULL", now, taskID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

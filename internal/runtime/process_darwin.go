@@ -43,8 +43,11 @@ func processStartTime(pid int) (time.Time, error) {
 	if errno != 0 {
 		return time.Time{}, fmt.Errorf("query darwin process %d: %w", pid, errno)
 	}
-	if n < darwinKinfoMinSize {
+	if n == 0 {
 		return time.Time{}, ErrProcessNotFound
+	}
+	if n < darwinKinfoMinSize {
+		return time.Time{}, errors.New("incomplete darwin process record")
 	}
 	sec := int64(binary.LittleEndian.Uint64(buf[0:8]))
 	usec := int32(binary.LittleEndian.Uint32(buf[8:12]))

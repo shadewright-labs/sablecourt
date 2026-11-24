@@ -24,6 +24,7 @@ var (
 )
 
 type sessionOutput struct {
+	archive    *boundedLog
 	file       io.StringWriter
 	tail       *diagnosticTail
 	hub        *attach.Hub
@@ -116,15 +117,19 @@ func (s *sessionOutput) emit(clean string) error {
 	if s.hub != nil {
 		s.hub.WriteOutput(s.taskID, []byte(clean))
 	}
+	if s.archive != nil {
+		if _, err := s.archive.WriteString(clean); err != nil {
+			return err
+		}
+	}
 	_, err := s.file.WriteString(clean)
 	return err
 }
 
 type boundedLog struct {
+	live    io.Writer
 	mu      sync.Mutex
 	file    *os.File
-	hub     *attach.Hub
-	taskID  string
 	written int
 	full    bool
 	partial bool
@@ -139,9 +144,10 @@ func (l *boundedLog) WriteString(record string) (int, error) {
 		line = "\n" + line
 	}
 	l.partial = !strings.HasSuffix(line, "\n")
-	if l.hub != nil {
-		l.hub.WriteOutput(l.taskID, []byte(line))
+	if l.live != nil {
+		_, _ = io.WriteString(l.live, line)
 	}
+
 	if l.full {
 		return len(record), nil
 	}

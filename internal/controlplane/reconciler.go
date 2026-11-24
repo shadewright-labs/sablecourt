@@ -63,6 +63,8 @@ type Reconciler struct {
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
 
+	instance       string
+	recovering     map[string]bool
 	reconcileMu    sync.Mutex
 	mu             sync.Mutex
 	handles        map[string]scruntime.Handle
@@ -87,6 +89,15 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 	}
 	if terminalTaskState(task.State) {
 		return store.ErrConflict
+	}
+	r.mu.Lock()
+	_, local := r.handles[taskID]
+	launching := r.launching[taskID] != nil
+	r.mu.Unlock()
+	if !local && !launching && task.State != domain.TaskStateSubmitted {
+		if err := r.claimRecovery(ctx, taskID); err != nil {
+			return err
+		}
 	}
 	if reason == "" {
 		reason = "operator_cancelled"
@@ -157,13 +168,15 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 		if !valid {
 			return r.deletePersistedHandle(ctx, taskID)
 		}
-		var persistedAdapter scruntime.Adapter
-		if task, taskErr := r.store.GetTask(ctx, taskID); taskErr == nil {
-			persistedAdapter = r.resolveRecoveryAdapter(task, rec, bundle)
-		} else {
-			persistedAdapter = r.adapters[rec.WorkloadClass]
+		task, err := r.store.GetTask(ctx, taskID)
+		if err != nil {
+			return err
 		}
-		alive, probeErr := r.probeHandleAlive(ctx, persistedAdapter, persisted)
+		persistedAdapter := r.resolveRecoveryAdapter(task, rec, bundle)
+		if persistedAdapter == nil {
+			return errors.New("runtime adapter unavailable for cleanup")
+		}
+		alive, probeErr := r.canRecoverHandle(ctx, persistedAdapter, persisted)
 		if probeErr != nil {
 			return probeErr
 		}
@@ -362,6 +375,8 @@ func NewReconciler(opts Options) *Reconciler {
 	}
 	return &Reconciler{
 		store:           opts.Store,
+		instance:        rand.Text(),
+		recovering:      make(map[string]bool),
 		bundle:          opts.Bundle,
 		policy:          opts.Policy,
 		adapters:        opts.Adapters,
@@ -695,6 +710,7 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 
 // ReconcileOnce observes tasks and queues bounded launches.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
+	recoveryErr := r.Recover(ctx)
 	// Only one pass at a time can observe and reserve task slots.
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
@@ -702,7 +718,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	launching := maps.Clone(r.launching)
 	handleIDs := slices.Collect(maps.Keys(r.handles))
 	bundle := r.bundle
-	passErr := r.launchErrors
+	passErr := errors.Join(recoveryErr, r.launchErrors)
 	r.launchErrors = nil
 	r.mu.Unlock()
 
@@ -720,7 +736,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			continue
 		}
 		if terminalTaskState(task.State) {
-			passErr = errors.Join(passErr, r.reconcileTerminal(context.WithoutCancel(ctx), task))
+			activeWorking++
 			continue
 		}
 		if task.State == domain.TaskStateSubmitted {
@@ -734,15 +750,11 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		r.mu.Lock()
 		_, hasHandle := r.handles[task.ID]
 		partialStart := r.partialStarts[task.ID]
+		recovering := r.recovering[task.ID]
 		r.mu.Unlock()
-		if !hasHandle && !partialStart {
-			adopted, recErr := r.recoverTask(ctx, task, bundle)
-			if !errors.Is(recErr, store.ErrConflict) {
-				passErr = errors.Join(passErr, recErr)
-			}
-			if !adopted {
-				continue
-			}
+		if (!hasHandle && !partialStart) || recovering {
+			activeWorking++
+			continue
 		}
 
 		var wl domain.Workload
@@ -750,12 +762,17 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		if bundle != nil {
 			wl, ok = bundle.Workloads[task.WorkloadName]
 		}
+		reason := ""
 		if !ok {
-			passErr = errors.Join(passErr, r.failTask(ctx, task, "workload_missing", `{}`))
-			continue
+			reason = "workload_missing"
+		} else if r.adapters[wl.Spec.Class] == nil {
+			reason = "adapter_missing"
 		}
-		if r.adapters[wl.Spec.Class] == nil {
-			passErr = errors.Join(passErr, r.failTask(ctx, task, "adapter_missing", `{}`))
+		if reason != "" {
+			if err := r.failTask(ctx, task, reason, `{}`); err != nil {
+				activeWorking++
+				passErr = errors.Join(passErr, err)
+			}
 			continue
 		}
 
@@ -763,7 +780,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		if !errors.Is(obsErr, store.ErrConflict) {
 			passErr = errors.Join(passErr, obsErr)
 		}
-		if stillActive {
+		if stillActive || obsErr != nil {
 			activeWorking++
 		}
 	}
@@ -831,7 +848,7 @@ func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, fac
 	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
 		return err
 	}
-	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, task.ID), r.stopTask(cleanupCtx, task.ID))
+	cleanupErr := r.stopTask(cleanupCtx, task.ID)
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
 	}
@@ -861,7 +878,11 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	if !hasHandle || adapter == nil {
 		return false, r.failLostTask(ctx, task, `{"reason":"handle_missing"}`)
 	}
-	if r.isTaskStale(task, r.now()) {
+	stale, err := r.staleWithoutExit(ctx, task, adapter, handle)
+	if err != nil {
+		return true, err
+	}
+	if stale {
 		return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
@@ -870,12 +891,18 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		observeErr = callCtx.Err()
 	}
 	cancel()
+	if errors.Is(observeErr, scruntime.ErrProcessUnverified) {
+		return true, errors.Join(observeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
+	}
 	events, err := r.store.ListTaskEvents(ctx, task.ID)
 	if err != nil {
 		return true, err
 	}
 	failures := observationFailures(events)
 	reason := ""
+	if errors.Is(observeErr, scruntime.ErrProcessNotFound) {
+		return false, r.failLostTask(ctx, task, `{"reason":"process_not_alive"}`)
+	}
 	if observeErr != nil {
 		reason = "observe_error"
 	} else {
@@ -1086,7 +1113,9 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	cancel()
 	startFailed = startErr != nil
 	if !startFailed {
-		handle = enrichHandle(handle)
+		if handle.LogPath == "" && handle.WorkDir != "" && strings.HasPrefix(handle.AdapterName, "coding:") {
+			handle.LogPath = handle.WorkDir + ".log"
+		}
 	}
 
 	if !startFailed || handle != (scruntime.Handle{}) {

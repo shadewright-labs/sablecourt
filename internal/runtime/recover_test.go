@@ -47,6 +47,8 @@ func TestProcessAliveWithStartTime(t *testing.T) {
 	}{
 		{name: "matching_live_process", pid: cmd.Process.Pid, startTime: start, want: true},
 		{name: "reused_pid_different_start_time", pid: cmd.Process.Pid, startTime: start.Add(-time.Second), want: false},
+		{name: "equivalent_timezone", pid: cmd.Process.Pid, startTime: start.In(time.FixedZone("offset", 3600)), want: true},
+		{name: "rounded_to_day", pid: cmd.Process.Pid, startTime: start.Truncate(24 * time.Hour), want: false},
 		{name: "zero_start_time", pid: cmd.Process.Pid, startTime: time.Time{}, want: false},
 		{name: "zero_pid", pid: 0, startTime: start, want: false},
 		{name: "negative_pid", pid: -1, startTime: start, want: false},

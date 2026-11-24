@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
@@ -23,6 +22,7 @@ const (
 )
 
 type processResult struct {
+	Start    time.Time
 	PID      int
 	ExitCode int
 	Message  string
@@ -46,7 +46,7 @@ func (p *codingProcess) requestStop() {
 	}
 }
 
-func startProcess(cmd *exec.Cmd, dir, scratch string, state *worktreeState, limit time.Duration, hub *attach.Hub) (_ *codingProcess, startErr error) {
+func startProcess(cmd *exec.Cmd, dir, scratch string, limit time.Duration, live io.Writer, stdoutLog, stderrLog *boundedLog) (_ *codingProcess, startErr error) {
 	logFile, err := os.OpenFile(dir+".log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
@@ -76,13 +76,8 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, state *worktreeState, limi
 		}
 	}()
 	cmd.Stdout, cmd.Stderr = stdoutChild, stderrChild
-	if hub != nil {
-		hub.Register(state.TaskID, nil)
-	}
+
 	if err := cmd.Start(); err != nil {
-		if hub != nil {
-			hub.Close(state.TaskID)
-		}
 		return nil, err
 	}
 	started = true
@@ -90,9 +85,9 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, state *worktreeState, limi
 
 	response := &harnessResponse{}
 	tail := &diagnosticTail{}
-	log := &boundedLog{file: logFile, hub: hub, taskID: state.TaskID}
-	out := &sessionOutput{file: log}
-	diagnostics := &sessionOutput{file: log, tail: tail}
+	log := &boundedLog{file: logFile, live: live}
+	out := &sessionOutput{file: log, archive: stdoutLog}
+	diagnostics := &sessionOutput{file: log, tail: tail, archive: stderrLog}
 	outDone := copyOutput(stdout, io.MultiWriter(out, response), out)
 	errDone := copyOutput(stderr, diagnostics, diagnostics)
 	process := &codingProcess{
@@ -117,9 +112,7 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, state *worktreeState, limi
 			stderrErr = nil
 		}
 		outputErr := errors.Join(stdoutErr, stderrErr, logFile.Close())
-		if hub != nil {
-			hub.Close(state.TaskID)
-		}
+
 		if process.stopErr != nil && process.result.ExitCode == 0 {
 			process.result.ExitCode = -1
 			process.result.Message = "coding process group did not stop"
@@ -132,13 +125,9 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, state *worktreeState, limi
 		if process.result.ExitCode == 0 {
 			process.result.Response = response.text()
 		}
-		if process.stopErr != nil || process.cleanScratch() != nil {
-			return
+		if process.stopErr == nil {
+			process.stopErr = process.cleanScratch()
 		}
-		completed := *state
-		completed.Result = &process.result
-		// Observe retries publication from the local result if this write fails.
-		_ = writeWorktreeState(dir, &completed)
 	}()
 	return process, nil
 }

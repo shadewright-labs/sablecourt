@@ -23,6 +23,7 @@ import (
 
 type stubProcess struct {
 	cmd      *exec.Cmd
+	start    time.Time
 	pid      int
 	stopFile string
 	done     chan struct{}
@@ -35,7 +36,13 @@ func startStubProcess(t *testing.T, dir string) *stubProcess {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start stub process: %v", err)
 	}
-	p := &stubProcess{
+	start, err := scruntime.ProcessStartTime(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatal(err)
+	}
+	p := &stubProcess{start: start,
 		cmd:      cmd,
 		pid:      cmd.Process.Pid,
 		stopFile: stopFile,
@@ -112,11 +119,12 @@ func (a *restartStubAdapter) Start(_ context.Context, spec scruntime.LaunchSpec)
 	a.procs[spec.TaskID] = proc
 	a.mu.Unlock()
 	return scruntime.Handle{
-		AdapterName: "coding:stub",
-		ExternalID:  spec.TaskID,
-		WorkDir:     dir,
-		Branch:      "sablecourt/" + spec.TaskID,
-		PID:         proc.pid,
+		AdapterName:      "coding:stub",
+		ExternalID:       spec.TaskID,
+		WorkDir:          dir,
+		Branch:           "sablecourt/" + spec.TaskID,
+		PID:              proc.pid,
+		ProcessStartTime: proc.start,
 	}, nil
 }
 
@@ -607,6 +615,7 @@ func TestRestartRecoveryMalformedHandlesFailClosed(t *testing.T) {
 			return validFields(id, func(m map[string]any) { m["process_start_time"] = "" })
 		}},
 		{name: "wrong_author", author: "untrusted-agent", value: func(id string) string { return validFields(id, nil) }},
+		{name: "cross_task_external_id", author: "controlplane", value: func(id string) string { return validFields(id, func(m map[string]any) { m["external_id"] = "other" }) }},
 		{name: "mismatched_task_id", author: "controlplane", value: func(id string) string {
 			return validFields(id, func(m map[string]any) { m["task_id"] = "task_other" })
 		}},
@@ -853,6 +862,9 @@ func TestRecoverAtStartupRespectsMaxConcurrentAndCancelledContext(t *testing.T) 
 	if err := r2.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
+	if r2.handles[liveTask.ID].PID != adapter.procs[liveTask.ID].pid {
+		t.Fatal("startup did not adopt the live handle")
+	}
 	reconcile(t, r2)
 	requireState(t, st, liveTask.ID, domain.TaskStateWorking)
 	requireState(t, st, queued.ID, domain.TaskStateSubmitted)
@@ -862,4 +874,176 @@ func TestRecoverAtStartupRespectsMaxConcurrentAndCancelledContext(t *testing.T) 
 	reconcile(t, r2)
 	requireState(t, st, liveTask.ID, domain.TaskStateCompleted)
 	requireState(t, st, queued.ID, domain.TaskStateWorking)
+}
+
+type recoveryProbe struct {
+	*restartStubAdapter
+	probe func(context.Context, scruntime.Handle) (bool, error)
+}
+
+func (a *recoveryProbe) HandleAlive(ctx context.Context, h scruntime.Handle) (bool, error) {
+	return a.probe(ctx, h)
+}
+
+func restartWorker(t *testing.T) (*Reconciler, *restartStubAdapter, domain.Task, Options) {
+	t.Helper()
+	a := newRestartStubAdapter(t, nil)
+	r, st, b, p := recoveryFixture(t, a, nil)
+	task, err := r.SubmitTask(t.Context(), "coder", "first", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	opts := Options{Store: st, Bundle: b, Policy: p, Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: a}, MaxConcurrent: 1}
+	return NewReconciler(opts), a, task, opts
+}
+
+func TestRecoveryProbeRetry(t *testing.T) {
+	r, a, task, _ := restartWorker(t)
+	broken := errors.New("probe unavailable")
+	r.adapters[domain.ClassCodingAgent] = &recoveryProbe{a, func(context.Context, scruntime.Handle) (bool, error) { return false, broken }}
+	if err := r.Recover(t.Context()); !errors.Is(err, broken) {
+		t.Errorf("probe error = %v", err)
+	}
+	requireState(t, r.store, task.ID, domain.TaskStateWorking)
+	if _, err := r.store.GetActiveLeaseByTokenHash(t.Context(), model.HashToken(a.lastSpec.TaskToken), time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("lease remained active", err)
+	}
+	r.adapters[domain.ClassCodingAgent] = a
+	if err := r.Recover(t.Context()); err != nil || r.handles[task.ID].PID == 0 {
+		t.Fatal("retry failed to adopt", err)
+	}
+}
+
+func TestRecoverySingleOwner(t *testing.T) {
+	r, _, task, opts := restartWorker(t)
+	peer := NewReconciler(opts)
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	for _, rec := range []*Reconciler{r, peer} {
+		go func() { <-start; done <- rec.Recover(t.Context()) }()
+	}
+	close(start)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile(t, r)
+	reconcile(t, peer)
+	if (r.handles[task.ID].PID == 0) == (peer.handles[task.ID].PID == 0) {
+		t.Fatal("expected exactly one owner")
+	}
+}
+
+type unreadableHandle struct{ store.Store }
+
+func (s unreadableHandle) GetMemory(ctx context.Context, ns, id string) (domain.MemoryEntry, error) {
+	if ns == runtimeHandlesNamespace {
+		return domain.MemoryEntry{}, errors.New("handle read failed")
+	}
+	return s.Store.GetMemory(ctx, ns, id)
+}
+func TestUnreadableHandleReservesSlot(t *testing.T) {
+	r, _, _, _ := restartWorker(t)
+	q, err := r.SubmitTask(t.Context(), "coder", "queued", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.store = unreadableHandle{r.store}
+	if err := r.ReconcileOnce(t.Context()); err == nil {
+		t.Error("missing read error")
+	}
+	if err := waitForLaunches(t, r); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, r.store, q.ID, domain.TaskStateSubmitted)
+}
+
+func TestBlockedRecoveryReservesSlot(t *testing.T) {
+	r, a, _, _ := restartWorker(t)
+	q, err := r.SubmitTask(t.Context(), "coder", "queued", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.adapters[domain.ClassCodingAgent] = &recoveryProbe{a, func(ctx context.Context, h scruntime.Handle) (bool, error) {
+		once.Do(func() { close(start) })
+		<-release
+		return a.HandleAlive(ctx, h)
+	}}
+	done := make(chan error, 1)
+	go func() { done <- r.Recover(t.Context()) }()
+	<-start
+	pass := make(chan error, 1)
+	go func() { pass <- r.ReconcileOnce(t.Context()) }()
+	select {
+	case err := <-pass:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(time.Second):
+		t.Error("reconciliation blocked on startup probe")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, r.store, q.ID, domain.TaskStateSubmitted)
+}
+
+func TestRestartRetriesPersistedStop(t *testing.T) {
+	a := &stopFailOnceAdapter{restartStubAdapter: newRestartStubAdapter(t, nil)}
+	r, st, b, p := recoveryFixture(t, a, nil)
+	task, err := r.SubmitTask(t.Context(), "coder", "stop-retry", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r)
+	a.failStop = true
+	if err := r.CancelTask(t.Context(), task.ID, "cancel"); err == nil {
+		t.Fatal("missing stop failure")
+	}
+	if _, err := st.GetActiveLeaseByTokenHash(t.Context(), model.HashToken(a.lastSpec.TaskToken), time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("lease survived cancellation", err)
+	}
+	a.failStop = false
+	fresh := NewReconciler(Options{Store: st, Bundle: b, Policy: p, Adapters: r.adapters})
+	if err := fresh.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if a.procs[task.ID].alive() {
+		t.Fatal("restart skipped surviving worker")
+	}
+}
+
+func TestRecoverRecordedExit(t *testing.T) {
+	r, a, task, _ := restartWorker(t)
+	a.procs[task.ID].finish(t)
+	r.adapters[domain.ClassCodingAgent] = recordedStub{a}
+	requireState(t, r.store, task.ID, domain.TaskStateWorking)
+	if err := r.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.handles[task.ID].PID == 0 {
+		t.Fatal("discarded durable exit")
+	}
+	reconcile(t, r)
+	requireState(t, r.store, task.ID, domain.TaskStateCompleted)
+}
+
+type recordedStub struct{ *restartStubAdapter }
+
+func (a recordedStub) HandleExited(_ context.Context, h scruntime.Handle) (bool, error) {
+	p := a.procs[h.ExternalID]
+	return p != nil && p.pid == h.PID && h.ProcessStartTime.Equal(p.start) && !p.alive(), nil
+}
+
+func TestMissingLaunchIdentity(t *testing.T) {
+	r, _, _, _ := recoveryFixture(t, newRestartStubAdapter(t, nil), nil)
+	h := scruntime.Handle{PID: os.Getpid(), AdapterName: "coding:stub", ExternalID: "missing-start"}
+	if err := r.saveHandle(t.Context(), h.ExternalID, domain.ClassCodingAgent, h); err == nil {
+		t.Fatal("accepted a process without launch-time identity")
+	}
 }
