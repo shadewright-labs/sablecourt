@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -1035,7 +1036,7 @@ func main() {
 	var speakOut, speakVoice string
 	voiceSpeakCmd := &cobra.Command{
 		Use:   "speak <text>",
-		Short: "Synthesize speech audio via local TTS (Kokoro/Piper or macOS say)",
+		Short: "Synthesize and play speech audio via local TTS (Kokoro/Piper or macOS say)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(30 * time.Second)
@@ -1051,6 +1052,24 @@ func main() {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s wrote %d bytes to %s\n", stJade.Render("✓"), len(audio), speakOut)
+				return nil
+			}
+			if playBin, err := exec.LookPath("afplay"); err == nil {
+				tmp, err := os.CreateTemp("", "sablecourt-speak-*.aiff")
+				if err != nil {
+					return err
+				}
+				tmpPath := tmp.Name()
+				_, writeErr := tmp.Write(audio)
+				_ = tmp.Close()
+				defer os.Remove(tmpPath)
+				if writeErr != nil {
+					return writeErr
+				}
+				if out, err := exec.CommandContext(cmd.Context(), playBin, tmpPath).CombinedOutput(); err != nil {
+					return fmt.Errorf("afplay failed: %s (%w)", strings.TrimSpace(string(out)), err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s played %d bytes\n", stJade.Render("✓"), len(audio))
 				return nil
 			}
 			_, err = cmd.OutOrStdout().Write(audio)
