@@ -156,8 +156,7 @@ func TestProcessShutdownReapsLeaderAfterGroupLoss(t *testing.T) {
 			a, spec := codingFixture(t)
 			a.DryRun = true
 			h := startTestTask(t, a, spec)
-			state, err := a.worktreeState(h)
-			if err != nil {
+			if _, err := a.worktreeState(h); err != nil {
 				t.Fatal(err)
 			}
 			cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; while :; do :; done")
@@ -167,7 +166,7 @@ func TestProcessShutdownReapsLeaderAfterGroupLoss(t *testing.T) {
 			if reason == "stop" {
 				limit = time.Minute
 			}
-			process, err := startProcess(cmd, h.WorkDir, t.TempDir(), state, limit, nil)
+			process, err := startProcess(cmd, h.WorkDir, t.TempDir(), limit, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

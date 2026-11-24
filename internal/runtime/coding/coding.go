@@ -137,11 +137,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, err
 	}
 
-	process, err := startProcess(cmd, dir, scratch, state, limit, a.AttachHub)
+	process, id, err := launchWrapper(cmd, dir, scratch, state.TaskID, limit, a.AttachHub)
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, cmd.Path, err)
 	}
-	handle.PID = cmd.Process.Pid
+	handle.PID, handle.ProcessStartTime = id.PID, id.Start
 	a.running.Store(dir, process)
 	return handle, nil
 }
@@ -251,22 +251,24 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	if !state.FinishedAt.IsZero() {
 		return a.finishWorktree(ctx, handle.WorkDir, state)
 	}
-	if process := a.process(handle.WorkDir); process != nil {
-		process.requestStop()
-		select {
-		case <-process.done:
-		case <-ctx.Done():
-			return ctx.Err()
+	if handle.PID > 0 {
+		if err := stopVerified(ctx, handle, state); err != nil {
+			return err
 		}
-		if process.stopErr != nil {
-			if err := process.shutdown(ctx); err != nil {
-				return err
+		if process := a.process(handle.WorkDir); process != nil {
+			select {
+			case <-process.done:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			process.stopErr = nil
 		}
 	}
-	if _, err := a.loadResult(handle, state); err != nil {
+	ready, err := a.loadResult(handle, state)
+	if err != nil {
 		return err
+	}
+	if !ready {
+		return errors.New("coding process is still running")
 	}
 	return a.finishWorktree(ctx, handle.WorkDir, state)
 }
@@ -296,29 +298,29 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
 }
 
-// loadResult waits for the local waiter to finish publishing before using its result.
 func (a *Adapter) loadResult(handle scruntime.Handle, state *worktreeState) (bool, error) {
-	if process := a.process(handle.WorkDir); process != nil {
-		if !outputClosed(process.done) {
-			return false, nil
-		}
-		if process.stopErr != nil {
-			return false, process.stopErr
-		}
-		if err := process.cleanScratch(); err != nil {
-			return false, err
-		}
-		if state.Result == nil {
-			state.Result = &process.result
-			if err := writeWorktreeState(handle.WorkDir, state); err != nil {
-				return false, err
-			}
-		}
+	if handle.PID == 0 {
+		return true, nil
 	}
-	if handle.PID != 0 && (state.Result == nil || state.Result.PID != handle.PID) {
-		return false, errors.New("coding process exit was not recorded")
+	if state.Result != nil && state.Result.PID == handle.PID && (state.Result.Start.IsZero() || state.Result.Start.Equal(handle.ProcessStartTime)) {
+		return true, nil
 	}
-	return true, nil
+	alive, err := scruntime.ProcessAliveWithStartTime(handle.PID, handle.ProcessStartTime)
+	if err != nil {
+		return false, err
+	}
+	result, err := recordedExit(handle)
+	if err != nil {
+		return false, err
+	}
+	if result != nil {
+		state.Result = result
+		return true, writeWorktreeState(handle.WorkDir, state)
+	}
+	if alive {
+		return false, nil
+	}
+	return false, scruntime.ErrProcessNotFound
 }
 
 func (a *Adapter) process(dir string) *codingProcess {

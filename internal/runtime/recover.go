@@ -9,6 +9,9 @@ import (
 // ErrProcessNotFound reports that no live process exists for a PID.
 var ErrProcessNotFound = errors.New("process not found")
 
+// ErrProcessUnverified reports a probe failure that should be retried.
+var ErrProcessUnverified = errors.New("unable to verify process identity")
+
 // HandleLivenessProber is an optional Adapter capability that reports whether a
 // recorded runtime handle still refers to the same live workload process.
 // Implementations must fail closed when process identity cannot be verified.
@@ -36,7 +39,12 @@ func ProcessAliveWithStartTime(pid int, expectedStart time.Time) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, errors.Join(ErrProcessUnverified, err)
 	}
 	return actual.UTC().Equal(expectedStart.UTC()), nil
+}
+
+// HandleExitProber reports a durable exit bound to the recorded process identity.
+type HandleExitProber interface {
+	HandleExited(context.Context, Handle) (bool, error)
 }

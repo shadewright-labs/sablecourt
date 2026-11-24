@@ -261,7 +261,7 @@ func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from
 		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return store.CommitTaskTransition(ctx, tx, taskID, to, now)
 }
 
 func (s *PostgresStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) error {
@@ -643,4 +643,8 @@ func defaultJSON(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func (s *PostgresStore) ClaimRecovery(ctx context.Context, taskID, previous, owner string) (bool, error) {
+	return store.ClaimRecovery(ctx, s.db, taskID, previous, owner)
 }
