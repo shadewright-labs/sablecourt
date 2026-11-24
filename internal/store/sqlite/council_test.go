@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -245,7 +246,7 @@ func TestCouncilReservationGuards(t *testing.T) {
 }
 
 func TestCouncilPolicy(t *testing.T) {
-	for _, tc := range []string{"defaults", "empty question", "oversized question", "missing seats", "duplicate role", "unknown route", "zone crossing", "missing zone", "zero rounds", "negative starts", "zero duration", "unpinned ref", "unknown writer", "bad pin"} {
+	for _, tc := range []string{"defaults", "empty question", "oversized question", "missing seats", "duplicate role", "unknown route", "zone crossing", "missing zone", "invalid role card UTF-8", "zero rounds", "negative starts", "starts above run ceiling", "zero duration", "unpinned ref", "unknown writer", "bad pin"} {
 		t.Run(tc, func(t *testing.T) {
 			s := openTestStore(t)
 			room, spec := councilFixture()
@@ -265,10 +266,15 @@ func TestCouncilPolicy(t *testing.T) {
 				spec.Members[1].Zone = domain.ZoneRuntime
 			case "missing zone":
 				spec.Members[1].Zone = ""
+			case "invalid role card UTF-8":
+				spec.Members[0].RoleCard = "Read the change.\xff"
 			case "zero rounds":
 				spec.MaxRounds = &zero
 			case "negative starts":
 				spec.MaxStarts = &neg
+			case "starts above run ceiling":
+				rounds, starts := 3, domain.ConclaveRunCeiling+1
+				spec.MaxRounds, spec.MaxStarts = &rounds, &starts
 			case "zero duration":
 				spec.Duration = &d
 			case "unpinned ref":
@@ -295,6 +301,201 @@ func TestCouncilPolicy(t *testing.T) {
 			snap, err := s.CouncilSnapshot(t.Context(), room.ID)
 			if err != nil || snap.MaxStarts != 6 || snap.MaxRounds != 2 || snap.Sequential || snap.Turns == nil || !snap.Deadline.Equal(room.CreatedAt.Add(15*time.Minute)) {
 				t.Fatalf("defaults: %+v %v", snap, err)
+			}
+		})
+	}
+}
+
+func TestCouncilSilentRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answered bool
+	}{
+		{name: "silent"},
+		{name: "answered", answered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+			room, spec := councilFixture()
+			if err := s.CreateCouncil(ctx, room, spec); err != nil {
+				t.Fatal(err)
+			}
+			first := councilTask("reviewer", 1, 1)
+			if err := reserve(t, s, first); err != nil {
+				t.Fatal(err)
+			}
+			msg := domain.ConclaveMessage{ConclaveID: room.ID, TaskID: first.ID, FromRole: "reviewer", ToRole: "all", Kind: "review", Body: "first answer"}
+			id, err := s.AppendConclaveMessage(ctx, msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateTaskState(ctx, first.ID, first.State, domain.TaskStateCompleted, "done", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.answered {
+				if err := s.AcceptCouncilAnswer(ctx, first.ID, id, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			retry := councilTask("reviewer", 1, 2)
+			err = reserve(t, s, retry)
+			if tc.answered {
+				if err == nil {
+					t.Fatal("retried an answered turn")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("retry after silent completion: %v", err)
+			}
+			if err := s.AcceptCouncilAnswer(ctx, first.ID, id, true); err == nil {
+				t.Fatal("accepted a superseded answer")
+			}
+			msg.TaskID, msg.Body = retry.ID, "retry answer"
+			id, err = s.AppendConclaveMessage(ctx, msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateTaskState(ctx, retry.ID, retry.State, domain.TaskStateCompleted, "done", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.AcceptCouncilAnswer(ctx, retry.ID, id, false); err != nil {
+				t.Fatal(err)
+			}
+			snap, err := s.CouncilSnapshot(ctx, room.ID)
+			if err != nil || len(snap.Attempts) != 2 || len(snap.Turns) != 1 ||
+				snap.Attempts[0].State != domain.TaskStateCompleted || snap.Attempts[0].Answer != nil || snap.Attempts[0].NothingToAdd ||
+				snap.Turns[0].Starts != 2 || snap.Turns[0].Answer == nil || snap.Turns[0].Answer.ID != id {
+				t.Fatalf("retry snapshot: %+v, %v", snap, err)
+			}
+		})
+	}
+}
+
+func TestCouncilDefaultWards(t *testing.T) {
+	ctx := t.Context()
+	s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+	room, spec := councilFixture()
+	third := spec.Members[0]
+	third.Vassal.Role = "observer"
+	spec.Members = append(spec.Members, third)
+	if err := s.CreateCouncil(ctx, room, spec); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		for _, member := range spec.Members {
+			role := member.Vassal.Role
+			task := councilTask(role, round, 1)
+			if err := reserve(t, s, task); err != nil {
+				t.Fatal(err)
+			}
+			msg := domain.ConclaveMessage{ConclaveID: room.ID, TaskID: task.ID, FromRole: role, ToRole: "all", Kind: "review", Body: "answer"}
+			id, reason, _, err := store.AppendConclavePost(ctx, s, msg, store.ConclaveLimits{}, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateCompleted, "done", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.AcceptCouncilAnswer(ctx, task.ID, id, false); err != nil {
+				t.Fatal(err)
+			}
+			if reason != "" {
+				t.Fatalf("round %d role %s tripped Ward %q", round, role, reason)
+			}
+		}
+	}
+	snap, err := s.CouncilSnapshot(ctx, room.ID)
+	if err != nil || len(snap.Turns) != 6 || snap.Session.State != domain.ConclaveStateActive ||
+		snap.Wards.MaxMessages <= snap.MaxStarts || snap.Wards.MaxPingPong <= snap.MaxStarts {
+		t.Fatalf("default council after six answers: %+v, %v", snap, err)
+	}
+}
+
+func TestCouncilInvalidCallerBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		pinned domain.PerTaskBudget
+		caller domain.PerTaskBudget
+	}{
+		{"negative cost", domain.PerTaskBudget{MaxCostUSD: 1}, domain.PerTaskBudget{MaxCostUSD: -1}},
+		{"NaN cost", domain.PerTaskBudget{MaxCostUSD: 1}, domain.PerTaskBudget{MaxCostUSD: math.NaN()}},
+		{"negative input", domain.PerTaskBudget{MaxInputTokens: 1}, domain.PerTaskBudget{MaxInputTokens: -1}},
+		{"negative output", domain.PerTaskBudget{MaxOutputTokens: 1}, domain.PerTaskBudget{MaxOutputTokens: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+			room, spec := councilFixture()
+			spec.Budget = &tc.pinned
+			if err := s.CreateCouncil(ctx, room, spec); err != nil {
+				t.Fatal(err)
+			}
+			first := councilTask("reviewer", 1, 1)
+			if err := reserve(t, s, first); err != nil {
+				t.Fatal(err)
+			}
+			usage := domain.BudgetEntry{TaskID: first.ID, WorkloadName: "worker", InputTokens: 1, OutputTokens: 1, CostMicroUSD: 1_000_000}
+			if err := s.RecordBudgetUsage(ctx, usage); err != nil {
+				t.Fatal(err)
+			}
+			next := councilTask("author", 1, 1)
+			limits := store.ConclaveLimits{Budget: &tc.caller}
+			_, err := store.SubmitConclaveTurn(ctx, room.ID, next.IdempotencyKey, limits, func(ctx context.Context) (domain.Task, error) {
+				return next, s.CreateTask(ctx, next)
+			})
+			if !errors.Is(err, store.ErrConclavePaused) {
+				t.Fatalf("expected invalid budget refusal, got %v", err)
+			}
+			snap, err := s.CouncilSnapshot(ctx, room.ID)
+			if err != nil || len(snap.Attempts) != 1 || snap.Session.State != domain.ConclaveStateInputRequired || snap.Session.WardReason == "" {
+				t.Fatalf("invalid budget snapshot: %+v, %v", snap, err)
+			}
+		})
+	}
+}
+
+func TestCouncilOperatorDecrees(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, recipient, body string
+		valid                       bool
+	}{
+		{"broadcast", "decree", "all", "continue", true},
+		{"seat at size limit", "decree", "reviewer", strings.Repeat("x", 64<<10), true},
+		{"unknown recipient", "decree", "outsider", "continue", false},
+		{"empty recipient", "decree", "", "continue", false},
+		{"blank text", "decree", "all", " \t\n", false},
+		{"oversized text", "decree", "all", strings.Repeat("x", (64<<10)+1), false},
+		{"invalid UTF-8", "decree", "all", "continue\xff", false},
+		{"invalid decision", "decision", "outsider", "continue", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := openTestStore(t)
+			room, spec := councilFixture()
+			if err := s.CreateCouncil(ctx, room, spec); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateConclaveState(ctx, room.ID, domain.ConclaveStateInputRequired, "test_pause"); err != nil {
+				t.Fatal(err)
+			}
+			msg := domain.ConclaveMessage{ConclaveID: room.ID, FromRole: "operator", Kind: tc.kind, ToRole: tc.recipient, Body: tc.body}
+			id, _, _, err := store.AppendConclavePost(ctx, s, msg, store.ConclaveLimits{}, true, false)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid %v, got id %d and error %v", tc.valid, id, err)
+			}
+			snap, err := s.CouncilSnapshot(ctx, room.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.valid {
+				if id == 0 || snap.Session.State != domain.ConclaveStateActive || len(snap.Decrees) != 1 || snap.Decrees[0].ID != id {
+					t.Fatalf("decree missing or room still paused: state %s, decrees %d", snap.Session.State, len(snap.Decrees))
+				}
+			} else if id != 0 || snap.Session.State != domain.ConclaveStateInputRequired || snap.Session.WardReason != "test_pause" || len(snap.Decrees) != 0 {
+				t.Fatalf("invalid decree changed room: state %s, reason %q, decrees %d", snap.Session.State, snap.Session.WardReason, len(snap.Decrees))
 			}
 		})
 	}
@@ -681,7 +882,7 @@ func TestCouncilRelicTextBoundaries(t *testing.T) {
 			case "sensitive metadata":
 				r.Name = "password=fixture-value"
 			case "oversized media type":
-				r.ContentType = strings.Repeat("x", maxCouncilText+1)
+				r.ContentType = strings.Repeat("x", store.MaxCouncilText+1)
 			case "invalid text":
 				r.Body = string([]byte{0xff})
 			}
