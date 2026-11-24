@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -52,6 +52,7 @@ type Dashboard struct {
 	getBundle       func() *config.Bundle
 	reload          func() error
 	manifestsPath   string
+	manifestMu      sync.Mutex
 	stalenessWindow time.Duration
 	tmpl            *template.Template
 	taskTmpl        *template.Template
@@ -722,28 +723,61 @@ func (d *Dashboard) appendManifestDoc(doc any) error {
 	if err != nil {
 		return err
 	}
+
+	d.manifestMu.Lock()
+	defer d.manifestMu.Unlock()
+
 	info, err := os.Stat(d.manifestsPath)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		outFile := filepath.Join(d.manifestsPath, fmt.Sprintf("studio-%d.yaml", time.Now().Unix()))
-		if err := os.WriteFile(outFile, raw, 0o600); err != nil {
-			return err
-		}
-	} else {
-		f, err := os.OpenFile(d.manifestsPath, os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := os.CreateTemp(d.manifestsPath, "studio-*.yaml")
 		if err != nil {
 			return err
 		}
-		if _, err := f.WriteString("\n---\n" + string(raw)); err != nil {
+		outFile := f.Name()
+		if _, err := f.Write(raw); err != nil {
 			_ = f.Close()
+			_ = os.Remove(outFile)
 			return err
 		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(outFile)
+			return err
+		}
+		if d.reload != nil {
+			if err := d.reload(); err != nil {
+				_ = os.Remove(outFile)
+				return err
+			}
+		}
+		return nil
+	}
+
+	origSize := info.Size()
+	f, err := os.OpenFile(d.manifestsPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	prefix := "\n---\n"
+	if origSize == 0 {
+		prefix = ""
+	}
+	if _, err := f.WriteString(prefix + string(raw)); err != nil {
 		_ = f.Close()
+		_ = os.Truncate(d.manifestsPath, origSize)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Truncate(d.manifestsPath, origSize)
+		return err
 	}
 	if d.reload != nil {
-		return d.reload()
+		if err := d.reload(); err != nil {
+			_ = os.Truncate(d.manifestsPath, origSize)
+			return err
+		}
 	}
 	return nil
 }
