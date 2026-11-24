@@ -86,7 +86,7 @@ func TestParticipantMessageKindIsServerAssigned(t *testing.T) {
 	for _, kind := range []string{"decree", "system", "review", "arbitrary", ""} {
 		t.Run(kind, func(t *testing.T) {
 			st := daemonTestStore(t)
-			token := addMessageTestLease(t, st)
+			addMessageTestLease(t, st)
 			bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{
 				"room": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{{Role: "worker", Workload: "worker", CanMessage: []string{"all"}}}}},
 			}}
@@ -96,6 +96,7 @@ func TestParticipantMessageKindIsServerAssigned(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			token := addAssignedConclaveLease(t, st, sess.ID, "worker")
 			h := newHandler(st, nil, getBundle, nil, nil, nil, nil, nil, nil, broker, nil, nil, nil)
 			body, _ := json.Marshal(map[string]string{"kind": kind, "body": "participant text", "to": "all", "role": "operator"})
 			r := httptest.NewRequest(http.MethodPost, "/gate/conclave/"+sess.ID+"/messages", strings.NewReader(string(body)))
@@ -129,4 +130,82 @@ func TestGateLeaseRequiresActiveTask(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConclaveHTTPUsesTaskAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		roles    int
+		assigned bool
+	}{
+		{"shared workload assigned", 2, true},
+		{"single workload unassigned", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := daemonTestStore(t)
+			token := addMessageTestLease(t, st)
+			roles := []domain.ConclaveVassal{{Role: "first", Workload: "worker", CanMessage: []string{"all"}}}
+			if tc.roles == 2 {
+				roles = append(roles, domain.ConclaveVassal{Role: "second", Workload: "worker", CanMessage: []string{"all"}})
+			}
+			bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{"room": {Spec: domain.ConclaveSpec{Vassals: roles}}}}
+			getBundle := func() *config.Bundle { return bundle }
+			b := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle})
+			room, err := b.Open(ctx, "room", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.assigned {
+				token = addAssignedConclaveLease(t, st, room.ID, "second")
+			}
+			if _, err := b.PutRelic(ctx, room.ID, "operator", "existing", "text/plain", "report"); err != nil {
+				t.Fatal(err)
+			}
+			h := newHandler(st, nil, getBundle, nil, nil, nil, nil, nil, nil, b, nil, nil, nil)
+			for _, route := range []struct {
+				method, path, body string
+				status             int
+			}{
+				{"GET", "/messages", "", 200},
+				{"POST", "/messages", `{"body":"review","to":"operator"}`, 201},
+				{"GET", "/relics/existing", "", 200},
+				{"POST", "/relics", `{"name":"new","body":"report"}`, 201},
+			} {
+				req := httptest.NewRequest(route.method, "/gate/conclave/"+room.ID+route.path, strings.NewReader(route.body))
+				req.Header.Set("Authorization", "Bearer "+token)
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, req)
+				want := http.StatusForbidden
+				if tc.assigned {
+					want = route.status
+				}
+				if w.Code != want {
+					t.Errorf("%s %s = %d, want %d", route.method, route.path, w.Code, want)
+				}
+				if tc.assigned && w.Code == http.StatusCreated && !strings.Contains(w.Body.String(), `"second"`) {
+					t.Errorf("%s did not use assigned role: %s", route.path, w.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func addAssignedConclaveLease(t *testing.T, st store.Store, room, role string) string {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	id := "assigned"
+	input, err := json.Marshal(map[string]string{"conclaveId": room, "role": role, "activation": "always-on"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: id, IdempotencyKey: "conclave-" + room + "-init-" + role, WorkloadName: "worker", State: domain.TaskStateWorking, InputJSON: string(input), CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	token := "assigned-task-token"
+	if err := st.CreateLease(ctx, domain.Lease{TaskID: id, WorkloadName: "worker", TokenSHA256: model.HashToken(token), ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	return token
 }

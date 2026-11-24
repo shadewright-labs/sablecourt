@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,7 @@ type Reconciler struct {
 	handles        map[string]scruntime.Handle
 	handleAdapters map[string]scruntime.Adapter
 	launching      map[string]bool
+	stopping       map[string]chan struct{}
 }
 
 func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
@@ -79,6 +81,11 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 		return err
 	}
 	cleanupCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		cleanupCtx, cancel = context.WithDeadline(cleanupCtx, deadline)
+		defer cancel()
+	}
 	cleanupErr := errors.Join(r.store.RevokeTaskLeases(cleanupCtx, taskID), r.stopTask(cleanupCtx, taskID))
 	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
@@ -94,16 +101,35 @@ func terminalTaskState(state domain.TaskState) bool {
 // stopTask retains the handle if stopping fails so a later pass can retry cleanup.
 func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	for r.stopping[taskID] != nil {
+		done := r.stopping[taskID]
+		r.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		r.mu.Lock()
+	}
 	handle, ok := r.handles[taskID]
-	if !ok {
+	adapter := r.handleAdapters[taskID]
+	if !ok || adapter == nil {
+		r.mu.Unlock()
+		if ok {
+			return errors.New("runtime adapter unavailable for cleanup")
+		}
 		return nil
 	}
-	adapter := r.handleAdapters[taskID]
-	if adapter == nil {
-		return errors.New("runtime adapter unavailable for cleanup")
-	}
-	if err := adapter.Stop(ctx, handle); err != nil {
+	done := make(chan struct{})
+	r.stopping[taskID] = done
+	r.mu.Unlock()
+
+	err := adapter.Stop(ctx, handle)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stopping, taskID)
+	close(done)
+	if err != nil {
 		return fmt.Errorf("stop task: %w", err)
 	}
 	delete(r.handles, taskID)
@@ -234,10 +260,14 @@ func NewReconciler(opts Options) *Reconciler {
 		handles:         make(map[string]scruntime.Handle),
 		handleAdapters:  make(map[string]scruntime.Adapter),
 		launching:       make(map[string]bool),
+		stopping:        make(map[string]chan struct{}),
 	}
 }
 
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
+	if strings.HasPrefix(idempotencyKey, "conclave-") && !store.HasConclaveReservation(ctx, idempotencyKey) {
+		return domain.Task{}, errors.New("conclave submission requires a run reservation")
+	}
 	r.mu.Lock()
 	bundle := r.bundle
 	r.mu.Unlock()
@@ -396,12 +426,32 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	if err != nil {
 		return domain.Task{}, err
 	}
-	idem := fmt.Sprintf("retry-%s-%d", orig.ID, attempt)
-	retried, err := r.SubmitTask(ctx, orig.WorkloadName, idem, string(raw))
+	if !strings.HasPrefix(orig.IdempotencyKey, "conclave-") {
+		return r.SubmitTask(ctx, orig.WorkloadName, fmt.Sprintf("retry-%s-%d", orig.ID, attempt), string(raw))
+	}
+	assignment, ok := store.TaskConclaveAssignment(orig)
+	if !ok {
+		return domain.Task{}, errors.New("invalid conclave task assignment")
+	}
+	room, err := r.store.GetConclave(ctx, assignment.ConclaveID)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return retried, nil
+	r.mu.Lock()
+	bundle := r.bundle
+	r.mu.Unlock()
+	if bundle == nil {
+		return domain.Task{}, errors.New("no workload bundle loaded")
+	}
+	tpl, ok := bundle.Conclaves[room.TemplateName]
+	if !ok {
+		return domain.Task{}, errors.New("conclave template not found")
+	}
+	key := assignment.RetryKey(orig.ID, attempt)
+	limits := store.LimitsForConclave(tpl, true, bundle.Budgets, r.now)
+	return store.SubmitConclaveTurn(ctx, room.ID, key, limits, func(ctx context.Context) (domain.Task, error) {
+		return r.SubmitTask(ctx, orig.WorkloadName, key, string(raw))
+	})
 }
 
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
@@ -685,8 +735,17 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) error {
 
 func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
 	// Claim durably before issuing any runtime side effects.
+	assignment, assigned := store.TaskConclaveAssignment(task)
+	if strings.HasPrefix(task.IdempotencyKey, "conclave-") && !assigned {
+		return store.ErrConflict
+	}
 	r.mu.Lock()
-	err := r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
+	var err error
+	if assigned {
+		err = store.ClaimConclaveTask(ctx, r.store, task.ID, assignment.ConclaveID, r.now)
+	} else {
+		err = r.store.UpdateTaskState(ctx, task.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "dispatch_claimed", `{}`)
+	}
 	if err == nil {
 		r.launching[task.ID] = true
 	}

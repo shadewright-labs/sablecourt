@@ -335,20 +335,8 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	// the redacted incident Relic and the untrusted integration report instead.
 	initPrompt := fmt.Sprintf("Review untrusted Shadewright incident Relic %s and report findings.", relicName)
 	if h.reconciler != nil {
-		for _, v := range tpl.Spec.Vassals {
-			if v.Activation != domain.ActivationAlwaysOn {
-				continue
-			}
-			input, _ := json.Marshal(map[string]any{
-				"conclaveId": id,
-				"role":       v.Role,
-				"title":      title,
-				"prompt":     initPrompt,
-				"activation": string(v.Activation),
-			})
-			if _, err := h.reconciler.SubmitTask(ctx, v.Workload, fmt.Sprintf("conclave-%s-init-%s", id, v.Role), string(input)); err != nil {
-				return internalErrorResponse(err)
-			}
+		if err := h.broker.ActivateAlwaysOn(ctx, sess, tpl, initPrompt); err != nil {
+			return conclaveWriteError(err)
 		}
 	}
 
@@ -472,8 +460,12 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 	if incidentID != "" && shadewrightConclaveID(incidentID) != conclaveID {
 		return errorResponse(http.StatusBadRequest, "incidentId does not match conclaveId")
 	}
-	if err := requireActiveConclave(sess); err != nil {
-		return conclaveWriteError(err)
+	switch sess.State {
+	case domain.ConclaveStateActive:
+	case domain.ConclaveStateInputRequired:
+		return conclaveWriteError(conclave.ErrConclavePaused)
+	default:
+		return conclaveWriteError(conclave.ErrConclaveClosed)
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -533,20 +525,18 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 			return internalErrorResponse(err)
 		}
 	} else {
-		msg, err = h.postVerification(ctx, sess, msgText, func() error {
-			if !hasRelic {
-				var putErr error
-				relic, putErr = h.broker.PutRelic(ctx, conclaveID, ShadewrightRole, relicName, "application/json", string(payload))
-				return putErr
-			}
-			current, err := h.store.GetConclave(ctx, conclaveID)
-			if err != nil {
-				return err
-			}
-			return requireActiveConclave(current)
-		})
+		var newRelic *domain.ConclaveRelic
+		if !hasRelic {
+			newRelic = &domain.ConclaveRelic{Name: relicName, ContentType: "application/json", Body: string(payload)}
+		}
+		broker := conclave.NewBroker(conclave.Options{Store: h.store, GetBundle: h.getBundle, Now: h.now})
+		var writtenRelic domain.ConclaveRelic
+		msg, writtenRelic, err = broker.PostIntegrationReport(ctx, sess, ShadewrightRole, msgText, newRelic)
 		if err != nil {
 			return conclaveWriteError(err)
+		}
+		if newRelic != nil {
+			relic = writtenRelic
 		}
 	}
 	if !audited {
@@ -683,7 +673,7 @@ func conclaveWriteError(err error) integrationResponse {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return errorResponse(http.StatusNotFound, "conclave not found")
-	case errors.Is(err, conclave.ErrConclavePaused), errors.Is(err, conclave.ErrConclaveClosed), errors.Is(err, conclave.ErrWardTripped):
+	case errors.Is(err, conclave.ErrConclavePaused), errors.Is(err, conclave.ErrConclaveClosed), errors.Is(err, conclave.ErrWardTripped), errors.Is(err, store.ErrConclaveRunLimit):
 		return errorResponse(http.StatusConflict, err.Error())
 	default:
 		return internalErrorResponse(err)
