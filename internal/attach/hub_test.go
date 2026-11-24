@@ -325,6 +325,8 @@ func TestStreamRedactorPreservesCredentialRulesAcrossWrites(t *testing.T) {
 		want  string
 	}{
 		{"task token", "task=sc_task_0123456789abcdef!", "task=[REDACTED:sablecourt_token]!"},
+		{"operator token", "op=op_" + strings.Repeat("0123456789abcdef", 4) + "!", "op=[REDACTED:sablecourt_token]!"},
+		{"operator_token assignment", "operator_token=synthetic", "operator_token=[REDACTED:secret]"},
 		{"Anthropic", "key sk-ant-synthetic1234567!", "key [REDACTED:anthropic_key]!"},
 		{"OpenAI project", "key sk-proj-synthetic1234567890!", "key [REDACTED:openai_key]!"},
 		{"GitHub PAT", "key github_pat_synthetic1234567890x!", "key [REDACTED:github_token]!"},

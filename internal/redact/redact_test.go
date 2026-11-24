@@ -64,3 +64,24 @@ func TestQuotedSecretFields(t *testing.T) {
 		}
 	}
 }
+
+func TestOperatorTokenRedacted(t *testing.T) {
+	lowerToken := "op_" + strings.Repeat("0123456789abcdef", 4)
+	upperToken := "op_" + strings.Repeat("ABCDEF0123456789", 4)
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"raw lowercase token", "token " + lowerToken + " end", "token [REDACTED:sablecourt_token] end"},
+		{"raw uppercase token", "token " + upperToken + " end", "token [REDACTED:sablecourt_token] end"},
+		{"operator_token kv", "operator_token=fixture-secret-value", "operator_token=[REDACTED:secret]"},
+		{"operator-token kv", "operator-token: fixture-secret-value", "operator-token: [REDACTED:secret]"},
+		{"operator_token json", `{"operator_token":"fixture value"}`, `{"operator_token":"[REDACTED:secret]"}`},
+		{"short op prefix untouched", "op_code=123", "op_code=123"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := String(tc.input); got != tc.want {
+				t.Errorf("String(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

@@ -94,16 +94,18 @@ func TestSixHardSecurityInvariants(t *testing.T) {
 
 	// Invariant 3: Untrusted external input is redacted in linear time without backtracking hangs.
 	t.Run("invariant3_linear_time_redaction_on_large_payload", func(t *testing.T) {
+		opToken := "op_" + strings.Repeat("a1", 32)
 		big := strings.Repeat("untrusted log line without secrets\n", 10000) +
 			"leaked=sk-ant-api03-secretvalue1234567890\n" +
+			"operator=" + opToken + "\n" +
 			strings.Repeat("more text ", 10000)
 		start := time.Now()
 		res := redact.Text(big)
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Fatalf("redaction too slow: %v", elapsed)
 		}
-		if res.Hits == 0 || strings.Contains(res.Text, "sk-ant-api03-secretvalue") {
-			t.Fatal("failed to redact secret inside large payload")
+		if res.Hits < 2 || strings.Contains(res.Text, "sk-ant-api03-secretvalue") || strings.Contains(res.Text, opToken) {
+			t.Fatal("failed to redact secret or operator token inside large payload")
 		}
 	})
 
