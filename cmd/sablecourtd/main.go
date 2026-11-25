@@ -696,22 +696,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
 	})
 	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Scope  string `json:"scope"`
-			Key    string `json:"key"`
-			Rule   string `json:"rule"`
-			Author string `json:"author"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
-			return
-		}
-		entry, err := contextpack.PutLearning(r.Context(), st, req.Scope, req.Key, req.Rule, req.Author)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, entry)
+		writeJSON(w, http.StatusGone, map[string]string{"error": "legacy learning publication is disabled"})
 	})
 	mux.HandleFunc("POST /api/v1/providers/{id}/sync", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
@@ -1147,7 +1132,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("GET /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
 		ns := strings.TrimSpace(r.URL.Query().Get("namespace"))
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
-		items, err := st.SearchMemory(r.Context(), ns, q, 100)
+		items, err := store.SearchVisibleMemory(r.Context(), st, ns, q, 100, store.IsLearningNamespace)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -1162,6 +1147,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if store.IsLearningNamespace(body.Namespace) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "learning namespace is reserved"})
 			return
 		}
 		body.Key = strings.TrimSpace(body.Key)
@@ -1186,6 +1175,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusCreated, entry)
 	})
 	mux.HandleFunc("DELETE /api/v1/memory/{namespace}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		if store.IsLearningNamespace(r.PathValue("namespace")) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "learning namespace is reserved"})
+			return
+		}
 		if err := st.DeleteMemory(r.Context(), r.PathValue("namespace"), r.PathValue("key")); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 			return

@@ -47,21 +47,6 @@
       </form>
     </div>
 
-    <div class="sc-panel sc-panel-jade">
-      <div class="sc-panel-head">
-        <h2 class="sc-panel-title">Scoped Learnings (auto-injected into Context Packet)</h2>
-        <span class="sc-badge sc-badge-jade">learning:*</span>
-      </div>
-      <form method="post" action="/ui/memory/learning">
-        <div class="row" style="margin-bottom:10px;">
-          <input type="text" name="scope" value="global" placeholder="global | repo:sablecourt | path:internal/gate/**" style="min-width:240px;" required>
-          <input type="text" name="key" placeholder="rule key (e.g. go-race-tests)" style="flex:1;" required>
-        </div>
-        <textarea name="rule" placeholder="Team rule or operator correction automatically attached to matching tasks..." required></textarea>
-        <div style="margin-top:10px;"><button type="submit" class="sc-btn sc-btn-primary">Save learning</button></div>
-      </form>
-    </div>
-
     <div class="sc-panel">
       <div class="sc-panel-head">
         <h2 class="sc-panel-title">Store Memory Entry</h2>

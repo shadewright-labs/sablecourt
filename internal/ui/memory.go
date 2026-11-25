@@ -18,6 +18,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 type memoryViewData struct {
@@ -34,7 +35,7 @@ func (d *Dashboard) handleMemoryPage(w http.ResponseWriter, r *http.Request) {
 	notice := r.URL.Query().Get("notice")
 	errMsg := r.URL.Query().Get("err")
 
-	entries, err := d.store.SearchMemory(r.Context(), scope, query, 100)
+	entries, err := store.SearchVisibleMemory(r.Context(), d.store, scope, query, 100, store.IsLearningNamespace)
 	if err != nil && errMsg == "" {
 		errMsg = err.Error()
 	}
@@ -57,6 +58,10 @@ func (d *Dashboard) handleSetMemory(w http.ResponseWriter, r *http.Request) {
 	scope := strings.TrimSpace(r.FormValue("scope"))
 	if scope == "" {
 		scope = "global"
+	}
+	if store.IsLearningNamespace(scope) {
+		http.Error(w, "learning namespace is reserved", http.StatusForbidden)
+		return
 	}
 	key := strings.TrimSpace(r.FormValue("key"))
 	value := strings.TrimSpace(r.FormValue("value"))
@@ -85,6 +90,10 @@ func (d *Dashboard) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := strings.TrimSpace(r.FormValue("scope"))
+	if store.IsLearningNamespace(scope) {
+		http.Error(w, "learning namespace is reserved", http.StatusForbidden)
+		return
+	}
 	key := strings.TrimSpace(r.FormValue("key"))
 	if scope == "" || key == "" {
 		http.Redirect(w, r, "/memory?err="+url.QueryEscape("scope and key are required"), http.StatusSeeOther)
@@ -111,22 +120,6 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		msg = "Closed-loop remediation started from " + id + " (with failure-handoff.md)"
 	}
 	http.Redirect(w, r, "/tasks/"+url.PathEscape(retried.ID)+"?notice="+url.QueryEscape(msg), http.StatusSeeOther)
-}
-
-func (d *Dashboard) handleSetLearning(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/memory?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-		return
-	}
-	scope := strings.TrimSpace(r.FormValue("scope"))
-	key := strings.TrimSpace(r.FormValue("key"))
-	rule := strings.TrimSpace(r.FormValue("rule"))
-	entry, err := contextpack.PutLearning(r.Context(), d.store, scope, key, rule, "operator")
-	if err != nil {
-		http.Redirect(w, r, "/memory?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, "/memory?notice="+url.QueryEscape(fmt.Sprintf("Saved learning %s/%s", entry.Namespace, entry.Key)), http.StatusSeeOther)
 }
 
 const proposedLearningPrefix = "proposed:"

@@ -190,7 +190,6 @@ func (d *Dashboard) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /audit", d.handleAuditPage)
 	mux.HandleFunc("GET /memory", d.handleMemoryPage)
 	mux.HandleFunc("POST /ui/memory/set", d.handleSetMemory)
-	mux.HandleFunc("POST /ui/memory/learning", d.handleSetLearning)
 	mux.HandleFunc("POST /ui/memory/delete", d.handleDeleteMemory)
 	mux.HandleFunc("POST /ui/tasks/{id}/retry", d.handleRetryTask)
 	mux.HandleFunc("POST /ui/conclaves/{id}/relics", d.handleConclaveUploadRelic)
