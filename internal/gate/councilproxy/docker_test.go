@@ -1583,3 +1583,21 @@ func TestWrapGateHandlerBusyRefusalBoundsUnreadBody(t *testing.T) {
 		t.Fatalf("server kept the connection open past the read deadline: %v", err)
 	}
 }
+
+func TestProvisionRequiresDurableIdentityBeforeDocker(t *testing.T) {
+	d := &fakeDocker{}
+	called := false
+	s, err := Provision(t.Context(), d, "sha256:"+strings.Repeat("a", 64), Config{
+		Harness: "claude", DaemonListen: loopbackAddress(),
+		RecordResources: func(proxy, network string) error {
+			called = true
+			if proxy == "" || network != proxy+"-net" {
+				t.Fatal("incomplete resource identity")
+			}
+			return errors.New("journal unavailable")
+		},
+	})
+	if !called || s != nil || err == nil || len(d.calls) != 0 {
+		t.Fatalf("calls=%v err=%v", d.calls, err)
+	}
+}

@@ -177,6 +177,9 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 			return err
 		}
 		persistedAdapter := r.resolveRecoveryAdapter(task, rec, bundle)
+		if persistedAdapter == nil && isContainerHandle(persisted) {
+			persistedAdapter = r.persistedClassAdapter(rec)
+		}
 		if persistedAdapter == nil {
 			return errors.New("runtime adapter unavailable for cleanup")
 		}
@@ -184,7 +187,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 		if probeErr != nil {
 			return probeErr
 		}
-		if !alive {
+		if !alive && !isContainerHandle(persisted) {
 			// Process is gone or PID was reused; never signal an unverified PID.
 			return r.deletePersistedHandle(ctx, taskID)
 		}
@@ -976,6 +979,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	failures := observationFailures(events)
 	reason := ""
 	if errors.Is(observeErr, scruntime.ErrProcessNotFound) {
+		if isContainerHandle(handle) {
+			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"container_not_alive"}`)
+		}
 		return false, r.failLostTask(ctx, task, `{"reason":"process_not_alive"}`)
 	}
 	if observeErr != nil {
@@ -1222,7 +1228,24 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		DataGateURL: r.dataGateURL,
 		TaskToken:   token,
 	}
-	if wl.Spec.Class == domain.ClassCodingAgent && r.hostDataGateURL != "" {
+	if assigned && assignment.Round > 0 && wl.Spec.Class == domain.ClassCodingAgent && wl.Spec.Coding != nil {
+		if cap, ok := adapter.(councilContainerCapable); ok && cap.SupportsCouncilContainers() {
+			spec.CouncilContainer = true
+			spec.CouncilDeadline = maxLeaseExpiry
+			spec.CreateAttempt = rand.Text()
+			preStart := scruntime.Handle{
+				AdapterName:   "coding:" + wl.Spec.Coding.Harness,
+				ExternalID:    task.ID,
+				ContainerName: "sablecourt-council-" + task.ID,
+				CreateAttempt: spec.CreateAttempt,
+			}
+			if err := r.saveHandle(ctx, task.ID, wl.Spec.Class, preStart); err != nil {
+				return err
+			}
+		}
+	}
+	// Host coding agents reach the gate over loopback. A council container has no host loopback.
+	if wl.Spec.Class == domain.ClassCodingAgent && !spec.CouncilContainer && r.hostDataGateURL != "" {
 		spec.DataGateURL = r.hostDataGateURL
 	}
 	// Only non-deterministic workloads with explicit Model Gate grants receive Model Gate coordinates.
