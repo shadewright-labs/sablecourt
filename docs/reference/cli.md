@@ -272,7 +272,7 @@ No flags of its own.
 
 ### `sablectl harness`
 
-Build local council harness images
+Build local council harness images and log in to them
 
 Groups the commands below; it does nothing on its own.
 
@@ -285,6 +285,12 @@ Build a pinned harness image and its proxy locally
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--source` | string | `.` | Sablecourt source checkout containing the council proxy |
+
+### `sablectl harness login <role>`
+
+Log in to a harness inside its container and keep the login in its volume
+
+No flags of its own.
 
 ### `sablectl help [command]`
 
