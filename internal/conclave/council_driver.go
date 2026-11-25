@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
+	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -153,10 +156,83 @@ func (b *Broker) driveCouncil(ctx context.Context, initial *store.CouncilSnapsho
 		if !allowStarts {
 			return nil
 		}
+		if s.Checkout.WriterRole != "" {
+			if err := prepareWriterPackets(s, plan, step); err != nil {
+				return err
+			}
+		}
 		return b.reserveCouncilStarts(ctx, s, step)
 	default:
 		return errors.New("unexpected council planner action")
 	}
+}
+
+// Add the diff as a separate peer excerpt so a long final answer cannot
+// consume the writer's entire share before reviewers see any changes.
+func prepareWriterPackets(s *store.CouncilSnapshot, plan CouncilSnapshot, step CouncilStep) error {
+	turns, _, err := plan.indexTurns()
+	if err != nil {
+		return err
+	}
+	members := make(map[string]CouncilMember, len(s.Members))
+	for _, m := range s.Members {
+		members[m.Vassal.Role] = m
+	}
+	for i, start := range step.Starts {
+		member := members[start.Role]
+		decrees, peers := plan.visible(step.Round, member, turns)
+		var rounds []contextpack.CouncilRound
+		hasEvidence := false
+		for _, peer := range peers {
+			if len(rounds) == 0 || rounds[len(rounds)-1].Number != peer.Round {
+				rounds = append(rounds, contextpack.CouncilRound{Number: peer.Round})
+			}
+			round := &rounds[len(rounds)-1]
+			round.Answers = append(round.Answers, contextpack.CouncilAnswer{Role: peer.Role, Body: peer.Answer.Body})
+			if peer.Role == s.Checkout.WriterRole {
+				if evidence := writerEvidence(s, peer); evidence != "" {
+					round.Answers = append(round.Answers, contextpack.CouncilAnswer{Role: peer.Role, Body: evidence})
+					hasEvidence = true
+				}
+			}
+		}
+		if !hasEvidence {
+			continue
+		}
+		var instructions []string
+		for _, d := range decrees {
+			instructions = append(instructions, d.Body)
+		}
+		packet, err := contextpack.AssembleCouncil(member.RoleCard, s.Question, instructions, rounds)
+		if err != nil {
+			return err
+		}
+		step.Starts[i].Packet = packet
+	}
+	return nil
+}
+
+func writerEvidence(s *store.CouncilSnapshot, turn CouncilTurn) string {
+	var evidence strings.Builder
+	for _, a := range s.Attempts {
+		if a.Role != turn.Role || a.Round != turn.Round {
+			continue
+		}
+		if a.State == domain.TaskStateFailed && a.Number < turn.Starts {
+			fmt.Fprintf(&evidence, "writer attempt %d produced nothing.\n", a.Number)
+		}
+		if a.State != domain.TaskStateCompleted || a.TaskID != turn.TaskID || a.Number != turn.Starts {
+			continue
+		}
+		for _, r := range a.Relics {
+			if r.Name == controlplane.CouncilWriterDiffName(turn.TaskID) && r.ConclaveID == s.Session.ID &&
+				r.AuthorRole == turn.Role && r.ContentType == "text/x-diff" && store.ValidCouncilText(r.Body) {
+				evidence.WriteString("Writer diff\n")
+				evidence.WriteString(store.RedactCouncilAnswer(r.Body))
+			}
+		}
+	}
+	return evidence.String()
 }
 
 func (b *Broker) reserveCouncilStarts(ctx context.Context, s *store.CouncilSnapshot, step CouncilStep) error {
