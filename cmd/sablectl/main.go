@@ -492,7 +492,8 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 			return nil
 		},
 	}
-	approveCmd.Flags().StringVar(&approveDigest, "digest", "", "Expected SHA-256 digest of the canonical payload")
+	approveCmd.Flags().StringVar(&approveDigest, "digest", "", "Expected SHA-256 digest of the canonical payload (required)")
+	_ = approveCmd.MarkFlagRequired("digest")
 	approvalCmd.AddCommand(approveCmd)
 
 	var denyReason string
