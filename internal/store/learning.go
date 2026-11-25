@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,9 +25,9 @@ import (
 type LearningStore interface {
 	ProposeLearning(ctx context.Context, learning domain.Learning) (domain.Learning, error)
 	GetLearning(ctx context.Context, id string) (domain.Learning, error)
-	AcceptLearning(ctx context.Context, id, expectedDigest, operator string, now time.Time) (domain.Learning, error)
-	ConfirmLearning(ctx context.Context, id string, outcomeID int64, operator string, now time.Time) (domain.Learning, error)
-	RetireLearning(ctx context.Context, id, operator, reason string, now time.Time) (domain.Learning, error)
+	AcceptLearning(ctx context.Context, id, expectedDigest string, now time.Time) (domain.Learning, error)
+	ConfirmLearning(ctx context.Context, id string, outcomeID int64, now time.Time) (domain.Learning, error)
+	RetireLearning(ctx context.Context, id, reason string, now time.Time) (domain.Learning, error)
 	ListLearnings(ctx context.Context, filter LearningFilter) ([]domain.Learning, error)
 	RecordLearningInjection(ctx context.Context, learningID, packetID, taskID string, at time.Time) (bool, error)
 	RecordLearningOutcome(ctx context.Context, outcome domain.LearningOutcome) (domain.LearningOutcome, error)
@@ -57,12 +59,14 @@ const (
 	LearningTimestampLayout        = "2006-01-02T15:04:05.000000000Z"
 )
 
-// LearningFilter narrows ListLearnings queries using indexed scope and status columns.
+// LearningFilter selects eligible advice by default. Specify proposed or retired
+// status to review those records, or IncludeExpired to inspect recorded status.
 type LearningFilter struct {
 	Status               domain.LearningStatus
 	ScopeKey             string
 	GlobalOnly           bool
 	RepoRemoteURL        string
+	Paths                []string
 	IncidentCluster      string
 	IncidentNamespace    string
 	IncidentWorkloadKind string
@@ -73,14 +77,29 @@ type LearningFilter struct {
 	Limit                int
 }
 
+type learningOperatorKey struct{}
+
+// WithLearningOperator binds the identity established by operator authentication.
+func WithLearningOperator(ctx context.Context, operator string) context.Context {
+	return context.WithValue(ctx, learningOperatorKey{}, operator)
+}
+
+func LearningOperator(ctx context.Context) (string, bool) {
+	operator, _ := ctx.Value(learningOperatorKey{}).(string)
+	return operator, ValidLearningID(operator, MaxLearningFieldBytes)
+}
+
+// Match URL userinfo in prose, including percent-encoded credentials.
+var learningURLCredentials = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@?#[:space:]]+@`)
+
 // RedactLearningText removes secrets and PEM private key blocks deterministically.
 func RedactLearningText(text string) string {
-	return RedactCouncilAnswer(text)
+	return RedactCouncilAnswer(learningURLCredentials.ReplaceAllString(text, "${1}[REDACTED:userinfo]@"))
 }
 
 // ContainsLearningSecret reports whether text contains a sensitive credential or private key header.
 func ContainsLearningSecret(text string) bool {
-	return privateKeyHeader.MatchString(text) || redact.ContainsSensitive(text)
+	return learningURLCredentials.MatchString(text) || privateKeyHeader.MatchString(text) || redact.ContainsSensitive(text)
 }
 
 // FormatLearningTime formats a UTC timestamp with fixed-width nanoseconds so SQLite
@@ -191,7 +210,8 @@ func NormalizeRepoRemoteURL(raw string) (string, error) {
 			return "", errors.New("repository remote URL path is invalid")
 		}
 	}
-	canonical := scheme + "://" + strings.ToLower(u.Host) + cleanedPath
+	escaped := strings.TrimSuffix(strings.TrimSuffix(u.EscapedPath(), "/"), ".git")
+	canonical := scheme + "://" + strings.ToLower(u.Host) + escaped
 	if len(canonical) > MaxLearningFieldBytes || ContainsLearningSecret(canonical) {
 		return "", errors.New("invalid canonical repository remote URL")
 	}
@@ -227,6 +247,43 @@ func NormalizePathGlob(raw string) (string, error) {
 		return "", errors.New("invalid path glob syntax")
 	}
 	return g, nil
+}
+
+// MatchesLearningPaths checks repository-relative paths. A ** segment matches
+// zero or more whole path components. Other segments use Go path.Match.
+func MatchesLearningPaths(globs, paths []string) bool {
+	if len(globs) == 0 {
+		return true
+	}
+	for _, candidate := range paths {
+		candidate = strings.TrimPrefix(candidate, "./")
+		if !fs.ValidPath(candidate) || candidate == "." || strings.ContainsAny(candidate, `\`) ||
+			(len(candidate) >= 2 && candidate[1] == ':') {
+			continue
+		}
+		parts := strings.Split(candidate, "/")
+		for _, glob := range globs {
+			matches := make([]bool, len(parts)+1)
+			matches[0] = true
+			for segment := range strings.SplitSeq(glob, "/") {
+				if segment == "**" {
+					for i := range parts {
+						matches[i+1] = matches[i+1] || matches[i]
+					}
+				} else {
+					for i := len(parts) - 1; i >= 0; i-- {
+						ok, _ := path.Match(segment, parts[i])
+						matches[i+1] = matches[i] && ok
+					}
+					matches[0] = false
+				}
+			}
+			if matches[len(parts)] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NormalizeLearningScope validates a scope and derives its scope kind, canonical scope key, and specificity.

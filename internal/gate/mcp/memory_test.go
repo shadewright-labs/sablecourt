@@ -439,7 +439,7 @@ func TestMemoryWildcardSearchLimitsVisibleRows(t *testing.T) {
 	ctx := context.Background()
 	_, st, cli := setupMemoryGateTest(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	for i, ns := range []string{"notes", "learning:global", "system:fixture", "\u2003SyStEm:fixture\u2002"} {
+	for i, ns := range []string{"notes", "learning-notes", "learning:global", "system:fixture", "\u2003SyStEm:fixture\u2002"} {
 		if err := st.PutMemory(ctx, domain.MemoryEntry{
 			Namespace: ns,
 			Key:       "shared-match",
@@ -454,9 +454,9 @@ func TestMemoryWildcardSearchLimitsVisibleRows(t *testing.T) {
 		limit int
 		want  []string
 	}{
-		{name: "one visible row", limit: 1, want: []string{"learning:global"}},
-		{name: "all visible rows", limit: 3, want: []string{"learning:global", "notes"}},
-		{name: "default limit", limit: 0, want: []string{"learning:global", "notes"}},
+		{name: "one visible row", limit: 1, want: []string{"learning-notes"}},
+		{name: "all visible rows", limit: 3, want: []string{"learning-notes", "notes"}},
+		{name: "default limit", limit: 0, want: []string{"learning-notes", "notes"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, err := cli.CallTool(ctx, &mcp.CallToolParams{
@@ -507,7 +507,7 @@ func TestMemoryReadNamespacePolicy(t *testing.T) {
 		{name: "refuse get system model tiers", namespace: "system:model-tiers", key: "critic", wantDeny: true},
 		{name: "refuse get system uppercase", namespace: "SYSTEM:model-tiers", key: "critic", wantDeny: true},
 		{name: "refuse get system whitespace", namespace: "  system:model-tiers ", key: "critic", wantDeny: true},
-		{name: "allow get learning global", namespace: "learning:global", key: "race", wantDeny: false},
+		{name: "refuse get learning global", namespace: "learning:global", key: "race", wantDeny: true},
 		{name: "allow get regular namespace", namespace: "notes", key: "n1", wantDeny: false},
 	}
 
@@ -595,6 +595,35 @@ func TestMemoryReadNamespacePolicy(t *testing.T) {
 				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.Namespace)), "system:") {
 					t.Fatalf("memory.search leaked system namespace entry: %+v", item)
 				}
+			}
+		})
+	}
+}
+
+func TestReservedLearningTools(t *testing.T) {
+	_, st, cli := setupMemoryGateTest(t)
+	const ns = "learning:global"
+	if err := st.PutMemory(t.Context(), domain.MemoryEntry{Namespace: ns, Key: "rule", Value: "legacy-marker"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tool   string
+		args   map[string]any
+		denied bool
+	}{
+		{"memory.get", map[string]any{"namespace": ns, "key": "rule"}, true},
+		{"memory.put", map[string]any{"namespace": ns, "key": "rule", "value": "updated"}, true},
+		{"memory.delete", map[string]any{"namespace": ns, "key": "rule"}, true},
+		{"memory.search", map[string]any{"namespace": ns}, true},
+		{"memory.search", map[string]any{}, false},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			res, err := cli.CallTool(t.Context(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.IsError != tc.denied || strings.Contains(res.Content[0].(*mcp.TextContent).Text, "legacy-marker") {
+				t.Error("reserved memory exposed or wrong refusal")
 			}
 		})
 	}

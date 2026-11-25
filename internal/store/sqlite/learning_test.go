@@ -51,7 +51,10 @@ func TestLearningBackendCapability(t *testing.T) {
 
 func TestLearningLifecycleAndClock(t *testing.T) {
 	ctx := t.Context()
-	_, ls := openLearningStore(t)
+	st, ls := openLearningStore(t)
+	seedTaskEvidence(t, st, "task-42", "go-test-log")
+	seedTaskEvidence(t, st, "task-106", "pass-evidence")
+	seedTaskEvidence(t, st, "task-110", "contradiction-log")
 
 	base := time.Date(2026, 11, 1, 10, 0, 0, 123456789, time.UTC)
 
@@ -96,18 +99,18 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 	}
 
 	// Accept requires exact version digest and authenticated operator.
-	if _, err := ls.AcceptLearning(ctx, l1.ID, "", "operator-1", base.Add(time.Hour)); err == nil {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l1.ID, "", base.Add(time.Hour)); err == nil {
 		t.Fatal("expected error on empty digest")
 	}
-	if _, err := ls.AcceptLearning(ctx, l1.ID, "wrong-digest", "operator-1", base.Add(time.Hour)); !errors.Is(err, store.ErrConflict) {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l1.ID, "wrong-digest", base.Add(time.Hour)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on wrong digest, got %v", err)
 	}
-	if _, err := ls.AcceptLearning(ctx, l1.ID, l1.VersionDigest, "", base.Add(time.Hour)); err == nil {
+	if _, err := ls.AcceptLearning(ctx, l1.ID, l1.VersionDigest, base.Add(time.Hour)); err == nil {
 		t.Fatal("expected error on empty operator")
 	}
 
 	acceptAt := base.Add(time.Hour)
-	accepted, err := ls.AcceptLearning(ctx, l1.ID, l1.VersionDigest, "operator-1", acceptAt)
+	accepted, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l1.ID, l1.VersionDigest, acceptAt)
 	if err != nil {
 		t.Fatalf("AcceptLearning: %v", err)
 	}
@@ -181,12 +184,12 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 
 	// Confirming an inconclusive outcome fails closed.
 	confirmAt := acceptAt.Add(30 * 24 * time.Hour)
-	if _, err := ls.ConfirmLearning(ctx, l1.ID, incOutcome.ID, "operator-2", confirmAt); !errors.Is(err, store.ErrConflict) {
+	if _, err := ls.ConfirmLearning(store.WithLearningOperator(ctx, "operator-2"), l1.ID, incOutcome.ID, confirmAt); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict confirming inconclusive outcome, got %v", err)
 	}
 
 	// Confirming a supporting outcome with evidence restarts the 90-day clock.
-	confirmed, err := ls.ConfirmLearning(ctx, l1.ID, supOutcome.ID, "operator-2", confirmAt)
+	confirmed, err := ls.ConfirmLearning(store.WithLearningOperator(ctx, "operator-2"), l1.ID, supOutcome.ID, confirmAt)
 	if err != nil {
 		t.Fatalf("ConfirmLearning: %v", err)
 	}
@@ -253,16 +256,16 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 
 	// Re-accept l1, then propose replacement l2 and accept l2 -> retires l1 in the same transaction.
 	reacceptAt := contraAt.Add(time.Hour)
-	if _, err := ls.AcceptLearning(ctx, l1.ID, l1.VersionDigest, "operator-1", reacceptAt); err != nil {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l1.ID, l1.VersionDigest, reacceptAt); err != nil {
 		t.Fatalf("re-accept l1: %v", err)
 	}
 	l2, err := ls.ProposeLearning(ctx, domain.Learning{
 		ID:            "learn-2",
 		Statement:     "Always pin Go dependencies in go.sum and verify with go mod verify",
 		Scope:         domain.LearningScope{RepoRemoteURL: "https://github.com/shadewright-labs/sablecourt"},
-		SourceKind:    domain.LearningSourceOperator,
-		SourceID:      "review-2",
-		EvidenceRef:   "pr:43",
+		SourceKind:    domain.LearningSourceTask,
+		SourceID:      "task-42",
+		EvidenceRef:   "artifact:go-test-log",
 		Author:        "operator-1",
 		PredecessorID: l1.ID,
 		CreatedAt:     reacceptAt.Add(time.Minute),
@@ -271,7 +274,7 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 		t.Fatalf("ProposeLearning(l2): %v", err)
 	}
 	replaceAt := reacceptAt.Add(2 * time.Minute)
-	if _, err := ls.AcceptLearning(ctx, l2.ID, l2.VersionDigest, "operator-1", replaceAt); err != nil {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l2.ID, l2.VersionDigest, replaceAt); err != nil {
 		t.Fatalf("AcceptLearning(l2): %v", err)
 	}
 	l1Retired, err := ls.GetLearning(ctx, l1.ID)
@@ -284,7 +287,9 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 		ID:            "learn-3",
 		Statement:     "Duplicate replacement",
 		Scope:         domain.LearningScope{RepoRemoteURL: "https://github.com/shadewright-labs/sablecourt"},
-		SourceKind:    domain.LearningSourceOperator,
+		SourceKind:    domain.LearningSourceTask,
+		SourceID:      "task-42",
+		EvidenceRef:   "artifact:go-test-log",
 		Author:        "operator-1",
 		PredecessorID: l1.ID,
 		CreatedAt:     replaceAt.Add(time.Minute),
@@ -292,7 +297,7 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeLearning(l3): %v", err)
 	}
-	if _, err := ls.AcceptLearning(ctx, l3.ID, l3.VersionDigest, "operator-1", replaceAt.Add(2*time.Minute)); !errors.Is(err, store.ErrConflict) {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l3.ID, l3.VersionDigest, replaceAt.Add(2*time.Minute)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict accepting replacement for already-retired predecessor, got %v", err)
 	}
 
@@ -312,10 +317,10 @@ func TestLearningLifecycleAndClock(t *testing.T) {
 	}
 
 	// Retire l2 explicitly and verify history and outcomes are preserved.
-	if _, err := ls.RetireLearning(ctx, l2.ID, "operator-1", "no longer needed", sweepAt.Add(time.Minute)); err != nil {
+	if _, err := ls.RetireLearning(store.WithLearningOperator(ctx, "operator-1"), l2.ID, "no longer needed", sweepAt.Add(time.Minute)); err != nil {
 		t.Fatalf("RetireLearning(l2): %v", err)
 	}
-	if _, err := ls.RetireLearning(ctx, l2.ID, "operator-1", "again", sweepAt.Add(2*time.Minute)); !errors.Is(err, store.ErrConflict) {
+	if _, err := ls.RetireLearning(store.WithLearningOperator(ctx, "operator-1"), l2.ID, "again", sweepAt.Add(2*time.Minute)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict retiring already-retired learning, got %v", err)
 	}
 
@@ -443,15 +448,18 @@ func TestLearningLegacyMigration(t *testing.T) {
 
 	now := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
 	// Direct acceptance of unmapped legacy scope fails closed.
-	if _, err := ls.AcceptLearning(ctx, repoLegacy.ID, repoLegacy.VersionDigest, "operator-1", now); !errors.Is(err, store.ErrConflict) {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), repoLegacy.ID, repoLegacy.VersionDigest, now); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict accepting unmapped legacy scope, got %v", err)
 	}
 	// Operator resolves it via linked replacement with canonical remote URL.
+	seedTaskEvidence(t, st, "source", "record")
 	mapped, err := ls.ProposeLearning(ctx, domain.Learning{
 		ID:            "mapped-style",
 		Statement:     repoLegacy.Statement,
 		Scope:         domain.LearningScope{RepoRemoteURL: "https://github.com/shadewright-labs/sablecourt"},
-		SourceKind:    domain.LearningSourceOperator,
+		SourceKind:    domain.LearningSourceTask,
+		SourceID:      "source",
+		EvidenceRef:   "artifact:record",
 		Author:        "operator-1",
 		PredecessorID: repoLegacy.ID,
 		CreatedAt:     now,
@@ -459,7 +467,7 @@ func TestLearningLegacyMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeLearning(mapped): %v", err)
 	}
-	if _, err := ls.AcceptLearning(ctx, mapped.ID, mapped.VersionDigest, "operator-1", now.Add(time.Second)); err != nil {
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), mapped.ID, mapped.VersionDigest, now.Add(time.Second)); err != nil {
 		t.Fatalf("AcceptLearning(mapped): %v", err)
 	}
 	retiredLegacy, err := ls.GetLearning(ctx, repoLegacy.ID)
@@ -471,6 +479,7 @@ func TestLearningLegacyMigration(t *testing.T) {
 func TestLearningListByScopeUsesIndex(t *testing.T) {
 	ctx := t.Context()
 	st, ls := openLearningStore(t)
+	seedTaskEvidence(t, st, "source", "record")
 
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	repoURL := "https://github.com/shadewright-labs/sablecourt"
@@ -489,18 +498,20 @@ func TestLearningListByScopeUsesIndex(t *testing.T) {
 	}
 	for i, s := range seed {
 		l, err := ls.ProposeLearning(ctx, domain.Learning{
-			ID:         s.id,
-			Statement:  "Rule " + s.id,
-			Scope:      s.scope,
-			SourceKind: domain.LearningSourceOperator,
-			Author:     "operator-1",
-			CreatedAt:  now.Add(time.Duration(i) * time.Second),
+			ID:          s.id,
+			Statement:   "Rule " + s.id,
+			Scope:       s.scope,
+			SourceKind:  domain.LearningSourceTask,
+			SourceID:    "source",
+			EvidenceRef: "artifact:record",
+			Author:      "operator-1",
+			CreatedAt:   now.Add(time.Duration(i) * time.Second),
 		})
 		if err != nil {
 			t.Fatalf("ProposeLearning(%s): %v", s.id, err)
 		}
 		if s.accept {
-			if _, err := ls.AcceptLearning(ctx, l.ID, l.VersionDigest, "operator-1", now.Add(time.Duration(i)*time.Second)); err != nil {
+			if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l.ID, l.VersionDigest, now.Add(time.Duration(i)*time.Second)); err != nil {
 				t.Fatalf("AcceptLearning(%s): %v", s.id, err)
 			}
 		}
@@ -536,13 +547,13 @@ func TestLearningListByScopeUsesIndex(t *testing.T) {
 		},
 		{
 			name:   "repo accepted specificity order",
-			filter: store.LearningFilter{Status: domain.LearningStatusAccepted, RepoRemoteURL: repoURL, Now: now.Add(time.Minute)},
-			want:   []string{"r-path", "r-only"},
+			filter: store.LearningFilter{Status: domain.LearningStatusAccepted, RepoRemoteURL: repoURL, Paths: []string{"internal/store/sqlite/learning.go"}, Now: now.Add(time.Minute)},
+			want:   []string{"r-path", "r-only", "g-1"},
 		},
 		{
-			name:   "incident cluster specificity order",
+			name:   "incident cluster only",
 			filter: store.LearningFilter{Status: domain.LearningStatusAccepted, IncidentCluster: "prod-eu", Now: now.Add(time.Minute)},
-			want:   []string{"inc-full", "inc-cluster"},
+			want:   []string{"inc-cluster", "g-1"},
 		},
 		{
 			name: "incident full selector",
@@ -554,7 +565,7 @@ func TestLearningListByScopeUsesIndex(t *testing.T) {
 				IncidentSymptom:      "OOMKilled",
 				Now:                  now.Add(time.Minute),
 			},
-			want: []string{"inc-full"},
+			want: []string{"inc-full", "inc-cluster", "g-1"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -658,6 +669,7 @@ func TestLearningImmutabilityAndNoDelete(t *testing.T) {
 func TestLearningAtomicRollbackAndRetry(t *testing.T) {
 	ctx := t.Context()
 	st, ls := openLearningStore(t)
+	seedTaskEvidence(t, st, "source", "record")
 	now := time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC)
 
 	t.Run("propose rollback on history failure", func(t *testing.T) {
@@ -695,24 +707,28 @@ func TestLearningAtomicRollbackAndRetry(t *testing.T) {
 
 	t.Run("accept replacement rollback on predecessor retirement failure", func(t *testing.T) {
 		orig, err := ls.ProposeLearning(ctx, domain.Learning{
-			ID:         "atomic-orig",
-			Statement:  "Original rule",
-			Scope:      domain.LearningScope{Global: true},
-			SourceKind: domain.LearningSourceOperator,
-			Author:     "operator-1",
-			CreatedAt:  now,
+			ID:          "atomic-orig",
+			Statement:   "Original rule",
+			Scope:       domain.LearningScope{Global: true},
+			SourceKind:  domain.LearningSourceTask,
+			SourceID:    "source",
+			EvidenceRef: "artifact:record",
+			Author:      "operator-1",
+			CreatedAt:   now,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ls.AcceptLearning(ctx, orig.ID, orig.VersionDigest, "operator-1", now); err != nil {
+		if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), orig.ID, orig.VersionDigest, now); err != nil {
 			t.Fatal(err)
 		}
 		repl, err := ls.ProposeLearning(ctx, domain.Learning{
 			ID:            "atomic-repl",
 			Statement:     "Replacement rule",
 			Scope:         domain.LearningScope{Global: true},
-			SourceKind:    domain.LearningSourceOperator,
+			SourceKind:    domain.LearningSourceTask,
+			SourceID:      "source",
+			EvidenceRef:   "artifact:record",
 			Author:        "operator-1",
 			PredecessorID: orig.ID,
 			CreatedAt:     now.Add(time.Second),
@@ -723,7 +739,7 @@ func TestLearningAtomicRollbackAndRetry(t *testing.T) {
 		if _, err := st.db.ExecContext(ctx, `CREATE TRIGGER fail_retire_pred BEFORE UPDATE ON learnings WHEN NEW.id = 'atomic-orig' AND NEW.status = 'retired' BEGIN SELECT RAISE(FAIL, 'retire blocked'); END`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ls.AcceptLearning(ctx, repl.ID, repl.VersionDigest, "operator-1", now.Add(2*time.Second)); err == nil {
+		if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), repl.ID, repl.VersionDigest, now.Add(2*time.Second)); err == nil {
 			t.Fatal("expected AcceptLearning failure when predecessor retirement fails")
 		}
 		gotRepl, err := ls.GetLearning(ctx, repl.ID)
@@ -737,7 +753,7 @@ func TestLearningAtomicRollbackAndRetry(t *testing.T) {
 		if _, err := st.db.ExecContext(ctx, `DROP TRIGGER fail_retire_pred`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ls.AcceptLearning(ctx, repl.ID, repl.VersionDigest, "operator-1", now.Add(2*time.Second)); err != nil {
+		if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), repl.ID, repl.VersionDigest, now.Add(2*time.Second)); err != nil {
 			t.Fatalf("retry AcceptLearning failed: %v", err)
 		}
 		gotOrig, _ = ls.GetLearning(ctx, orig.ID)
@@ -862,27 +878,31 @@ func TestLearningAuditEdgeCases(t *testing.T) {
 
 	t.Run("unaddressed contradiction withholds injection and confirmation even before state sync", func(t *testing.T) {
 		st, ls := openLearningStore(t)
+		seedTaskEvidence(t, st, "source", "record")
 		now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
 
 		l, err := ls.ProposeLearning(ctx, domain.Learning{
-			ID:         "withhold-1",
-			Statement:  "Always check return errors",
-			Scope:      domain.LearningScope{Global: true},
-			SourceKind: domain.LearningSourceOperator,
-			Author:     "operator-1",
-			CreatedAt:  now,
+			ID:          "withhold-1",
+			Statement:   "Always check return errors",
+			Scope:       domain.LearningScope{Global: true},
+			SourceKind:  domain.LearningSourceTask,
+			SourceID:    "source",
+			EvidenceRef: "artifact:record",
+			Author:      "operator-1",
+			CreatedAt:   now,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ls.AcceptLearning(ctx, l.ID, l.VersionDigest, "operator-1", now); err != nil {
+		if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l.ID, l.VersionDigest, now); err != nil {
 			t.Fatal(err)
 		}
 		sup, err := ls.RecordLearningOutcome(ctx, domain.LearningOutcome{
 			LearningID:  l.ID,
 			Kind:        domain.LearningOutcomeSupporting,
-			SourceKind:  domain.LearningSourceVerifier,
-			EvidenceRef: "artifact:ok",
+			SourceKind:  domain.LearningSourceTask,
+			SourceID:    "source",
+			EvidenceRef: "artifact:record",
 			Actor:       "verifier",
 			CreatedAt:   now.Add(time.Minute),
 		})
@@ -908,7 +928,7 @@ func TestLearningAuditEdgeCases(t *testing.T) {
 		if _, err := ls.RecordLearningInjection(ctx, l.ID, "pkt-withheld", "task-1", now.Add(3*time.Minute)); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("RecordLearningInjection must withhold contradicted learning, got %v", err)
 		}
-		if _, err := ls.ConfirmLearning(ctx, l.ID, sup.ID, "operator-1", now.Add(3*time.Minute)); !errors.Is(err, store.ErrConflict) {
+		if _, err := ls.ConfirmLearning(store.WithLearningOperator(ctx, "operator-1"), l.ID, sup.ID, now.Add(3*time.Minute)); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("ConfirmLearning must withhold contradicted learning, got %v", err)
 		}
 	})
@@ -967,7 +987,8 @@ func TestLearningAuditEdgeCases(t *testing.T) {
 	})
 
 	t.Run("max-length replacement id keeps predecessor review reason within limit", func(t *testing.T) {
-		_, ls := openLearningStore(t)
+		st, ls := openLearningStore(t)
+		seedTaskEvidence(t, st, "source", "record")
 		now := time.Date(2026, 11, 25, 17, 0, 0, 0, time.UTC)
 		orig, err := ls.ProposeLearning(ctx, domain.Learning{
 			ID:         "short-orig",
@@ -985,7 +1006,9 @@ func TestLearningAuditEdgeCases(t *testing.T) {
 			ID:            maxID,
 			Statement:     "Replacement",
 			Scope:         domain.LearningScope{Global: true},
-			SourceKind:    domain.LearningSourceOperator,
+			SourceKind:    domain.LearningSourceTask,
+			SourceID:      "source",
+			EvidenceRef:   "artifact:record",
 			Author:        "operator-1",
 			PredecessorID: orig.ID,
 			CreatedAt:     now.Add(time.Second),
@@ -993,7 +1016,7 @@ func TestLearningAuditEdgeCases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ls.AcceptLearning(ctx, repl.ID, repl.VersionDigest, "operator-1", now.Add(2*time.Second)); err != nil {
+		if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), repl.ID, repl.VersionDigest, now.Add(2*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		gotOrig, err := ls.GetLearning(ctx, orig.ID)
