@@ -108,7 +108,7 @@ func ensureSocketRoot(sockRoot string) (string, error) {
 			if err := os.MkdirAll(stateDir, 0o700); err != nil {
 				return "", err
 			}
-			if err := os.Chmod(stateDir, 0o700); err != nil {
+			if err := os.Chmod(stateDir, 0o700); err != nil { // #nosec G302 -- a directory needs the execute bit; 0700 keeps it private to the daemon user
 				return "", err
 			}
 		}
@@ -127,7 +127,7 @@ func ensureSocketRoot(sockRoot string) (string, error) {
 		if err := os.MkdirAll(clean, 0o700); err != nil {
 			return "", err
 		}
-		if err := os.Chmod(clean, 0o700); err != nil {
+		if err := os.Chmod(clean, 0o700); err != nil { // #nosec G302 -- a directory needs the execute bit; 0700 keeps it private to the daemon user
 			return "", err
 		}
 	}
