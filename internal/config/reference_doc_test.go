@@ -48,29 +48,33 @@ func loaderKinds(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	consts := map[string]string{}
-	domainPkgs, err := parser.ParseDir(fset, filepath.Join("..", "domain"), func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	domainDir := filepath.Join("..", "domain")
+	entries, err := os.ReadDir(domainDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pkg := range domainPkgs {
-		for _, f := range pkg.Files {
-			ast.Inspect(f, func(n ast.Node) bool {
-				vs, ok := n.(*ast.ValueSpec)
-				if !ok {
-					return true
-				}
-				for i, name := range vs.Names {
-					if i < len(vs.Values) {
-						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-							consts[name.Name], _ = strconv.Unquote(lit.Value)
-						}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(domainDir, e.Name()), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			vs, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			for i, name := range vs.Names {
+				if i < len(vs.Values) {
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						consts[name.Name], _ = strconv.Unquote(lit.Value)
 					}
 				}
-				return true
-			})
-		}
+			}
+			return true
+		})
 	}
 	f, err := parser.ParseFile(fset, "loader.go", nil, 0)
 	if err != nil {
