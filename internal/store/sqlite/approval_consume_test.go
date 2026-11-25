@@ -36,7 +36,7 @@ func TestConsumeApproval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
 			seedApproval(t, st, "apr-c", tc.expiresAt, tc.status)
-			err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: tc.task, Capability: tc.cap, PayloadSHA256: tc.digest, Now: func() time.Time { return now }})
+			err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: tc.task, Capability: tc.cap, PayloadSHA256: tc.digest, Now: func() time.Time { return now }, Audit: useAudit})
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err %v, want %v", err, tc.wantErr)
 			}
@@ -52,7 +52,7 @@ func TestConsumeApproval(t *testing.T) {
 
 	t.Run("missing", func(t *testing.T) {
 		st := openTestStore(t)
-		if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "nope", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }}); !errors.Is(err, store.ErrNotFound) {
+		if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "nope", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }, Audit: useAudit}); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("err %v, want ErrNotFound", err)
 		}
 	})
@@ -67,7 +67,7 @@ func TestConsumeApproval(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }}); err == nil {
+				if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }, Audit: useAudit}); err == nil {
 					mu.Lock()
 					ok++
 					mu.Unlock()
@@ -78,7 +78,7 @@ func TestConsumeApproval(t *testing.T) {
 		if ok != 1 {
 			t.Fatalf("%d uses succeeded, want exactly 1", ok)
 		}
-		if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }}); !errors.Is(err, store.ErrConflict) {
+		if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-c", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }, Audit: useAudit}); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("later use: err %v, want ErrConflict", err)
 		}
 	})
@@ -119,7 +119,7 @@ func TestConsumeApprovalChecksExpiryAfterTheWait(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-wait", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: now})
+		done <- st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-wait", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: now, Audit: useAudit})
 	}()
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()

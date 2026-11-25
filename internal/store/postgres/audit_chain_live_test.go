@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"strconv"
@@ -106,5 +107,41 @@ func TestLivePostgresConcurrentConsumersKeepOneAuditChainIfConfigured(t *testing
 				t.Fatalf("VerifyAuditChain: %v", err)
 			}
 		})
+	}
+}
+
+// useAudit is a complete consumption audit record for store tests.
+var useAudit = domain.AuditRecord{Category: "approval", Action: "action:git.open_pr", Outcome: "consumed"}
+
+// Medium 4: PostgreSQL refuses a use without an audit record and leaves the
+// approval unused.
+func TestLivePostgresConsumeRequiresAuditIfConfigured(t *testing.T) {
+	dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("SABLECOURT_TEST_POSTGRES_DSN not set; skipping live Postgres integration test")
+	}
+	st := openFreshPostgres(t, dsn)
+	ctx := context.Background()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "triage-agent", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "task-na", IdempotencyKey: "task-na", WorkloadName: "triage-agent", State: domain.TaskStateWorking}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateApproval(ctx, domain.Approval{ID: "apr-na", TaskID: "task-na", WorkloadName: "triage-agent", Capability: "action:git.open_pr", PayloadCanonicalJSON: `{}`, PayloadSHA256: "d1", ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DecideApproval(ctx, "apr-na", "d1", domain.ApprovalApproved, "operator", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-na", TaskID: "task-na", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return time.Now().UTC() }})
+	if !errors.Is(err, store.ErrAuditRequired) {
+		t.Fatalf("err %v, want ErrAuditRequired", err)
+	}
+	if got, _ := st.GetApproval(ctx, "apr-na"); got.Status != domain.ApprovalApproved {
+		t.Fatalf("status %q, want approved", got.Status)
 	}
 }

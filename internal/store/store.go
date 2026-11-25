@@ -92,6 +92,10 @@ type Store interface {
 	DeleteMemory(ctx context.Context, namespace, key string) error
 }
 
+// ErrAuditRequired is returned by ConsumeApproval for a request without a
+// complete audit record; nothing is read or changed.
+var ErrAuditRequired = errors.New("approval use needs an audit record")
+
 // ConsumeRequest is one use of an approved approval.
 type ConsumeRequest struct {
 	ID            string
@@ -100,7 +104,21 @@ type ConsumeRequest struct {
 	PayloadSHA256 string
 	// Now is called once, after the approval row is locked.
 	Now func() time.Time
-	// Audit is appended in the same transaction as the consumption. A record
-	// with an empty CreatedAt gets the time Now returned.
+	// Audit is appended in the same transaction as the consumption and is
+	// required: a record without Category, Action and Outcome is refused with
+	// ErrAuditRequired. A record with an empty CreatedAt gets the time Now
+	// returned.
 	Audit domain.AuditRecord
+}
+
+// Check refuses a request the stores must not run: no clock, or no complete
+// audit record for the consumption.
+func (r ConsumeRequest) Check() error {
+	if r.Now == nil {
+		return errors.New("consume approval: no clock")
+	}
+	if r.Audit.Category == "" || r.Audit.Action == "" || r.Audit.Outcome == "" {
+		return ErrAuditRequired
+	}
+	return nil
 }

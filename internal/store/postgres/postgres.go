@@ -390,8 +390,8 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 }
 
 func (s *PostgresStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequest) error {
-	if req.Now == nil {
-		return errors.New("consume approval: no clock")
+	if err := req.Check(); err != nil {
+		return err
 	}
 	// Lock order: the audit_log table lock (lockAuditHead) first, then the
 	// approval row lock. This is the only transaction that takes both; the
@@ -447,7 +447,7 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, req store.ConsumeRe
 	} else if n != 1 {
 		return store.ErrConflict
 	}
-	if outcome == nil && req.Audit.Category != "" {
+	if outcome == nil {
 		rec := req.Audit
 		if rec.CreatedAt.IsZero() {
 			rec.CreatedAt = now

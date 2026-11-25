@@ -86,7 +86,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 
 	live := "apr-live-" + suffix
 	seed(live, now.Add(time.Minute))
-	if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: live, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d2", Now: func() time.Time { return now }}); !errors.Is(err, store.ErrConflict) {
+	if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: live, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d2", Now: func() time.Time { return now }, Audit: useAudit}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("wrong digest: err %v, want ErrConflict", err)
 	}
 	var wg sync.WaitGroup
@@ -95,7 +95,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if st.ConsumeApproval(ctx, store.ConsumeRequest{ID: live, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }}) == nil {
+			if st.ConsumeApproval(ctx, store.ConsumeRequest{ID: live, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }, Audit: useAudit}) == nil {
 				ok.Add(1)
 			}
 		}()
@@ -110,7 +110,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 
 	old := "apr-old-" + suffix
 	seed(old, now.Add(-time.Second))
-	if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: old, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }}); !errors.Is(err, store.ErrExpired) {
+	if err := st.ConsumeApproval(ctx, store.ConsumeRequest{ID: old, TaskID: taskID, Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return now }, Audit: useAudit}); !errors.Is(err, store.ErrExpired) {
 		t.Fatalf("expired: err %v, want ErrExpired", err)
 	}
 	if got, _ := st.GetApproval(ctx, old); got.Status != domain.ApprovalExpired {
@@ -202,7 +202,7 @@ func TestLivePostgresUpgradeExpiresLegacyApprovalsIfConfigured(t *testing.T) {
 	if got, _ := st.GetApproval(ctx, "apr-pending"); got.Status != domain.ApprovalPending {
 		t.Fatalf("pending row: status %q, want pending", got.Status)
 	}
-	err = st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-used", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return time.Now().UTC() }})
+	err = st.ConsumeApproval(ctx, store.ConsumeRequest{ID: "apr-used", TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1", Now: func() time.Time { return time.Now().UTC() }, Audit: useAudit})
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("replay after upgrade: err %v, want ErrConflict", err)
 	}

@@ -98,6 +98,7 @@ func TestUpgradeExpiresApprovalsApprovedBeforeIt(t *testing.T) {
 func consumeForTest(st *SQLiteStore, id string) error {
 	return st.ConsumeApproval(context.Background(), store.ConsumeRequest{
 		ID: id, TaskID: "task-1", Capability: "action:git.open_pr", PayloadSHA256: "d1",
-		Now: func() time.Time { return time.Now().UTC() },
+		Now:   func() time.Time { return time.Now().UTC() },
+		Audit: useAudit,
 	})
 }

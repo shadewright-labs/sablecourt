@@ -453,18 +453,34 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
-func (s *SQLiteStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequest) error {
-	if req.Now == nil {
-		return errors.New("consume approval: no clock")
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequest) (err error) {
+	if err := req.Check(); err != nil {
+		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE takes the database's writer lock before anything is
+	// read, waiting up to busy_timeout for another connection to release it.
+	// The clock is read only after that, so a wait for the writer cannot carry
+	// a time from before the expiry past it. A deferred transaction would read
+	// first and then fail with SQLITE_BUSY at the write, without waiting.
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// Without a context: the connection goes back to the pool and must
+			// not carry an open transaction.
+			_, _ = conn.ExecContext(context.WithoutCancel(ctx), `ROLLBACK`)
+		}
+	}()
 
 	var rowTask, rowCapability, rowDigest, status, expires string
-	err = tx.QueryRowContext(ctx, `
+	err = conn.QueryRowContext(ctx, `
 		SELECT task_id, capability, payload_sha256, status, expires_at
 		FROM approvals WHERE id = ?
 	`, req.ID).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
@@ -481,14 +497,13 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequ
 	if err != nil {
 		return fmt.Errorf("parse approval expiry: %w", err)
 	}
-	// Sampled only now that this transaction holds the row, so a wait for the
-	// lock cannot carry a time from before the expiry past it.
+	// Sampled only now that this transaction holds the writer lock.
 	now := req.Now()
 	next, outcome := domain.ApprovalConsumed, error(nil)
 	if !now.Before(expiresAt) {
 		next, outcome = domain.ApprovalExpired, store.ErrExpired
 	}
-	res, err := tx.ExecContext(ctx, `
+	res, err := conn.ExecContext(ctx, `
 		UPDATE approvals SET status = ? WHERE id = ? AND status = ?
 	`, string(next), req.ID, string(domain.ApprovalApproved))
 	if err != nil {
@@ -499,18 +514,19 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequ
 	} else if n != 1 {
 		return store.ErrConflict
 	}
-	if outcome == nil && req.Audit.Category != "" {
+	if outcome == nil {
 		rec := req.Audit
 		if rec.CreatedAt.IsZero() {
 			rec.CreatedAt = now
 		}
-		if err := s.appendAuditTx(ctx, tx, rec); err != nil {
+		if err := s.appendAuditOn(ctx, conn, rec); err != nil {
 			return fmt.Errorf("record approval use: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
 	}
+	committed = true
 	return outcome
 }
 
@@ -632,6 +648,16 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 }
 
 func (s *SQLiteStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
+	return s.appendAuditOn(ctx, tx, rec)
+}
+
+// sqlRunner is a transaction or a connection inside BEGIN ... COMMIT.
+type sqlRunner interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (s *SQLiteStore) appendAuditOn(ctx context.Context, tx sqlRunner, rec domain.AuditRecord) error {
 	prevHash := "genesis"
 	var last string
 	err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last)
