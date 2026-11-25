@@ -15,13 +15,14 @@ This document describes the YAML manifest schema (`sablecourt.io/v1alpha1`), HTT
 
 ## HTTP and SSE API endpoints (`sablecourtd`)
 
-All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `CSP`), and a `2 MiB` body size limit. In `--mode=citadel` (or `--operator-auth-required`), operator routes require `Authorization: Bearer <operator_bearer_token>`.
+All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `CSP`), and a `2 MiB` body size limit. In both `--mode=sanctum` and `--mode=citadel`, operator routes always require `Authorization: Bearer <op_...>` (read from the `0600` `operator.token` file in the `0700` state directory) or a 30-minute `SameSite=Strict` `sablecourt_session` cookie issued by `POST /login`; `--operator-auth-required` is deprecated and ignored.
 
 ### Operator API
 
 | Method and path | Scope | Purpose |
 | :--- | :--- | :--- |
-| `GET /healthz`, `GET /metrics` | Public / Scrape | Liveness check and Prometheus operational metrics |
+| `GET /healthz`, `GET /login`, `POST /login` | Public | Liveness check and form sign-in exchanging `operator.token` for `sablecourt_session` |
+| `GET /metrics` | Operator | Prometheus operational metrics |
 | `GET /api/v1/workloads` | Operator | List declared workloads and zones |
 | `GET /api/v1/tasks`, `POST /api/v1/tasks` | Operator | List tasks or submit a new task |
 | `GET /api/v1/tasks/{id}`, `POST /api/v1/tasks/{id}/cancel`, `POST /api/v1/tasks/{id}/retry` | Operator | Inspect, cancel, or retry a task with its original input |
