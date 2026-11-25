@@ -2,6 +2,7 @@ package coding
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -502,6 +503,46 @@ git commit --no-gpg-sign -m fixture
 			}
 			if _, err := os.Stat(outside); !os.IsNotExist(err) {
 				t.Fatalf("sandboxed writer touched outside path: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSeatbeltExecutable(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing-sandbox-exec")
+	nonExec := filepath.Join(dir, "non-exec-sandbox-exec")
+	execFile := filepath.Join(dir, "exec-sandbox-exec")
+	subDir := filepath.Join(dir, "dir-sandbox-exec")
+	testWrite(t, dir, filepath.Base(nonExec), "#!/bin/sh\n", 0o600)
+	testWrite(t, dir, filepath.Base(execFile), "#!/bin/sh\n", 0o700)
+	if err := os.Mkdir(subDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		path        string
+		wantErr     bool
+		wantMissing bool
+	}{
+		{name: "missing executable", path: missing, wantErr: true, wantMissing: true},
+		{name: "non-executable file", path: nonExec, wantErr: true, wantMissing: false},
+		{name: "directory", path: subDir, wantErr: true, wantMissing: false},
+		{name: "executable file", path: execFile, wantErr: false, wantMissing: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSeatbeltExecutable(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateSeatbeltExecutable(%q) err = %v, wantErr = %v", tc.path, err, tc.wantErr)
+			}
+			var missingErr *scruntime.MissingBinaryError
+			gotMissing := errors.As(err, &missingErr)
+			if gotMissing != tc.wantMissing {
+				t.Fatalf("MissingBinaryError = %v (err = %v), want %v", gotMissing, err, tc.wantMissing)
+			}
+			if tc.wantMissing && missingErr.Path != tc.path {
+				t.Fatalf("MissingBinaryError.Path = %q, want %q", missingErr.Path, tc.path)
 			}
 		})
 	}

@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +24,7 @@ const wrapperArg = "--sablecourt-coding-wrapper"
 
 type wrapperSpec struct {
 	Args         []string
+	Target       string `json:",omitempty"`
 	Env          []string
 	Dir, Scratch string
 	StateBase    string
@@ -31,6 +34,13 @@ type wrapperSpec struct {
 type workerIdentity struct {
 	PID   int
 	Start time.Time
+}
+
+type readyStatus struct {
+	workerIdentity
+	Error       string `json:",omitempty"`
+	MissingPath string `json:",omitempty"`
+	NotExist    bool   `json:",omitempty"`
 }
 
 type exitRecord struct {
@@ -100,11 +110,25 @@ func runWrapper() error {
 		return err
 	}
 	defer stderr.Close()
+	if spec.Target != "" && spec.Target != spec.Args[0] {
+		if err := checkWrappedTarget(spec.Target, spec.Dir); err != nil {
+			_ = json.NewEncoder(ready).Encode(readyStatus{
+				Error:       redact.String(err.Error()),
+				MissingPath: spec.Target,
+				NotExist:    errors.Is(err, os.ErrNotExist),
+			})
+			return err
+		}
+	}
 	p, err := startProcess(cmd, base, spec.Scratch, spec.Limit, os.Stdout, &boundedLog{file: stdout}, &boundedLog{file: stderr})
 	if err != nil {
+		_ = json.NewEncoder(ready).Encode(readyStatus{
+			Error:    redact.String(err.Error()),
+			NotExist: errors.Is(err, os.ErrNotExist),
+		})
 		return err
 	}
-	if err := json.NewEncoder(ready).Encode(id); err != nil {
+	if err := json.NewEncoder(ready).Encode(readyStatus{workerIdentity: id}); err != nil {
 		p.requestStop()
 	}
 	select {
@@ -165,6 +189,7 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 	}()
 	data, err := json.Marshal(wrapperSpec{
 		Args:      cmd.Args,
+		Target:    sandboxTarget(cmd),
 		Env:       cmd.Env,
 		Dir:       cmd.Dir,
 		Scratch:   scratch,
@@ -199,10 +224,24 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 		return nil, id, err
 	}
 	_ = child.Close()
-	if err = json.NewDecoder(ready).Decode(&id); err != nil {
+	var status readyStatus
+	if err = json.NewDecoder(ready).Decode(&status); err != nil {
 		_ = wrapper.Wait()
 		return nil, id, err
 	}
+	if status.Error != "" {
+		_ = wrapper.Wait()
+		err = errors.New(status.Error)
+		if status.NotExist {
+			missingPath := status.MissingPath
+			if missingPath == "" {
+				missingPath = cmd.Path
+			}
+			err = &scruntime.MissingBinaryError{Path: missingPath, Err: err}
+		}
+		return nil, id, err
+	}
+	id = status.workerIdentity
 	if id.PID != wrapper.Process.Pid || id.Start.IsZero() {
 		_ = wrapper.Process.Signal(syscall.SIGTERM)
 		_ = wrapper.Wait()
@@ -217,6 +256,70 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 		}
 	}()
 	return p, id, nil
+}
+
+func checkWrappedTarget(target, dir string) error {
+	info, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	interp, ok := shebangInterpreter(target)
+	if !ok {
+		return nil
+	}
+	if !filepath.IsAbs(interp) && dir != "" {
+		interp = filepath.Join(dir, interp)
+	}
+	if _, err := os.Stat(interp); errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func shebangInterpreter(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	var buf [512]byte
+	n, err := io.ReadFull(f, buf[:])
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", false
+	}
+	line := buf[:n]
+	if len(line) < 2 || line[0] != '#' || line[1] != '!' {
+		return "", false
+	}
+	line = line[2:]
+	if end := bytes.IndexAny(line, "\r\n\x00"); end >= 0 {
+		line = line[:end]
+	} else if n == len(buf) {
+		return "", false
+	}
+	if runtime.GOOS == "darwin" {
+		// The Darwin kernel ends the interpreter line at '#' as well as at a newline.
+		if end := bytes.IndexByte(line, '#'); end >= 0 {
+			line = line[:end]
+		}
+	}
+	trimmed := strings.TrimLeft(string(line), " \t")
+	if trimmed == "" {
+		return "", false
+	}
+	if i := strings.IndexAny(trimmed, " \t"); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	if trimmed == "" {
+		return "", false
+	}
+	return trimmed, true
 }
 
 func readBounded(path string, limit int) ([]byte, error) {

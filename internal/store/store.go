@@ -44,6 +44,8 @@ type Store interface {
 	RevokeTaskLeases(ctx context.Context, taskID string) error
 
 	RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error
+	ReserveBudget(ctx context.Context, req BudgetReservationRequest) (BudgetReservationResult, error)
+	SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error
 	TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error)
 	WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error)
 	TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error)
