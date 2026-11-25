@@ -1544,13 +1544,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			if _, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID); err != nil {
+			var since int64
+			_, _ = fmt.Sscanf(r.URL.Query().Get("since"), "%d", &since)
+			msgs, err := conclaveBroker.ReadMessagesForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID, since)
+			if errors.Is(err, conclave.ErrMessageDenied) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
-			var since int64
-			_, _ = fmt.Sscanf(r.URL.Query().Get("since"), "%d", &since)
-			msgs, err := st.ListConclaveMessages(r.Context(), r.PathValue("id"), since)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
@@ -1588,11 +1588,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if !ok {
 				return
 			}
-			if _, err := conclaveBroker.ResolveRoleForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID); err != nil {
+			relic, err := conclaveBroker.ReadRelicForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID, r.PathValue("name"))
+			if errors.Is(err, conclave.ErrMessageDenied) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
-			relic, err := st.GetConclaveRelic(r.Context(), r.PathValue("id"), r.PathValue("name"))
 			if err != nil {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "relic not found"})
 				return
