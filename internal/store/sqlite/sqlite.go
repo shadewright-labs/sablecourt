@@ -519,6 +519,14 @@ func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.Budget
 	return err
 }
 
+func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (store.BudgetReservationResult, error) {
+	return store.ReserveBudgetTx(ctx, s.db, nil, req)
+}
+
+func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+	return store.SettleBudgetReservationTx(ctx, s.db, nil, reservationID, actual)
+}
+
 func (s *SQLiteStore) TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `

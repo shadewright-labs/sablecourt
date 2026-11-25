@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 464" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Principals and trust boundaries</title>
+  <desc id="d">In the callers and devices zone, people prove passkeys (for sign-in and fresh approval assertions), OIDC tokens, or hashed sessions to sablecourtd, a paired approval device sends a P-256 signature over the approval ID and payload digest, and external integrations send keyed rotating tokens or workload JWTs. Inside the control plane host, sablecourtd and its capability gates sit inside the daemon and gates trust boundary holding raw secrets and the keychain-backed CA key. In the isolated runtimes zone, a harness container on an internal network sends a channel-bound lease to the pinned gate proxy (trusted as an allow-list hop for the leases it forwards), which authenticates to sablecourtd over a Unix socket or mutual TLS, while workloads present sc_task_ leases. Dashed boxes and lines mark planned components.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:650}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="464" rx="18" fill="#08060e"/>
+
+  <rect class="lane" x="24" y="24" width="252" height="380" rx="14"/>
+  <text class="lanet" x="44" y="54">CALLERS AND DEVICES</text>
+
+  <rect class="lane" x="408" y="24" width="288" height="380" rx="14"/>
+  <text class="lanet" x="428" y="54">CONTROL PLANE HOST</text>
+  <rect class="frame" x="424" y="68" width="256" height="316" rx="12"/>
+  <text class="idt" x="440" y="92">DAEMON AND GATES</text>
+
+  <rect class="lane" x="828" y="24" width="268" height="380" rx="14"/>
+  <text class="lanet" x="848" y="54">ISOLATED RUNTIMES</text>
+  <rect class="frame" x="844" y="68" width="236" height="212" rx="12"/>
+  <text class="idt" x="860" y="92">INTERNAL NETWORK</text>
+
+  <rect class="plan" x="44" y="76" width="212" height="72" rx="10"/>
+  <text class="h" x="60" y="102">People</text>
+  <text class="s" x="60" y="123">browser and sablectl</text>
+  <text class="s" x="60" y="140">viewer, operator, approver</text>
+
+  <rect class="wait" x="44" y="192" width="212" height="64" rx="10"/>
+  <text class="h" x="60" y="218">Approval device</text>
+  <text class="s" x="60" y="239">paired P-256 hardware key</text>
+
+  <rect class="ext" x="44" y="300" width="212" height="72" rx="10"/>
+  <text class="h" x="60" y="326">Integrations</text>
+  <text class="s" x="60" y="347">Nightloom, Shadewright, CI</text>
+  <text class="s" x="60" y="364">pinned integration routes</text>
+
+  <rect class="key" x="432" y="188" width="240" height="72" rx="12"/>
+  <text class="h" x="448" y="214">sablecourtd</text>
+  <text class="s" x="448" y="235">sessions, gates, leases, CA</text>
+  <text class="s" x="448" y="252">keychain CA, raw secrets</text>
+
+  <rect class="plan" x="856" y="104" width="212" height="64" rx="10"/>
+  <text class="h" x="872" y="130">Gate proxy</text>
+  <text class="s" x="872" y="151">trusted allow-list hop</text>
+
+  <rect class="plan" x="856" y="204" width="212" height="64" rx="10"/>
+  <text class="h" x="872" y="230">Harness container</text>
+  <text class="s" x="872" y="251">isolated CLI volume</text>
+
+  <rect class="box" x="856" y="316" width="212" height="64" rx="10"/>
+  <text class="h" x="872" y="342">Workload</text>
+  <text class="s" x="872" y="363">container or cluster pod</text>
+
+  <path class="r" d="M256 112H504V182" marker-end="url(#m)"/>
+  <text class="lbl" x="342" y="104" text-anchor="middle">passkey, OIDC, session</text>
+
+  <path class="f" d="M256 224H426" marker-end="url(#a)"/>
+  <text class="lbl" x="342" y="216" text-anchor="middle">P-256 approval sig</text>
+
+  <path class="r" d="M256 336H504V266" marker-end="url(#m)"/>
+  <text class="lbl" x="342" y="328" text-anchor="middle">keyed token, JWT</text>
+
+  <path class="r" d="M600 182V136H850" marker-start="url(#m)" marker-end="url(#m)"/>
+  <text class="lbl" x="752" y="128" text-anchor="middle">socket or mTLS</text>
+
+  <path class="r" d="M962 204V174" marker-end="url(#m)"/>
+  <text class="lbl" x="974" y="192">channel lease</text>
+
+  <path class="f" d="M856 348H600V266" marker-end="url(#a)"/>
+  <text class="lbl" x="752" y="340" text-anchor="middle">sc_task_ lease</text>
+
+  <rect class="key" x="44" y="424" width="16" height="12" rx="3"/>
+  <text class="cap" x="68" y="434">daemon key boundary</text>
+  <rect class="wait" x="248" y="424" width="16" height="12" rx="3"/>
+  <text class="cap" x="272" y="434">human approval key</text>
+  <rect class="ext" x="448" y="424" width="16" height="12" rx="3"/>
+  <text class="cap" x="472" y="434">external integration</text>
+  <rect class="plan" x="652" y="424" width="16" height="12" rx="3"/>
+  <text class="cap" x="676" y="434">planned component or credential</text>
+</svg>
