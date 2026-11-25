@@ -2,6 +2,7 @@ package coding
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,6 +322,50 @@ func TestFailedStartRemovesWorktreeAndBranch(t *testing.T) {
 			}
 			if _, err := os.Stat(worktree + ".log"); !os.IsNotExist(err) {
 				t.Errorf("failed start left a session log: %v", err)
+			}
+		})
+	}
+}
+
+func TestMissingBinaryReportsPath(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("look up git: %v", err)
+	}
+	missingConfigured := filepath.Join(t.TempDir(), "missing-claude")
+	missingInterp := filepath.Join(t.TempDir(), "missing-interpreter")
+	emptyPath := t.TempDir() + string(os.PathListSeparator) + filepath.Dir(gitBin)
+	for _, tc := range []struct {
+		name, configured, pathEnv, script, wantPath string
+	}{
+		{name: "configured path", configured: missingConfigured, wantPath: missingConfigured},
+		{name: "missing from PATH", pathEnv: emptyPath, wantPath: "claude"},
+		{name: "missing interpreter", script: "#!" + missingInterp + "\n", wantPath: "harness"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, spec := codingFixture(t)
+			wantPath := tc.wantPath
+			if tc.configured != "" {
+				a.HarnessPaths = map[string]string{"claude": tc.configured}
+			}
+			if tc.pathEnv != "" {
+				t.Setenv("PATH", tc.pathEnv)
+				if _, err := exec.LookPath("claude"); err == nil {
+					t.Skip("claude binary exists in git directory")
+				}
+			}
+			if tc.script != "" {
+				fakeHarness(t, tc.script)
+				resolved, err := resolvedPath(filepath.Join(strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0], "claude"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantPath = resolved
+			}
+			_, err := a.Start(context.Background(), spec)
+			var missing *scruntime.MissingBinaryError
+			if !errors.As(err, &missing) || missing.Path != wantPath {
+				t.Fatalf("Start err = %v, missing = %+v, want Path %q", err, missing, wantPath)
 			}
 		})
 	}
