@@ -8,12 +8,7 @@ Status: built. Detection of deleted last rows and signed heads are decided, not 
 
 Every append reads the hash of the newest row, computes the hash of the new one, and inserts both in one transaction. The first row uses the literal `genesis` as its previous hash. SQLite keeps a single database connection, so appends do not interleave. The PostgreSQL store (parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)) locks the table for each append.
 
-```mermaid
-flowchart LR
-    G["genesis"] -->|prev_hash| R1["row 1: record, created_at, row_hash"]
-    R1 -->|prev_hash| R2["row 2: record, created_at, row_hash"]
-    R2 -->|prev_hash| R3["row 3: record, created_at, row_hash"]
-```
+[![Each row stores the hash of the row before it, starting from genesis; Audit verify reads the rows and recomputes the links; deleted newest rows leave no link to check.](../diagrams/audit-chain.svg)](../diagrams/audit-chain.svg "Open full size")
 
 The row hash is the SHA-256 of eight fields joined with `|` in this order: previous hash, category, task ID, workload name, action, outcome, detail JSON, and the creation time as stored. The row ID is not part of the hash and the fields are not escaped, so a `|` inside a field is not told apart from a separator. Nothing in the hash is secret: no key signs it.
 

@@ -35,19 +35,9 @@ Operator authentication is always on. The old `--operator-auth-required` flag is
 
 ## Sign-in and the session cookie
 
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant D as sablecourtd
-    B->>D: GET /login
-    D-->>B: form asking for the operator token
-    B->>D: POST /login with the token, same origin
-    D-->>B: 303 and cookie sablecourt_session
-    B->>D: request with the cookie
-    D-->>B: served, or 403 if a write is not same origin
-    B->>D: POST /logout
-    D-->>B: cookie cleared, every session of this daemon invalid
-```
+[![The browser posts the operator token, sablecourtd signs a 30 minute cookie with the session key or refuses, later requests are checked against the key, and logout replaces the key.](../diagrams/sign-in.svg)](../diagrams/sign-in.svg "Open full size")
+
+The "session key" in the diagram is the 32 random bytes held in the daemon's memory; the cookie is checked against it on every request.
 
 - `POST /login` needs a same-origin request (`Sec-Fetch-Site` and `Origin` agree with `Host`; on plain HTTP an `Origin` header is required), form encoding, and a body of at most 1024 bytes holding one `token` field.
 - Failed logins are counted per client: 10 a minute for one IPv4 address or one IPv6 `/64`, and 1024 a minute across all clients. Past the limit the answer is 429 with `Retry-After`. Every wrong token counts, whatever its shape. A correct token is not refused while the limit is hit.

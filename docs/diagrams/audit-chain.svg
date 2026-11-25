@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 372" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Audit chain and verification</title>
+  <desc id="d">Row 1 stores the genesis value as its previous hash, row 2 stores the hash of row 1, and row 3 stores the hash of row 2. Each row hash is the SHA-256 of the previous hash and the row's category, task, workload, action, outcome, detail and creation time. Verification reads the rows in ID order, recomputes each hash and checks each link. Rows deleted after the newest remaining row leave no link to check, so their deletion is never detected.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="372" rx="18" fill="#08060e"/>
+  <rect class="box" x="40" y="40" width="130" height="72" rx="10"/>
+  <text class="h" x="56" y="66">genesis</text>
+  <text class="s" x="56" y="87">fixed start value</text>
+  <rect class="box" x="242" y="40" width="210" height="72" rx="10"/>
+  <text class="h" x="258" y="66">Row 1</text>
+  <text class="s" x="258" y="87">prev_hash and row_hash</text>
+  <rect class="box" x="524" y="40" width="210" height="72" rx="10"/>
+  <text class="h" x="540" y="66">Row 2</text>
+  <text class="s" x="540" y="87">prev_hash and row_hash</text>
+  <rect class="box" x="806" y="40" width="210" height="72" rx="10"/>
+  <text class="h" x="822" y="66">Row 3</text>
+  <text class="s" x="822" y="87">prev_hash and row_hash</text>
+  <rect class="bad" x="1096" y="40" width="144" height="72" rx="10"/>
+  <text class="h" x="1112" y="66">Newest rows</text>
+  <text class="no" x="1112" y="87">cut off: never seen</text>
+
+  <path class="f" d="M170 76H236" marker-end="url(#a)"/>
+  <text class="lbl" x="203" y="68" text-anchor="middle">links</text>
+  <path class="f" d="M452 76H518" marker-end="url(#a)"/>
+  <text class="lbl" x="485" y="68" text-anchor="middle">links</text>
+  <path class="f" d="M734 76H800" marker-end="url(#a)"/>
+  <text class="lbl" x="767" y="68" text-anchor="middle">links</text>
+  <path class="deny" d="M1016 76H1090" marker-end="url(#x)"/>
+  <text class="lbl" x="1053" y="68" text-anchor="middle">no link</text>
+
+  <rect class="key" x="242" y="216" width="774" height="64" rx="12"/>
+  <text class="h" x="262" y="242">Audit verify</text>
+  <text class="s" x="262" y="263">reads rows in ID order, skips rows with an empty hash</text>
+  <path class="f" d="M347 216V112" marker-end="url(#a)"/>
+  <text class="lbl" x="357" y="170">reads</text>
+  <path class="f" d="M629 216V112" marker-end="url(#a)"/>
+  <text class="lbl" x="639" y="170">reads</text>
+  <path class="f" d="M911 216V112" marker-end="url(#a)"/>
+  <text class="lbl" x="921" y="170">reads</text>
+
+  <text class="cap" x="40" y="322">Row hash: SHA-256 of previous hash, category, task, workload, action, outcome, detail and created at, joined with |.</text>
+  <text class="cap" x="40" y="344">Verify recomputes each hash from those fields and checks that each prev_hash equals the hash before it.</text>
+</svg>
