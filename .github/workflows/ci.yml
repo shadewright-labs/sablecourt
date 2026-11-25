@@ -60,6 +60,9 @@ jobs:
 
       - name: Static security analysis (gosec)
         uses: securego/gosec@master
+        env:
+          # The action's image can lag the Go version in go.mod; let it fetch the right toolchain.
+          GOTOOLCHAIN: auto
         with:
           args: -exclude=G104,G304,G204 ./...
 
