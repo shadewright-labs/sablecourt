@@ -160,8 +160,8 @@ type resultLinkFailure struct {
 
 var errResultLink = errors.New("injected link failure")
 
-func (s resultLinkFailure) RecordCouncilAnswer(context.Context, domain.ConclaveMessage, bool) (int64, string, error) {
-	return 0, "", errResultLink
+func (s resultLinkFailure) AppendConclaveMessage(context.Context, domain.ConclaveMessage) (int64, error) {
+	return 0, errResultLink
 }
 
 func TestCouncilResultRecovery(t *testing.T) {

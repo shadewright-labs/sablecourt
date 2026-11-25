@@ -157,8 +157,8 @@ func AppendConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessag
 }
 
 // AppendReservedCouncilAnswer uses the same room lock and Wards as other posts.
-func AppendReservedCouncilAnswer(ctx context.Context, st Store, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
-	id, reason, _, err := runConclavePost(ctx, st, msg, &conclavePost{answerVote: &vote})
+func AppendReservedCouncilAnswer(ctx context.Context, st Store, msg domain.ConclaveMessage, vote bool, limits ConclaveLimits) (int64, string, error) {
+	id, reason, _, err := runConclavePost(ctx, st, msg, &conclavePost{answerVote: &vote, limits: limits})
 	return id, reason, err
 }
 
@@ -543,10 +543,8 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 	if (room.policy != nil) != (a.Round > 0) {
 		return errors.New("turn does not match room mode")
 	}
-	if room.policy == nil {
-		if err := checkTurnKey(ctx, tx, turn.key); err != nil {
-			return err
-		}
+	if err := checkTurnKey(ctx, tx, turn.key); err != nil {
+		return err
 	}
 	switch room.State {
 	case domain.ConclaveStateActive:
@@ -599,9 +597,6 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 		return refuseTurn(ctx, tx, room, ConclaveMaxRunsWard, now, ErrConclaveRunLimit)
 	}
 	if room.policy != nil {
-		if err := checkTurnKey(ctx, tx, turn.key); err != nil {
-			return err
-		}
 		if err := reserveCouncilAttempt(ctx, tx, room, task, a); err != nil {
 			return err
 		}

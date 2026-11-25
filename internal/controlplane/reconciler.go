@@ -548,12 +548,32 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 	return r.submitTask(ctx, step.Workload, "", string(raw), "", &workflowStepRecord{Workflow: workflowName})
 }
 
+// CouncilRetryReady checks for unfinished cleanup, including handles and leases
+// left by the previous daemon. Recover owns the cleanup itself.
+func (r *Reconciler) CouncilRetryReady(ctx context.Context, id string) (bool, error) {
+	r.mu.Lock()
+	_, attached := r.handles[id]
+	busy := attached || r.launching[id] != nil || r.recovering[id] || r.stopping[id] != nil
+	r.mu.Unlock()
+	if busy {
+		return false, nil
+	}
+	pending, err := r.store.ListReconcileTasks(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	return !slices.ContainsFunc(pending, func(task domain.Task) bool { return task.ID == id }), nil
+}
+
 // RetryTaskWithHandoff retries a task, optionally attaching a standardized failure-handoff.md
 // containing redacted artifacts, lifecycle events, and failure context.
 func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string, withHandoff bool, reason string) (domain.Task, error) {
 	orig, err := r.store.GetTask(ctx, origTaskID)
 	if err != nil {
 		return domain.Task{}, err
+	}
+	if a, ok := store.TaskConclaveAssignment(orig); ok && a.Round > 0 {
+		return domain.Task{}, fmt.Errorf("%w: council retries require a planned reservation", store.ErrConflict)
 	}
 	if !terminalTaskState(orig.State) {
 		return domain.Task{}, fmt.Errorf("%w: retry requires a terminal task", store.ErrConflict)
@@ -878,12 +898,19 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	if !hasHandle || adapter == nil {
 		return false, r.failLostTask(ctx, task, `{"reason":"handle_missing"}`)
 	}
+	assignment, assigned := store.TaskConclaveAssignment(task)
+	council := assigned && assignment.Round > 0
 	stale, err := r.staleWithoutExit(ctx, task, adapter, handle)
 	if err != nil {
 		return true, err
 	}
 	if stale {
-		return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
+		if !council {
+			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
+		}
+		if err := r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID); err != nil {
+			return true, err
+		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 	obs, observeErr := adapter.Observe(callCtx, handle)
@@ -913,6 +940,15 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		}
 	}
 	if reason != "" {
+		if council {
+			// Keep the reservation until the runtime supplies a definite observation.
+			cleanupCtx := context.WithoutCancel(ctx)
+			err := r.store.RevokeTaskLeases(cleanupCtx, task.ID)
+			if failures == 0 {
+				err = errors.Join(err, r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, reason, `{"consecutive_failures":1}`))
+			}
+			return true, err
+		}
 		if r.isTaskStale(task, r.now()) {
 			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 		}
@@ -922,6 +958,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		}
 		// Failed observations never refresh the last known heartbeat.
 		return true, r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, reason, facts)
+	}
+	if stale && (obs.State == scruntime.StateRunning || obs.State == scruntime.StateSuspended) {
+		return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 	}
 	if failures > 0 {
 		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, task.State, "observation_recovered", `{}`); err != nil {
@@ -939,7 +978,7 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	}
 	switch obs.State {
 	case scruntime.StateCompleted, scruntime.StateFailed:
-		if err := r.persistArtifacts(ctx, task.ID, adapter, handle); err != nil {
+		if err := r.persistArtifacts(ctx, task.ID, adapter, handle, council); err != nil {
 			return true, errors.Join(err, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 		}
 		target := domain.TaskStateCompleted
@@ -1012,6 +1051,31 @@ func (r *Reconciler) claimLaunch(taskID string) bool {
 	return true
 }
 
+// A coding council may use the adapter's existing read-only commit checkout.
+// Live trees and persistent writers require their own confined launch support.
+func (r *Reconciler) launchCheckout(ctx context.Context, task domain.Task, wl domain.Workload, assignment store.ConclaveAssignment) (string, bool, error) {
+	if assignment.Round == 0 {
+		return r.workflowCheckout(ctx, task, wl)
+	}
+	cs, err := store.Councils(r.store)
+	if err != nil {
+		return "", false, err
+	}
+	s, err := cs.CouncilSnapshot(ctx, assignment.ConclaveID)
+	if err != nil {
+		return "", false, err
+	}
+	c := s.Checkout
+	if wl.Spec.Coding == nil && c == (store.CouncilCheckout{}) {
+		return "", false, nil
+	}
+	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil || c.Commit == "" || c.WriterRole != "" ||
+		(c.Source != "" && c.Source != wl.Spec.Coding.RepoPath) {
+		return "", false, errors.New("council checkout isolation unavailable")
+	}
+	return c.Commit, true, nil
+}
+
 func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
 	claimed := false
 	startFailed := false
@@ -1057,7 +1121,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	claimed = true
 	task.State = domain.TaskStateWorking
 
-	commit, readOnly, err := r.workflowCheckout(ctx, task, wl)
+	commit, readOnly, err := r.launchCheckout(ctx, task, wl, assignment)
 	if err != nil {
 		return err
 	}
@@ -1069,7 +1133,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if err != nil {
 		return err
 	}
-	if readOnly {
+	if readOnly && assignment.Round == 0 {
 		var payload struct {
 			Packet string `json:"context_packet"`
 		}
@@ -1425,7 +1489,7 @@ func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task,
 	return nil
 }
 
-func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) error {
+func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle, council bool) error {
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 	arts, err := adapter.CollectArtifacts(callCtx, handle)
 	if callCtx.Err() != nil {
@@ -1442,6 +1506,9 @@ func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapte
 	for i, artifact := range arts {
 		if artifact.Name == "final-message" && len(artifact.Text) > maxFinalMessage {
 			artifact.Text = ""
+		}
+		if council {
+			artifact.Text = store.RedactCouncilAnswer(artifact.Text)
 		}
 		clean[i] = scruntime.Artifact{
 			Name:        redact.String(artifact.Name),
