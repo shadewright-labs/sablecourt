@@ -38,12 +38,13 @@ type Options struct {
 }
 
 type Broker struct {
-	store      store.Store
-	reconciler *controlplane.Reconciler
-	getBundle  func() *config.Bundle
-	notifier   *notify.Notifier
-	now        func() time.Time
-	councilMu  sync.Mutex
+	store           store.Store
+	reconciler      *controlplane.Reconciler
+	getBundle       func() *config.Bundle
+	notifier        *notify.Notifier
+	now             func() time.Time
+	councilMu       sync.Mutex
+	councilStopping map[string]bool
 }
 
 func NewBroker(opts Options) *Broker {

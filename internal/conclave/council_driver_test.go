@@ -855,3 +855,218 @@ func TestCouncilDriverStaleReservationAtCap(t *testing.T) {
 		})
 	}
 }
+
+func TestCouncilDriverSlowStopDoesNotBlockOtherCouncil(t *testing.T) {
+	ctx := t.Context()
+	f := driverRoom(t, false, 6, 6)
+	baseSpec := f.snapshot(t, 0)
+	durSlow := 5 * time.Minute
+	durFast := 10 * time.Minute
+	// Create a second council with a later deadline.
+	specFast := store.CouncilSpec{
+		Question: baseSpec.Question,
+		Members:  baseSpec.Members,
+		Duration: &durFast,
+	}
+	if err := f.CreateCouncil(ctx, domain.ConclaveSession{ID: "room-fast", State: domain.ConclaveStateActive, TemplateName: "council", CreatedAt: f.clock}, specFast); err != nil {
+		t.Fatal(err)
+	}
+	specSlow := store.CouncilSpec{
+		Question: baseSpec.Question,
+		Members:  baseSpec.Members,
+		Duration: &durSlow,
+	}
+	if err := f.CreateCouncil(ctx, domain.ConclaveSession{ID: "room-slow", State: domain.ConclaveStateActive, TemplateName: "council", CreatedAt: f.clock}, specSlow); err != nil {
+		t.Fatal(err)
+	}
+	// Close the default "room" so only room-slow and room-fast are active.
+	if _, err := f.CouncilStore.CloseCouncil(ctx, "room", domain.ConclaveStateCancelled, "setup"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start round 1 attempts for both councils.
+	f.pass(t)
+	waitHeartbeats := func(id string) store.CouncilSnapshot {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if err := f.rec.ReconcileOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			s, err := f.CouncilSnapshot(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready := 0
+			for _, a := range s.Attempts {
+				task, err := f.GetTask(ctx, a.TaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if task.LastHeartbeatAt != nil {
+					ready++
+				}
+			}
+			if len(s.Attempts) == 3 && ready == 3 {
+				return s
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s launched %d/3", id, ready)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	slowSnap := waitHeartbeats("room-slow")
+	fastSnap := waitHeartbeats("room-fast")
+
+	slowTasks := map[string]bool{}
+	for _, a := range slowSnap.Attempts {
+		slowTasks[a.TaskID] = true
+	}
+	slowStarted := make(chan struct{})
+	var startOnce sync.Once
+	releaseSlow := make(chan struct{})
+	f.stub.stop = func(h rt.Handle) error {
+		if slowTasks[h.ExternalID] {
+			startOnce.Do(func() { close(slowStarted) })
+			<-releaseSlow
+		}
+		return nil
+	}
+
+	var clockMu sync.Mutex
+	curClock := slowSnap.Deadline
+	f.Broker.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return curClock
+	}
+
+	slowDone := make(chan error, 1)
+	go func() {
+		slowDone <- f.ReconcileCouncils(ctx, true)
+	}()
+	defer func() {
+		close(releaseSlow)
+		if err := <-slowDone; err != nil {
+			t.Errorf("slow reconcile: %v", err)
+		}
+	}()
+
+	select {
+	case <-slowStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("room-slow stop never started")
+	}
+
+	// While room-slow is blocked in Stop, advance clock past room-fast's deadline
+	// and reconcile again. room-fast must close and cancel its tasks promptly.
+	clockMu.Lock()
+	curClock = fastSnap.Deadline
+	clockMu.Unlock()
+
+	fastDone := make(chan error, 1)
+	go func() {
+		fastDone <- f.ReconcileCouncils(ctx, true)
+	}()
+
+	select {
+	case err := <-fastDone:
+		if err != nil {
+			t.Fatalf("fast reconcile returned error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("slow stop in room-slow blocked deadline handling for unrelated room-fast")
+	}
+
+	gotFast, err := f.CouncilSnapshot(ctx, "room-fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !councilClosed(&gotFast) || gotFast.Session.WardReason != "deadline" {
+		t.Fatalf("room-fast state = %s reason = %q, want cancelled/deadline", gotFast.Session.State, gotFast.Session.WardReason)
+	}
+	for _, a := range gotFast.Attempts {
+		if a.State != domain.TaskStateCancelled {
+			t.Fatalf("room-fast task %s state = %s, want cancelled", a.TaskID, a.State)
+		}
+	}
+}
+
+type cleanupCouncilStub struct {
+	*councilStub
+	mu        sync.Mutex
+	cleanups  []string
+	failFirst bool
+}
+
+func (s *cleanupCouncilStub) CleanupCouncil(_ context.Context, conclaveID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanups = append(s.cleanups, conclaveID)
+	if s.failFirst {
+		s.failFirst = false
+		return errors.New("transient cleanup failure")
+	}
+	return nil
+}
+
+func TestCouncilDriverCallsRetryableCleanupCouncil(t *testing.T) {
+	ctx := t.Context()
+	commit := strings.Repeat("a", 40)
+	f := driverRoomWithCheckout(t, false, 6, 6, store.CouncilCheckout{Source: "project", Ref: "main", Commit: commit})
+	w := f.bundle.Workloads["worker"]
+	w.Spec.Class = domain.ClassCodingAgent
+	w.Spec.Coding = &domain.CodingConfig{RepoPath: "project"}
+	f.bundle.Workloads["worker"] = w
+	cleaner := &cleanupCouncilStub{councilStub: f.stub, failFirst: true}
+	f.rec = controlplane.NewReconciler(controlplane.Options{
+		Store:    f.Store,
+		Bundle:   f.bundle,
+		Adapters: map[domain.WorkloadClass]rt.Adapter{domain.ClassCodingAgent: cleaner},
+	})
+	f.Broker = NewBroker(Options{
+		Store:      f.Store,
+		Reconciler: f.rec,
+		GetBundle:  func() *config.Bundle { return f.bundle },
+		Now:        func() time.Time { return f.clock },
+	})
+
+	f.pass(t)
+	f.launch(t, 3)
+	s := f.snapshot(t, 3)
+	f.clock = s.Deadline
+
+	// First pass closes, cancels attempts, and tries CleanupCouncil (which fails transiently).
+	if err := f.ReconcileCouncils(ctx, true); err == nil {
+		t.Fatal("expected first CleanupCouncil failure to be surfaced")
+	}
+	cleaner.mu.Lock()
+	callsAfterFirst := len(cleaner.cleanups)
+	cleaner.mu.Unlock()
+	if callsAfterFirst != 1 {
+		t.Fatalf("CleanupCouncil calls after first pass = %d, want 1", callsAfterFirst)
+	}
+
+	// Council must remain scheduled for retryable cleanup until CleanupCouncil succeeds.
+	ids, err := f.ListReconcileCouncils(ctx)
+	if err != nil || !slices.Contains(ids, "room") {
+		t.Fatalf("ListReconcileCouncils after failed cleanup = %v, err=%v; want room retained for retry", ids, err)
+	}
+
+	// Second pass retries CleanupCouncil and succeeds.
+	if err := f.ReconcileCouncils(ctx, true); err != nil {
+		t.Fatalf("second ReconcileCouncils: %v", err)
+	}
+	cleaner.mu.Lock()
+	callsAfterSecond := len(cleaner.cleanups)
+	cleaner.mu.Unlock()
+	if callsAfterSecond != 2 {
+		t.Fatalf("CleanupCouncil calls after retry = %d, want 2", callsAfterSecond)
+	}
+
+	ids, err = f.ListReconcileCouncils(ctx)
+	if err != nil || slices.Contains(ids, "room") {
+		t.Fatalf("ListReconcileCouncils after successful cleanup = %v, err=%v; want room removed", ids, err)
+	}
+}

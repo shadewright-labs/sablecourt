@@ -376,6 +376,10 @@ func validateConclave(name string, cc domain.Conclave, bundle *Bundle) error {
 }
 
 func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
+	switch name {
+	case "claude", "codex", "agy":
+		return fmt.Errorf("workload %q: name is reserved for the built-in council panel", name)
+	}
 	if w.Metadata.Zone != domain.ZoneRuntime && w.Metadata.Zone != domain.ZoneSandbox {
 		return fmt.Errorf("workload %q: metadata.zone must be %q or %q (got %q)", name, domain.ZoneRuntime, domain.ZoneSandbox, w.Metadata.Zone)
 	}

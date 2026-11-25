@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +19,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 const (
-	defaultCouncilRounds    = 2
-	maxCouncilQuestionBytes = 64 << 10
-	defaultCouncilPollEvery = 500 * time.Millisecond
+	defaultCouncilRounds         = 2
+	maxCouncilQuestionBytes      = 30 << 10
+	maxCouncilEncodedPacketBytes = contextpack.MaxCouncilOpeningEncodedPacketBytes
+	defaultCouncilPollEvery      = 500 * time.Millisecond
 )
 
 var defaultCouncilHarnesses = []string{"claude", "codex", "agy"}
@@ -300,7 +303,22 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 }
 
 func postCouncilOpen(ctx context.Context, cli *http.Client, base string, payload map[string]any) ([]byte, error) {
-	raw, err := fetchPOSTContext(ctx, cli, base+"/api/v1/councils", payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/councils", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "ccl_req_"+rand.Text())
+	resp, err := cli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := readBoundedHTTPResponse(resp)
 	if err != nil {
 		var statusErr *httpStatusError
 		if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusMethodNotAllowed) {
@@ -357,17 +375,23 @@ func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, 
 		return "", err
 	}
 	type result struct {
-		line string
-		err  error
+		line      string
+		exhausted bool
+		err       error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		limited := io.LimitReader(r, maxBytes+1)
-		line, err := bufio.NewReader(limited).ReadString('\n')
-		ch <- result{line: line, err: err}
+		// Allow up to maxBytes plus a CRLF terminator plus one sentinel byte so
+		// hitting the reader limit before '\n' is detected before trimming.
+		lr := &io.LimitedReader{R: r, N: maxBytes + 3}
+		line, err := bufio.NewReader(lr).ReadString('\n')
+		ch <- result{line: line, exhausted: errors.Is(err, io.EOF) && lr.N == 0, err: err}
 	}()
 	select {
 	case res := <-ch:
+		if res.exhausted {
+			return "", fmt.Errorf("question exceeds %d KiB", maxBytes>>10)
+		}
 		if res.err != nil && !errors.Is(res.err, io.EOF) {
 			return "", res.err
 		}
@@ -381,7 +405,7 @@ func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, 
 }
 
 func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, harnesses []string, sequential bool) map[string]any {
-	redactedQuestion := redact.String(question)
+	redactedQuestion := store.RedactCouncilAnswer(question)
 	payload := map[string]any{
 		"title":      singleLineSummary(redactedQuestion, 120),
 		"decree":     redactedQuestion,
@@ -546,15 +570,32 @@ func findDigestRelic(relics []domain.ConclaveRelic) (domain.ConclaveRelic, bool)
 }
 
 func validateCouncilQuestion(raw string) (string, error) {
+	if strings.ContainsRune(raw, '\x00') {
+		return "", errors.New("question contains invalid NUL byte")
+	}
+	trimmedLine := raw
+	if strings.HasSuffix(trimmedLine, "\n") {
+		trimmedLine = strings.TrimSuffix(trimmedLine, "\n")
+		trimmedLine = strings.TrimSuffix(trimmedLine, "\r")
+	}
+	if len(trimmedLine) > maxCouncilQuestionBytes {
+		return "", errors.New("question exceeds 30 KiB")
+	}
 	q := strings.TrimSpace(raw)
 	if q == "" {
 		return "", errors.New("question is required")
 	}
-	if len(q) > maxCouncilQuestionBytes {
-		return "", errors.New("question exceeds 64 KiB")
+	redacted := store.RedactCouncilAnswer(q)
+	if len(redacted) > maxCouncilQuestionBytes {
+		return "", errors.New("question exceeds 30 KiB after redaction")
 	}
-	if strings.ContainsRune(q, '\x00') {
-		return "", errors.New("question contains invalid NUL byte")
+	packet, err := contextpack.AssembleCouncil("", redacted, nil, nil)
+	if err != nil {
+		return "", errors.New("question cannot be packed")
+	}
+	encoded, err := json.Marshal(packet.Markdown)
+	if err != nil || len(encoded) > maxCouncilEncodedPacketBytes {
+		return "", errors.New("question exceeds launch input budget")
 	}
 	return q, nil
 }
@@ -597,8 +638,8 @@ func parseCouncilHarnesses(raw string) ([]string, error) {
 }
 
 func validateCouncilHarnessSlice(parts []string) ([]string, error) {
-	if len(parts) == 0 {
-		return nil, errors.New("at least one harness is required")
+	if len(parts) != len(defaultCouncilHarnesses) {
+		return nil, errors.New("council panel requires claude, codex, and agy")
 	}
 	seen := make(map[string]bool, len(parts))
 	out := make([]string, 0, len(parts))

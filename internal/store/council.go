@@ -17,11 +17,13 @@ import (
 // CouncilStore is an optional capability. Callers must acquire it before opening a council.
 type CouncilStore interface {
 	CreateCouncil(context.Context, domain.ConclaveSession, CouncilSpec) error
+	CouncilByIdempotencyKey(context.Context, string) (domain.ConclaveSession, string, error)
 	ListReconcileCouncils(context.Context) ([]string, error)
 	CouncilSnapshot(context.Context, string) (CouncilSnapshot, error)
 	AcceptCouncilAnswer(context.Context, string, int64, bool) error
 	RecordCouncilAnswer(context.Context, domain.ConclaveMessage, bool) (int64, string, error)
 	CloseCouncil(context.Context, string, domain.ConclaveState, string) (domain.ConclaveRelic, error)
+	MarkCouncilCleanedUp(context.Context, string) error
 	PutCouncilRelic(context.Context, string, domain.ConclaveRelic) error
 }
 
@@ -43,6 +45,8 @@ type CouncilMember struct {
 // Source identifies the daemon-selected checkout. An empty ref and commit select the working tree.
 type CouncilCheckout struct {
 	Source, Ref, Commit, WriterRole string
+	SourceDev                       uint64 `json:",omitempty"`
+	SourceIno                       uint64 `json:",omitempty"`
 }
 
 type CouncilSpec struct {
@@ -54,6 +58,8 @@ type CouncilSpec struct {
 	Duration             *time.Duration
 	Wards                domain.ConclaveWards
 	Budget               *domain.PerTaskBudget
+	IdempotencyKey       string
+	RequestSHA256        string
 }
 
 type CouncilPolicy struct {
@@ -90,10 +96,11 @@ type CouncilAttempt struct {
 
 type CouncilSnapshot struct {
 	CouncilPolicy
-	Session  domain.ConclaveSession
-	Decrees  []domain.ConclaveMessage
-	Turns    []CouncilTurn
-	Attempts []CouncilAttempt
+	Session        domain.ConclaveSession
+	Decrees        []domain.ConclaveMessage
+	Turns          []CouncilTurn
+	Attempts       []CouncilAttempt
+	CleanupPending bool
 }
 
 // CouncilPolicyReader loads the pinned policy in the transaction holding the room lock.
