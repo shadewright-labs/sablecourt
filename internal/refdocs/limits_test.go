@@ -349,14 +349,34 @@ func documentedLimits(t *testing.T, page string) []limitRow {
 	return rows
 }
 
-// TestLimitsReferenceMatchesConstants resolves the constant named in every
-// row of docs/reference/limits.md and compares it with the Value column:
+// TestLimitsReferenceMatchesConstants checks that docs/reference/limits.md
+// has exactly one row for each constant in limitConstants, resolves the
+// constant named in every row and compares it with the Value column:
 // the number, and the unit (a time unit needs a time.Duration constant, a
 // size unit or no unit needs a plain number).
 func TestLimitsReferenceMatchesConstants(t *testing.T) {
 	rows := documentedLimits(t, filepath.Join(repoRoot, "docs", "reference", "limits.md"))
 	if len(rows) < 30 {
 		t.Fatalf("only %d limit rows parsed", len(rows))
+	}
+	onPage := map[string]int{}
+	for _, row := range rows {
+		onPage[row.constantRef]++
+	}
+	declared := map[string]bool{}
+	for _, c := range limitConstants {
+		declared[c] = true
+		if onPage[c] == 0 {
+			t.Errorf("limits.md has no row for %s", c)
+		}
+	}
+	for c, n := range onPage {
+		if n > 1 {
+			t.Errorf("limits.md lists %s %d times", c, n)
+		}
+		if !declared[c] {
+			t.Errorf("limits.md lists %s, which is not in limitConstants", c)
+		}
 	}
 	e := newEvaluator()
 	for _, row := range rows {
