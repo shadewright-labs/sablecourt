@@ -183,6 +183,9 @@ func (b *Broker) cancelOpeningTurns(ctx context.Context, roomID string) error {
 
 // ActivateAlwaysOn reserves the opening turns of a room created by an integration.
 func (b *Broker) ActivateAlwaysOn(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, prompt string) error {
+	if snap, err := b.council(ctx, session.ID); err != nil || snap != nil {
+		return err
+	}
 	return b.activateAlwaysOn(ctx, session, tpl, redact.String(prompt), b.limits(b.bundle(), tpl, true))
 }
 
@@ -218,6 +221,27 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 	toRole = strings.TrimPrefix(strings.TrimSpace(toRole), "@")
 	if toRole == "" {
 		toRole = "all"
+	}
+	snap, err := b.council(ctx, session.ID)
+	if err != nil {
+		return domain.ConclaveMessage{}, err
+	}
+	if snap != nil {
+		if hasTpl && fromRole != "operator" {
+			if err := checkVassalCanMessage(tpl, fromRole, toRole); err != nil {
+				return domain.ConclaveMessage{}, err
+			}
+		}
+		if !store.ValidCouncilText(body) {
+			return domain.ConclaveMessage{}, errors.New("invalid council message")
+		}
+		body = store.RedactCouncilAnswer(body)
+		tpl.Spec.Vassals = nil
+		for _, member := range snap.Members {
+			tpl.Spec.Vassals = append(tpl.Spec.Vassals, member.Vassal)
+		}
+		msg, _, err := b.persistPost(ctx, session, tpl, true, b.councilLimits(bundle, session), fromRole, toRole, kind, body, taskID, false)
+		return msg, err
 	}
 	var targets []domain.ConclaveVassal
 	if hasTpl && b.reconciler != nil {
@@ -372,6 +396,7 @@ func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession,
 
 type turnInput struct {
 	store.ConclaveAssignment
+	Packet   string `json:"context_packet,omitempty"`
 	Title    string `json:"title,omitempty"`
 	FromRole string `json:"fromRole,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
@@ -393,7 +418,7 @@ func (b *Broker) submitTurn(ctx context.Context, v domain.ConclaveVassal, input 
 		return b.reconciler.SubmitTask(ctx, v.Workload, key, string(raw))
 	})
 	if errors.Is(err, store.ErrConclaveRunLimit) {
-		if session, getErr := b.store.GetConclave(ctx, input.ConclaveID); getErr == nil {
+		if session, getErr := b.store.GetConclave(ctx, input.ConclaveID); getErr == nil && session.State == domain.ConclaveStateInputRequired && session.WardReason == store.ConclaveMaxRunsWard {
 			b.recordWard(ctx, session, "", store.ConclaveMaxRunsWard)
 		}
 	}
@@ -404,6 +429,9 @@ func (b *Broker) submitTurn(ctx context.Context, v domain.ConclaveVassal, input 
 func (b *Broker) WakeMentions(ctx context.Context, tpl domain.Conclave, msg domain.ConclaveMessage) error {
 	if b.reconciler == nil {
 		return nil
+	}
+	if snap, err := b.council(ctx, msg.ConclaveID); err != nil || snap != nil {
+		return err
 	}
 	err := b.wakeMentions(ctx, mentionTargets(tpl, msg.FromRole, msg.ToRole), msg, b.limits(b.bundle(), tpl, true))
 	if errors.Is(err, store.ErrConclaveRunLimit) || errors.Is(err, ErrConclavePaused) || errors.Is(err, ErrConclaveClosed) {
@@ -501,7 +529,22 @@ func (b *Broker) Close(ctx context.Context, conclaveID string, state domain.Conc
 	if state != domain.ConclaveStateCompleted && state != domain.ConclaveStateCancelled {
 		state = domain.ConclaveStateCompleted
 	}
-	if err := b.store.UpdateConclaveState(ctx, conclaveID, state, ""); err != nil {
+	snap, err := b.council(ctx, conclaveID)
+	if err != nil {
+		return err
+	}
+	if snap != nil {
+		if _, err := b.collectCouncil(ctx, snap, true); err != nil {
+			return err
+		}
+		reason := "owner_close"
+		if state == domain.ConclaveStateCancelled {
+			reason = "owner_stop"
+		}
+		if err := b.finishCouncil(ctx, conclaveID, reason); err != nil {
+			return err
+		}
+	} else if err := b.store.UpdateConclaveState(ctx, conclaveID, state, ""); err != nil {
 		return err
 	}
 	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
