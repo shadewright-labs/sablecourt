@@ -2,7 +2,7 @@ FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad
 
 # A dated package index keeps rebuilds independent of Debian mirror changes.
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
-    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20250224T000000Z/ bookworm main\n' > /etc/apt/sources.list \
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261123T000000Z/ bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261123T000000Z/ bookworm-updates main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261123T000000Z/ bookworm-security main\n' > /etc/apt/sources.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl git gzip libstdc++6 tar xz-utils \
     && rm -rf /var/lib/apt/lists/* \
@@ -34,12 +34,13 @@ RUN test "$(codex --version)" = 'codex-cli 0.172.0'
 CMD ["codex", "--version"]
 
 FROM base AS agy
-RUN curl -fsSL https://antigravity.google/cli/install.sh -o /scratch/install.sh \
-    && HOME=/root bash /scratch/install.sh --version 1.5.16 --dir /usr/local/bin \
-    && chmod 0755 /usr/local/bin/agy \
-    && rm -rf /root/.cache/antigravity /scratch/install.sh
+RUN curl -fsSL https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-arm/cli_linux_arm64.tar.gz -o /scratch/agy.tar.gz \
+    && echo 'e4f086d0730b325cfd438ea90396ee78eb23a3110ef7f792824c8817b8d0432462b7b5f91b3d933fc1932a6f4ba73de505e2e96f44448c9fb2427292ead716f7  /scratch/agy.tar.gz' | sha512sum -c - \
+    && tar -xzf /scratch/agy.tar.gz -C /scratch antigravity \
+    && install -m 0755 /scratch/antigravity /usr/local/bin/agy \
+    && rm -f /scratch/agy.tar.gz /scratch/antigravity
 USER 10001:10001
-RUN test "$(agy --version)" = '1.5.16'
+RUN test "$(agy --version)" = '1.5.17'
 CMD ["agy", "--version"]
 
 FROM base AS proxy

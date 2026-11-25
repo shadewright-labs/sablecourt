@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 )
 
 func TestCodingAdapterWiresPersistentState(t *testing.T) {
@@ -95,5 +98,44 @@ func TestRegisterCodingAdapter(t *testing.T) {
 				t.Fatalf("log = %q, want substring %q", logBuf.String(), tc.wantLog)
 			}
 		})
+	}
+}
+
+type fakeWiringEngine struct {
+	docker.EngineClient
+}
+
+func TestWireCouncilContainers(t *testing.T) {
+	state := t.TempDir()
+	hub := attach.NewHub()
+	da := docker.NewAdapter(fakeWiringEngine{}, "")
+	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
+
+	// Even when host sandbox is unavailable, Sanctum registers coding adapter for container councils.
+	wireCouncilContainers(context.Background(), adapters, false, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, "127.0.0.1:7432", nil)
+
+	ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
+	if !ok || ca == nil {
+		t.Fatalf("expected *coding.Adapter registered, got %T", adapters[domain.ClassCodingAgent])
+	}
+	if !ca.SupportsCouncilContainers() || ca.CouncilRunner != da || ca.CouncilProxy != da || ca.CouncilProxyImage != harnessimages.ProxyImage() || ca.DaemonListen != "127.0.0.1:7432" {
+		t.Fatalf("unexpected council container wiring: runner=%v proxy=%v img=%q listen=%q", ca.CouncilRunner == da, ca.CouncilProxy == da, ca.CouncilProxyImage, ca.DaemonListen)
+	}
+	for _, role := range []string{"claude", "codex", "agy"} {
+		def, err := harnessimages.Lookup(role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := da.CouncilHarnesses[role]
+		if !ok || got.Image != def.Image || got.LoginVolume != def.Volume {
+			t.Fatalf("harness %s config = %+v, want image=%q volume=%q", role, got, def.Image, def.Volume)
+		}
+	}
+
+	// Citadel must not wire local council containers.
+	citadelAdapters := map[domain.WorkloadClass]scruntime.Adapter{}
+	wireCouncilContainers(context.Background(), citadelAdapters, true, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, "127.0.0.1:7432", nil)
+	if citadelAdapters[domain.ClassCodingAgent] != nil {
+		t.Fatal("citadel unexpectedly registered council coding adapter")
 	}
 }

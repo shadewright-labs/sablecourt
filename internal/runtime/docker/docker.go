@@ -102,6 +102,22 @@ func NewAdapter(cli EngineClient, networkName string) *Adapter {
 	}
 }
 
+// Ping checks whether the configured Docker engine is reachable.
+func (a *Adapter) Ping(ctx context.Context) error {
+	if a == nil || a.Client == nil {
+		return errors.New("Docker client unavailable")
+	}
+	type pinger interface {
+		Ping(context.Context, client.PingOptions) (client.PingResult, error)
+	}
+	p, ok := a.Client.(pinger)
+	if !ok {
+		return nil
+	}
+	_, err := p.Ping(ctx, client.PingOptions{})
+	return err
+}
+
 func (a *Adapter) EnsureInternalNetwork(ctx context.Context) error {
 	_, err := a.internalNetwork(ctx, true)
 	return err
@@ -113,13 +129,17 @@ func isMissing(err error) bool {
 
 // Council runs use the network already provisioned for their proxy.
 func (a *Adapter) internalNetwork(ctx context.Context, create bool) (string, error) {
+	return a.internalNetworkNamed(ctx, a.NetworkName, create)
+}
+
+func (a *Adapter) internalNetworkNamed(ctx context.Context, name string, create bool) (string, error) {
 	inspect := func() (string, error) {
-		r, err := a.Client.NetworkInspect(ctx, a.NetworkName, client.NetworkInspectOptions{})
+		r, err := a.Client.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 		if err != nil {
 			return "", err
 		}
 		n := r.Network
-		if n.ID == "" || n.Name != a.NetworkName || !n.Internal || n.Driver != "bridge" || n.Ingress || n.ConfigOnly {
+		if n.ID == "" || n.Name != name || !n.Internal || n.Driver != "bridge" || n.Ingress || n.ConfigOnly {
 			return "", errors.New("expected a named internal bridge network")
 		}
 		return n.ID, nil
@@ -128,7 +148,7 @@ func (a *Adapter) internalNetwork(ctx context.Context, create bool) (string, err
 	if !create || !isMissing(err) {
 		return id, err
 	}
-	_, createErr := a.Client.NetworkCreate(ctx, a.NetworkName, client.NetworkCreateOptions{
+	_, createErr := a.Client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge", Internal: true, Labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt"},
 	})
 	// A concurrent launcher may have created it. Validate the winner.
@@ -155,6 +175,15 @@ func (a *Adapter) localImage(ctx context.Context, ref string) (client.ImageInspe
 func (a *Adapter) EnsureImage(ctx context.Context, ref string) error {
 	_, err := a.localImage(ctx, ref)
 	return err
+}
+
+// ResolveLocalImage verifies ref exists locally and returns its immutable sha256 ID.
+func (a *Adapter) ResolveLocalImage(ctx context.Context, ref string) (string, error) {
+	img, err := a.localImage(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	return img.ID, nil
 }
 
 func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {

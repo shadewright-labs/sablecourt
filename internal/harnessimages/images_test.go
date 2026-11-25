@@ -71,7 +71,7 @@ func TestCatalog(t *testing.T) {
 	}{
 		{"claude", "2.1.332", []string{"claude", "auth", "login"}},
 		{"codex", "0.172.0", []string{"codex", "login", "--device-auth"}},
-		{"agy", "1.5.16", []string{"agy"}},
+		{"agy", "1.5.17", []string{"agy"}},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			d, err := Lookup(tc.role)

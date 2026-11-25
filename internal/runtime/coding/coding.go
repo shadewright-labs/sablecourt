@@ -12,26 +12,39 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 // Adapter runs local coding CLIs (claude or codex) inside dedicated Git worktrees
 // with stripped environment variables, detached process groups, and OS sandboxing.
 type Adapter struct {
-	WorktreeRoot    string // Directory for worktrees and their state.
-	DryRun          bool
-	AttachHub       *attach.Hub
-	BranchRetention time.Duration     // Prune merged branches after this age on the next start.
-	HarnessPaths    map[string]string // Absolute executable paths supplied by the operator.
-	WallTime        time.Duration     // Zero uses the default task limit.
+	WorktreeRoot      string // Directory for worktrees and their state.
+	DryRun            bool
+	AttachHub         *attach.Hub
+	BranchRetention   time.Duration     // Prune merged branches after this age on the next start.
+	HarnessPaths      map[string]string // Absolute executable paths supplied by the operator.
+	WallTime          time.Duration     // Zero uses the default task limit.
+	CouncilRunner     scruntime.CouncilRunner
+	CouncilProxy      councilproxy.Docker
+	CouncilProxyImage string
+	DaemonListen      string
+	CouncilLimits     scruntime.CouncilLimits
 
 	allowUnconfined bool // In-process fixture only.
 	setupTimeout    time.Duration
 	beforeTaskState func(taskID string) // Test hook invoked before writing task state.
 
-	mu      sync.Mutex
-	gates   map[string]*taskGate
-	running sync.Map // Worktree path to *codingProcess.
+	mu         sync.Mutex
+	gates      map[string]*taskGate
+	running    sync.Map // Worktree path to *codingProcess.
+	containers sync.Map // Task base path to *containerProcess.
+}
+
+// SupportsCouncilContainers reports whether the adapter is configured to launch
+// council turns inside hardened containers.
+func (a *Adapter) SupportsCouncilContainers() bool {
+	return a != nil && a.CouncilRunner != nil
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -76,7 +89,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, errors.New("coding wall time must be positive")
 	}
 	if !a.DryRun {
-		if err := a.validateSandbox(cfg.Sandbox, readOnly); err != nil {
+		if spec.CouncilContainer {
+			if err := a.validateCouncilContainerLaunch(spec, input); err != nil {
+				return scruntime.Handle{}, err
+			}
+		} else if err := a.validateSandbox(cfg.Sandbox, readOnly); err != nil {
 			return scruntime.Handle{}, err
 		}
 	}
@@ -152,6 +169,10 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			}
 		}
 		return handle, nil
+	}
+
+	if spec.CouncilContainer {
+		return a.startCouncilContainer(ctx, spec, input, dir, taskBase, state, readOnly, commitJournal)
 	}
 
 	if input.checkoutMode == "" && input.context != "" {
@@ -266,6 +287,9 @@ func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scrunti
 	defer release()
 	state, err := a.worktreeState(handle)
 	if err != nil {
+		if isContainerHandle(handle) && errors.Is(err, os.ErrNotExist) {
+			return a.observeOrphanContainer(ctx, handle)
+		}
 		return scruntime.Observation{}, err
 	}
 	taskBase, err := a.taskBase(handle.ExternalID)
@@ -273,7 +297,7 @@ func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scrunti
 		return scruntime.Observation{}, err
 	}
 	obs := scruntime.Observation{State: scruntime.StateRunning, ObservedAt: time.Now().UTC()}
-	ready, err := a.loadResult(taskBase, handle, state)
+	ready, err := a.loadResult(ctx, taskBase, handle, state)
 	if err != nil || !ready {
 		return obs, err
 	}
@@ -298,6 +322,13 @@ func (a *Adapter) Resume(_ context.Context, _ scruntime.Handle, _ scruntime.Chec
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
+	if isContainerHandle(handle) {
+		if taskBase, err := a.taskBase(handle.ExternalID); err == nil {
+			if err := a.stopInMemoryContainer(ctx, taskBase); err != nil {
+				return err
+			}
+		}
+	}
 	release, err := a.lockTask(ctx, handle.ExternalID, false)
 	if err != nil {
 		return err
@@ -305,11 +336,23 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	defer release()
 	state, err := a.worktreeState(handle)
 	if err != nil {
+		if isContainerHandle(handle) && errors.Is(err, os.ErrNotExist) {
+			return a.cleanupContainerResources(ctx, &containerIdentity{
+				ContainerName: handle.ContainerName,
+				CreateAttempt: handle.CreateAttempt,
+				ContainerID:   handle.ContainerID,
+				ProxyName:     handle.ProxyName,
+				NetworkName:   handle.NetworkName,
+			})
+		}
 		return err
 	}
 	taskBase, err := a.taskBase(handle.ExternalID)
 	if err != nil {
 		return err
+	}
+	if state.Container != nil || isContainerHandle(handle) {
+		return a.stopCouncilContainer(ctx, taskBase, handle, state)
 	}
 	if !state.FinishedAt.IsZero() {
 		return a.finishTask(ctx, taskBase, state)
@@ -326,7 +369,7 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 			}
 		}
 	}
-	ready, err := a.loadResult(taskBase, handle, state)
+	ready, err := a.loadResult(ctx, taskBase, handle, state)
 	if err != nil {
 		return err
 	}
@@ -351,7 +394,7 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 		return nil, err
 	}
 	if state.FinishedAt.IsZero() {
-		ready, err := a.loadResult(taskBase, handle, state)
+		ready, err := a.loadResult(ctx, taskBase, handle, state)
 		if err != nil {
 			return nil, err
 		}
@@ -368,7 +411,10 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
 }
 
-func (a *Adapter) loadResult(taskBase string, handle scruntime.Handle, state *worktreeState) (bool, error) {
+func (a *Adapter) loadResult(ctx context.Context, taskBase string, handle scruntime.Handle, state *worktreeState) (bool, error) {
+	if state.Container != nil {
+		return a.loadContainerResult(ctx, taskBase, handle, state)
+	}
 	if handle.PID == 0 {
 		return true, nil
 	}

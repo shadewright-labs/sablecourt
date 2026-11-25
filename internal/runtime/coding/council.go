@@ -327,7 +327,7 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				_ = f.Close()
 				return stErr
-			case st.Worker == nil:
+			case st.Worker == nil && st.Container == nil:
 				if _, runErr := os.Lstat(rec.TaskBase + ".run"); errors.Is(runErr, os.ErrNotExist) {
 					incomplete = true
 					_ = removeFile(rec.TaskBase + stateSuffix)
@@ -1351,6 +1351,12 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		}
 	}()
 
+	if state.Container != nil {
+		if err := a.cleanupContainerResources(ctx, state.Container); err != nil {
+			return err
+		}
+	}
+
 	checkoutDir := state.checkoutDir(taskBase)
 	justFinished := state.FinishedAt.IsZero()
 	failedWriter := state.Mode == checkoutModeWriter && !state.ReadOnly && state.Result != nil && state.Result.ExitCode != 0
@@ -1462,6 +1468,7 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		}
 	}
 	a.running.Delete(taskBase)
+	a.containers.Delete(taskBase)
 	if state.CleanupError != "" {
 		state.CleanupError = ""
 		return writeWorktreeState(taskBase, state)
