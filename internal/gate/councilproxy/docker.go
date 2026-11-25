@@ -106,9 +106,7 @@ type Session struct {
 	network  string
 	proxy    string
 	unixGate *unixGate
-	registry *Registry
-	gateAuth string
-	launchID string
+	tlsGate  *tlsGate
 	endpoint WorkloadEndpoint
 	evidence LaunchEvidence
 }
@@ -116,9 +114,9 @@ type Session struct {
 // Provision builds an isolated internal network and one hardened proxy per launch.
 // When a task lease is present, Provision probes whether a container can dial a
 // per-launch Unix socket on the host; when reachable it mounts that socket into the
-// proxy container only, and otherwise falls back to host-gateway with per-launch
-// preflight proof verification. A failed launch returns a session only if Docker
-// cleanup must be retried.
+// proxy container only, and when explicitly unsupported it serves a per-launch TLS 1.3
+// gate endpoint pinned by SPKI SHA-256. A failed launch returns a session only if
+// Docker cleanup must be retried.
 func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (*Session, error) {
 	if err := cfg.validateProvision(); err != nil {
 		return nil, err
@@ -133,16 +131,10 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		return nil, fmt.Errorf("generate council proxy name: %w", err)
 	}
 	name := "sablecourt-council-" + hex.EncodeToString(nonce[:])
-	gateAuth, _ := GateAuthority(cfg.DaemonListen)
-	reg := cfg.Registry
-	if reg == nil {
-		reg = DefaultRegistry
-	}
 
 	mode := GateModeNone
 	var ug *unixGate
-	var gateSecret [32]byte
-	var registeredLaunch string
+	var tg *tlsGate
 	if cfg.LeaseSHA256 != "" {
 		useUnix, err := probeUnixSocketMode(ctx, docker, imageID, name, cfg.SocketRoot)
 		if err != nil {
@@ -155,11 +147,10 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 			}
 			mode = GateModeUnixSocket
 		} else {
-			if _, err := rand.Read(gateSecret[:]); err != nil {
-				return nil, fmt.Errorf("generate council gate secret: %w", err)
+			tg, err = startTLSGate(cfg, DefaultGateLimits())
+			if err != nil {
+				return nil, err
 			}
-			reg.Register(gateAuth, name, gateSecret)
-			registeredLaunch = name
 			mode = GateModeHostGateway
 		}
 	}
@@ -168,9 +159,7 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		docker:   docker,
 		network:  name + "-net",
 		unixGate: ug,
-		registry: reg,
-		gateAuth: gateAuth,
-		launchID: registeredLaunch,
+		tlsGate:  tg,
 	}
 	netInfo, err := docker.CreateInternalNetwork(ctx, InternalNetworkSpec{
 		Name: s.network,
@@ -204,7 +193,7 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 	case GateModeHostGateway:
 		spec.HostGateway = DockerHostGateway
 		spec.HostGatewayTarget = defaultHostGatewayTarget
-		spec.Args = append(args, "-gate-launch-id", name, "-gate-secret", hex.EncodeToString(gateSecret[:]))
+		spec.Args = append(args, "-gate-tls-port", tg.port, "-gate-spki-sha256", tg.spkiSHA256)
 	default:
 		spec.Args = args
 	}
@@ -255,56 +244,56 @@ func (s *Session) rollback(ctx context.Context, launchErr error) (*Session, erro
 	return nil, launchErr
 }
 
-// Close tears down the per-launch Unix socket or preflight secret first so any
+// Close tears down the per-launch Unix socket or TLS gate endpoint first so any
 // surviving proxy immediately fails closed, then removes the proxy before its network.
 func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.endpoint = WorkloadEndpoint{}
 	s.evidence = LaunchEvidence{}
-	var sockErr error
+	var gateErr error
 	if s.unixGate != nil {
-		sockErr = s.unixGate.close()
+		gateErr = s.unixGate.close()
 		s.unixGate = nil
 	}
-	if s.launchID != "" && s.registry != nil {
-		s.registry.Unregister(s.gateAuth, s.launchID)
-		s.launchID = ""
+	if s.tlsGate != nil {
+		gateErr = errors.Join(gateErr, s.tlsGate.close())
+		s.tlsGate = nil
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	if s.proxy != "" {
 		if err := s.docker.RemoveProxy(ctx, s.proxy); err != nil {
-			return errors.Join(sockErr, fmt.Errorf("remove council proxy: %w", err))
+			return errors.Join(gateErr, fmt.Errorf("remove council proxy: %w", err))
 		}
 		s.proxy = ""
 	}
 	if s.network != "" {
 		if err := s.docker.RemoveInternalNetwork(ctx, s.network); err != nil {
-			return errors.Join(sockErr, fmt.Errorf("remove council network: %w", err))
+			return errors.Join(gateErr, fmt.Errorf("remove council network: %w", err))
 		}
 		s.network = ""
 	}
-	return sockErr
+	return gateErr
 }
 
 func validateIsolatedNetwork(info InternalNetworkInfo) error {
 	if !supportsIsolatedGateway(info.EngineVersion) {
-		return fmt.Errorf("docker engine %q does not support isolated internal network gateway mode (requires Docker Engine 27.1+)", strings.TrimSpace(info.EngineVersion))
+		return fmt.Errorf("docker engine %q does not support isolated internal network gateway mode (requires Docker Engine 28.0+)", strings.TrimSpace(info.EngineVersion))
 	}
 	if info.Driver != "bridge" || !info.Internal {
 		return errors.New("council network must be an internal bridge network")
 	}
 	if info.Options[BridgeGatewayModeIPv4] != GatewayModeIsolated ||
 		info.Options[BridgeGatewayModeIPv6] != GatewayModeIsolated {
-		return errors.New("docker engine did not apply isolated gateway mode on council internal network (requires Docker Engine 27.1+)")
+		return errors.New("docker engine did not apply isolated gateway mode on council internal network (requires Docker Engine 28.0+)")
 	}
 	if len(info.Subnets) == 0 {
 		return errors.New("council internal network has no isolated subnet")
 	}
 	for _, gw := range info.Gateways {
 		if strings.TrimSpace(gw) != "" {
-			return errors.New("docker engine assigned a gateway to an isolated council internal network (requires Docker Engine 27.1+)")
+			return errors.New("docker engine assigned a gateway to an isolated council internal network (requires Docker Engine 28.0+)")
 		}
 	}
 	return nil
@@ -323,7 +312,7 @@ func supportsIsolatedGateway(version string) bool {
 	if err != nil {
 		return false
 	}
-	return major > 27 || (major == 27 && minor >= 1)
+	return major >= 28 && minor >= 0
 }
 
 func parseVersionNumber(part string, exact bool) (int, error) {

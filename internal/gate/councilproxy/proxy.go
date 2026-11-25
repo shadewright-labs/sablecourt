@@ -3,11 +3,15 @@ package councilproxy
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -30,14 +34,14 @@ const (
 
 // Config comes from the daemon at launch. An empty digest permits provider login only.
 type Config struct {
-	Harness      string
-	DaemonListen string
-	LeaseSHA256  string
-	GateSocket   string
-	GateLaunchID string
-	GateSecret   string
-	SocketRoot   string
-	Registry     *Registry
+	Harness        string
+	DaemonListen   string
+	LeaseSHA256    string
+	GateSocket     string
+	GateTLSPort    string
+	GateSPKISHA256 string
+	SocketRoot     string
+	GateHandler    http.Handler
 }
 
 func validPort(port string) bool {
@@ -102,10 +106,83 @@ var providerHosts = map[string][]string{
 type lookupIP func(context.Context, string, string) ([]netip.Addr, error)
 type dialContext func(context.Context, string, string) (net.Conn, error)
 
-func newGateTransport() *http.Transport {
-	dialer := &net.Dialer{Timeout: dialTimeout}
+func verifyPinnedPeerCertificate(pinnedSPKI [sha256.Size]byte) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) != 1 {
+			return errors.New("gate TLS peer must present a single leaf certificate")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("parse gate TLS certificate: %w", err)
+		}
+		if cert.PublicKeyAlgorithm != x509.ECDSA {
+			return errors.New("gate TLS certificate must use an ECDSA key")
+		}
+		pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok || pub.Curve != elliptic.P256() {
+			return errors.New("gate TLS certificate must use P-256")
+		}
+		now := time.Now()
+		if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+			return errors.New("gate TLS certificate is outside its validity window")
+		}
+		if err := cert.VerifyHostname(Authority); err != nil {
+			return fmt.Errorf("gate TLS certificate authority mismatch: %w", err)
+		}
+		got := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		if subtle.ConstantTimeCompare(got[:], pinnedSPKI[:]) != 1 {
+			return errors.New("gate TLS certificate SPKI digest mismatch")
+		}
+		return nil
+	}
+}
+
+func newTLSGateTransport(pinnedSPKI [sha256.Size]byte, dial dialContext) *http.Transport {
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: dialTimeout}
+		dial = dialer.DialContext
+	}
+	verifyPeer := verifyPinnedPeerCertificate(pinnedSPKI)
+	tlsCfg := &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		MaxVersion:            tls.VersionTLS13,
+		ServerName:            Authority,
+		InsecureSkipVerify:    true, // #nosec G402 -- VerifyPeerCertificate enforces P-256, validity window, and constant-time SPKI SHA-256 pinning on every TLS 1.3 handshake.
+		ClientSessionCache:    nil,
+		VerifyPeerCertificate: verifyPeer,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if cs.Version != tls.VersionTLS13 || cs.DidResume || len(cs.PeerCertificates) != 1 {
+				return errors.New("gate TLS connection must complete a fresh TLS 1.3 certificate handshake")
+			}
+			got := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if subtle.ConstantTimeCompare(got[:], pinnedSPKI[:]) != 1 {
+				return errors.New("gate TLS connection SPKI digest mismatch")
+			}
+			return nil
+		},
+	}
 	return &http.Transport{
-		DialContext:           dialer.DialContext,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("plain TCP council gate connection refused")
+		},
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			rawConn, err := dial(dialCtx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if deadline, ok := dialCtx.Deadline(); ok {
+				_ = rawConn.SetDeadline(deadline)
+			}
+			tlsConn := tls.Client(rawConn, tlsCfg.Clone())
+			if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			_ = rawConn.SetDeadline(time.Time{})
+			return tlsConn, nil
+		},
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		MaxIdleConns:          8,
@@ -131,9 +208,6 @@ func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTri
 			p.SetURL(upstream)
 			p.Out.Host = gate
 			p.Out.Header.Del("Cookie")
-			p.Out.Header.Del(LaunchHeader)
-			p.Out.Header.Del(ChallengeHeader)
-			p.Out.Header.Del(ProofHeader)
 		},
 		ModifyResponse: func(r *http.Response) error {
 			if r.StatusCode >= http.StatusMultipleChoices && r.StatusCode < http.StatusBadRequest {
@@ -141,7 +215,6 @@ func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTri
 			}
 			r.Header.Del("Location")
 			r.Header.Del("Set-Cookie")
-			r.Header.Del(ProofHeader)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
@@ -182,56 +255,10 @@ func gateRouteHandler(expectedHost string, digest []byte, forward http.Handler) 
 	})
 }
 
-func verifyGateUpstream(ctx context.Context, transport http.RoundTripper, upstream *url.URL, gate, launchID string, secret [32]byte) error {
-	var challengeRaw [16]byte
-	if _, err := rand.Read(challengeRaw[:]); err != nil {
-		return err
-	}
-	challenge := hex.EncodeToString(challengeRaw[:])
-	preCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	defer cancel()
-
-	target := upstream.ResolveReference(&url.URL{Path: PreflightPath})
-	req, err := http.NewRequestWithContext(preCtx, http.MethodHead, target.String(), nil)
-	if err != nil {
-		return err
-	}
-	req.Host = gate
-	req.Header.Set(LaunchHeader, launchID)
-	req.Header.Set(ChallengeHeader, challenge)
-
-	res, err := transport.RoundTrip(req)
-	if err != nil {
-		return err
-	}
-	if res.Body != nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
-		_ = res.Body.Close()
-	}
-	if res.StatusCode != http.StatusNoContent {
-		return errors.New("upstream preflight unexpected status")
-	}
-	proofs := res.Header.Values(ProofHeader)
-	if len(proofs) != 1 {
-		return errors.New("upstream preflight missing single proof header")
-	}
-	want := ComputeGateProof(secret, gate, launchID, challenge)
-	if subtle.ConstantTimeCompare([]byte(proofs[0]), []byte(want)) != 1 {
-		return errors.New("upstream preflight proof mismatch")
-	}
-	return nil
-}
-
 // New constructs the gate and HTTPS CONNECT proxy without consulting environment proxy settings.
 func New(cfg Config) (http.Handler, error) {
 	dialer := &net.Dialer{Timeout: dialTimeout}
-	var transport http.RoundTripper
-	if cfg.GateSocket != "" {
-		transport = newUnixGateTransport(cfg.GateSocket)
-	} else {
-		transport = newGateTransport()
-	}
-	return newProxy(cfg, transport, net.DefaultResolver.LookupNetIP, dialer.DialContext)
+	return newProxy(cfg, nil, net.DefaultResolver.LookupNetIP, dialer.DialContext)
 }
 
 func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dialContext) (http.Handler, error) {
@@ -249,23 +276,19 @@ func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dia
 			transport = newUnixGateTransport(cfg.GateSocket)
 		}
 		forward = newGateReverseProxy(&url.URL{Scheme: "http", Host: "unix"}, gate, transport)
-	case cfg.GateSecret != "":
-		if transport == nil {
-			transport = newGateTransport()
+	case cfg.GateSPKISHA256 != "":
+		targetPort := port
+		if cfg.GateTLSPort != "" {
+			targetPort = cfg.GateTLSPort
 		}
-		rawSecret, _ := hex.DecodeString(cfg.GateSecret)
-		var secret [32]byte
-		copy(secret[:], rawSecret)
-		upstream := &url.URL{Scheme: "http", Host: net.JoinHostPort(DockerHostGateway, port)}
-		reverse := newGateReverseProxy(upstream, gate, transport)
-		launchID := cfg.GateLaunchID
-		forward = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := verifyGateUpstream(r.Context(), transport, upstream, gate, launchID, secret); err != nil {
-				http.Error(w, "council gate unavailable", http.StatusBadGateway)
-				return
-			}
-			reverse.ServeHTTP(w, r)
-		})
+		if transport == nil {
+			rawPin, _ := hex.DecodeString(cfg.GateSPKISHA256)
+			var pin [sha256.Size]byte
+			copy(pin[:], rawPin)
+			transport = newTLSGateTransport(pin, nil)
+		}
+		upstream := &url.URL{Scheme: "https", Host: net.JoinHostPort(DockerHostGateway, targetPort)}
+		forward = newGateReverseProxy(upstream, gate, transport)
 	}
 
 	gateHandler := gateRouteHandler("", digest, forward)
@@ -296,8 +319,11 @@ func (cfg Config) validateProvision() error {
 	if err := cfg.validateCommon(); err != nil {
 		return err
 	}
-	if cfg.GateSocket != "" || cfg.GateLaunchID != "" || cfg.GateSecret != "" {
+	if cfg.GateSocket != "" || cfg.GateTLSPort != "" || cfg.GateSPKISHA256 != "" {
 		return errors.New("provision selects gate transport parameters automatically")
+	}
+	if cfg.LeaseSHA256 != "" && cfg.GateHandler == nil {
+		return errors.New("council gate provision requires an in-process gate handler")
 	}
 	return nil
 }
@@ -307,15 +333,15 @@ func (cfg Config) validateProxy() error {
 		return err
 	}
 	if cfg.LeaseSHA256 == "" {
-		if cfg.GateSocket != "" || cfg.GateLaunchID != "" || cfg.GateSecret != "" {
-			return errors.New("login proxy must not carry gate upstream credentials or socket")
+		if cfg.GateSocket != "" || cfg.GateTLSPort != "" || cfg.GateSPKISHA256 != "" {
+			return errors.New("login proxy must not carry gate upstream parameters")
 		}
 		return nil
 	}
 	hasSocket := cfg.GateSocket != ""
-	hasGatewayAuth := cfg.GateLaunchID != "" || cfg.GateSecret != ""
-	if hasSocket == hasGatewayAuth {
-		return errors.New("council gate proxy requires either a unix socket or upstream preflight credentials")
+	hasTLS := cfg.GateSPKISHA256 != "" || cfg.GateTLSPort != ""
+	if hasSocket == hasTLS {
+		return errors.New("council gate proxy requires either a unix socket or a pinned TLS SPKI digest")
 	}
 	if hasSocket {
 		if !strings.HasPrefix(cfg.GateSocket, "/") || path.Clean(cfg.GateSocket) != cfg.GateSocket || strings.ContainsRune(cfg.GateSocket, 0) {
@@ -323,8 +349,11 @@ func (cfg Config) validateProxy() error {
 		}
 		return nil
 	}
-	if !validLaunchID(cfg.GateLaunchID) || !validHexBytes(cfg.GateSecret, 32, 32) {
-		return errors.New("invalid council gate preflight credentials")
+	if !validHexBytes(cfg.GateSPKISHA256, sha256.Size, sha256.Size) {
+		return errors.New("invalid council gate TLS SPKI SHA-256 digest")
+	}
+	if cfg.GateTLSPort != "" && !validPort(cfg.GateTLSPort) {
+		return errors.New("invalid council gate TLS port")
 	}
 	return nil
 }

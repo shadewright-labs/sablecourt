@@ -223,10 +223,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
 	}
-	operatorToken, err := initDaemonState(dir)
+	operatorToken, stateLock, err := initDaemonState(dir)
 	if err != nil {
 		return err
 	}
+	defer stateLock.Close()
 	logger := telemetry.NewLogger()
 
 	var gitSyncer *config.GitSyncer
@@ -628,15 +629,21 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
-func initDaemonState(dir string) (string, error) {
+func initDaemonState(dir string) (string, io.Closer, error) {
+	stateLock, err := operatortoken.LockStateDir(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("lock operator state directory: %w", err)
+	}
 	operatorToken, err := operatortoken.LoadOrCreate(dir)
 	if err != nil {
-		return "", fmt.Errorf("initialize operator credential: %w", err)
+		_ = stateLock.Close()
+		return "", nil, fmt.Errorf("initialize operator credential: %w", err)
 	}
 	if err := councilproxy.SweepStaleSockets(councilproxy.SocketRoot(dir)); err != nil {
-		return "", fmt.Errorf("sweep stale council gate sockets: %w", err)
+		_ = stateLock.Close()
+		return "", nil, fmt.Errorf("sweep stale council gate sockets: %w", err)
 	}
-	return operatorToken, nil
+	return operatorToken, stateLock, nil
 }
 
 func shortDigest(s string) string {
