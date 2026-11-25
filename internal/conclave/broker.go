@@ -43,6 +43,7 @@ type Broker struct {
 	getBundle  func() *config.Bundle
 	notifier   *notify.Notifier
 	now        func() time.Time
+	councilMu  sync.Mutex
 }
 
 func NewBroker(opts Options) *Broker {
@@ -396,10 +397,13 @@ func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession,
 
 type turnInput struct {
 	store.ConclaveAssignment
-	Packet   string `json:"context_packet,omitempty"`
-	Title    string `json:"title,omitempty"`
-	FromRole string `json:"fromRole,omitempty"`
-	Prompt   string `json:"prompt,omitempty"`
+	Packet         string `json:"context_packet,omitempty"`
+	Title          string `json:"title,omitempty"`
+	FromRole       string `json:"fromRole,omitempty"`
+	Prompt         string `json:"prompt,omitempty"`
+	CheckoutMode   string `json:"checkoutMode,omitempty"`
+	CheckoutRef    string `json:"checkoutRef,omitempty"`
+	CheckoutWriter string `json:"checkoutWriter,omitempty"`
 }
 
 func (b *Broker) submitTurn(ctx context.Context, v domain.ConclaveVassal, input turnInput, limits store.ConclaveLimits) (domain.Task, error) {
@@ -533,16 +537,18 @@ func (b *Broker) Close(ctx context.Context, conclaveID string, state domain.Conc
 	if err != nil {
 		return err
 	}
+	var collectErr error
 	if snap != nil {
-		if _, err := b.collectCouncil(ctx, snap, true); err != nil {
-			return err
-		}
+		_, collectErr = b.collectCouncil(ctx, snap, true)
 		reason := "owner_close"
 		if state == domain.ConclaveStateCancelled {
 			reason = "owner_stop"
 		}
-		if err := b.finishCouncil(ctx, conclaveID, reason); err != nil {
-			return err
+		if collectErr != nil {
+			reason += fmt.Sprintf(" (answer recording failed: %.256q)", store.RedactCouncilAnswer(collectErr.Error()))
+		}
+		if err := b.finishCouncil(ctx, conclaveID, state, reason); err != nil {
+			return errors.Join(collectErr, err)
 		}
 	} else if err := b.store.UpdateConclaveState(ctx, conclaveID, state, ""); err != nil {
 		return err
@@ -554,7 +560,7 @@ func (b *Broker) Close(ctx context.Context, conclaveID string, state domain.Conc
 		DetailJSON: fmt.Sprintf(`{"conclave_id":%q}`, conclaveID),
 		CreatedAt:  b.now(),
 	})
-	return nil
+	return collectErr
 }
 
 // ResolveRoleForWorkload supports legacy callers that do not pass a task ID.

@@ -35,22 +35,25 @@ func (b *Broker) council(ctx context.Context, id string) (*store.CouncilSnapshot
 
 // ReconcileCouncils follows task recovery at startup and task observation on each tick.
 func (b *Broker) ReconcileCouncils(ctx context.Context, allowStarts bool) error {
-	if _, err := store.Councils(b.store); err != nil {
+	b.councilMu.Lock()
+	defer b.councilMu.Unlock()
+	councils, err := store.Councils(b.store)
+	if err != nil {
 		if errors.Is(err, store.ErrCouncilUnsupported) {
 			return nil
 		}
 		return err
 	}
-	rooms, err := b.store.ListConclaves(ctx)
+	ids, err := councils.ListReconcileCouncils(ctx)
 	if err != nil {
 		return err
 	}
 	var passErr error
-	for _, room := range rooms {
+	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(passErr, err)
 		}
-		snap, err := b.council(ctx, room.ID)
+		snap, err := b.council(ctx, id)
 		if err == nil && snap != nil {
 			err = b.driveCouncil(ctx, snap, allowStarts)
 		}
@@ -97,7 +100,7 @@ func (b *Broker) collectCouncil(ctx context.Context, snap *store.CouncilSnapshot
 					// A forced close preserves admitted posts and marks refused seats missing.
 					continue
 				}
-				if expired {
+				if expired && !ownerClosing {
 					// The deadline blocks reservations while collection retries.
 					err = errors.Join(err, b.cancelCouncilTasks(ctx, snap, "deadline"))
 				}
@@ -142,8 +145,10 @@ func (b *Broker) driveCouncil(ctx context.Context, initial *store.CouncilSnapsho
 	switch step.Action {
 	case "wait":
 		return nil
-	case "cancel", "close":
-		return b.finishCouncil(ctx, s.Session.ID, step.Reason)
+	case "cancel":
+		return b.finishCouncil(ctx, s.Session.ID, domain.ConclaveStateCancelled, step.Reason)
+	case "close":
+		return b.finishCouncil(ctx, s.Session.ID, domain.ConclaveStateCompleted, step.Reason)
 	case "start":
 		if !allowStarts {
 			return nil
@@ -169,6 +174,13 @@ func (b *Broker) reserveCouncilStarts(ctx context.Context, s *store.CouncilSnaps
 		}
 	}
 	limits := b.councilLimits(b.bundle(), s.Session)
+	mode := "live"
+	switch {
+	case s.Checkout.WriterRole != "":
+		mode = "writer"
+	case s.Checkout.Commit != "":
+		mode = "ref"
+	}
 	for _, start := range step.Starts {
 		if turn, ok := previous[start.Role]; ok {
 			ready, err := b.reconciler.CouncilRetryReady(ctx, turn.TaskID)
@@ -179,9 +191,15 @@ func (b *Broker) reserveCouncilStarts(ctx context.Context, s *store.CouncilSnaps
 				continue
 			}
 		}
-		input := turnInput{ConclaveAssignment: store.ConclaveAssignment{
-			ConclaveID: s.Session.ID, Round: step.Round, Role: start.Role, Attempt: start.Attempt,
-		}, Packet: store.RedactCouncilAnswer(start.Packet.Markdown)}
+		input := turnInput{
+			ConclaveAssignment: store.ConclaveAssignment{
+				ConclaveID: s.Session.ID, Round: step.Round, Role: start.Role, Attempt: start.Attempt,
+			},
+			Packet:         store.RedactCouncilAnswer(start.Packet.Markdown),
+			CheckoutMode:   mode,
+			CheckoutRef:    s.Checkout.Commit,
+			CheckoutWriter: s.Checkout.WriterRole,
+		}
 		_, err := b.submitTurn(ctx, members[start.Role], input, limits)
 		if errors.Is(err, ErrConclavePaused) || errors.Is(err, ErrConclaveClosed) || errors.Is(err, store.ErrConclaveRunLimit) {
 			return nil
@@ -195,8 +213,8 @@ func (b *Broker) reserveCouncilStarts(ctx context.Context, s *store.CouncilSnaps
 
 // Close under the reservation lock first, then read back all admitted attempts.
 // A later pass finishes cancellation if the daemon stops between the two steps.
-func (b *Broker) finishCouncil(ctx context.Context, id, reason string) error {
-	if _, err := b.CloseCouncil(ctx, id, reason); err != nil {
+func (b *Broker) finishCouncil(ctx context.Context, id string, state domain.ConclaveState, reason string) error {
+	if _, err := b.closeCouncil(ctx, id, state, reason); err != nil {
 		return err
 	}
 	s, err := b.council(ctx, id)

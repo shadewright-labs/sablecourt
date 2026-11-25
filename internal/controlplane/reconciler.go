@@ -1069,7 +1069,7 @@ func (r *Reconciler) launchCheckout(ctx context.Context, task domain.Task, wl do
 	if wl.Spec.Coding == nil && c == (store.CouncilCheckout{}) {
 		return "", false, nil
 	}
-	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil || c.Commit == "" || c.WriterRole == assignment.Role ||
+	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil || c.Commit == "" || c.WriterRole != "" ||
 		(c.Source != "" && c.Source != wl.Spec.Coding.RepoPath) {
 		return "", false, errors.New("council checkout isolation unavailable")
 	}

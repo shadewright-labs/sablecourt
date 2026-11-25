@@ -769,8 +769,21 @@ func TestCouncilReservationReplay(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := reserve(t, s, task); !errors.Is(err, want) {
-				t.Fatalf("got %v, want %v", err, want)
+			before, err := s.GetConclave(t.Context(), room.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay := task
+			replay.ID = "replay"
+			if err := reserve(t, s, replay); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("replay got %v, want conflict", err)
+			}
+			snap, err := s.CouncilSnapshot(t.Context(), room.ID)
+			if err != nil || snap.Session != before || len(snap.Attempts) != 1 || snap.Attempts[0].TaskID != task.ID {
+				t.Fatalf("replay changed the room or its attempts: %v", err)
+			}
+			if err := reserve(t, s, councilTask("author", 1, 1)); !errors.Is(err, want) {
+				t.Fatalf("new reservation got %v, want %v", err, want)
 			}
 		})
 	}

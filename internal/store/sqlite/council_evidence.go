@@ -49,7 +49,7 @@ func lockAttempt(ctx context.Context, tx *sql.Tx, task string) (attemptEvidence,
 }
 
 func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
-	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote)
+	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote, store.ConclaveLimits{})
 }
 
 func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) error {

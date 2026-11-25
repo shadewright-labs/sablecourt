@@ -17,6 +17,7 @@ import (
 // CouncilStore is an optional capability. Callers must acquire it before opening a council.
 type CouncilStore interface {
 	CreateCouncil(context.Context, domain.ConclaveSession, CouncilSpec) error
+	ListReconcileCouncils(context.Context) ([]string, error)
 	CouncilSnapshot(context.Context, string) (CouncilSnapshot, error)
 	AcceptCouncilAnswer(context.Context, string, int64, bool) error
 	RecordCouncilAnswer(context.Context, domain.ConclaveMessage, bool) (int64, string, error)
