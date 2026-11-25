@@ -45,29 +45,13 @@ A turn gets a context packet: the question, the Decrees addressed to its role or
 | Starts, retries included | 6 | 1 to 6 | API `starts` |
 | Wall time from opening | 15 minutes | positive seconds | API `durationSeconds` |
 
-A zero or negative value is rejected, not replaced by the default. A Decree cannot raise any of them. A council ends when:
+A zero or negative value is rejected, not replaced by the default. A Decree cannot raise any of them. A council ends by one of three rules. After a round completes it closes with `nothing_to_add` when all three seats voted to stop, and with `round_cap` at the round ceiling. Separately, a round that cannot finish because every start is spent and no turn is running closes with `start_cap`.
 
-```mermaid
-flowchart TD
-    A[Round complete] --> B{All three said NOTHING TO ADD?}
-    B -- yes --> C[Close: nothing_to_add]
-    B -- no --> D{Round cap reached?}
-    D -- yes --> E[Close: round_cap]
-    D -- no --> F{Starts left?}
-    F -- no --> G[Close: start_cap]
-    F -- yes --> H[Next round]
-```
+[![How a council ends: nothing to add, round cap or start cap, otherwise the next round.](../diagrams/council-finish.svg)](../diagrams/council-finish.svg "Open full size")
 
 A seat votes to stop only when its entire trimmed final message is `NOTHING TO ADD`; silence or an empty answer never completes a turn. Ctrl-C in the CLI and the deadline end the council as `cancelled`; `sablectl conclave close` ends it as `completed`. All three cancel active turns and still write the digest. A Ward pauses the council in `input-required`: the CLI exits with an error naming the Ward, and the council waits for a Decree or its deadline.
 
-```mermaid
-stateDiagram-v2
-    [*] --> reserved: turn reserved
-    reserved --> running: container started
-    running --> recorded: clean exit, final message
-    running --> failed: error, timeout, restart
-    failed --> reserved: retry, next attempt
-```
+[![States of one council turn: reserved, running, recorded or failed, with retry back to reserved.](../diagrams/council-turn-states.svg)](../diagrams/council-turn-states.svg "Open full size")
 
 A failed, cancelled or answerless turn is retried as the next attempt while starts remain. After a daemon restart a turn's container is removed, its lease revoked and its task failed as lost on restart; the council then retries or closes. `sablectl task retry` refuses council tasks.
 
