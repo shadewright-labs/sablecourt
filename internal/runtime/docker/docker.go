@@ -46,6 +46,12 @@ type Adapter struct {
 	Client           EngineClient
 	NetworkName      string
 	AttachHub        *attach.Hub
+	attachCtx        context.Context
+}
+
+// SetAttachHub ties log streams to the daemon lifetime across individual Start calls.
+func (a *Adapter) SetAttachHub(ctx context.Context, hub *attach.Hub) {
+	a.attachCtx, a.AttachHub = ctx, hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -254,7 +260,10 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if a.AttachHub != nil {
 		if ls, ok := a.Client.(logStreamer); ok {
 			a.AttachHub.Register(spec.TaskID, stdinCloser)
-			go a.streamLogs(spec.TaskID, created.ID, ls)
+			if a.attachCtx != nil {
+				ctx = a.attachCtx
+			}
+			go a.streamLogs(ctx, spec.TaskID, created.ID, ls)
 		} else if stdinCloser != nil {
 			a.AttachHub.Register(spec.TaskID, stdinCloser)
 		}
@@ -263,9 +272,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	return handle, nil
 }
 
-func (a *Adapter) streamLogs(taskID, containerID string, ls logStreamer) {
+func (a *Adapter) streamLogs(ctx context.Context, taskID, containerID string, ls logStreamer) {
 	defer a.AttachHub.Close(taskID)
-	rc, err := ls.ContainerLogs(context.Background(), containerID, client.ContainerLogsOptions{
+	rc, err := ls.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,

@@ -243,7 +243,7 @@ func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec, input lau
 }
 
 func writeSessionFile(dir, name string, data []byte) error {
-	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o444)
+	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
 	if err != nil {
 		return fmt.Errorf("create session file: %w", err)
 	}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"testing/synctest"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -90,5 +92,36 @@ func TestK8sAdapterHardenedJobLifecycle(t *testing.T) {
 
 	if err := adapter.Stop(ctx, handle); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestLogCancellation(t *testing.T) {
+	for _, kind := range []string{"k8s-deployment", "job"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				hub := attach.NewHub()
+				a := NewAdapter(Options{Client: fake.NewSimpleClientset(), AttachHub: hub})
+				a.SetAttachHub(ctx, hub)
+				start, finishStart := context.WithCancel(ctx)
+				defer finishStart()
+				spec := scruntime.LaunchSpec{TaskID: "task"}
+				spec.Workload.Spec.Runtime = domain.RuntimeConfig{Type: kind, Image: "fixture"}
+				if _, err := a.Start(start, spec); err != nil {
+					t.Fatal(err)
+				}
+				finishStart()
+				synctest.Wait()
+				if active, _, _ := hub.Status(spec.TaskID); !active {
+					t.Fatal("finishing Start canceled live attach")
+				}
+				cancel()
+				synctest.Wait()
+				if active, _, _ := hub.Status(spec.TaskID); active {
+					t.Error("pod log lookup ignored cancellation")
+				}
+			})
+		})
 	}
 }

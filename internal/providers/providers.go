@@ -50,7 +50,7 @@ type providerDef struct {
 }
 
 var builtinProviders = []providerDef{
-	{
+	{ // #nosec G101 -- Registry.SyncModels reads the openai credential from SecretStore using SecretName.
 		ID:            "openai",
 		DisplayName:   "OpenAI (GPT)",
 		Kind:          "api_key",
@@ -58,7 +58,7 @@ var builtinProviders = []providerDef{
 		BaseURL:       "https://api.openai.com",
 		DefaultModels: []string{"gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-sol", "gpt-5", "o3"},
 	},
-	{
+	{ // #nosec G101 -- Registry.SyncModels reads the anthropic credential from SecretStore using SecretName.
 		ID:            "anthropic",
 		DisplayName:   "Anthropic (Claude)",
 		Kind:          "api_key",
@@ -74,7 +74,7 @@ var builtinProviders = []providerDef{
 		BaseURL:       "https://generativelanguage.googleapis.com",
 		DefaultModels: []string{"gemini-4-neon-high", "gemini-4-carbon-high", "gemini-3.8-flash-high"},
 	},
-	{
+	{ // #nosec G101 -- Registry.SyncModels reads the local credential from SecretStore using SecretName.
 		ID:            "local",
 		DisplayName:   "Local (Ollama / LM Studio)",
 		Kind:          "local",
