@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -46,7 +47,7 @@ func (b *Broker) readView(ctx context.Context, room, workload, taskID string) (*
 	if err == nil {
 		snap, err := cs.CouncilSnapshot(ctx, room)
 		if err == nil {
-			return councilViewForAssignment(snap, a, workload, taskID)
+			return councilViewForAssignment(snap, a, workload, taskID, b.now())
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return nil, err
@@ -56,6 +57,9 @@ func (b *Broker) readView(ctx context.Context, room, workload, taskID string) (*
 		return nil, ErrMessageDenied
 	}
 	session, err := b.store.GetConclave(ctx, room)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrMessageDenied
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -63,11 +67,33 @@ func (b *Broker) readView(ctx context.Context, room, workload, taskID string) (*
 	return nil, err
 }
 
-func councilViewForAssignment(snap store.CouncilSnapshot, a store.ConclaveAssignment, workload, taskID string) (*councilRead, error) {
+func councilViewForAssignment(snap store.CouncilSnapshot, a store.ConclaveAssignment, workload, taskID string, now time.Time) (*councilRead, error) {
 	plan := CouncilSnapshot{
 		Session: snap.Session, Members: snap.Members, Question: snap.Question,
 		MaxRounds: snap.MaxRounds, MaxStarts: snap.MaxStarts, Sequential: snap.Sequential,
-		Turns: snap.Turns, Decrees: snap.Decrees,
+		Turns: snap.Turns, Decrees: snap.Decrees, Deadline: snap.Deadline,
+	}
+	session := plan.Session
+	if session.ID == "" || session.CreatedAt.IsZero() || now.Before(session.CreatedAt) || !plan.Deadline.After(session.CreatedAt) {
+		return nil, errors.New("invalid council identity or deadline")
+	}
+	switch session.State {
+	case domain.ConclaveStateActive:
+		if session.WardReason != "" {
+			return nil, errors.New("active council has an unresolved Ward")
+		}
+	case domain.ConclaveStateInputRequired:
+		if session.WardReason == "" {
+			return nil, errors.New("paused council has no Ward reason")
+		}
+		return nil, ErrMessageDenied
+	case domain.ConclaveStateCompleted, domain.ConclaveStateCancelled:
+		return nil, ErrMessageDenied
+	default:
+		return nil, errors.New("unknown council state")
+	}
+	if !now.Before(plan.Deadline) {
+		return nil, ErrMessageDenied
 	}
 	turns, _, err := plan.indexTurns()
 	if err != nil {
@@ -95,7 +121,14 @@ func (b *Broker) ReadMessagesForTask(ctx context.Context, room, workload, taskID
 		return nil, err
 	}
 	if view == nil {
-		return b.store.ListConclaveMessages(ctx, room, since)
+		msgs, err := b.store.ListConclaveMessages(ctx, room, since)
+		if err != nil {
+			return nil, err
+		}
+		for i := range msgs {
+			msgs[i].Body = redact.String(msgs[i].Body)
+		}
+		return msgs, nil
 	}
 	var msgs []domain.ConclaveMessage
 	appendMessage := func(m domain.ConclaveMessage) {
@@ -120,7 +153,12 @@ func (b *Broker) ReadRelicForTask(ctx context.Context, room, workload, taskID, n
 		return domain.ConclaveRelic{}, err
 	}
 	if view == nil {
-		return b.store.GetConclaveRelic(ctx, room, name)
+		relic, err := b.store.GetConclaveRelic(ctx, room, name)
+		if err != nil {
+			return domain.ConclaveRelic{}, err
+		}
+		relic.Body = redact.String(relic.Body)
+		return relic, nil
 	}
 	for _, t := range view.peers {
 		for _, a := range view.attempts {
@@ -129,6 +167,7 @@ func (b *Broker) ReadRelicForTask(ctx context.Context, room, workload, taskID, n
 			}
 			for _, r := range a.Relics {
 				if r.Name == name && r.ConclaveID == room && r.AuthorRole == t.Role {
+					r.Body = redact.String(r.Body)
 					return r, nil
 				}
 			}

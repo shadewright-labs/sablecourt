@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,13 +24,13 @@ import (
 type visibilityStore struct {
 	store.Store
 	store.CouncilStore
-	change func(*store.CouncilSnapshot)
+	change func(*store.CouncilSnapshot) error
 }
 
 func (s visibilityStore) CouncilSnapshot(ctx context.Context, room string) (store.CouncilSnapshot, error) {
 	snap, err := s.CouncilStore.CouncilSnapshot(ctx, room)
 	if err == nil && s.change != nil {
-		s.change(&snap)
+		err = s.change(&snap)
 	}
 	return snap, err
 }
@@ -49,6 +50,8 @@ func reserveVisibilityTurn(t *testing.T, st store.Store, role string, round int)
 	}
 	return task
 }
+
+const visibilityKey = "-----BEGIN PRIVATE KEY-----\nfixture-key-data\n-----END PRIVATE KEY-----"
 
 func recordVisibilityAnswer(t *testing.T, st visibilityStore, task domain.Task, role, to string) {
 	t.Helper()
@@ -85,12 +88,7 @@ func visibilityRequest(t *testing.T, h http.Handler, token, room, resource strin
 		}
 		method, path, body = "POST", "/gate/mcp", string(raw)
 	}
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	w := visibilityResponse(h, token, method, path, body)
 	if !mcp {
 		return w.Body.String(), w.Code == http.StatusOK
 	}
@@ -117,6 +115,16 @@ func visibilityRequest(t *testing.T, h http.Handler, token, room, resource strin
 	return "", false
 }
 
+func visibilityResponse(h http.Handler, token, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
 func TestCouncilVisibilityAcrossReads(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -140,7 +148,12 @@ func TestCouncilVisibilityAcrossReads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			st := visibilityStore{base, councils, tc.change}
+			st := visibilityStore{base, councils, func(snap *store.CouncilSnapshot) error {
+				if tc.change != nil {
+					tc.change(snap)
+				}
+				return nil
+			}}
 			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneRuntime}); err != nil {
 				t.Fatal(err)
 			}
@@ -205,17 +218,7 @@ func TestCouncilVisibilityAcrossReads(t *testing.T) {
 				return token
 			}
 			token := lease(reader.ID)
-			wl := domain.Workload{Metadata: domain.ObjectMeta{Name: "worker"}, Spec: domain.WorkloadSpec{Grants: domain.GrantSet{MCPTools: []string{"conclave.read", "conclave.relic_get"}}}}
-			bundle := &config.Bundle{Workloads: map[string]domain.Workload{"worker": wl}, Conclaves: map[string]domain.Conclave{"review": {Spec: domain.ConclaveSpec{Vassals: seats}}}}
-			getBundle := func() *config.Bundle { return bundle }
-			broker := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle})
-			var rules []domain.PolicyRule
-			for _, name := range wl.Spec.Grants.MCPTools {
-				rules = append(rules, domain.PolicyRule{Workload: "worker", Capability: "mcp:" + name, Effect: domain.EffectAllow})
-			}
-			gate := mcpgate.New(mcpgate.Options{Store: gateLeaseStore{st}, Bundle: bundle, Policy: policy.NewEngine([]domain.Policy{{Spec: domain.PolicySpec{Rules: rules}}}, nil)})
-			broker.RegisterMCPTools(gate)
-			h := newHandler(st, nil, getBundle, nil, nil, gate, nil, nil, nil, broker, nil, nil, nil)
+			broker, h := newVisibilityHandler(st, seats, nil)
 			other, err := broker.Open(ctx, "review", "", "ordinary-decree")
 			if err != nil {
 				t.Fatal(err)
@@ -250,4 +253,208 @@ func TestCouncilVisibilityAcrossReads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newVisibilityHandler(st store.Store, seats []domain.ConclaveVassal, now func() time.Time) (*conclave.Broker, http.Handler) {
+	wl := domain.Workload{Metadata: domain.ObjectMeta{Name: "worker"}, Spec: domain.WorkloadSpec{Grants: domain.GrantSet{MCPTools: []string{"conclave.read", "conclave.relic_get"}}}}
+	bundle := &config.Bundle{Workloads: map[string]domain.Workload{"worker": wl}, Conclaves: map[string]domain.Conclave{"review": {Spec: domain.ConclaveSpec{Vassals: seats}}}}
+	getBundle := func() *config.Bundle { return bundle }
+	broker := conclave.NewBroker(conclave.Options{Store: st, GetBundle: getBundle, Now: now})
+	var rules []domain.PolicyRule
+	for _, name := range wl.Spec.Grants.MCPTools {
+		rules = append(rules, domain.PolicyRule{Workload: "worker", Capability: "mcp:" + name, Effect: domain.EffectAllow})
+	}
+	gate := mcpgate.New(mcpgate.Options{Store: gateLeaseStore{st}, Bundle: bundle, Policy: policy.NewEngine([]domain.Policy{{Spec: domain.PolicySpec{Rules: rules}}}, nil)})
+	broker.RegisterMCPTools(gate)
+	h := newHandler(st, nil, getBundle, nil, nil, gate, nil, nil, nil, broker, nil, nil, nil)
+	return broker, h
+}
+
+func TestCouncilReadSessionChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   domain.ConclaveState
+		elapsed time.Duration
+		change  func(*store.CouncilSnapshot)
+		want    int
+	}{
+		{name: "active", want: http.StatusOK},
+		{name: "completed", state: domain.ConclaveStateCompleted, want: http.StatusForbidden},
+		{name: "cancelled", state: domain.ConclaveStateCancelled, want: http.StatusForbidden},
+		{name: "deadline", elapsed: 15 * time.Minute, want: http.StatusForbidden},
+		{name: "past deadline", elapsed: 16 * time.Minute, want: http.StatusForbidden},
+		{name: "unknown state", change: func(s *store.CouncilSnapshot) { s.Session.State = "broken" }, want: http.StatusInternalServerError},
+		{name: "active Ward", change: func(s *store.CouncilSnapshot) { s.Session.WardReason = "max_runs" }, want: http.StatusInternalServerError},
+		{name: "paused without Ward", change: func(s *store.CouncilSnapshot) { s.Session.State = domain.ConclaveStateInputRequired }, want: http.StatusInternalServerError},
+		{name: "paused with Ward", change: func(s *store.CouncilSnapshot) {
+			s.Session.State, s.Session.WardReason = domain.ConclaveStateInputRequired, "max_runs"
+		}, want: http.StatusForbidden},
+		{name: "missing time", change: func(s *store.CouncilSnapshot) { s.Session.CreatedAt = time.Time{} }, want: http.StatusInternalServerError},
+		{name: "future creation", elapsed: -time.Second, want: http.StatusInternalServerError},
+		{name: "invalid deadline", change: func(s *store.CouncilSnapshot) { s.Deadline = s.Session.CreatedAt }, want: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock, _, broker, h, token := visibilityReadFixture(t, func(s *store.CouncilSnapshot) error {
+				if tc.change != nil {
+					tc.change(s)
+				}
+				return nil
+			})
+			if tc.state != "" {
+				if err := broker.Close(t.Context(), "panel", tc.state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			*clock = clock.Add(tc.elapsed)
+			for resource, evidence := range map[string]string{"messages": "writer-answer", "relics/writer-notes": "writer-evidence"} {
+				w := visibilityResponse(h, token, http.MethodGet, "/gate/conclave/panel/"+resource, "")
+				if w.Code != tc.want || strings.Contains(w.Body.String(), evidence) != (tc.want == http.StatusOK) {
+					t.Errorf("HTTP %s status = %d, want %d", resource, w.Code, tc.want)
+				}
+				body, ok := visibilityRequest(t, h, token, "panel", resource, true)
+				if ok != (tc.want == http.StatusOK) || strings.Contains(body, evidence) != ok {
+					t.Errorf("MCP %s success = %t, want %t", resource, ok, tc.want == http.StatusOK)
+				}
+			}
+		})
+	}
+}
+
+func TestGateRelicEvidenceErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*store.CouncilSnapshot) error
+		want   int
+	}{
+		{"missing relic", nil, http.StatusNotFound},
+		{"snapshot error", func(*store.CouncilSnapshot) error { return errors.New("broken snapshot") }, http.StatusInternalServerError},
+		{"invalid turns", func(s *store.CouncilSnapshot) error { s.Turns = nil; return nil }, http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, h, token := visibilityReadFixture(t, tc.change)
+			w := visibilityResponse(h, token, http.MethodGet, "/gate/conclave/panel/relics/missing", "")
+			if w.Code != tc.want {
+				t.Errorf("status = %d, want %d", w.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestGateMessagesSince(t *testing.T) {
+	_, _, _, h, token := visibilityReadFixture(t, nil)
+	for _, tc := range []struct {
+		query  string
+		want   int
+		answer bool
+	}{
+		{"", http.StatusOK, true},
+		{"?since=", http.StatusOK, true},
+		{"?since=0", http.StatusOK, true},
+		{"?since=9223372036854775807", http.StatusOK, false},
+		{"?since=notanumber", http.StatusBadRequest, false},
+		{"?since=0junk", http.StatusBadRequest, false},
+		{"?since=-1", http.StatusBadRequest, false},
+		{"?since=9223372036854775808", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			w := visibilityResponse(h, token, http.MethodGet, "/gate/conclave/panel/messages"+tc.query, "")
+			if w.Code != tc.want || strings.Contains(w.Body.String(), "writer-answer") != tc.answer {
+				t.Errorf("status = %d, want %d, body = %s", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGateMissingOrdinaryRoom(t *testing.T) {
+	_, st, _, h, _ := visibilityReadFixture(t, nil)
+	token := addAssignedConclaveLease(t, st, "missing", "reader")
+	w := visibilityResponse(h, token, http.MethodGet, "/gate/conclave/missing/messages", "")
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestGateReadBodiesRedacted(t *testing.T) {
+	_, st, _, h, token := visibilityReadFixture(t, func(s *store.CouncilSnapshot) error {
+		for _, turn := range s.Turns {
+			if turn.Answer != nil {
+				turn.Answer.Body += " " + visibilityKey
+			}
+		}
+		for _, attempt := range s.Attempts {
+			for i := range attempt.Relics {
+				attempt.Relics[i].Body += " " + visibilityKey
+			}
+		}
+		return nil
+	})
+	ctx := t.Context()
+	ordinary := domain.ConclaveSession{ID: "ordinary", TemplateName: "review", State: domain.ConclaveStateActive}
+	if err := st.CreateConclave(ctx, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	addAssignedConclaveLease(t, st, ordinary.ID, "reader")
+	ordinaryToken := model.TokenPrefix + "assigned"
+	if err := st.CreateLease(ctx, domain.Lease{TaskID: "assigned", WorkloadName: "worker", TokenSHA256: model.HashToken(ordinaryToken), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	body := "public-text " + visibilityKey
+	if _, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: ordinary.ID, Kind: "decree", FromRole: "operator", ToRole: "all", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutConclaveRelic(ctx, domain.ConclaveRelic{ConclaveID: ordinary.ID, Name: "notes", AuthorRole: "writer", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		room, token, resource, want string
+	}{
+		{ordinary.ID, ordinaryToken, "messages", "public-text"},
+		{ordinary.ID, ordinaryToken, "relics/notes", "public-text"},
+		{"panel", token, "relics/writer-notes", "writer-evidence"},
+		{"panel", token, "messages", "writer-answer"},
+	} {
+		for _, mcp := range []bool{false, true} {
+			got, ok := visibilityRequest(t, h, tc.token, tc.room, tc.resource, mcp)
+			if !ok || !strings.Contains(got, tc.want) || !strings.Contains(got, "[REDACTED:") || strings.Contains(got, "fixture-key-data") {
+				t.Errorf("MCP=%t %s %s: expected redacted body", mcp, tc.room, tc.resource)
+			}
+		}
+	}
+}
+
+func visibilityReadFixture(t *testing.T, change func(*store.CouncilSnapshot) error) (*time.Time, visibilityStore, *conclave.Broker, http.Handler, string) {
+	t.Helper()
+	ctx := t.Context()
+	base := daemonTestStore(t)
+	councils, err := store.Councils(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := visibilityStore{base, councils, change}
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneRuntime}); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC()
+	room := domain.ConclaveSession{ID: "panel", TemplateName: "review", CreatedAt: clock, State: domain.ConclaveStateActive}
+	spec := store.CouncilSpec{Question: "Review?", Sequential: true}
+	var seats []domain.ConclaveVassal
+	for _, role := range []string{"writer", "reader"} {
+		v := domain.ConclaveVassal{Role: role, Workload: "worker", CanMessage: []string{"all"}}
+		seats = append(seats, v)
+		spec.Members = append(spec.Members, store.CouncilMember{Vassal: v, Zone: domain.ZoneRuntime})
+	}
+	if err := st.CreateCouncil(ctx, room, spec); err != nil {
+		t.Fatal(err)
+	}
+	recordVisibilityAnswer(t, st, reserveVisibilityTurn(t, st, "writer", 1), "writer", "all")
+	reader := reserveVisibilityTurn(t, st, "reader", 1)
+	if err := st.UpdateTaskState(ctx, reader.ID, domain.TaskStateSubmitted, domain.TaskStateWorking, "started", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	token := model.TokenPrefix + reader.ID
+	if err := st.CreateLease(ctx, domain.Lease{TaskID: reader.ID, WorkloadName: "worker", TokenSHA256: model.HashToken(token), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	broker, h := newVisibilityHandler(st, seats, func() time.Time { return clock })
+	return &clock, st, broker, h, token
 }

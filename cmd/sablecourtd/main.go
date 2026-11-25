@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1545,7 +1546,14 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			var since int64
-			_, _ = fmt.Sscanf(r.URL.Query().Get("since"), "%d", &since)
+			if raw := r.URL.Query().Get("since"); raw != "" {
+				var err error
+				since, err = strconv.ParseInt(raw, 10, 64)
+				if err != nil || since < 0 {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "since must be a non-negative integer"})
+					return
+				}
+			}
 			msgs, err := conclaveBroker.ReadMessagesForTask(r.Context(), r.PathValue("id"), lease.WorkloadName, lease.TaskID, since)
 			if errors.Is(err, conclave.ErrMessageDenied) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
@@ -1593,8 +1601,12 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 				return
 			}
-			if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "relic not found"})
+				return
+			}
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
 			writeJSON(w, http.StatusOK, relic)
