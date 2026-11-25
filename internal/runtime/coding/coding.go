@@ -26,6 +26,8 @@ type Adapter struct {
 	WallTime        time.Duration     // Zero uses the default task limit.
 
 	allowUnconfined bool // In-process fixture only.
+	setupTimeout    time.Duration
+	beforeTaskState func(taskID string) // Test hook invoked before writing task state.
 
 	mu      sync.Mutex
 	gates   map[string]*taskGate
@@ -86,10 +88,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	defer release()
 
 	var (
-		dir      string
-		taskBase string
-		state    *worktreeState
-		rollback func(context.Context) error
+		dir           string
+		taskBase      string
+		state         *worktreeState
+		rollback      func(context.Context) error
+		commitJournal func() error
 	)
 	switch input.checkoutMode {
 	case "":
@@ -105,19 +108,21 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			return scruntime.Handle{}, err
 		}
 	case checkoutModeRef:
-		dir, taskBase, state, rollback, err = a.prepareRefCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
+		dir, taskBase, state, rollback, commitJournal, err = a.prepareRefCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
 		if err != nil {
 			return scruntime.Handle{}, err
 		}
 	case checkoutModeWriter:
-		dir, taskBase, state, rollback, err = a.prepareWriterCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
+		dir, taskBase, state, rollback, commitJournal, err = a.prepareWriterCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
 		if err != nil {
 			return scruntime.Handle{}, err
 		}
 	}
 	defer func() {
 		if startErr != nil && rollback != nil {
-			startErr = errors.Join(startErr, rollback(context.WithoutCancel(ctx)))
+			rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
+			defer rbCancel()
+			startErr = errors.Join(startErr, rollback(rbCtx))
 		}
 	}()
 
@@ -141,6 +146,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		handle.LogPath = taskBase + ".log"
 	}
 	if a.DryRun {
+		if commitJournal != nil {
+			if err := commitJournal(); err != nil {
+				return scruntime.Handle{}, err
+			}
+		}
 		return handle, nil
 	}
 
@@ -178,6 +188,9 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	}
 	handle.PID, handle.ProcessStartTime = id.PID, id.Start
 	a.running.Store(taskBase, process)
+	if commitJournal != nil {
+		_ = commitJournal()
+	}
 	return handle, nil
 }
 
@@ -348,6 +361,9 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	}
 	if err := a.finishTask(ctx, taskBase, state); err != nil {
 		return nil, err
+	}
+	if state.Mode == checkoutModeWriter && !state.ReadOnly && state.Result != nil && state.Result.ExitCode != 0 {
+		return state.Artifacts, nil
 	}
 	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
 }

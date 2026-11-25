@@ -29,6 +29,10 @@ func (a *Adapter) probe(ctx context.Context, handle scruntime.Handle, exit bool)
 	}
 	taskBase, err := a.taskBase(handle.ExternalID)
 	if err != nil {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
 		return false, nil
 	}
 	if handle.LogPath != "" && handle.LogPath != taskBase+".log" {
