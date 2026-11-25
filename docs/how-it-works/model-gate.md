@@ -48,7 +48,7 @@ A request routed to `openai` or `local` may be retried once on the other of the 
 
 ## Child budgets
 
-Reservation and settlement are one transaction (PR 86); the ceiling check for delegated tasks came with PR 66.
+Reservation and settlement are two transactions, one before the upstream request and one after the response; each is atomic, and a failed settlement keeps the reservation until it expires (PR 86). The ceiling check for delegated tasks came with PR 66.
 
 A task with a parent, such as a workflow step after the first, must carry a ceiling (stored with the task) with `maxInputTokens`, `maxOutputTokens` and `maxCostUSD` (at least one, no unknown members, at most 4 KiB). The gate applies it on top of the workload's budget, counting only that task's own usage; a ceiling of zero refuses everything. A missing or malformed ceiling returns 403 `invalid_child_budget_ceiling`, and an exhausted one 429 with `child_input_tokens`, `child_output_tokens` or `child_cost_usd`. A ceiling cannot raise the workload's own limits. Workflow steps after the first have a parent; see [Known gaps](#known-gaps) for what that means today.
 

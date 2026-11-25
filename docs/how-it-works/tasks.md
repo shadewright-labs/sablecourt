@@ -47,7 +47,7 @@ The daemon runs a pass every 2 seconds. ADR-0002 calls the loop observe, update,
 
 Each running task has a handle (process ID and OS start time, or container identity) stored as a memory entry in a reserved namespace that tools cannot read or write. After a restart the first pass loads each handle and checks it:
 
-- A process handle is reattached only if the recorded ID and start time match a live process. An unverified ID is never signalled.
+- A process handle is reattached if the recorded ID and start time match a live process, or if that process has exited and left an exit record with the same ID and start time, in which case the next pass records its completion. An unverified ID is never signalled.
 - A container handle is always cleaned up (container, proxy and network of the old launch), then the task fails with `lost_on_restart`, because the old daemon's listeners are gone.
 - A missing or invalid handle fails the task with `lost_on_restart`.
 - A claim record keeps two daemons from recovering the same task.
