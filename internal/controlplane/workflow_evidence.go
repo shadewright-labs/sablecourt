@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
@@ -122,29 +123,40 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
-	if wl.Spec.Class == domain.ClassDeterministicController && !council {
-		return task.InputJSON, nil
-	}
-
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(task.InputJSON), &payload); err != nil || payload == nil {
 		prompt, _ := json.Marshal(task.InputJSON)
 		payload = map[string]json.RawMessage{"prompt": prompt}
 	}
+	var unreservedCouncil bool
+	if !assigned {
+		var err error
+		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
+		if err != nil {
+			return "", err
+		}
+	}
+	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
+		return task.InputJSON, nil
+	}
+
 	// Only the dispatcher can create a round reservation. Its immutable input
 	// carries the already filtered packet. Other tasks receive an assembled one.
 	var markdown string
 	if council {
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
-		if err := json.Unmarshal(payload["context_packet"], &markdown); err != nil ||
-			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes {
+		packet := payload["context_packet"]
+		// Check the stored bytes before JSON decoding can replace invalid UTF-8.
+		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
+			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
+			redact.String(markdown) != markdown {
 			return "", errors.New("invalid reserved council packet")
 		}
 	}
 	// Typed consumers may match field names case-insensitively.
 	rebuild := false
 	for key := range payload {
-		if strings.EqualFold(key, "context_packet") || strings.EqualFold(key, "conclaveId") {
+		if strings.EqualFold(key, "context_packet") || ((assigned || unreservedCouncil) && strings.EqualFold(key, "conclaveId")) {
 			delete(payload, key)
 			rebuild = true
 		}
@@ -154,6 +166,10 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if assigned {
 		payload["conclaveId"], _ = json.Marshal(assignment.ConclaveID)
+	}
+	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
+		raw, err := json.Marshal(payload)
+		return string(raw), err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -196,6 +212,31 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
 	return string(raw), err
+}
+
+func referencesCouncil(ctx context.Context, st store.Store, payload map[string]json.RawMessage) (bool, error) {
+	councils, err := store.Councils(st)
+	if err != nil {
+		return false, nil
+	}
+	// A typed reader can match any case variant of the room field.
+	for key, value := range payload {
+		if !strings.EqualFold(key, "conclaveId") {
+			continue
+		}
+		var room string
+		if json.Unmarshal(value, &room) != nil || room == "" {
+			continue
+		}
+		_, err := councils.CouncilSnapshot(ctx, room)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("check council room: %w", err)
+		}
+	}
+	return false, nil
 }
 
 func resolveTierRoute(ctx context.Context, st store.Store, wl domain.Workload, tier, provider, model string) (string, string, error) {
