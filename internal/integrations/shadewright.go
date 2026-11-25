@@ -161,7 +161,7 @@ func NewShadewright(opts ShadewrightOptions) *ShadewrightHandler {
 }
 
 // RegisterRoutes attaches the Shadewright incident and verification endpoints to mux.
-func (h *ShadewrightHandler) RegisterRoutes(mux *http.ServeMux) {
+func (h *ShadewrightHandler) RegisterRoutes(mux interface{ Handle(string, http.Handler) }) {
 	mux.Handle("POST "+ShadewrightIncidentPath, h.IncidentHandler())
 	mux.Handle("POST "+ShadewrightVerificationPath, h.VerificationHandler())
 }
