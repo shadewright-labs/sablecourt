@@ -393,11 +393,23 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, req store.ConsumeRe
 	if req.Now == nil {
 		return errors.New("consume approval: no clock")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Lock order: the audit_log table lock (lockAuditHead) first, then the
+	// approval row lock. This is the only transaction that takes both; the
+	// other transactions that append inside a larger one (conclave posts) lock
+	// a conclave row and then the audit table, and none of them locks an
+	// approval row, so no two transactions can wait on each other in a cycle.
+	// The isolation is READ COMMITTED whatever the connection's default, so
+	// the head read after the lock sees the latest committed row. Under
+	// REPEATABLE READ the snapshot would be taken by the first query, before
+	// the audit lock, and two consumers could chain onto the same head.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockAuditHead(ctx, tx); err != nil {
+		return err
+	}
 
 	var rowTask, rowCapability, rowDigest, status, expires string
 	err = tx.QueryRowContext(ctx, `
@@ -568,7 +580,7 @@ func (s *PostgresStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTot
 }
 
 func (s *PostgresStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -580,8 +592,26 @@ func (s *PostgresStore) AppendAudit(ctx context.Context, rec domain.AuditRecord)
 	return tx.Commit()
 }
 
+// lockAuditHead takes the lock that serialises the audit chain head. It is held
+// until the transaction ends. ConsumeApproval takes it before its row lock;
+// see the lock order note there.
+func lockAuditHead(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "LOCK TABLE audit_log IN SHARE ROW EXCLUSIVE MODE")
+	return err
+}
+
+// appendAuditTx appends one row to the hash chain. It refuses to run in a
+// transaction that is not READ COMMITTED: under a snapshot isolation the head
+// it reads may be older than the lock, and the chain would fork.
 func (s *PostgresStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
-	if _, err := tx.ExecContext(ctx, "LOCK TABLE audit_log IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+	var isolation string
+	if err := tx.QueryRowContext(ctx, `SELECT current_setting('transaction_isolation')`).Scan(&isolation); err != nil {
+		return err
+	}
+	if isolation != "read committed" {
+		return fmt.Errorf("audit append refused at isolation %q: the chain head needs read committed", isolation)
+	}
+	if err := lockAuditHead(ctx, tx); err != nil {
 		return err
 	}
 	prevHash := "genesis"
