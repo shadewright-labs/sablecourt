@@ -492,6 +492,10 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 // StartWorkflow dispatches the first step of a declared Workflow and records workflow metadata
 // so ReconcileOnce can advance subsequent steps upon completion.
 func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput string) (domain.Task, error) {
+	return r.startWorkflow(ctx, workflowName, "", userInput)
+}
+
+func (r *Reconciler) startWorkflow(ctx context.Context, workflowName, idempotencyKey, userInput string) (domain.Task, error) {
 	r.mu.Lock()
 	b := r.bundle
 	r.mu.Unlock()
@@ -545,7 +549,7 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
-	return r.submitTask(ctx, step.Workload, "", string(raw), "", &workflowStepRecord{Workflow: workflowName})
+	return r.submitTask(ctx, step.Workload, idempotencyKey, string(raw), "", &workflowStepRecord{Workflow: workflowName})
 }
 
 type councilCleaner interface {
