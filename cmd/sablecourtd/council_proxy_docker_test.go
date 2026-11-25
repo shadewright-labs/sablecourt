@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -84,7 +92,7 @@ func TestCouncilProxyDocker(t *testing.T) {
 		t.Helper()
 		s, err := councilproxy.Provision(ctx, d, image, councilproxy.Config{
 			Harness: "claude", DaemonListen: daemonAddr, LeaseSHA256: model.HashToken(token),
-			SocketRoot: sockRoot,
+			SocketRoot: sockRoot, GateHandler: h,
 		})
 		if s != nil {
 			t.Cleanup(func() {
@@ -199,35 +207,107 @@ func TestCouncilProxyDocker(t *testing.T) {
 			}
 		})
 	}
-	for _, args := range [][]string{{"inspect", proxyURL.Hostname()}, {"logs", proxyURL.Hostname()}} {
-		data := d.must(t, "", args...)
-		if strings.Contains(data, valid) || strings.Contains(data, wrong) || strings.Contains(data, expired) {
-			t.Fatalf("raw task lease appeared in docker %s", args[0])
+	inspectRaw := d.must(t, "", "inspect", proxyURL.Hostname())
+	logsRaw := d.must(t, "", "logs", proxyURL.Hostname())
+	workloadEnv := strings.Join(endpoint.Env(), "\n")
+	for label, data := range map[string]string{
+		"docker inspect": inspectRaw,
+		"docker logs":    logsRaw,
+		"workload env":   workloadEnv,
+	} {
+		for _, secretMaterial := range []string{valid, wrong, expired, "PRIVATE KEY", "-gate-secret", "-gate-launch-id", "op_"} {
+			if strings.Contains(data, secretMaterial) {
+				t.Fatalf("secret material %q appeared in %s", secretMaterial, label)
+			}
+		}
+	}
+	proxyArgs, proxyEnv := decodeInspectArgsAndEnv(t, inspectRaw)
+	allowedProxyFlags := map[string]bool{
+		"-harness":          true,
+		"-daemon-listen":    true,
+		"-lease-sha256":     true,
+		"-listen-name":      true,
+		"-gate-socket":      true,
+		"-gate-tls-port":    true,
+		"-gate-spki-sha256": true,
+	}
+	var gateTLSPort string
+	for i := 0; i < len(proxyArgs); i += 2 {
+		flagName := proxyArgs[i]
+		if !allowedProxyFlags[flagName] || i+1 >= len(proxyArgs) {
+			t.Fatalf("unexpected or secret-carrying flag %q in proxy inspect args: %v", flagName, proxyArgs)
+		}
+		if flagName == "-gate-tls-port" {
+			gateTLSPort = proxyArgs[i+1]
+		}
+	}
+	for _, envEntry := range proxyEnv {
+		name, _, _ := strings.Cut(envEntry, "=")
+		upper := strings.ToUpper(name)
+		if strings.Contains(upper, "SECRET") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "KEY") || strings.Contains(upper, "LEASE") {
+			t.Fatalf("unexpected secret-like env var %q in proxy container inspect", name)
 		}
 	}
 
 	// Regression for finding 1: daemon side goes away while proxy container survives,
-	// and an unrelated listener takes the old daemon address and port.
+	// and an unrelated listener takes the old upstream address and port.
 	t.Run("substituted upstream after daemon loss receives zero credentials", func(t *testing.T) {
 		d.keepProxyOnRemove.Store(true)
 		_ = validSession.Close(ctx)
 		_ = daemonSrv.Close()
 		<-daemonDone
 
-		subLn, err := net.Listen("tcp4", daemonAddr)
-		if err != nil {
-			t.Fatalf("bind substituted listener at %s: %v", daemonAddr, err)
+		replaceAddr := daemonAddr
+		if ev.GateMode == councilproxy.GateModeHostGateway {
+			if gateTLSPort == "" {
+				t.Fatal("missing -gate-tls-port in host-gateway proxy args")
+			}
+			replaceAddr = net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), gateTLSPort)
 		}
+
 		var leakedCredentials atomic.Int32
+
+		// 1. Plain TCP listener taking over the port receives zero credentials.
+		plainLn, err := net.Listen("tcp4", replaceAddr)
+		if err != nil {
+			t.Fatalf("bind plain substituted listener at %s: %v", replaceAddr, err)
+		}
+		plainDone := make(chan struct{})
+		go func() {
+			defer close(plainDone)
+			for {
+				c, err := plainLn.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+				buf, _ := io.ReadAll(io.LimitReader(c, 8192))
+				if bytes.Contains(buf, []byte(valid)) || bytes.Contains(buf, []byte("Authorization")) {
+					leakedCredentials.Add(1)
+				}
+				_ = c.Close()
+			}
+		}()
+		gotPlain := runHarnessProbe(valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint)
+		_ = plainLn.Close()
+		<-plainDone
+		if !strings.HasPrefix(gotPlain, "502\n") {
+			t.Fatalf("surviving proxy against plain substituted listener returned %q, want 502", gotPlain)
+		}
+
+		// 2. Unverified TLS 1.3 listener with a fresh P-256 certificate taking over the port receives zero credentials.
+		subCert := newTestSelfSignedP256Cert(t)
+		subLn, err := net.Listen("tcp4", replaceAddr)
+		if err != nil {
+			t.Fatalf("bind TLS substituted listener at %s: %v", replaceAddr, err)
+		}
 		subSrv := &http.Server{
 			ReadHeaderTimeout: time.Second,
+			ErrorLog:          log.New(io.Discard, "", 0),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 				if r.Header.Get("Authorization") != "" || strings.Contains(string(body), valid) {
 					leakedCredentials.Add(1)
-				}
-				if ch := r.Header.Get(councilproxy.ChallengeHeader); ch != "" {
-					w.Header().Set(councilproxy.ProofHeader, ch)
 				}
 				w.WriteHeader(http.StatusNoContent)
 			}),
@@ -235,21 +315,65 @@ func TestCouncilProxyDocker(t *testing.T) {
 		subDone := make(chan struct{})
 		go func() {
 			defer close(subDone)
-			_ = subSrv.Serve(subLn)
+			_ = subSrv.Serve(tls.NewListener(subLn, &tls.Config{
+				Certificates: []tls.Certificate{subCert},
+				MinVersion:   tls.VersionTLS13,
+				MaxVersion:   tls.VersionTLS13,
+			}))
 		}()
 		t.Cleanup(func() {
 			_ = subSrv.Close()
 			<-subDone
 		})
 
-		got := runHarnessProbe(valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint)
-		if !strings.HasPrefix(got, "502\n") {
-			t.Fatalf("surviving proxy against substituted listener returned %q, want 502", got)
+		gotTLS := runHarnessProbe(valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint)
+		if !strings.HasPrefix(gotTLS, "502\n") {
+			t.Fatalf("surviving proxy against substituted TLS listener returned %q, want 502", gotTLS)
 		}
 		if leakedCredentials.Load() != 0 {
-			t.Fatalf("substituted listener received %d credential-bearing requests, want 0", leakedCredentials.Load())
+			t.Fatalf("substituted listeners received %d credential-bearing requests, want 0", leakedCredentials.Load())
 		}
 	})
+}
+
+func decodeInspectArgsAndEnv(t *testing.T, raw string) (args []string, env []string) {
+	t.Helper()
+	var inspected []struct {
+		Args   []string `json:"Args"`
+		Config struct {
+			Cmd []string `json:"Cmd"`
+			Env []string `json:"Env"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal([]byte(raw), &inspected); err != nil || len(inspected) != 1 {
+		t.Fatalf("decode proxy inspect args/env: %v", err)
+	}
+	if !slices.Equal(inspected[0].Args, inspected[0].Config.Cmd) {
+		t.Fatalf("inspect Args %v != Config.Cmd %v", inspected[0].Args, inspected[0].Config.Cmd)
+	}
+	return inspected[0].Args, inspected[0].Config.Env
+}
+
+func newTestSelfSignedP256Cert(t *testing.T) tls.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{councilproxy.Authority},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
 }
 
 func dockerTestSocketRoot(t *testing.T) string {
@@ -427,6 +551,13 @@ func (d proxyDockerCLI) ProbeGateSocket(ctx context.Context, spec councilproxy.G
 	}
 	args = append(append(args, spec.ImageID), spec.Args...)
 	_, err := d.run(ctx, "", args...)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == councilproxy.ProbeSocketUnsupportedExitCode ||
+			councilproxy.IsUnshareableSocketBindError(spec.HostSocketPath, exitErr.ExitCode(), err.Error()) {
+			return councilproxy.ErrGateSocketUnsupported
+		}
+	}
 	return err
 }
 

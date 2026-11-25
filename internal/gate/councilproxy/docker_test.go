@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -44,7 +43,7 @@ func (f *fakeDocker) ProbeGateSocket(_ context.Context, spec GateSocketProbe) er
 		return err
 	}
 	if !f.socketReachable {
-		return errors.New("container cannot reach host unix socket")
+		return ErrGateSocketUnsupported
 	}
 	var token string
 	for i := 0; i+1 < len(spec.Args); i++ {
@@ -52,13 +51,7 @@ func (f *fakeDocker) ProbeGateSocket(_ context.Context, spec GateSocketProbe) er
 			token = spec.Args[i+1]
 		}
 	}
-	conn, err := net.DialTimeout("unix", spec.HostSocketPath, time.Second)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	_, err = io.WriteString(conn, token+"\n")
-	return err
+	return ProbeGateSocketClient(spec.HostSocketPath, token)
 }
 
 func (f *fakeDocker) CreateInternalNetwork(_ context.Context, spec InternalNetworkSpec) (InternalNetworkInfo, error) {
@@ -142,11 +135,15 @@ func shortSocketRoot(t *testing.T) string {
 }
 
 func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
+	const token = "sc_task_fixture"
+	daemonAddr := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432")
+	gateAuth, _ := GateAuthority(daemonAddr)
 	for _, tc := range []struct {
 		name, fail, cleanupFail string
 		want                    []string
 	}{
 		{"success", "", "", []string{"probe", "network", "container", "egress", "start"}},
+		{"probe failure", "probe", "", []string{"probe"}},
 		{"network creation may commit", "network", "", []string{"probe", "network", "remove network"}},
 		{"proxy creation may commit", "container", "", []string{"probe", "network", "container", "remove container", "remove network"}},
 		{"connect failure", "egress", "", []string{"probe", "network", "container", "egress", "remove container", "remove network"}},
@@ -155,12 +152,17 @@ func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
 		{"network cleanup needs retry", "start", "remove network", []string{"probe", "network", "container", "egress", "start", "remove container", "remove network"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := NewRegistry()
 			sockRoot := shortSocketRoot(t)
 			engine := &fakeDocker{fail: tc.fail, cleanupFail: tc.cleanupFail, socketReachable: false}
 			cfg := Config{
-				Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest,
-				SocketRoot: sockRoot, Registry: reg,
+				Harness: "codex", DaemonListen: daemonAddr, LeaseSHA256: leaseDigest,
+				SocketRoot: sockRoot, GateHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Host != gateAuth || r.Header.Get("Authorization") != "Bearer "+token {
+						http.Error(w, "bad gate request", http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}),
 			}
 			session, err := Provision(t.Context(), engine, imageID, cfg)
 			if (err != nil) != (tc.fail != "") || !reflect.DeepEqual(engine.calls, tc.want) {
@@ -170,9 +172,19 @@ func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
 			if readErr != nil || len(entries) != 0 {
 				t.Fatalf("probe or host-gateway launch left socket entries: err=%v entries=%v", readErr, entries)
 			}
+			var tlsPort, spkiHex string
+			for i := 0; i+1 < len(engine.spec.Args); i += 2 {
+				switch engine.spec.Args[i] {
+				case "-gate-tls-port":
+					tlsPort = engine.spec.Args[i+1]
+				case "-gate-spki-sha256":
+					spkiHex = engine.spec.Args[i+1]
+				}
+			}
 			if tc.fail == "" {
 				if engine.spec.HostGateway != DockerHostGateway || engine.spec.HostGatewayTarget != defaultHostGatewayTarget ||
-					engine.spec.GateSocketHostPath != "" || engine.spec.GateSocketContainerPath != "" {
+					engine.spec.GateSocketHostPath != "" || engine.spec.GateSocketContainerPath != "" ||
+					!validPort(tlsPort) || !validHexBytes(spkiHex, sha256.Size, sha256.Size) {
 					t.Fatalf("unexpected host-gateway container spec: %+v", engine.spec)
 				}
 				ev := session.Evidence()
@@ -184,15 +196,26 @@ func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
 					endpoint.ProxyURL != "http://"+engine.proxy+":"+Port || endpoint.DataGateURL != endpoint.ProxyURL+"/gate/mcp" {
 					t.Fatalf("unexpected workload endpoint: %+v", endpoint)
 				}
-				// Verify preflight succeeds while session is open and fails once closed.
-				gateAuth, _ := GateAuthority(loopbackAddress())
-				preReq := httptest.NewRequest(http.MethodHead, PreflightPath, nil)
-				preReq.Header.Set(LaunchHeader, engine.proxy)
-				preReq.Header.Set(ChallengeHeader, strings.Repeat("b", 32))
-				preRec := httptest.NewRecorder()
-				reg.HandlePreflight(preRec, preReq, gateAuth)
-				if preRec.Code != http.StatusNoContent || preRec.Header().Get(ProofHeader) == "" {
-					t.Fatalf("active session preflight status=%d proof=%q", preRec.Code, preRec.Header().Get(ProofHeader))
+				// Verify pinned TLS 1.3 connection succeeds while session is open.
+				tlsAddr := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), tlsPort)
+				pin := decodeSPKIPin(t, spkiHex)
+				tr := newTLSGateTransport(pin, func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, tlsAddr)
+				})
+				defer tr.CloseIdleConnections()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+net.JoinHostPort(DockerHostGateway, tlsPort)+"/gate/task/messages", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Host = gateAuth
+				req.Header.Set("Authorization", "Bearer "+token)
+				res, err := tr.RoundTrip(req)
+				if err != nil {
+					t.Fatalf("active session pinned TLS call failed: %v", err)
+				}
+				_ = res.Body.Close()
+				if res.StatusCode != http.StatusNoContent {
+					t.Fatalf("active session TLS gate status=%d, want 204", res.StatusCode)
 				}
 			} else if session != nil && (session.Workload() != (WorkloadEndpoint{}) || session.Evidence() != (LaunchEvidence{})) {
 				t.Fatal("failed proxy was advertised to a workload or left evidence")
@@ -201,22 +224,18 @@ func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
 				t.Fatal("unexpected cleanup handle")
 			}
 			if session != nil {
-				proxyName := engine.proxy
 				engine.cleanupFail = ""
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
 				if err := session.Close(ctx); err != nil {
 					t.Fatalf("cleanup retry: %v", err)
 				}
-				// Preflight must fail closed after Close.
-				gateAuth, _ := GateAuthority(loopbackAddress())
-				preReq := httptest.NewRequest(http.MethodHead, PreflightPath, nil)
-				preReq.Header.Set(LaunchHeader, proxyName)
-				preReq.Header.Set(ChallengeHeader, strings.Repeat("b", 32))
-				preRec := httptest.NewRecorder()
-				reg.HandlePreflight(preRec, preReq, gateAuth)
-				if preRec.Code != http.StatusForbidden || preRec.Header().Get(ProofHeader) != "" {
-					t.Fatalf("closed session preflight status=%d proof=%q", preRec.Code, preRec.Header().Get(ProofHeader))
+				if tlsPort != "" {
+					tlsAddr := net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), tlsPort)
+					if conn, dialErr := net.DialTimeout("tcp4", tlsAddr, 200*time.Millisecond); dialErr == nil {
+						_ = conn.Close()
+						t.Fatalf("per-launch TLS listener at %s remained open after Close", tlsAddr)
+					}
 				}
 				before := len(engine.calls)
 				if err := session.Close(ctx); err != nil || len(engine.calls) != before {
@@ -232,7 +251,12 @@ func TestDockerProxyHostGatewayLifecycle(t *testing.T) {
 
 func TestDockerProxyUnixSocketLifecycleAndRouteBoundary(t *testing.T) {
 	const token = "sc_task_fixture"
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	daemonAddr := loopbackAddress()
+	gateAuthority, err := GateAuthority(daemonAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery == "redirect" {
 			w.Header().Set("Location", "/login")
 			w.WriteHeader(http.StatusTemporaryRedirect)
@@ -244,17 +268,14 @@ func TestDockerProxyUnixSocketLifecycleAndRouteBoundary(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("unix:" + r.Host))
-	}))
-	t.Cleanup(daemon.Close)
-	daemonAddr := daemon.Listener.Addr().String()
-	gateAuthority, err := GateAuthority(daemonAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	sockRoot := shortSocketRoot(t)
 	engine := &fakeDocker{socketReachable: true}
-	cfg := Config{Harness: "claude", DaemonListen: daemonAddr, LeaseSHA256: leaseDigest, SocketRoot: sockRoot}
+	cfg := Config{
+		Harness: "claude", DaemonListen: daemonAddr, LeaseSHA256: leaseDigest,
+		SocketRoot: sockRoot, GateHandler: gateHandler,
+	}
 	session, err := Provision(t.Context(), engine, imageID, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -406,6 +427,48 @@ func TestSweepStaleSockets(t *testing.T) {
 	}
 }
 
+func TestSocketCleanupRetainsVerifiedDirectoryHandle(t *testing.T) {
+	base := shortSocketRoot(t)
+	sockRoot := filepath.Join(base, "gates")
+	if err := os.Mkdir(sockRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sockPath, _, cleanup, err := createPrivateUnixSocket(sockRoot, "g-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subName := filepath.Base(filepath.Dir(sockPath))
+
+	victimRoot := filepath.Join(base, "victim")
+	victimSub := filepath.Join(victimRoot, subName)
+	if err := os.MkdirAll(victimSub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(victimSub, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("do-not-delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	movedRoot := filepath.Join(base, "moved-gates")
+	if err := os.Rename(sockRoot, movedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victimRoot, sockRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanErr := cleanup()
+	if _, err := os.Lstat(sentinel); err != nil {
+		t.Fatalf("cleanup followed replaced parent symlink and deleted victim file: %v", err)
+	}
+	if cleanErr != nil {
+		t.Fatalf("cleanup via retained handle failed: %v", cleanErr)
+	}
+	if _, err := os.Lstat(filepath.Join(movedRoot, subName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original launch socket directory was not removed from verified root: %v", err)
+	}
+}
+
 func TestDockerProxyRefusesNonIsolatedInternalNetwork(t *testing.T) {
 	isolatedSubnet := netip.PrefixFrom(netip.AddrFrom4([4]byte{172, 20, 0, 0}), 16).String()
 	assignedGateway := netip.AddrFrom4([4]byte{172, 20, 0, 1}).String()
@@ -414,8 +477,16 @@ func TestDockerProxyRefusesNonIsolatedInternalNetwork(t *testing.T) {
 		name string
 		info InternalNetworkInfo
 	}{
-		{"engine older than 27.1", InternalNetworkInfo{
+		{"engine 27.0 before isolated gateway support", InternalNetworkInfo{
 			EngineVersion: "27.0.3", Driver: "bridge", Internal: true,
+			Options: isolatedOpts, Subnets: []string{isolatedSubnet},
+		}},
+		{"engine 27.1 before isolated gateway support", InternalNetworkInfo{
+			EngineVersion: "27.1.0", Driver: "bridge", Internal: true,
+			Options: isolatedOpts, Subnets: []string{isolatedSubnet},
+		}},
+		{"engine 27.5 before isolated gateway support", InternalNetworkInfo{
+			EngineVersion: "27.5.1", Driver: "bridge", Internal: true,
 			Options: isolatedOpts, Subnets: []string{isolatedSubnet},
 		}},
 		{"engine missing version", InternalNetworkInfo{
@@ -465,6 +536,22 @@ func TestDockerProxyRefusesNonIsolatedInternalNetwork(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("engine 28.0 with isolated options succeeds", func(t *testing.T) {
+		info := InternalNetworkInfo{
+			EngineVersion: "28.0.0", Driver: "bridge", Internal: true,
+			Options: isolatedOpts, Subnets: []string{isolatedSubnet},
+		}
+		engine := &fakeDocker{netInfo: &info}
+		cfg := Config{Harness: "codex", DaemonListen: loopbackAddress(), SocketRoot: shortSocketRoot(t)}
+		s, err := Provision(t.Context(), engine, imageID, cfg)
+		if err != nil || s == nil {
+			t.Fatalf("expected 28.0.0 isolated network to succeed, got session=%v err=%v", s, err)
+		}
+		if err := s.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestDockerProxyRefusesBeforeCreate(t *testing.T) {
@@ -480,7 +567,9 @@ func TestDockerProxyRefusesBeforeCreate(t *testing.T) {
 		{"invalid harness", imageID, Config{Harness: "other", DaemonListen: loopbackAddress()}},
 		{"lan daemon address", imageID, Config{Harness: "codex", DaemonListen: lanListen}},
 		{"unspecified daemon address", imageID, Config{Harness: "codex", DaemonListen: unspecListen}},
-		{"pre-populated gate socket", imageID, Config{Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest, GateSocket: ContainerGateSocket}},
+		{"pre-populated gate socket", imageID, Config{Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest, GateSocket: ContainerGateSocket, GateHandler: http.NotFoundHandler()}},
+		{"pre-populated gate spki", imageID, Config{Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest, GateSPKISHA256: strings.Repeat("a", 64), GateHandler: http.NotFoundHandler()}},
+		{"missing gate handler with lease", imageID, Config{Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := &fakeDocker{}
@@ -748,4 +837,459 @@ func TestGateListenerLimitsWithFakeListener(t *testing.T) {
 			t.Fatal("handler observed payload exceeding MaxBodyBytes")
 		}
 	})
+}
+
+func TestWrapGateHandlerSlowBodiesAndPromptRefusal(t *testing.T) {
+	ln, err := net.Listen("tcp4", net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const slots = MaxGateConns // 32
+	limits := GateLimits{
+		MaxConns:          slots,
+		ReadHeaderTimeout: time.Second,
+		ReadTimeout:       250 * time.Millisecond,
+		WriteTimeout:      time.Second,
+		IdleTimeout:       time.Second,
+		MaxHeaderBytes:    4096,
+		MaxBodyBytes:      1024,
+	}
+	// Mirror sablecourtd: server sets ReadHeaderTimeout only; WrapGateHandler must enforce body deadlines and 32-slot admission.
+	srv := &http.Server{
+		ReadHeaderTimeout: time.Second,
+		Handler: WrapGateHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}), limits),
+	}
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		_ = srv.Serve(LimitListener(ln, 256))
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-srvDone
+	})
+
+	addr := ln.Addr().String()
+	slowConns := make([]net.Conn, 0, slots)
+	slowReaders := make([]*bufio.Reader, 0, slots)
+	t.Cleanup(func() {
+		for _, c := range slowConns {
+			_ = c.Close()
+		}
+	})
+
+	// Hold all 32 slots in WrapGateHandler with incomplete bodies.
+	// Expect: 100-continue fires only when WrapGateHandler starts reading r.Body after acquiring its slot.
+	for i := range slots {
+		c, err := net.DialTimeout("tcp4", addr, time.Second)
+		if err != nil {
+			t.Fatalf("dial slow body %d: %v", i, err)
+		}
+		slowConns = append(slowConns, c)
+		if _, err := io.WriteString(c, "POST /gate/mcp HTTP/1.1\r\nHost: gate\r\nContent-Length: 64\r\nExpect: 100-continue\r\n\r\n"); err != nil {
+			t.Fatalf("write headers %d: %v", i, err)
+		}
+		br := bufio.NewReader(c)
+		slowReaders = append(slowReaders, br)
+		if err := c.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		line, err := br.ReadString('\n')
+		if err != nil || !strings.Contains(line, "100 Continue") {
+			t.Fatalf("slot %d did not enter body read: line=%q err=%v", i, line, err)
+		}
+		// Consume blank line terminating 100 Continue response, then send 1 byte and stall.
+		if _, err := br.ReadString('\n'); err != nil {
+			t.Fatalf("slot %d 100-continue crlf: %v", i, err)
+		}
+		if _, err := io.WriteString(c, "{"); err != nil {
+			t.Fatalf("slot %d partial body write: %v", i, err)
+		}
+	}
+
+	// The 33rd request must be refused promptly (well before the 250ms body ReadTimeout).
+	fastClient := &http.Client{Timeout: 100 * time.Millisecond}
+	defer fastClient.CloseIdleConnections()
+	res33, err := fastClient.Get("http://" + addr + "/gate/task/messages")
+	if err != nil {
+		t.Fatalf("33rd request blocked instead of prompt refusal: %v", err)
+	}
+	_ = res33.Body.Close()
+	if res33.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("33rd request status = %d, want %d", res33.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	// Wait for the body ReadTimeout to abort all 32 stalled bodies and free their slots.
+	deadline := time.Now().Add(2 * time.Second)
+	for i, c := range slowConns {
+		if err := c.SetReadDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.ReadResponse(slowReaders[i], nil)
+		if err == nil {
+			_ = res.Body.Close()
+		}
+		_ = c.Close()
+	}
+
+	// Verify all 32 slots are freed after the deadline by running 32 requests.
+	okClient := &http.Client{Timeout: time.Second}
+	defer okClient.CloseIdleConnections()
+	var wg sync.WaitGroup
+	errs := make(chan error, slots)
+	for range slots {
+		wg.Go(func() {
+			res, err := okClient.Post("http://"+addr+"/gate/mcp", "application/json", strings.NewReader(`{}`))
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = res.Body.Close()
+			if res.StatusCode != http.StatusNoContent {
+				errs <- fmt.Errorf("status = %d, want 204", res.StatusCode)
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("post-deadline slot recovery failed: %v", err)
+	}
+}
+
+type probeOverrideDocker struct {
+	fakeDocker
+	probe func(context.Context, GateSocketProbe) error
+}
+
+func (p *probeOverrideDocker) ProbeGateSocket(ctx context.Context, spec GateSocketProbe) error {
+	p.calls = append(p.calls, "probe")
+	return p.probe(ctx, spec)
+}
+
+func TestProbeUnixSocketModeFailsClosedOnDockerOrExchangeError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe func(context.Context, GateSocketProbe) error
+	}{
+		{
+			name: "docker runtime error",
+			probe: func(_ context.Context, _ GateSocketProbe) error {
+				return errors.New("docker daemon unavailable")
+			},
+		},
+		{
+			name: "zero exit without connecting",
+			probe: func(_ context.Context, _ GateSocketProbe) error {
+				return nil
+			},
+		},
+		{
+			name: "wrong probe token",
+			probe: func(_ context.Context, spec GateSocketProbe) error {
+				conn, err := net.DialTimeout("unix", spec.HostSocketPath, time.Second)
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				_, _ = io.WriteString(conn, "wrong-token\n")
+				return nil
+			},
+		},
+		{
+			name: "eof before token",
+			probe: func(_ context.Context, spec GateSocketProbe) error {
+				conn, err := net.DialTimeout("unix", spec.HostSocketPath, time.Second)
+				if err != nil {
+					return err
+				}
+				return conn.Close()
+			},
+		},
+		{
+			name: "unsupported claimed after host connection accepted",
+			probe: func(_ context.Context, spec GateSocketProbe) error {
+				conn, err := net.DialTimeout("unix", spec.HostSocketPath, time.Second)
+				if err != nil {
+					return err
+				}
+				_ = conn.Close()
+				return ErrGateSocketUnsupported
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sockRoot := shortSocketRoot(t)
+			engine := &probeOverrideDocker{probe: tc.probe}
+			cfg := Config{
+				Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest,
+				SocketRoot: sockRoot, GateHandler: http.NotFoundHandler(),
+			}
+			s, err := Provision(t.Context(), engine, imageID, cfg)
+			if s != nil {
+				_ = s.Close(t.Context())
+			}
+			if err == nil || !reflect.DeepEqual(engine.calls, []string{"probe"}) {
+				t.Fatalf("probe failure %q fell back instead of failing closed: session=%v err=%v calls=%v", tc.name, s, err, engine.calls)
+			}
+			entries, readErr := os.ReadDir(sockRoot)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("probe failure left socket entries: err=%v entries=%v", readErr, entries)
+			}
+		})
+	}
+}
+
+func TestUnixSocketModeDispatchesInProcessWithoutLoopbackDial(t *testing.T) {
+	const token = "sc_task_fixture"
+	ln, err := net.Listen("tcp4", net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonAddr := ln.Addr().String()
+	gateAuthority, err := GateAuthority(daemonAddr)
+	if err != nil {
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+
+	gateHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != gateAuthority || r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unexpected gate request", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "in-process-ok")
+	})
+
+	sockRoot := shortSocketRoot(t)
+	engine := &fakeDocker{socketReachable: true}
+	session, err := Provision(t.Context(), engine, imageID, Config{
+		Harness:      "claude",
+		DaemonListen: daemonAddr,
+		LeaseSHA256:  leaseDigest,
+		SocketRoot:   sockRoot,
+		GateHandler:  gateHandler,
+	})
+	if err != nil {
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(t.Context()) })
+
+	// Close the daemon loopback port and replace it with an unauthenticated listener.
+	_ = ln.Close()
+	subLn, err := net.Listen("tcp4", daemonAddr)
+	if err != nil {
+		t.Fatalf("bind substituted loopback listener: %v", err)
+	}
+	var tcpHits, tcpLeaks int32
+	var tcpMu sync.Mutex
+	subSrv := &http.Server{
+		ReadHeaderTimeout: time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tcpMu.Lock()
+			tcpHits++
+			if r.Header.Get("Authorization") != "" {
+				tcpLeaks++
+			}
+			tcpMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "substituted-tcp")
+		}),
+	}
+	subDone := make(chan struct{})
+	go func() {
+		defer close(subDone)
+		_ = subSrv.Serve(subLn)
+	}()
+	t.Cleanup(func() {
+		_ = subSrv.Close()
+		<-subDone
+	})
+
+	hostSock := engine.spec.GateSocketHostPath
+	unixClient := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", hostSock)
+			},
+		},
+	}
+	t.Cleanup(unixClient.CloseIdleConnections)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://unix/gate/task/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = gateAuthority
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "operator=strip-me")
+	res, err := unixClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+
+	tcpMu.Lock()
+	hits, leaks := tcpHits, tcpLeaks
+	tcpMu.Unlock()
+	if hits != 0 || leaks != 0 {
+		t.Fatalf("unix socket gate dialed loopback port: hits=%d leaks=%d body=%q", hits, leaks, string(body))
+	}
+	if res.StatusCode != http.StatusOK || string(body) != "in-process-ok" {
+		t.Fatalf("status=%d body=%q, want 200 in-process-ok", res.StatusCode, string(body))
+	}
+}
+
+func TestHostGatewayArgsContainNoSecret(t *testing.T) {
+	sockRoot := shortSocketRoot(t)
+	engine := &fakeDocker{socketReachable: false}
+	session, err := Provision(t.Context(), engine, imageID, Config{
+		Harness:      "codex",
+		DaemonListen: loopbackAddress(),
+		LeaseSHA256:  leaseDigest,
+		SocketRoot:   sockRoot,
+		GateHandler:  http.NotFoundHandler(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(t.Context()) })
+
+	allowedFlags := map[string]bool{
+		"-harness":          true,
+		"-daemon-listen":    true,
+		"-lease-sha256":     true,
+		"-listen-name":      true,
+		"-gate-tls-port":    true,
+		"-gate-spki-sha256": true,
+	}
+	for i := 0; i < len(engine.spec.Args); i += 2 {
+		flagName := engine.spec.Args[i]
+		if !allowedFlags[flagName] || i+1 >= len(engine.spec.Args) {
+			t.Fatalf("unexpected or secret-carrying flag %q in proxy argv: %v", flagName, engine.spec.Args)
+		}
+	}
+	for _, entry := range session.Workload().Env() {
+		name, val, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		if strings.Contains(upper, "SECRET") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "KEY") || strings.Contains(val, "PRIVATE KEY") {
+			t.Fatalf("unexpected secret-like workload env entry %q", entry)
+		}
+	}
+	if err := session.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if session.tlsGate != nil {
+		t.Fatal("tlsGate retained on session after Close")
+	}
+}
+
+func TestIsUnshareableSocketBindError(t *testing.T) {
+	sockRoot := shortSocketRoot(t)
+	sockPath, _, cleanup, err := createPrivateUnixSocket(sockRoot, "p-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	resolved, err := filepath.EvalSymlinks(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regFile := filepath.Join(sockRoot, "not-a-socket")
+	if err := os.WriteFile(regFile, []byte("plain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(sockRoot, "missing.sock")
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		exitCode int
+		output   string
+		want     bool
+	}{
+		{
+			name:     "docker desktop socket_mnt rewrite",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker run: exit status 125: docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /socket_mnt" + resolved + "\n\nRun 'docker run --help' for more information\n",
+			want:     true,
+		},
+		{
+			name:     "docker desktop host_mnt rewrite",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /host_mnt" + resolved + "\n",
+			want:     true,
+		},
+		{
+			name:     "unprefixed vm missing bind source",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: " + sockPath + "\n",
+			want:     true,
+		},
+		{
+			name:     "docker desktop mounts denied multiline",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: Mounts denied:\nThe path " + filepath.Dir(resolved) + " is not shared from the host and is not known to Docker.\n",
+			want:     true,
+		},
+		{
+			name:     "missing host socket fails closed",
+			path:     missingPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /socket_mnt" + missingPath + "\n",
+			want:     false,
+		},
+		{
+			name:     "regular host file fails closed",
+			path:     regFile,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /socket_mnt" + regFile + "\n",
+			want:     false,
+		},
+		{
+			name:     "wrong exit code fails closed",
+			path:     sockPath,
+			exitCode: 1,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /socket_mnt" + resolved + "\n",
+			want:     false,
+		},
+		{
+			name:     "different bind path fails closed",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: /socket_mnt/tmp/unrelated/gate.sock\n",
+			want:     false,
+		},
+		{
+			name:     "daemon unreachable fails closed",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\n",
+			want:     false,
+		},
+		{
+			name:     "missing image fails closed",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "Unable to find image 'sha256:aaa' locally\n",
+			want:     false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsUnshareableSocketBindError(tc.path, tc.exitCode, tc.output); got != tc.want {
+				t.Fatalf("IsUnshareableSocketBindError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

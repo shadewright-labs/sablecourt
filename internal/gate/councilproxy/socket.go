@@ -3,17 +3,21 @@ package councilproxy
 import (
 	"bufio"
 	"context"
-	"crypto/hmac"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,12 +30,13 @@ import (
 )
 
 const (
-	ContainerGateSocket = "/gate.sock"
-	PreflightPath       = "/gate/_preflight"
-	LaunchHeader        = "X-Sablecourt-Gate-Launch"
-	ChallengeHeader     = "X-Sablecourt-Gate-Challenge"
-	ProofHeader         = "X-Sablecourt-Gate-Proof"
+	ContainerGateSocket            = "/gate.sock"
+	ProbeSocketUnsupportedExitCode = 42
+	launchCertLifetime             = 2 * time.Hour
 )
+
+// ErrGateSocketUnsupported indicates that a bind-mounted host Unix socket cannot be connected from a container.
+var ErrGateSocketUnsupported = errors.New("council gate unix socket is not shareable with container")
 
 type GateMode string
 
@@ -46,100 +51,6 @@ type LaunchEvidence struct {
 	Proxy        string   `json:"proxy"`
 	ProxyImageID string   `json:"proxy_image_id"`
 	GateMode     GateMode `json:"gate_mode"`
-}
-
-type registryKey struct {
-	authority string
-	launchID  string
-}
-
-type Registry struct {
-	mu      sync.RWMutex
-	entries map[registryKey][32]byte
-}
-
-var DefaultRegistry = NewRegistry()
-
-func NewRegistry() *Registry {
-	return &Registry{entries: make(map[registryKey][32]byte)}
-}
-
-func (r *Registry) Register(authority, launchID string, secret [32]byte) {
-	authority = strings.ToLower(strings.TrimSpace(authority))
-	if r == nil || authority == "" || !validLaunchID(launchID) {
-		return
-	}
-	r.mu.Lock()
-	r.entries[registryKey{authority: authority, launchID: launchID}] = secret
-	r.mu.Unlock()
-}
-
-func (r *Registry) Unregister(authority, launchID string) {
-	authority = strings.ToLower(strings.TrimSpace(authority))
-	if r == nil || authority == "" || launchID == "" {
-		return
-	}
-	r.mu.Lock()
-	delete(r.entries, registryKey{authority: authority, launchID: launchID})
-	r.mu.Unlock()
-}
-
-func IsPreflightRequest(r *http.Request) bool {
-	if r == nil || r.Method != http.MethodHead || r.URL == nil {
-		return false
-	}
-	u := r.URL
-	return !u.IsAbs() && u.Host == "" && u.Opaque == "" && u.User == nil &&
-		u.RawPath == "" && u.RawQuery == "" && u.Path == PreflightPath &&
-		r.Header.Get("Upgrade") == ""
-}
-
-func (r *Registry) HandlePreflight(w http.ResponseWriter, req *http.Request, authority string) {
-	w.Header().Set("Cache-Control", "no-store")
-	authority = strings.ToLower(strings.TrimSpace(authority))
-	if r == nil || authority == "" || !IsPreflightRequest(req) || len(req.Header.Values("Authorization")) != 0 {
-		http.Error(w, "council gate preflight refused", http.StatusForbidden)
-		return
-	}
-	launches := req.Header.Values(LaunchHeader)
-	challenges := req.Header.Values(ChallengeHeader)
-	if len(launches) != 1 || len(challenges) != 1 ||
-		!validLaunchID(launches[0]) || !validHexBytes(challenges[0], 16, 64) {
-		http.Error(w, "council gate preflight refused", http.StatusForbidden)
-		return
-	}
-	r.mu.RLock()
-	secret, ok := r.entries[registryKey{authority: authority, launchID: launches[0]}]
-	r.mu.RUnlock()
-	if !ok {
-		http.Error(w, "council gate preflight refused", http.StatusForbidden)
-		return
-	}
-	w.Header().Set(ProofHeader, ComputeGateProof(secret, authority, launches[0], challenges[0]))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func HandleGatePreflight(w http.ResponseWriter, req *http.Request, authority string) {
-	DefaultRegistry.HandlePreflight(w, req, authority)
-}
-
-func ComputeGateProof(secret [32]byte, authority, launchID, challenge string) string {
-	mac := hmac.New(sha256.New, secret[:])
-	_, _ = io.WriteString(mac, strings.ToLower(strings.TrimSpace(authority))+"\n"+launchID+"\n"+challenge)
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func validLaunchID(id string) bool {
-	if id == "" || len(id) > 128 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if c <= 0x20 || c >= 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 func validHexBytes(raw string, minBytes, maxBytes int) bool {
@@ -273,12 +184,16 @@ func createPrivateUnixSocket(sockRoot, prefix string) (sockPath string, ln net.L
 	if err != nil {
 		return "", nil, nil, err
 	}
-	defer root.Close()
+	closeRootOnErr := true
+	defer func() {
+		if closeRootOnErr {
+			_ = root.Close()
+		}
+	}()
 	if err := root.Mkdir(subName, 0o700); err != nil {
 		return "", nil, nil, err
 	}
-	launchDir := filepath.Join(rootPath, subName)
-	if err := os.Chmod(launchDir, 0o700); err != nil {
+	if err := root.Chmod(subName, 0o700); err != nil {
 		_ = root.RemoveAll(subName)
 		return "", nil, nil, err
 	}
@@ -287,6 +202,7 @@ func createPrivateUnixSocket(sockRoot, prefix string) (sockPath string, ln net.L
 		_ = root.RemoveAll(subName)
 		return "", nil, nil, errors.New("council gate launch socket directory failed permission check")
 	}
+	launchDir := filepath.Join(rootPath, subName)
 	sockPath = filepath.Join(launchDir, "gate.sock")
 	uln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -296,23 +212,18 @@ func createPrivateUnixSocket(sockRoot, prefix string) (sockPath string, ln net.L
 	// The parent directory is 0700 and owned by the current user, blocking other host users;
 	// the socket inode itself needs write permission so unprivileged container UID 10001 can connect
 	// when the single socket file is bind-mounted into the proxy container.
-	if err := os.Chmod(sockPath, 0o666); err != nil { // #nosec G302 -- parent launchDir and sockRoot are 0700 owned by daemon user
+	if err := root.Chmod(filepath.Join(subName, "gate.sock"), 0o666); err != nil { // #nosec G302 -- parent launchDir and sockRoot are 0700 owned by daemon user
 		_ = uln.Close()
 		_ = root.RemoveAll(subName)
 		return "", nil, nil, err
 	}
+	closeRootOnErr = false
 	var once sync.Once
 	var cleanErr error
 	cleanup = func() error {
 		once.Do(func() {
 			_ = uln.Close()
-			r, openErr := openPrivateRoot(rootPath)
-			if openErr != nil {
-				cleanErr = errors.Join(openErr, os.RemoveAll(launchDir))
-				return
-			}
-			defer r.Close()
-			cleanErr = r.RemoveAll(subName)
+			cleanErr = errors.Join(root.RemoveAll(subName), root.Close())
 		})
 		return cleanErr
 	}
@@ -331,7 +242,7 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		return false, err
 	}
 	probeToken := hex.EncodeToString(tokenRaw[:])
-	var verified atomic.Bool
+	var accepted, verified atomic.Bool
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
@@ -339,6 +250,7 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		if acceptErr != nil {
 			return
 		}
+		accepted.Store(true)
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 		line, readErr := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
@@ -347,8 +259,9 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		}
 		got := strings.TrimSpace(line)
 		if subtle.ConstantTimeCompare([]byte(got), []byte(probeToken)) == 1 {
-			verified.Store(true)
-			_, _ = io.WriteString(conn, "ok\n")
+			if _, writeErr := io.WriteString(conn, "ok\n"); writeErr == nil {
+				verified.Store(true)
+			}
 		}
 	}()
 
@@ -371,7 +284,74 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
-	return probeErr == nil && verified.Load(), nil
+	if errors.Is(probeErr, ErrGateSocketUnsupported) {
+		if accepted.Load() {
+			return false, errors.New("council gate socket probe accepted a host connection before reporting unsupported socket")
+		}
+		return false, nil
+	}
+	if probeErr != nil {
+		return false, fmt.Errorf("council gate socket probe failed: %w", probeErr)
+	}
+	if !verified.Load() {
+		return false, errors.New("council gate socket probe did not complete token exchange")
+	}
+	return true, nil
+}
+
+func isSocketNotShareable(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENOTSOCK) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOTSUP)
+}
+
+// IsUnshareableSocketBindError reports whether a failed Docker bind-mount probe
+// specifically shows that the runtime cannot see or forward an existing host
+// Unix socket (such as Docker Desktop rewriting socket bind mounts under
+// /socket_mnt/... or denying host file sharing). Any other error returns false
+// so callers fail closed.
+func IsUnshareableSocketBindError(hostSocketPath string, exitCode int, output string) bool {
+	if exitCode != 125 || hostSocketPath == "" {
+		return false
+	}
+	info, err := os.Lstat(hostSocketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+	candidates := []string{filepath.Clean(hostSocketPath)}
+	if resolved, err := filepath.EvalSymlinks(hostSocketPath); err == nil {
+		resolved = filepath.Clean(resolved)
+		if resolved != "" && resolved != candidates[0] {
+			candidates = append(candidates, resolved)
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "invalid mount config for type "); idx >= 0 {
+			const marker = "bind source path does not exist:"
+			if _, rest, ok := strings.Cut(line[idx:], marker); ok {
+				mounted := strings.TrimSpace(rest)
+				for _, cand := range candidates {
+					if mounted == cand || mounted == "/socket_mnt"+cand || mounted == "/host_mnt"+cand {
+						return true
+					}
+				}
+			}
+		}
+	}
+	if strings.Contains(output, "Mounts denied:") && strings.Contains(output, "not shared from the host") {
+		for _, cand := range candidates {
+			if strings.Contains(output, cand) {
+				return true
+			}
+			dir := filepath.Dir(cand)
+			if dir != string(filepath.Separator) && dir != "." && strings.Contains(output, dir) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ProbeGateSocketClient runs inside the short-lived probe container to verify Unix socket reachability.
@@ -379,8 +359,18 @@ func ProbeGateSocketClient(socketPath, token string) error {
 	if socketPath == "" || token == "" {
 		return errors.New("probe requires socket path and token")
 	}
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return ErrGateSocketUnsupported
+	}
 	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
 	if err != nil {
+		if isSocketNotShareable(err) {
+			return ErrGateSocketUnsupported
+		}
 		return err
 	}
 	defer conn.Close()
@@ -400,15 +390,76 @@ func ProbeGateSocketClient(socketPath, token string) error {
 	return nil
 }
 
+type gateResponseGuard struct {
+	w           http.ResponseWriter
+	wroteHeader bool
+	blocked     bool
+}
+
+func (g *gateResponseGuard) Header() http.Header { return g.w.Header() }
+
+func (g *gateResponseGuard) Unwrap() http.ResponseWriter { return g.w }
+
+func (g *gateResponseGuard) WriteHeader(code int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	g.w.Header().Del("Location")
+	g.w.Header().Del("Set-Cookie")
+	if code >= http.StatusMultipleChoices && code < http.StatusBadRequest {
+		g.blocked = true
+		http.Error(g.w, "council gate unavailable", http.StatusBadGateway)
+		return
+	}
+	g.w.WriteHeader(code)
+}
+
+func (g *gateResponseGuard) Write(p []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.blocked {
+		return len(p), nil
+	}
+	return g.w.Write(p)
+}
+
+func (g *gateResponseGuard) Flush() {
+	if g.blocked {
+		return
+	}
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if f, ok := g.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func sanitizeGateHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := r.Clone(r.Context())
+		req.Header.Del("Cookie")
+		guard := &gateResponseGuard{w: w}
+		next.ServeHTTP(guard, req)
+		if !guard.wroteHeader {
+			guard.WriteHeader(http.StatusOK)
+		}
+	})
+}
+
 type unixGate struct {
-	sockPath  string
-	server    *http.Server
-	transport *http.Transport
-	done      chan struct{}
-	cleanup   func() error
+	sockPath string
+	server   *http.Server
+	done     chan struct{}
+	cleanup  func() error
 }
 
 func startUnixGate(sockRoot string, cfg Config, limits GateLimits) (*unixGate, error) {
+	if cfg.GateHandler == nil {
+		return nil, errors.New("council unix gate requires an in-process gate handler")
+	}
 	gate, err := GateAuthority(cfg.DaemonListen)
 	if err != nil {
 		return nil, err
@@ -422,9 +473,7 @@ func startUnixGate(sockRoot string, cfg Config, limits GateLimits) (*unixGate, e
 	if err != nil {
 		return nil, err
 	}
-	transport := newGateTransport()
-	reverse := newGateReverseProxy(&url.URL{Scheme: "http", Host: cfg.DaemonListen}, gate, transport)
-	handler := gateRouteHandler(gate, digest, WrapGateHandler(reverse, limits))
+	handler := gateRouteHandler(gate, digest, WrapGateHandler(sanitizeGateHandler(cfg.GateHandler), limits))
 	srv := NewGateServer(handler, limits)
 	done := make(chan struct{})
 	go func() {
@@ -432,11 +481,10 @@ func startUnixGate(sockRoot string, cfg Config, limits GateLimits) (*unixGate, e
 		_ = srv.Serve(LimitListener(ln, limits.MaxConns))
 	}()
 	return &unixGate{
-		sockPath:  sockPath,
-		server:    srv,
-		transport: transport,
-		done:      done,
-		cleanup:   cleanup,
+		sockPath: sockPath,
+		server:   srv,
+		done:     done,
+		cleanup:  cleanup,
 	}, nil
 }
 
@@ -446,6 +494,132 @@ func (g *unixGate) close() error {
 	}
 	_ = g.server.Close()
 	<-g.done
-	g.transport.CloseIdleConnections()
 	return g.cleanup()
+}
+
+type tlsGate struct {
+	addr       string
+	port       string
+	spkiSHA256 string
+	cert       atomic.Pointer[tls.Certificate]
+	tlsConfig  *tls.Config
+	server     *http.Server
+	done       chan struct{}
+	closeOnce  sync.Once
+}
+
+func newLaunchCertificate(now time.Time, validity time.Duration) (tls.Certificate, string, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("generate council gate P-256 key: %w", err)
+	}
+	serialMax := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialMax)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("generate council gate certificate serial: %w", err)
+	}
+	serial.Add(serial, big.NewInt(1))
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(validity),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{Authority},
+	}
+	derCert, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("create council gate certificate: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(derCert)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("parse council gate certificate: %w", err)
+	}
+	spkiSum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	return tls.Certificate{
+		Certificate: [][]byte{derCert},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}, hex.EncodeToString(spkiSum[:]), nil
+}
+
+func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
+	if cfg.GateHandler == nil {
+		return nil, errors.New("council TLS gate requires an in-process gate handler")
+	}
+	gate, err := GateAuthority(cfg.DaemonListen)
+	if err != nil {
+		return nil, err
+	}
+	loopbackHost, _, err := net.SplitHostPort(cfg.DaemonListen)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := hex.DecodeString(cfg.LeaseSHA256)
+	if err != nil || len(digest) != sha256.Size {
+		return nil, errors.New("invalid council task lease digest")
+	}
+	limits = limits.normalized()
+
+	cert, spkiHex, err := newLaunchCertificate(time.Now(), launchCertLifetime)
+	if err != nil {
+		return nil, err
+	}
+	rawLn, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
+	if err != nil {
+		return nil, fmt.Errorf("listen council gate TLS loopback: %w", err)
+	}
+	addr := rawLn.Addr().String()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || !validPort(port) {
+		_ = rawLn.Close()
+		return nil, errors.New("invalid council gate TLS listen port")
+	}
+
+	g := &tlsGate{
+		addr:       addr,
+		port:       port,
+		spkiSHA256: spkiHex,
+	}
+	g.cert.Store(&cert)
+	tlsCfg := &tls.Config{
+		MinVersion:             tls.VersionTLS13,
+		MaxVersion:             tls.VersionTLS13,
+		SessionTicketsDisabled: true,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			c := g.cert.Load()
+			if c == nil {
+				return nil, errors.New("council gate TLS launch closed")
+			}
+			return c, nil
+		},
+	}
+	handler := gateRouteHandler(gate, digest, WrapGateHandler(sanitizeGateHandler(cfg.GateHandler), limits))
+	srv := NewGateServer(handler, limits)
+	srv.ErrorLog = log.New(io.Discard, "", 0)
+	tlsLn := tls.NewListener(LimitListener(rawLn, limits.MaxConns), tlsCfg)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve(tlsLn)
+	}()
+	g.tlsConfig = tlsCfg
+	g.server = srv
+	g.done = done
+	return g, nil
+}
+
+func (g *tlsGate) close() error {
+	if g == nil {
+		return nil
+	}
+	g.closeOnce.Do(func() {
+		g.cert.Store(nil)
+		_ = g.server.Close()
+		<-g.done
+	})
+	return nil
 }

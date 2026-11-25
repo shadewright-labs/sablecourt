@@ -120,7 +120,7 @@ func (l *limitListener) Close() error {
 	return l.Listener.Close()
 }
 
-// WrapGateHandler enforces concurrent request admission, per-response write deadlines, and bounded request bodies.
+// WrapGateHandler enforces concurrent request admission, per-request read/write deadlines, and bounded request bodies.
 func WrapGateHandler(next http.Handler, limits GateLimits) http.Handler {
 	limits = limits.normalized()
 	sem := make(chan struct{}, limits.MaxConns)
@@ -128,10 +128,23 @@ func WrapGateHandler(next http.Handler, limits GateLimits) http.Handler {
 		select {
 		case sem <- struct{}{}:
 			defer func() { <-sem }()
-		case <-r.Context().Done():
+		default:
+			w.Header().Set("Connection", "close")
+			http.Error(w, "council gate busy", http.StatusServiceUnavailable)
 			return
 		}
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(limits.WriteTimeout))
+		rc := http.NewResponseController(w)
+		now := time.Now()
+		if err := rc.SetReadDeadline(now.Add(limits.ReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			w.Header().Set("Connection", "close")
+			http.Error(w, "council gate read deadline failed", http.StatusInternalServerError)
+			return
+		}
+		if err := rc.SetWriteDeadline(now.Add(limits.WriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			w.Header().Set("Connection", "close")
+			http.Error(w, "council gate write deadline failed", http.StatusInternalServerError)
+			return
+		}
 		if r.ContentLength > limits.MaxBodyBytes {
 			w.Header().Set("Connection", "close")
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
@@ -148,6 +161,7 @@ func WrapGateHandler(next http.Handler, limits GateLimits) http.Handler {
 				return
 			}
 			if err != nil {
+				w.Header().Set("Connection", "close")
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
