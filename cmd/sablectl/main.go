@@ -22,6 +22,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
@@ -1100,6 +1101,7 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 	}
 
 	councilCmd := buildCouncilCmd(httpClient, &jsonOut)
+	rootCmd.AddCommand(buildHarnessCmd(harnessimages.CommandDocker{}))
 	doctorCmd, initCmd, taskDiffCmd, memoryCmd := buildDXCommands(httpClient, &jsonOut)
 	serviceCmd, tsCmd := buildOpsCommands()
 	taskCmd.AddCommand(taskDiffCmd)
