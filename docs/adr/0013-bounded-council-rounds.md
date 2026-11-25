@@ -1,7 +1,7 @@
 # ADR-0013: Bounded council rounds in Conclaves
 
 - Date: 2026-11-24
-- Status: Accepted (2026-11-24, by the owner; to be revised from what the first test runs show)
+- Status: Accepted (2026-11-24; to be revised from what the first test runs show)
 
 ## Context
 
@@ -17,7 +17,7 @@ Each turn gets the question, applicable operator Decrees, and redacted, role-lab
 
 A named ref resolves once to a pinned commit and produces a read-only checkout. An explicit single-writer mode gives one selected role a fresh council worktree at that commit for the life of the council. Peers keep their read-only view and may receive the writer's redacted diff as a Relic after its turn becomes visible. The daemon refuses an invalid ref, a second writer, or a launch without enforceable isolation. Publication requires PR checks and human merge.
 
-The default ceilings are two rounds, six starts including retries, and 15 minutes from opening. Apply defaults to omitted values and reject explicit zero or negative ceilings. Persist the ceilings for each council. Check existing Wards before dispatch and reserve each start atomically against its `(council, round, role)` turn record. Reconcile existing attempts on restart before dispatching again. Decrees cannot reset hard ceilings. Finish at the round cap or when every role explicitly reports nothing to add in one completed round. Silence never completes a turn. Stop new starts when a run limit or Ward trips. Owner stop or deadline cancels active runs. Record the reason and preserve partial results.
+The default ceilings are two rounds, six starts including retries, and 15 minutes from opening. Apply defaults to omitted values and reject explicit zero or negative ceilings. Persist the ceilings for each council. Check existing Wards before dispatch and reserve each start atomically against its `(council, round, role)` turn record. Reconcile existing attempts on restart before dispatching again. Decrees cannot reset hard ceilings. Finish at the round cap or when every role explicitly reports nothing to add in one completed round. Silence never completes a turn. Stop new starts when a run limit or Ward trips. A stop by the user or the deadline cancels active runs. Record the reason and preserve partial results.
 
 The daemon writes an attributed digest Relic from recorded conclusions, objections, and evidence references in round and role order. It preserves disagreements and marks missing turns. The CLI prints the digest without launching a chair.
 
@@ -29,7 +29,7 @@ A sequential default anchors later answers, and mention-driven dispatch cannot g
 
 Build read-only checkout isolation, durable turn records and reservations, visibility checks, and deadline cancellation before enabling the command. Parallel review waits for the slowest participant. Failed attempts can consume starts needed to finish.
 
-## For the owner
+## Summary
 
 - Accept the three-harness, question-led Conclave with parallel review and opt-in sequential turns to unblock #27 and the local council milestone in #2.
 - Accept bounded peer visibility, read-only defaults, and one explicit writer with GitOps publication to unblock checkout and context work in #27.

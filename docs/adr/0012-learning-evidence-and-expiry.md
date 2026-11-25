@@ -1,7 +1,7 @@
 # ADR-0012: Learning evidence, scope, and expiry
 
 - Date: 2026-11-24
-- Status: Proposed
+- Status: Accepted (2026-11-25; to be revised from what the first test runs show)
 
 ## Context
 
@@ -25,9 +25,9 @@ Automatically renewing on `PASS` or `Cleared` treats a task verdict as evidence 
 
 ## Consequences
 
-Reserve `learning:*` across generic memory routes before switching the matcher. Reject writes to those namespaces and exclude them from generic reads and searches. Import legacy entries once as proposals, keyed by original namespace and key. Preserve the original timestamp and author label as legacy metadata, mark unverified provenance, and queue ambiguous repository or path scopes for operator mapping. Roll out storage and migration first, then operator review, scoped matching and injection, and the Shadewright read. The owner takes on review of imported, disputed, and expired advice.
+Reserve `learning:*` across generic memory routes before switching the matcher. Reject writes to those namespaces and exclude them from generic reads and searches. Import legacy entries once as proposals, keyed by original namespace and key. Preserve the original timestamp and author label as legacy metadata, mark unverified provenance, and queue ambiguous repository or path scopes for operator mapping. Roll out storage and migration first, then operator review, scoped matching and injection, and the Shadewright read. The user takes on review of imported, disputed, and expired advice.
 
-## For the owner
+## Summary
 
 - Accept the dedicated, versioned record and operator-only acceptance to unblock #41.
 - Accept the 90-day review clock, withholding on the first evidenced contradiction, and proposal-only migration to unblock safe injection in #41.
