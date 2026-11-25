@@ -420,8 +420,22 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			}()
 		},
 	})
-	if err := reconciler.Recover(ctx); err != nil {
-		logger.Warn("task recovery completed with errors", "error", err)
+	getBundle := func() *config.Bundle {
+		bundleMu.RLock()
+		defer bundleMu.RUnlock()
+		return bundle
+	}
+
+	conclaveBroker := conclave.NewBroker(conclave.Options{
+		Store:      st,
+		Reconciler: reconciler,
+		GetBundle:  getBundle,
+		Notifier:   notifier,
+	})
+	conclaveBroker.RegisterMCPTools(dataActionGate)
+
+	if err := reconcileDaemonPass(ctx, reconciler.Recover, conclaveBroker); err != nil {
+		logger.Warn("startup reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
 	}
 	scheduler := controlplane.NewScheduler(reconciler)
 	if err := scheduler.Reload(ctx, bundle); err != nil {
@@ -489,8 +503,12 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 				bundleMu.RLock()
 				hasBundle := bundle != nil
 				bundleMu.RUnlock()
+				taskPass := reconciler.Recover
 				if hasBundle {
-					_ = reconciler.ReconcileOnce(ctx)
+					taskPass = reconciler.ReconcileOnce
+				}
+				if err := reconcileDaemonPass(ctx, taskPass, conclaveBroker); err != nil {
+					logger.Warn("daemon reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
 				}
 			}
 		}
@@ -500,20 +518,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Store:   st,
 		Secrets: secretStore,
 	})
-
-	getBundle := func() *config.Bundle {
-		bundleMu.RLock()
-		defer bundleMu.RUnlock()
-		return bundle
-	}
-
-	conclaveBroker := conclave.NewBroker(conclave.Options{
-		Store:      st,
-		Reconciler: reconciler,
-		GetBundle:  getBundle,
-		Notifier:   notifier,
-	})
-	conclaveBroker.RegisterMCPTools(dataActionGate)
 
 	dash, err := ui.NewDashboard(ui.Options{
 		Store:         st,
@@ -585,6 +589,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func reconcileDaemonPass(ctx context.Context, reconcileTasks func(context.Context) error, broker *conclave.Broker) error {
+	taskErr := reconcileTasks(ctx)
+	return errors.Join(taskErr, broker.ReconcileCouncils(ctx, taskErr == nil))
 }
 
 type handlerConfig struct {
