@@ -137,6 +137,7 @@ func TaskConclaveAssignment(task domain.Task) (ConclaveAssignment, bool) {
 
 type conclavePostKey struct{}
 type conclavePost struct {
+	answerVote   *bool
 	limits       ConclaveLimits
 	resume       bool
 	wake         bool
@@ -153,6 +154,12 @@ type conclavePost struct {
 func AppendConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, limits ConclaveLimits, resume, wake bool) (int64, string, time.Time, error) {
 	post := &conclavePost{limits: limits, resume: resume, wake: wake}
 	return runConclavePost(ctx, st, msg, post)
+}
+
+// AppendReservedCouncilAnswer uses the same room lock and Wards as other posts.
+func AppendReservedCouncilAnswer(ctx context.Context, st Store, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
+	id, reason, _, err := runConclavePost(ctx, st, msg, &conclavePost{answerVote: &vote})
+	return id, reason, err
 }
 
 // AppendConclaveReport checks the Wards before recording a verification report and its relic.
@@ -220,6 +227,13 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 		return 0, err
 	}
 	defer tx.Rollback()
+
+	if post.answerVote != nil {
+		id, err := reservedCouncilAnswer(ctx, tx, room, msg, *post.answerVote)
+		if err != nil || id != 0 {
+			return id, err
+		}
+	}
 
 	if room.State != domain.ConclaveStateActive && room.State != domain.ConclaveStateInputRequired {
 		return 0, ErrConclaveClosed
@@ -325,6 +339,12 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 		if err != nil {
 			return 0, err
 		}
+		if post.answerVote != nil {
+			if err := linkCouncilFinal(ctx, tx, msg.TaskID, id, *post.answerVote); err != nil {
+				return 0, err
+			}
+		}
+
 		if reason == "" && !post.report {
 			reason, err = conclaveBudgetWard(ctx, tx, room, limits.Budget)
 			if err != nil {

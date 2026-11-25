@@ -48,6 +48,10 @@ func lockAttempt(ctx context.Context, tx *sql.Tx, task string) (attemptEvidence,
 	return a, err
 }
 
+func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
+	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote)
+}
+
 func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -117,7 +121,7 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	if r.ContentType == "" {
 		r.ContentType = "text/plain"
 	}
-	if !store.ValidCouncilText(r.Name) || !store.ValidCouncilText(r.ContentType) || redact.String(r.Name) != r.Name || redact.String(r.ContentType) != r.ContentType {
+	if r.Name == store.CouncilDigestRelicName || len(r.Name) > store.MaxCouncilRelicName || !store.ValidCouncilText(r.Name) || !store.ValidCouncilText(r.ContentType) || redact.String(r.Name) != r.Name || redact.String(r.ContentType) != r.ContentType {
 		return errors.New("invalid council relic metadata")
 	}
 	if len(r.Body) > store.MaxConclaveTurnInput || !utf8.ValidString(r.Body) || strings.TrimSpace(r.Body) == "" {
@@ -154,6 +158,13 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	}
 	if a.roomState != domain.ConclaveStateActive || !time.Now().Before(a.policy.Deadline) || a.taskState != domain.TaskStateWorking && a.taskState != domain.TaskStateSubmitted {
 		return errors.New("council attempt cannot publish a relic")
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM conclave_relics WHERE council_task_id=?", task).Scan(&count); err != nil {
+		return err
+	}
+	if count >= store.MaxCouncilRelicsPerAttempt {
+		return errors.New("council relic limit reached")
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO conclave_relics(conclave_id,name,author_role,content_type,body,sha256,created_at,council_task_id)
 		VALUES (?,?,?,?,?,?,?,?)`, a.room, r.Name, a.role, r.ContentType, r.Body, r.SHA256, formatTime(r.CreatedAt), task)
