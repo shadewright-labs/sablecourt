@@ -80,22 +80,21 @@ func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (
 	}
 
 	rec := domain.Learning{
-		ID:                 in.ID,
-		Statement:          statement,
-		Scope:              scope,
-		ScopeKind:          scopeKind,
-		ScopeKey:           scopeKey,
-		ScopeSpecificity:   specificity,
-		SourceKind:         in.SourceKind,
-		SourceID:           in.SourceID,
-		EvidenceRef:        evidenceRef,
-		ProvenanceVerified: in.SourceID != "" && evidenceRef != "",
-		Author:             in.Author,
-		PredecessorID:      in.PredecessorID,
-		Status:             domain.LearningStatusProposed,
-		ReviewReason:       reviewReason,
-		CreatedAt:          createdAt,
-		UpdatedAt:          createdAt,
+		ID:               in.ID,
+		Statement:        statement,
+		Scope:            scope,
+		ScopeKind:        scopeKind,
+		ScopeKey:         scopeKey,
+		ScopeSpecificity: specificity,
+		SourceKind:       in.SourceKind,
+		SourceID:         in.SourceID,
+		EvidenceRef:      evidenceRef,
+		Author:           in.Author,
+		PredecessorID:    in.PredecessorID,
+		Status:           domain.LearningStatusProposed,
+		ReviewReason:     reviewReason,
+		CreatedAt:        createdAt,
+		UpdatedAt:        createdAt,
 	}
 	digest, err := store.ComputeLearningVersionDigest(rec)
 	if err != nil {
@@ -108,6 +107,11 @@ func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (
 		return domain.Learning{}, err
 	}
 	defer tx.Rollback()
+
+	rec.ProvenanceVerified, err = learningEvidenceExists(ctx, tx, rec.SourceKind, rec.SourceID, rec.EvidenceRef)
+	if err != nil {
+		return domain.Learning{}, err
+	}
 
 	if rec.PredecessorID != "" {
 		var exists int
@@ -136,14 +140,15 @@ func (s *SQLiteStore) GetLearning(ctx context.Context, id string) (domain.Learni
 	return getLearningRow(ctx, s.db, id)
 }
 
-func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest, operator string, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest string, now time.Time) (domain.Learning, error) {
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
 	if !store.ValidLearningID(expectedDigest, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("expected learning digest is required")
 	}
-	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+	operator, ok := store.LearningOperator(ctx)
+	if !ok {
 		return domain.Learning{}, errors.New("authenticated operator is required")
 	}
 	if now.IsZero() {
@@ -170,6 +175,10 @@ func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest, op
 	}
 	if rec.Scope.NeedsScopeMapping {
 		return domain.Learning{}, fmt.Errorf("%w: learning scope requires operator mapping before acceptance", store.ErrConflict)
+	}
+
+	if err := requireLearningEvidence(ctx, tx, rec.SourceKind, rec.SourceID, rec.EvidenceRef); err != nil {
+		return domain.Learning{}, err
 	}
 
 	nowStr := store.FormatLearningTime(now)
@@ -251,14 +260,15 @@ func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest, op
 	return updated, nil
 }
 
-func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID int64, operator string, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID int64, now time.Time) (domain.Learning, error) {
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
 	if outcomeID <= 0 {
 		return domain.Learning{}, errors.New("supporting outcome id is required")
 	}
-	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+	operator, ok := store.LearningOperator(ctx)
+	if !ok {
 		return domain.Learning{}, errors.New("authenticated operator is required")
 	}
 	if now.IsZero() {
@@ -288,12 +298,13 @@ func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID 
 		return domain.Learning{}, fmt.Errorf("%w: learning has an unaddressed contradiction", store.ErrConflict)
 	}
 
-	var outcomeKind, evidenceRef, confirmedBy string
+	var outcomeKind, evidenceRef, confirmedBy, sourceID, createdAt string
+	var sourceKind domain.LearningSourceKind
 	err = tx.QueryRowContext(ctx, `
-		SELECT kind, evidence_ref, confirmed_by
+		SELECT kind, evidence_ref, confirmed_by, source_kind, source_id, created_at
 		FROM learning_outcomes
 		WHERE id = ? AND learning_id = ?
-	`, outcomeID, id).Scan(&outcomeKind, &evidenceRef, &confirmedBy)
+	`, outcomeID, id).Scan(&outcomeKind, &evidenceRef, &confirmedBy, &sourceKind, &sourceID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Learning{}, store.ErrNotFound
 	}
@@ -308,6 +319,16 @@ func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID 
 	}
 
 	nowStr := store.FormatLearningTime(now)
+	if createdAt > nowStr || rec.LastConfirmedAt == nil || now.Before(*rec.LastConfirmedAt) {
+		return domain.Learning{}, fmt.Errorf("%w: outcome or last confirmation is in the future", store.ErrConflict)
+	}
+	if err := subsequentLearningOutcome(ctx, tx, id, createdAt); err != nil {
+		return domain.Learning{}, err
+	}
+	if err := requireLearningEvidence(ctx, tx, sourceKind, sourceID, evidenceRef); err != nil {
+		return domain.Learning{}, err
+	}
+
 	expiresAt := now.Add(domain.LearningReviewTTL)
 	expiresStr := store.FormatLearningTime(expiresAt)
 
@@ -359,11 +380,12 @@ func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID 
 	return updated, nil
 }
 
-func (s *SQLiteStore) RetireLearning(ctx context.Context, id, operator, reason string, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) RetireLearning(ctx context.Context, id, reason string, now time.Time) (domain.Learning, error) {
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
-	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+	operator, ok := store.LearningOperator(ctx)
+	if !ok {
 		return domain.Learning{}, errors.New("authenticated operator is required")
 	}
 	cleanReason := ""
@@ -563,6 +585,20 @@ func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.Learn
 		return domain.LearningOutcome{}, err
 	}
 
+	if in.Kind != domain.LearningOutcomeInconclusive {
+		if rec.Status != domain.LearningStatusAccepted {
+			return domain.LearningOutcome{}, fmt.Errorf("%w: outcome requires an accepted learning", store.ErrConflict)
+		}
+		if err := subsequentLearningOutcome(ctx, tx, rec.ID, createdStr); err != nil {
+			return domain.LearningOutcome{}, err
+		}
+	}
+	if in.Kind == domain.LearningOutcomeContradiction {
+		if err := requireLearningEvidence(ctx, tx, in.SourceKind, in.SourceID, evidenceRef); err != nil {
+			return domain.LearningOutcome{}, err
+		}
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO learning_outcomes (
 			learning_id, kind, source_kind, source_id, evidence_ref, summary, actor, created_at
@@ -718,41 +754,40 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 	if filter.GlobalOnly {
 		conds = append(conds, "scope_global = 1")
 	}
-	if strings.TrimSpace(filter.RepoRemoteURL) != "" {
-		repo, err := store.NormalizeRepoRemoteURL(filter.RepoRemoteURL)
+	// Pending, retired, and explicitly expired records are available for review.
+	match := !filter.IncludeExpired && (filter.Status == "" || filter.Status == domain.LearningStatusAccepted)
+	repo := strings.TrimSpace(filter.RepoRemoteURL)
+	if repo != "" {
+		var err error
+		repo, err = store.NormalizeRepoRemoteURL(repo)
 		if err != nil {
 			return nil, err
 		}
-		conds = append(conds, "repo_remote_url = ?")
-		args = append(args, repo)
 	}
-	if strings.TrimSpace(filter.IncidentCluster) != "" {
-		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentCluster), store.MaxLearningSelectorBytes) {
-			return nil, errors.New("invalid incident cluster filter")
+	for _, sel := range []struct {
+		column, value string
+		max           int
+	}{
+		{"repo_remote_url", repo, store.MaxLearningFieldBytes},
+		{"incident_cluster", filter.IncidentCluster, store.MaxLearningSelectorBytes},
+		{"incident_namespace", filter.IncidentNamespace, store.MaxLearningSelectorBytes},
+		{"incident_workload_kind", filter.IncidentWorkloadKind, store.MaxLearningSelectorBytes},
+		{"incident_symptom", filter.IncidentSymptom, store.MaxLearningSymptomBytes},
+	} {
+		v := strings.TrimSpace(sel.value)
+		if v != "" && !store.ValidLearningID(v, sel.max) {
+			return nil, errors.New("invalid learning selector")
 		}
-		conds = append(conds, "incident_cluster = ?")
-		args = append(args, strings.TrimSpace(filter.IncidentCluster))
+		if match {
+			conds = append(conds, sel.column+" IN ('', ?)")
+			args = append(args, v)
+		} else if v != "" {
+			conds = append(conds, sel.column+" = ?")
+			args = append(args, v)
+		}
 	}
-	if strings.TrimSpace(filter.IncidentNamespace) != "" {
-		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentNamespace), store.MaxLearningSelectorBytes) {
-			return nil, errors.New("invalid incident namespace filter")
-		}
-		conds = append(conds, "incident_namespace = ?")
-		args = append(args, strings.TrimSpace(filter.IncidentNamespace))
-	}
-	if strings.TrimSpace(filter.IncidentWorkloadKind) != "" {
-		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentWorkloadKind), store.MaxLearningSelectorBytes) {
-			return nil, errors.New("invalid incident workload kind filter")
-		}
-		conds = append(conds, "incident_workload_kind = ?")
-		args = append(args, strings.TrimSpace(filter.IncidentWorkloadKind))
-	}
-	if strings.TrimSpace(filter.IncidentSymptom) != "" {
-		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentSymptom), store.MaxLearningSymptomBytes) {
-			return nil, errors.New("invalid incident symptom filter")
-		}
-		conds = append(conds, "incident_symptom = ?")
-		args = append(args, strings.TrimSpace(filter.IncidentSymptom))
+	if match && len(filter.Paths) == 0 {
+		conds = append(conds, "path_globs_json = '[]'")
 	}
 	if filter.NeedsScopeMapping != nil {
 		if *filter.NeedsScopeMapping {
@@ -761,29 +796,31 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 			conds = append(conds, "needs_scope_mapping = 0")
 		}
 	}
+	if match {
+		filter.Status = domain.LearningStatusAccepted
+	}
 	if filter.Status != "" {
 		conds = append(conds, "status = ?")
 		args = append(args, string(filter.Status))
-		if filter.Status == domain.LearningStatusAccepted && !filter.IncludeExpired {
-			conds = append(conds, "needs_scope_mapping = 0")
-			conds = append(conds, "expires_at IS NOT NULL AND expires_at > ?")
-			args = append(args, store.FormatLearningTime(now))
-			conds = append(conds, `NOT EXISTS (
-				SELECT 1 FROM learning_outcomes o
-				WHERE o.learning_id = learnings.id
-				  AND o.kind = 'contradiction'
-				  AND o.evidence_ref <> ''
-				  AND o.created_at >= COALESCE(learnings.last_confirmed_at, learnings.created_at)
-			)`)
-		}
+	}
+	if match {
+		conds = append(conds, `needs_scope_mapping = 0 AND expires_at > ? AND NOT EXISTS (
+			SELECT 1 FROM learning_outcomes o WHERE o.learning_id = learnings.id
+			AND o.kind = 'contradiction' AND o.evidence_ref <> ''
+			AND o.created_at >= COALESCE(learnings.last_confirmed_at, learnings.created_at)
+		)`)
+		args = append(args, store.FormatLearningTime(now))
 	}
 
 	query := selectLearningColumns + " FROM learnings"
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
-	query += " ORDER BY scope_specificity DESC, created_at DESC, id ASC LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY scope_specificity DESC, id ASC"
+	if !match || len(filter.Paths) == 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -797,10 +834,13 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 		if err != nil {
 			return nil, err
 		}
-		if filter.Status == domain.LearningStatusAccepted && !filter.IncludeExpired && !rec.IsEligible(now) {
+		if match && !store.MatchesLearningPaths(rec.Scope.PathGlobs, filter.Paths) {
 			continue
 		}
 		out = append(out, rec)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }
@@ -1055,120 +1095,200 @@ func appendLearningHistoryTx(ctx context.Context, tx *sql.Tx, h domain.LearningH
 // unverified proposals per ADR-0012, preserving original metadata and queuing ambiguous
 // repository or path scopes for operator mapping.
 func migrateLegacyLearningsTx(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT namespace, key, value, author, updated_at
-		FROM court_memory
-		WHERE LOWER(TRIM(namespace)) LIKE 'learning:%'
-		ORDER BY namespace ASC, key ASC
-	`)
+	const pageSize = 32
+	type legacyRow struct {
+		rowID                             int64
+		namespace, key, author, updatedAt string
+		value                             sql.NullString
+	}
+
+	// Never pass a partial credential to a redactor. Oversized statements stay
+	// in Court Memory and get a quarantine record instead of a clipped copy.
+	const pageQuery = `SELECT rowid, namespace, key,
+		CASE WHEN octet_length(value) <= ? THEN value END,
+		CASE WHEN octet_length(author) <= ? THEN author ELSE '[oversized label]' END,
+		CASE WHEN octet_length(updated_at) <= ? THEN updated_at ELSE '[oversized timestamp]' END
+		FROM court_memory WHERE lower(trim(namespace, ?)) LIKE 'learning:%'`
+	const spaces = " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+	migratedAt := time.Now().UTC()
+	var after int64
+	for first := true; ; first = false {
+		query := pageQuery
+		args := []any{store.MaxLearningStatementBytes, store.MaxLearningFieldBytes, store.MaxLearningFieldBytes, spaces}
+		if !first {
+			query += " AND rowid > ?"
+			args = append(args, after)
+		}
+		rows, err := tx.QueryContext(ctx, query+" ORDER BY rowid LIMIT ?", append(args, pageSize)...)
+		if err != nil {
+			return err
+		}
+		var page []legacyRow
+		for rows.Next() {
+			var r legacyRow
+			if err := rows.Scan(&r.rowID, &r.namespace, &r.key, &r.value, &r.author, &r.updatedAt); err != nil {
+				rows.Close()
+				return err
+			}
+			page = append(page, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, r := range page {
+			if err := importLegacyLearning(ctx, tx, r.namespace, r.key, r.value, r.author, r.updatedAt, migratedAt); err != nil {
+				return err
+			}
+			after = r.rowID
+		}
+		if len(page) < pageSize {
+			return nil
+		}
+	}
+}
+
+func legacyMetadata(raw string) string {
+	raw = strings.ToValidUTF8(strings.ReplaceAll(raw, "\x00", ""), "")
+	return truncateUTF8(store.RedactLearningText(raw), store.MaxLearningFieldBytes)
+}
+
+func importLegacyLearning(ctx context.Context, tx *sql.Tx, origNS, origKey string, value sql.NullString, author, updatedAt string, migratedAt time.Time) error {
+	stmt := strings.TrimSpace(store.RedactLearningText(value.String))
+	cleanNS := legacyMetadata(origNS)
+	cleanKey := legacyMetadata(origKey)
+	cleanAuthor := legacyMetadata(author)
+	cleanUpdatedAt := legacyMetadata(updatedAt)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s|%d:%s", len(origNS), origNS, len(origKey), origKey)))
+	id := "legacy-" + hex.EncodeToString(sum[:16])
+
+	var scopeIn domain.LearningScope
+	reason := "migrated_legacy_scope_mapping_required"
+	if strings.EqualFold(strings.TrimSpace(origNS), "learning:global") {
+		scopeIn = domain.LearningScope{
+			Global:          true,
+			LegacyNamespace: cleanNS,
+		}
+		reason = "migrated_legacy_learning"
+	} else {
+		scopeIn = domain.LearningScope{
+			LegacyNamespace:   cleanNS,
+			NeedsScopeMapping: true,
+		}
+	}
+
+	createdAt, stampErr := store.ParseLearningTime(updatedAt)
+	if stampErr != nil {
+		createdAt = migratedAt
+	}
+	if stampErr != nil || !store.ValidLearningText(author, store.MaxLearningFieldBytes) ||
+		!value.Valid || !store.ValidLearningText(stmt, store.MaxLearningStatementBytes) ||
+		!store.ValidLearningText(origKey, store.MaxLearningFieldBytes) || !store.ValidLearningText(origNS, store.MaxLearningFieldBytes) {
+		reason = "malformed_legacy_learning"
+		scopeIn = domain.LearningScope{LegacyNamespace: cleanNS, NeedsScopeMapping: true}
+		if strings.TrimSpace(cleanNS) == "" {
+			scopeIn.LegacyNamespace = "learning:unmapped"
+		}
+		if !store.ValidLearningText(stmt, store.MaxLearningStatementBytes) {
+			stmt = "[invalid legacy statement]"
+		}
+	}
+
+	scope, scopeKind, scopeKey, specificity, err := store.NormalizeLearningScope(scopeIn, true)
 	if err != nil {
 		return err
 	}
-	type legacyRow struct {
-		namespace, key, value, author, updatedAt string
+
+	rec := domain.Learning{
+		ID:                 id,
+		Statement:          stmt,
+		Scope:              scope,
+		ScopeKind:          scopeKind,
+		ScopeKey:           scopeKey,
+		ScopeSpecificity:   specificity,
+		SourceKind:         domain.LearningSourceLegacy,
+		ProvenanceVerified: false,
+		Author:             "legacy-migration",
+		Status:             domain.LearningStatusProposed,
+		ReviewReason:       reason,
+		LegacyNamespace:    cleanNS,
+		LegacyKey:          cleanKey,
+		LegacyAuthor:       cleanAuthor,
+		LegacyUpdatedAt:    cleanUpdatedAt,
+		CreatedAt:          createdAt,
+		UpdatedAt:          migratedAt,
 	}
-	var legacy []legacyRow
-	for rows.Next() {
-		var r legacyRow
-		if err := rows.Scan(&r.namespace, &r.key, &r.value, &r.author, &r.updatedAt); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		legacy = append(legacy, r)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	digest, err := store.ComputeLearningVersionDigest(rec)
+	if err != nil {
 		return err
 	}
-	_ = rows.Close()
+	rec.VersionDigest = digest
 
-	migratedAt := time.Now().UTC()
-	seenOrigin := map[string]struct{}{}
-	for _, r := range legacy {
-		stmt := strings.TrimSpace(store.RedactLearningText(r.value))
-		stmt = strings.ReplaceAll(stmt, "\x00", "")
-		if !utf8.ValidString(stmt) {
-			stmt = strings.ToValidUTF8(stmt, "")
-		}
-		stmt = strings.TrimSpace(truncateUTF8(stmt, store.MaxLearningStatementBytes))
-		if stmt == "" {
-			continue
-		}
+	return insertLearningTx(ctx, tx, rec, "migrated", "system", reason)
+}
 
-		origNS := strings.TrimSpace(r.namespace)
-		origKey := strings.TrimSpace(r.key)
-		cleanNS := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(origNS, "\x00", "")), store.MaxLearningFieldBytes))
-		cleanKey := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(origKey, "\x00", "")), store.MaxLearningFieldBytes))
-		cleanAuthor := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(r.author, "\x00", "")), store.MaxLearningFieldBytes))
-		cleanUpdatedAt := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(r.updatedAt, "\x00", "")), store.MaxLearningFieldBytes))
-
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s|%d:%s", len(origNS), origNS, len(origKey), origKey)))
-		id := "legacy-" + hex.EncodeToString(sum[:16])
-
-		originKey := cleanNS + "\x00" + cleanKey
-		if cleanNS != "" && cleanKey != "" {
-			if _, exists := seenOrigin[originKey]; exists {
-				suffix := "#" + hex.EncodeToString(sum[:4])
-				cleanKey = truncateUTF8(cleanKey, store.MaxLearningFieldBytes-len(suffix)) + suffix
-			}
-			seenOrigin[cleanNS+"\x00"+cleanKey] = struct{}{}
-		}
-
-		var scopeIn domain.LearningScope
-		reason := "migrated_legacy_scope_mapping_required"
-		if strings.EqualFold(origNS, "learning:global") {
-			scopeIn = domain.LearningScope{
-				Global:          true,
-				LegacyNamespace: cleanNS,
-			}
-			reason = "migrated_legacy_learning"
-		} else {
-			scopeIn = domain.LearningScope{
-				LegacyNamespace:   cleanNS,
-				NeedsScopeMapping: true,
-			}
-		}
-
-		scope, scopeKind, scopeKey, specificity, err := store.NormalizeLearningScope(scopeIn, true)
-		if err != nil {
-			return err
-		}
-
-		createdAt := migratedAt
-		if parsed, err := store.ParseLearningTime(r.updatedAt); err == nil {
-			createdAt = parsed
-		}
-
-		rec := domain.Learning{
-			ID:                 id,
-			Statement:          stmt,
-			Scope:              scope,
-			ScopeKind:          scopeKind,
-			ScopeKey:           scopeKey,
-			ScopeSpecificity:   specificity,
-			SourceKind:         domain.LearningSourceLegacy,
-			ProvenanceVerified: false,
-			Author:             "legacy-migration",
-			Status:             domain.LearningStatusProposed,
-			ReviewReason:       reason,
-			LegacyNamespace:    cleanNS,
-			LegacyKey:          cleanKey,
-			LegacyAuthor:       cleanAuthor,
-			LegacyUpdatedAt:    cleanUpdatedAt,
-			CreatedAt:          createdAt,
-			UpdatedAt:          migratedAt,
-		}
-		digest, err := store.ComputeLearningVersionDigest(rec)
-		if err != nil {
-			return err
-		}
-		rec.VersionDigest = digest
-
-		if err := insertLearningTx(ctx, tx, rec, "migrated", "system", reason); err != nil {
-			return err
-		}
+// Compare against the latest acceptance, including reacceptance after review.
+func subsequentLearningOutcome(ctx context.Context, tx *sql.Tx, id, createdAt string) error {
+	var acceptedAt string
+	err := tx.QueryRowContext(ctx, `SELECT created_at FROM learning_history
+		WHERE learning_id = ? AND event_kind = 'accepted' ORDER BY id DESC LIMIT 1`, id).Scan(&acceptedAt)
+	if err != nil {
+		return err
+	}
+	if createdAt <= acceptedAt {
+		return fmt.Errorf("%w: outcome must follow acceptance", store.ErrConflict)
 	}
 	return nil
+}
+
+func requireLearningEvidence(ctx context.Context, tx *sql.Tx, kind domain.LearningSourceKind, id, ref string) error {
+	verified, err := learningEvidenceExists(ctx, tx, kind, id, ref)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return fmt.Errorf("%w: learning evidence does not resolve for its source", store.ErrConflict)
+	}
+	return nil
+}
+
+func learningEvidenceExists(ctx context.Context, tx *sql.Tx, kind domain.LearningSourceKind, id, ref string) (bool, error) {
+	prefix, name, ok := strings.Cut(ref, ":")
+	if !ok || id == "" || name == "" {
+		return false, nil
+	}
+	var query string
+	switch kind {
+	case domain.LearningSourceTask, domain.LearningSourceAgent, domain.LearningSourceVerifier:
+		if prefix != "artifact" {
+			return false, nil
+		}
+		query = `SELECT count(*) = 1 FROM tasks t, json_each(CASE WHEN json_valid(t.artifacts_json) THEN t.artifacts_json ELSE '[]' END) a
+			WHERE t.id = ? AND a.type = 'object' AND a.value ->> 'name' = ?
+			AND json_type(a.value, '$.text') = 'text' AND trim(a.value ->> 'text') <> ''`
+	case domain.LearningSourceCouncil:
+		if prefix != "relic" {
+			return false, nil
+		}
+		query = `SELECT EXISTS (SELECT 1 FROM councils c JOIN conclave_relics r ON r.conclave_id = c.id
+			WHERE c.id = ? AND r.name = ? AND trim(r.body) <> '')`
+	case domain.LearningSourceIncident, domain.LearningSourceShadewright:
+		if prefix != "relic" {
+			return false, nil
+		}
+		// Contract 3 derives the incident room from the external incident ID.
+		id = fmt.Sprintf("ccl-shadewright-%x", sha256.Sum256([]byte("shadewright\x00"+id)))
+		query = `SELECT EXISTS (SELECT 1 FROM conclaves c JOIN conclave_relics r ON r.conclave_id = c.id
+			WHERE c.id = ? AND c.title = 'Shadewright Incident ' || c.id AND r.name = ? AND trim(r.body) <> '')`
+	default:
+		return false, nil
+	}
+	var verified bool
+	err := tx.QueryRowContext(ctx, query, id, name).Scan(&verified)
+	return verified, err
 }
 
 func hasUnaddressedContradictionTx(ctx context.Context, tx *sql.Tx, rec domain.Learning) (bool, error) {

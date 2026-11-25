@@ -21,6 +21,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 	"github.com/shadewright-labs/sablecourt/internal/ui"
 )
@@ -280,5 +281,85 @@ func TestSecurityHardeningCSRFAndHeaders(t *testing.T) {
 	h.ServeHTTP(rec, reqSame)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for same-origin POST, got %d", rec.Code)
+	}
+}
+
+func TestReservedMemoryRoutes(t *testing.T) {
+	st, _, _, h, _ := newIntegrationTestEnv(t, domain.ConclaveWards{}, defaultIntegrationSecrets())
+	const ns = "learning:global"
+	for _, tc := range []struct {
+		name, method, path, body string
+		form, read               bool
+	}{
+		{"api search", "GET", "/api/v1/memory", "", false, true},
+		{"api exact search", "GET", "/api/v1/memory?namespace=learning:global", "", false, true},
+		{"ui search", "GET", "/memory", "", false, true},
+		{"api put", "POST", "/api/v1/memory", `{"namespace":"LEARNING:Global","key":"write","value":"changed"}`, false, false},
+		{"api delete", "DELETE", "/api/v1/memory/learning:global/key", "", false, false},
+		{"api publish", "POST", "/api/v1/learnings", `{"scope":"global","key":"write","rule":"changed","author":"spoof"}`, false, false},
+		{"ui put", "POST", "/ui/memory/set", "scope=learning:global&key=write&value=changed", true, false},
+		{"ui delete", "POST", "/ui/memory/delete", "scope=learning:global&key=key", true, false},
+		{"ui publish", "POST", "/ui/memory/learning", "scope=global&key=write&rule=changed", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := st.PutMemory(t.Context(), domain.MemoryEntry{Namespace: ns, Key: "key", Value: "private-legacy-value"}); err != nil {
+				t.Fatal(err)
+			}
+			req := operatorRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.form {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if tc.read {
+				if rec.Code != 200 || strings.Contains(rec.Body.String(), "private-legacy-value") {
+					t.Errorf("learning visible or status %d", rec.Code)
+				}
+				return
+			}
+			if rec.Code < 400 && !(rec.Code == 303 && strings.Contains(rec.Header().Get("Location"), "err=")) {
+				t.Errorf("write returned %d", rec.Code)
+			}
+			if _, err := st.GetMemory(t.Context(), ns, "key"); err != nil {
+				t.Errorf("original removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestLearningOperatorBoundary(t *testing.T) {
+	auth := newOperatorAuth(testOperatorToken)
+	mux := http.NewServeMux()
+	probe := func(w http.ResponseWriter, r *http.Request) {
+		id, _ := store.LearningOperator(r.Context())
+		_, _ = io.WriteString(w, id)
+	}
+	mux.HandleFunc("GET /memory", probe)
+	mux.HandleFunc("GET /healthz", probe)
+	mux.HandleFunc("GET /api/v1/observer/snapshot", probe)
+	h := auth.requireOperatorAuth(mux, mux, defaultIntegrationSecrets())
+	for _, tc := range []struct {
+		name, path, token, want string
+		cookie                  bool
+	}{
+		{"bearer", "/memory", testOperatorToken, "operator", false},
+		{"cookie", "/memory", "", "operator", true},
+		{"observer", "/api/v1/observer/snapshot", testObserverToken, "", false},
+		{"public", "/healthz", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			if tc.cookie {
+				req.AddCookie(&http.Cookie{Name: operatorCookie, Value: auth.sessionValue(req.Host, time.Now().Add(time.Minute).Unix())})
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != 200 || rec.Body.String() != tc.want {
+				t.Errorf("status %d, identity %q, want %q", rec.Code, rec.Body.String(), tc.want)
+			}
+		})
 	}
 }

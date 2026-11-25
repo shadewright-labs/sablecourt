@@ -469,7 +469,7 @@ type Learning struct {
 	SourceKind         LearningSourceKind
 	SourceID           string
 	EvidenceRef        string
-	ProvenanceVerified bool
+	ProvenanceVerified bool // Evidence resolved at proposal time. Acceptance checks it again.
 	Author             string
 	PredecessorID      string
 	Status             LearningStatus

@@ -53,7 +53,8 @@ CREATE INDEX idx_learnings_expires
 CREATE INDEX idx_learnings_predecessor
     ON learnings(predecessor_id) WHERE predecessor_id IS NOT NULL;
 
-CREATE UNIQUE INDEX idx_learnings_legacy_origin
+-- Original namespace and key bytes determine the primary key. Redacted labels can coincide.
+CREATE INDEX idx_learnings_legacy_origin
     ON learnings(legacy_namespace, legacy_key) WHERE legacy_namespace <> '' AND legacy_key <> '';
 
 CREATE TABLE learning_history (
