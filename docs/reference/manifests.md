@@ -60,7 +60,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 
 ### Upstream MCP server (parked)
 
-Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/upstream.go`. Each entry exposes the tools in `allowedTools` as `<name>.<tool>`. Parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). The loader does not validate these fields.
+Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/upstream.go`. Each entry exposes the tools in `allowedTools` as `<name>.<tool>`. Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks upstream MCP work. The loader does not validate these fields.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |

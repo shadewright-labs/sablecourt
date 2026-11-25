@@ -2,7 +2,7 @@
 
 Where `sablecourtd` and `sablectl` keep state, which secrets and environment variables they read, and what they pass to workloads. Command-line flags are in the [CLI reference](cli.md).
 
-Status: built.
+Status: built. A row marked parked belongs to feature work that [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks: PostgreSQL, A2A, GitHub integrations, upstream MCP, voice, device pairing and chat alerts.
 
 ## State directory
 
@@ -43,7 +43,7 @@ Source: `internal/secret`. The daemon reads a secret from the OS keyring (servic
 | `local_model_api_key` | Model Gate, provider `local` | Optional. The local endpoint may need no key. |
 | `shadewright_bearer_token` | Integration routes | The two `/api/v1/integrations/shadewright/` routes. |
 | `observer_bearer_token` | Observer routes | `GET /api/v1/observer/*` and the Scry stream for that credential. |
-| `github_webhook_secret` | `POST /api/v1/hooks/github` | Parked. |
+| `github_webhook_secret` | `POST /api/v1/hooks/github` | Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks GitHub integrations. |
 | `a2a_bearer_token` | `POST /a2a` | Parked. |
 | `github_token` | `git.open_pr` action, `sablectl auth github` | Parked. |
 | `notify_webhook_url` | Chat alerts | Parked. Also read from `SABLECOURT_NOTIFY_WEBHOOK_URL`. |
@@ -57,7 +57,7 @@ Voice settings resolve in the order secret, environment variable, default (sourc
 | `voice_stt_model` | `SABLECOURT_STT_MODEL` | `whisper-large-v3-turbo` |
 | `voice_tts_url` | `SABLECOURT_TTS_URL` | none |
 | `voice_tts_model` | `SABLECOURT_TTS_MODEL` | `kokoro` |
-| `voice_tts_voice` | `SABLECOURT_TTS_VOICE` | none |
+| `voice_tts_voice` | `SABLECOURT_TTS_VOICE` | `af_heart` when a TTS URL is set; otherwise none, so `say` on macOS uses its own voice |
 
 ## Model Gate upstreams
 
@@ -81,7 +81,7 @@ The tables in this section and the Environment variable column of the voice tabl
 | `SABLECOURT_STATE_DIR` | both | State directory, absolute path. |
 | `SABLECOURT_MODE` | `sablecourtd` | Mode, used only when `--mode` is empty, `sanctum` or `local`. |
 | `SABLECOURT_MODEL_GATEWAY_URL` | `sablecourtd` | Same as `--model-gateway-url`. |
-| `SABLECOURT_POSTGRES_DSN` | `sablecourtd` | Same as `--postgres-dsn` (parked). |
+| `SABLECOURT_POSTGRES_DSN` | `sablecourtd` | Same as `--postgres-dsn`. [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks PostgreSQL. |
 | `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | The operator token. Without it, `sablectl` reads `operator.token` from the state directory when the daemon is local. Sent only over HTTPS or to a local daemon. There is no matching flag. |
 | `SABLECOURT_GITHUB_CLIENT_ID` | `sablectl` | Same as `auth github --client-id` (parked). |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |

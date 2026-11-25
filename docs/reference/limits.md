@@ -72,7 +72,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Question, checked by the daemon | `cmd/sablecourtd.maxCouncilQuestion` | 30 KiB |
 | Question, checked by `sablectl council` before sending | `cmd/sablectl.maxCouncilQuestionBytes` | 30 KiB |
 | Encoded opening packet | `internal/contextpack.MaxCouncilOpeningEncodedPacketBytes` | 59 KiB |
-| Council text per message | `internal/store.MaxCouncilText` | 64 KiB |
+| Council text: each message body, a member's role card, a Relic's content type, a close reason, a council writer's `git-diff` artifact and Relic, and a task exit fact | `internal/store.MaxCouncilText` | 64 KiB |
 | Relic name in a council | `internal/store.MaxCouncilRelicName` | 255 B |
 | Relics per attempt | `internal/store.MaxCouncilRelicsPerAttempt` | 16 |
 | Context packet for a council turn | `internal/contextpack.maxPacketBytes` | 32 KiB |
@@ -131,7 +131,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Session output line | `internal/runtime/coding.maxSessionLine` | 1 MiB |
 | Session log kept | `internal/runtime/coding.maxSessionLog` | 1 MiB |
 | Wall time of a coding task or council container when the adapter sets none | `internal/runtime/coding.defaultWallTime` | 15 min |
-| Grace period before a kill | `internal/runtime/coding.processGracePeriod` | 1 s |
+| Process grace period: the wait after `SIGTERM` before `SIGKILL`, the wait after `SIGKILL`, and the deadline for reading standard output and error after exit (the result is marked invalid when standard output is not read by then) | `internal/runtime/coding.processGracePeriod` | 1 s |
 | Diagnostic tail kept from a failed harness | `internal/runtime/coding.maxDiagnosticTail` | 4 KiB |
 | Context pack pre-check timeout | `internal/contextpack.precheckTimeout` | 10 s |
 | Context pack pre-check output kept | `internal/contextpack.maxPrecheckBytes` | 16 KiB |
