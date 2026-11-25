@@ -4,7 +4,7 @@ Limits, ceilings and timeouts that refuse, cut or time out a request, a task or 
 
 Status: built.
 
-The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdocs`, which `go test ./...` runs. It finds each named constant in the source, evaluates it, and fails when the value or the unit differs from the Value column, or when the constant no longer exists. A time unit needs a `time.Duration` constant; sizes use B, KiB (1024 bytes), MiB and GiB. A limit that is a literal in the code, with no constant, is not listed here; the [how it works](../how-it-works/index.md) pages describe those where they matter.
+The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdocs`, which `go test ./...` runs. It finds each named constant in the source, evaluates it, and fails when the value or the unit differs from the Value column, or when the constant no longer exists. The test also holds a list of the limit constants, so a row removed from this page fails it too; a new limit constant is listed there and here. A time unit needs a `time.Duration` constant; sizes use B, KiB (1024 bytes), MiB and GiB. A limit that is a literal in the code, with no constant, is not listed here; the [how it works](../how-it-works/index.md) pages describe those where they matter.
 
 ## HTTP server
 
@@ -47,7 +47,8 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Limit | Constant | Value |
 | --- | --- | --- |
 | Request body read by the Model Gate | `internal/gate/model.maxRequestBodyBytes` | 16 MiB |
-| Upstream response kept to read token usage | `internal/gate/model.maxCapturedResponseBytes` | 8 MiB |
+| Upstream response kept to read token usage. A read is kept whole while less than this is held, so up to one read less one byte more is kept (8 MiB + 32 KiB - 1 B at most) | `internal/gate/model.maxCapturedResponseBytes` | 8 MiB |
+| Size of one read from the upstream response | `internal/gate/model.upstreamReadChunkBytes` | 32 KiB |
 | Budget reservation lifetime | `internal/store.defaultBudgetReservationTTL` | 15 min |
 | Reservation settlement attempts | `internal/gate/model.settleReservationAttempts` | 3 |
 | Time limit for all settlement attempts together | `internal/gate/model.settleReservationTimeout` | 10 s |

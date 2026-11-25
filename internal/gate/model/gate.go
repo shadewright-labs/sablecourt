@@ -317,7 +317,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var captured bytes.Buffer
 	flusher, canFlush := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, upstreamReadChunkBytes)
 	for {
 		n, readErr := upResp.Body.Read(buf)
 		if n > 0 {
@@ -499,8 +499,12 @@ func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, det
 const (
 	// maxRequestBodyBytes is how much of a request body the gate reads.
 	maxRequestBodyBytes = 16 << 20
-	// maxCapturedResponseBytes is how much of a response the gate keeps to read usage from.
+	// maxCapturedResponseBytes is how much of a response the gate keeps to
+	// read usage from. A chunk is kept whole while less than this is held,
+	// so up to upstreamReadChunkBytes-1 more can be kept.
 	maxCapturedResponseBytes = 8 << 20
+	// upstreamReadChunkBytes is the size of one read from the upstream response.
+	upstreamReadChunkBytes = 32 << 10
 )
 
 // modelPlaceholder in a route stands for any model name.
