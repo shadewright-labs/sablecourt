@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Context packet assembly</title>
+  <desc id="d">A task enters and its kind is checked. A deterministic controller outside a council gets no packet. A council turn gets the packet reserved for it. Any other task gets the required part (role card, intent, failure handoff), then the optional parts (learnings, decrees, relics, pre-check), each redacted. If the packet is over 32 KiB, the oldest optional entry is dropped and the size is checked again; the required part is never dropped. The packet then goes in the launch input of the runtime.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="400" rx="18" fill="#08060e"/>
+  <rect class="box" x="24" y="164" width="140" height="72" rx="10"/>
+  <text class="h" x="40" y="190">Task input</text>
+  <text class="s" x="40" y="211">prompt, input,</text>
+  <text class="s" x="40" y="228">handoff</text>
+
+  <polygon class="box" points="220,200 300,152 380,200 300,248"/>
+  <text class="s" x="300" y="205" text-anchor="middle">Task kind?</text>
+
+  <rect class="box" x="200" y="48" width="200" height="64" rx="10"/>
+  <text class="h" x="216" y="74">Council packet</text>
+  <text class="s" x="216" y="95">reserved for the turn</text>
+
+  <rect class="box" x="200" y="288" width="200" height="64" rx="10"/>
+  <text class="h" x="216" y="314">No packet</text>
+  <text class="s" x="216" y="335">controller, no council</text>
+
+  <rect class="box" x="452" y="164" width="200" height="72" rx="10"/>
+  <text class="h" x="468" y="190">Required part</text>
+  <text class="s" x="468" y="211">role card, intent,</text>
+  <text class="s" x="468" y="228">failure handoff</text>
+
+  <rect class="box" x="724" y="164" width="210" height="72" rx="10"/>
+  <text class="h" x="740" y="190">Optional parts</text>
+  <text class="s" x="740" y="211">learnings, decrees,</text>
+  <text class="s" x="740" y="228">relics, pre-check</text>
+
+  <polygon class="box" points="1006,200 1086,152 1166,200 1086,248"/>
+  <text class="s" x="1086" y="205" text-anchor="middle">Over 32 KiB?</text>
+
+  <rect class="box" x="986" y="48" width="200" height="64" rx="10"/>
+  <text class="h" x="1002" y="74">Drop one entry</text>
+  <text class="s" x="1002" y="95">the oldest optional one</text>
+
+  <rect class="key" x="986" y="288" width="200" height="64" rx="12"/>
+  <text class="h" x="1002" y="314">Launch</text>
+  <text class="s" x="1002" y="335">redacted packet in input</text>
+
+  <path class="f" d="M164 200H214" marker-end="url(#a)"/>
+  <path class="f" d="M300 152V118" marker-end="url(#a)"/>
+  <text class="lbl" x="312" y="140">council turn</text>
+  <path class="f" d="M300 248V282" marker-end="url(#a)"/>
+  <text class="lbl" x="312" y="272">controller</text>
+  <path class="f" d="M380 200H446" marker-end="url(#a)"/>
+  <text class="lbl" x="413" y="192" text-anchor="middle">other</text>
+  <path class="f" d="M652 200H718" marker-end="url(#a)"/>
+  <path class="f" d="M934 200H1000" marker-end="url(#a)"/>
+  <path class="f" d="M1066 176V118" marker-end="url(#a)"/>
+  <text class="lbl" x="1058" y="146" text-anchor="end">yes</text>
+  <path class="f" d="M1106 118V176" marker-end="url(#a)"/>
+  <text class="lbl" x="1114" y="146">check again</text>
+  <path class="f" d="M1086 248V282" marker-end="url(#a)"/>
+  <text class="lbl" x="1098" y="270">no</text>
+</svg>

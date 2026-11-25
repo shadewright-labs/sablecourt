@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 740" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Container launch order</title>
+  <desc id="d">The daemon asks the container engine to run a socket probe and create the internal network, then to create the proxy, attach it to the default bridge and start it. The engine runs a readiness call in the proxy, which answers 401, and the engine reports it ready. The daemon then creates the harness, which the engine starts with the lease and prompt on its standard input. When the harness exits the engine returns the exit code and output, and the daemon removes the harness container, closes its per-launch gate, and removes the proxy and the network.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  
+  <rect width="1120" height="740" rx="18" fill="#08060e"/>
+  <rect class="key" x="60" y="24" width="180" height="56" rx="12"/>
+  <text class="h" x="150" y="58" text-anchor="middle">sablecourtd</text>
+  <rect class="box" x="330" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="420" y="58" text-anchor="middle">Docker engine</text>
+  <rect class="box" x="600" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="690" y="58" text-anchor="middle">Proxy container</text>
+  <rect class="box" x="870" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="960" y="58" text-anchor="middle">Harness container</text>
+  <path class="life" d="M150 80V716"/>
+  <path class="life" d="M420 80V716"/>
+  <path class="life" d="M690 80V716"/>
+  <path class="life" d="M960 80V716"/>
+  <path class="f" d="M156 124H414" marker-end="url(#a)"/>
+  <text class="lbl" x="285" y="116" text-anchor="middle">probe socket</text>
+  <path class="f" d="M156 178H414" marker-end="url(#a)"/>
+  <text class="lbl" x="285" y="170" text-anchor="middle">create network</text>
+  <path class="f" d="M156 232H414" marker-end="url(#a)"/>
+  <text class="lbl" x="285" y="224" text-anchor="middle">create proxy, attach egress</text>
+  <path class="f" d="M426 286H684" marker-end="url(#a)"/>
+  <text class="lbl" x="555" y="278" text-anchor="middle">start</text>
+  <path class="r" d="M684 340H426" marker-end="url(#m)"/>
+  <text class="lbl" x="555" y="332" text-anchor="middle">401 on probe</text>
+  <path class="r" d="M414 394H156" marker-end="url(#m)"/>
+  <text class="lbl" x="285" y="386" text-anchor="middle">ready</text>
+  <path class="f" d="M156 448H414" marker-end="url(#a)"/>
+  <text class="lbl" x="285" y="440" text-anchor="middle">create harness</text>
+  <path class="f" d="M426 502H954" marker-end="url(#a)"/>
+  <text class="lbl" x="690" y="494" text-anchor="middle">start, stdin</text>
+  <path class="r" d="M954 556H426" marker-end="url(#m)"/>
+  <text class="lbl" x="690" y="548" text-anchor="middle">exit, output</text>
+  <path class="r" d="M414 610H156" marker-end="url(#m)"/>
+  <text class="lbl" x="285" y="602" text-anchor="middle">result</text>
+  <path class="f" d="M156 664H414" marker-end="url(#a)"/>
+  <text class="lbl" x="285" y="656" text-anchor="middle">remove harness, proxy, network</text>
+</svg>

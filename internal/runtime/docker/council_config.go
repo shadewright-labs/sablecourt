@@ -14,16 +14,20 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 // CouncilHarness is trusted daemon configuration for one locally built image,
-// its private login volume, and the two listeners of its pinned proxy.
+// its private login volume, and optional fixed proxy endpoints.
 type CouncilHarness struct {
 	Image, LoginVolume    string
 	ProxyURL, DataGateURL string
+	// LoginFiles are the credential files whose presence in the login volume
+	// means the user has logged in. Only the preflight uses them, by path, and it does not open them.
+	LoginFiles []string
 }
 
 // CouncilLoginVolumeLabels identifies the managed volume when provisioning login state.
@@ -190,9 +194,13 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	if err != nil || (proxy.Path != "" && proxy.Path != "/") {
 		return o, errors.New("invalid council forward proxy")
 	}
-	gate, err := proxyEndpoint(gateRaw)
-	if err != nil || gate.Hostname() != proxy.Hostname() {
-		return o, errors.New("gate must use the pinned council proxy")
+	// A login session reaches only the provider through the proxy and has no gate.
+	gate := proxy
+	if !login {
+		gate, err = proxyEndpoint(gateRaw)
+		if err != nil || gate.Hostname() != proxy.Hostname() {
+			return o, errors.New("gate must use the pinned council proxy")
+		}
 	}
 	env := append(slices.Clone(councilBaseEnv),
 		"HTTP_PROXY="+proxyRaw, "HTTPS_PROXY="+proxyRaw,
@@ -307,11 +315,15 @@ func inspectCouncilLoginVolume(ctx context.Context, engine councilEngineAPI, har
 	if err != nil {
 		return fmt.Errorf("inspect council login volume: %w", err)
 	}
-	if vol.Volume.Name != name || vol.Volume.Driver != "local" || len(vol.Volume.Options) != 0 {
+	return validateCouncilLoginVolume(vol.Volume, harness, name)
+}
+
+func validateCouncilLoginVolume(vol volume.Volume, harness, name string) error {
+	if vol.Name != name || vol.Driver != "local" || len(vol.Options) != 0 {
 		return errors.New("invalid council login volume")
 	}
 	for k, v := range CouncilLoginVolumeLabels(harness) {
-		if vol.Volume.Labels[k] != v {
+		if vol.Labels[k] != v {
 			return errors.New("login volume does not belong to this council harness")
 		}
 	}
