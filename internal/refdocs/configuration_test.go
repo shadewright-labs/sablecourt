@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,6 +28,9 @@ type pageTable struct {
 	rows    [][]string
 }
 
+// readTables reads the tables of a page and the text of each section. A row
+// whose cell count differs from its header fails the test and is left out,
+// so later lookups can index any column of the header.
 func readTables(t *testing.T, page string) (tables []pageTable, text map[string]string) {
 	t.Helper()
 	f, err := os.Open(page) // #nosec G304 -- fixed repository path
@@ -34,10 +38,21 @@ func readTables(t *testing.T, page string) (tables []pageTable, text map[string]
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
+	tables, text, problems, err := parseTables(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Errorf("%s: %s", filepath.Base(page), p)
+	}
+	return tables, text
+}
+
+func parseTables(r io.Reader) (tables []pageTable, text map[string]string, problems []string, err error) {
 	text = map[string]string{}
 	section := ""
 	var cur *pageTable
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if s, ok := strings.CutPrefix(line, "## "); ok {
@@ -57,14 +72,13 @@ func readTables(t *testing.T, page string) (tables []pageTable, text map[string]
 			tables = append(tables, pageTable{section: section, header: cells})
 			cur = &tables[len(tables)-1]
 		case strings.HasPrefix(cells[0], "---"):
+		case len(cells) != len(cur.header):
+			problems = append(problems, fmt.Sprintf("%s: row %q has %d cells, its header has %d", section, line, len(cells), len(cur.header)))
 		default:
 			cur.rows = append(cur.rows, cells)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return tables, text
+	return tables, text, problems, sc.Err()
 }
 
 // backticked returns the names in backticks in a cell.
@@ -451,5 +465,33 @@ func TestConfigurationEnvironmentVariables(t *testing.T) {
 				t.Errorf("%s is on the page as %s, but no code does that", name, kind)
 			}
 		}
+	}
+}
+
+// TestParseTablesRowWidth checks that a row whose cell count differs from
+// its header is reported and left out instead of being indexed later.
+func TestParseTablesRowWidth(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		page     string
+		rows     int
+		problems int
+	}{
+		{"full rows", "## S\n\n| A | B |\n| --- | --- |\n| `x` | `y` |\n", 1, 0},
+		{"short row", "## S\n\n| A | B |\n| --- | --- |\n| `x` |\n| `y` | `z` |\n", 1, 1},
+		{"long row", "## S\n\n| A | B |\n| --- | --- |\n| `x` | `y` | `z` |\n", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tables, _, problems, err := parseTables(strings.NewReader(tc.page))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tables) != 1 || len(tables[0].rows) != tc.rows || len(problems) != tc.problems {
+				t.Fatalf("tables %v, problems %q; want one table with %d rows and %d problems", tables, problems, tc.rows, tc.problems)
+			}
+			for _, r := range tables[0].rows {
+				_ = r[len(tables[0].header)-1]
+			}
+		})
 	}
 }

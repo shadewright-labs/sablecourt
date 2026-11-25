@@ -48,23 +48,21 @@ func TestMetricsReferenceListsEveryMetric(t *testing.T) {
 	MetricsHandler(st).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	code := map[string]string{}
 	codeLabels := map[string]map[string]bool{}
-	sample := regexp.MustCompile(`^([a-z_]+)(?:\{(.*)\})? `)
-	labelName := regexp.MustCompile(`([a-z_]+)="`)
 	for _, line := range strings.Split(rec.Body.String(), "\n") {
 		if rest, ok := strings.CutPrefix(line, "# TYPE "); ok {
 			name, typ, _ := strings.Cut(rest, " ")
 			code[name] = typ
 			continue
 		}
-		m := sample.FindStringSubmatch(line)
-		if m == nil {
+		name, labels, ok := sampleLabels(line)
+		if !ok {
 			continue
 		}
-		if codeLabels[m[1]] == nil {
-			codeLabels[m[1]] = map[string]bool{}
+		if codeLabels[name] == nil {
+			codeLabels[name] = map[string]bool{}
 		}
-		for _, l := range labelName.FindAllStringSubmatch(m[2], -1) {
-			codeLabels[m[1]][l[1]] = true
+		for _, l := range labels {
+			codeLabels[name][l] = true
 		}
 	}
 	if len(code) == 0 {
@@ -128,6 +126,29 @@ func TestMetricsReferenceListsEveryMetric(t *testing.T) {
 	}
 }
 
+// Metric and label names as the exposition format allows them: a letter or
+// underscore first, then letters, digits and underscores (and colons in
+// metric names).
+var (
+	sampleLine  = regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})? `)
+	labelPair   = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="(?:[^"\\]|\\.)*"`)
+	labelInCell = regexp.MustCompile("`([a-zA-Z_][a-zA-Z0-9_]*)`")
+)
+
+// sampleLabels reads the metric name and the label names of one sample
+// line. A label value is skipped whole, so text inside it that looks like a
+// label is not read as one.
+func sampleLabels(line string) (name string, labels []string, ok bool) {
+	m := sampleLine.FindStringSubmatch(line)
+	if m == nil {
+		return "", nil, false
+	}
+	for _, l := range labelPair.FindAllStringSubmatch(m[2], -1) {
+		labels = append(labels, l[1])
+	}
+	return m[1], labels, true
+}
+
 // labelsCell reads the label names of a Labels cell: the names in backticks
 // before any parenthesis, or "none".
 func labelsCell(cell string) string {
@@ -136,7 +157,7 @@ func labelsCell(cell string) string {
 		return "none"
 	}
 	names := map[string]bool{}
-	for _, m := range regexp.MustCompile("`([a-z_]+)`").FindAllStringSubmatch(before, -1) {
+	for _, m := range labelInCell.FindAllStringSubmatch(before, -1) {
 		names[m[1]] = true
 	}
 	return joinLabels(names)
@@ -152,4 +173,34 @@ func joinLabels(names map[string]bool) string {
 	}
 	sort.Strings(out)
 	return strings.Join(out, ", ")
+}
+
+func TestMetricsReferenceParsers(t *testing.T) {
+	for _, tc := range []struct {
+		line, name, labels string
+	}{
+		{`sablecourt_tasks{state="working"} 1`, "sablecourt_tasks", "state"},
+		{`sablecourt_http2_requests{code2="200",le="0.5"} 3`, "sablecourt_http2_requests", "code2, le"},
+		{`sablecourt_x{note="a=\"b\", c=\"d\"",zone1="z"} 1`, "sablecourt_x", "note, zone1"},
+		{`sablecourt_up 1`, "sablecourt_up", "none"},
+	} {
+		name, labels, ok := sampleLabels(tc.line)
+		got := map[string]bool{}
+		for _, l := range labels {
+			got[l] = true
+		}
+		if !ok || name != tc.name || joinLabels(got) != tc.labels {
+			t.Errorf("sampleLabels(%q) = %q, %q, %v; want %q, %q", tc.line, name, joinLabels(got), ok, tc.name, tc.labels)
+		}
+	}
+	for _, tc := range []struct{ cell, want string }{
+		{"`state`", "state"},
+		{"`code2`, `le` (buckets)", "code2, le"},
+		{"`zone1` (one of `a1`)", "zone1"},
+		{"none", "none"},
+	} {
+		if got := labelsCell(tc.cell); got != tc.want {
+			t.Errorf("labelsCell(%q) = %q, want %q", tc.cell, got, tc.want)
+		}
+	}
 }
