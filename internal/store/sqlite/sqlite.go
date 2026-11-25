@@ -96,6 +96,12 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", version, err)
 		}
+		if version == "0012_learnings.sql" {
+			if err := migrateLegacyLearningsTx(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("migrate legacy learnings %s: %w", version, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, nowRFC3339()); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", version, err)

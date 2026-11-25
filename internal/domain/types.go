@@ -409,3 +409,129 @@ type MemoryEntry struct {
 	Author    string
 	UpdatedAt time.Time
 }
+
+type LearningStatus string
+
+const (
+	LearningStatusProposed LearningStatus = "proposed"
+	LearningStatusAccepted LearningStatus = "accepted"
+	LearningStatusRetired  LearningStatus = "retired"
+)
+
+type LearningSourceKind string
+
+const (
+	LearningSourceOperator    LearningSourceKind = "operator"
+	LearningSourceAgent       LearningSourceKind = "agent"
+	LearningSourceVerifier    LearningSourceKind = "verifier"
+	LearningSourceShadewright LearningSourceKind = "shadewright"
+	LearningSourceTask        LearningSourceKind = "task"
+	LearningSourceCouncil     LearningSourceKind = "council"
+	LearningSourceIncident    LearningSourceKind = "incident"
+	LearningSourceLegacy      LearningSourceKind = "legacy"
+)
+
+type LearningOutcomeKind string
+
+const (
+	LearningOutcomeSupporting    LearningOutcomeKind = "supporting"
+	LearningOutcomeContradiction LearningOutcomeKind = "contradiction"
+	LearningOutcomeInconclusive  LearningOutcomeKind = "inconclusive"
+)
+
+// LearningReviewTTL is the 90-day acceptance and confirmation review window from ADR-0012.
+const LearningReviewTTL = 90 * 24 * time.Hour
+
+// LearningScope identifies where a learning applies. Global scope cannot be combined
+// with narrower selectors. Narrower selectors match conjunctively. Ambiguous legacy
+// imports set NeedsScopeMapping and retain LegacyNamespace for operator mapping.
+type LearningScope struct {
+	Global            bool     `json:"global,omitempty"`
+	RepoRemoteURL     string   `json:"repoRemoteURL,omitempty"`
+	PathGlobs         []string `json:"pathGlobs,omitempty"`
+	Cluster           string   `json:"cluster,omitempty"`
+	Namespace         string   `json:"namespace,omitempty"`
+	WorkloadKind      string   `json:"workloadKind,omitempty"`
+	Symptom           string   `json:"symptom,omitempty"`
+	LegacyNamespace   string   `json:"legacyNamespace,omitempty"`
+	NeedsScopeMapping bool     `json:"needsScopeMapping,omitempty"`
+}
+
+// Learning is a versioned, immutable-statement advisory record per ADR-0012.
+type Learning struct {
+	ID                 string
+	VersionDigest      string
+	Statement          string
+	Scope              LearningScope
+	ScopeKind          string
+	ScopeKey           string
+	ScopeSpecificity   int
+	SourceKind         LearningSourceKind
+	SourceID           string
+	EvidenceRef        string
+	ProvenanceVerified bool
+	Author             string
+	PredecessorID      string
+	Status             LearningStatus
+	AcceptedBy         string
+	ReviewReason       string
+	LegacyNamespace    string
+	LegacyKey          string
+	LegacyAuthor       string
+	LegacyUpdatedAt    string
+	CreatedAt          time.Time
+	LastConfirmedAt    *time.Time
+	ExpiresAt          *time.Time
+	UpdatedAt          time.Time
+	InjectionCount     int64
+}
+
+// IsEligible reports whether the learning is accepted, mapped, and unexpired at now.
+func (l Learning) IsEligible(now time.Time) bool {
+	if l.Status != LearningStatusAccepted || l.Scope.NeedsScopeMapping || l.ExpiresAt == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.Before(*l.ExpiresAt)
+}
+
+// EffectiveStatus returns LearningStatusProposed when an accepted learning is expired at now.
+func (l Learning) EffectiveStatus(now time.Time) LearningStatus {
+	if l.Status == LearningStatusAccepted && !l.IsEligible(now) {
+		return LearningStatusProposed
+	}
+	return l.Status
+}
+
+// LearningHistory records every status transition and confirmation for traceability.
+type LearningHistory struct {
+	ID            int64
+	LearningID    string
+	FromStatus    LearningStatus
+	ToStatus      LearningStatus
+	EventKind     string
+	Actor         string
+	Reason        string
+	EvidenceRef   string
+	PredecessorID string
+	SupersededBy  string
+	ExpiresAt     *time.Time
+	CreatedAt     time.Time
+}
+
+// LearningOutcome links post-acceptance evidence to a specific learning version.
+type LearningOutcome struct {
+	ID          int64
+	LearningID  string
+	Kind        LearningOutcomeKind
+	SourceKind  LearningSourceKind
+	SourceID    string
+	EvidenceRef string
+	Summary     string
+	Actor       string
+	ConfirmedBy string
+	ConfirmedAt *time.Time
+	CreatedAt   time.Time
+}
