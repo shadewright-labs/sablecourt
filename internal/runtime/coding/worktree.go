@@ -136,7 +136,19 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 }
 
 func (s *worktreeState) createCheckout(ctx context.Context, dir string) error {
-	if _, err := s.commonGit().run(ctx, "worktree", "add", "--no-checkout", "--end-of-options", dir, s.Branch); err != nil {
+	// Registration shares the repository's metadata with every other launch
+	// and with the config writers that take this same gate.
+	release := func() {}
+	if s.configLock != nil {
+		rel, err := s.configLock(ctx)
+		if err != nil {
+			return err
+		}
+		release = rel
+	}
+	_, err := s.commonGit().run(ctx, "worktree", "add", "--no-checkout", "--end-of-options", dir, s.Branch)
+	release()
+	if err != nil {
 		return err
 	}
 	// Discover the registration once, before the workload can modify the checkout.
