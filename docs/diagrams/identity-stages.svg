@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 380" role="img" aria-labelledby="t d" data-diagram="timeline" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Identity rollout stages</title>
+  <desc id="d">Four planned stages spaced evenly by delivery milestone along the rollout order axis. Stage 0 adds browser-only logout cookie clearing, filters wrong-prefix tokens before the host-keyed limiter, strips the provider-sync environment, enforces single-use approvals, and writes authentication audit rows. Correctly prefixed invalid tokens can still lock out callers on the same loopback address. Stage 1 consumes operator.token on first passkey enrolment, adds hashed revocable server-side sessions, requires fresh passkey or paired-device approval proof, and ships rotating integration key slots. Stage 2 delivers 0400 file leases through the trusted gate proxy with copied-lease channel binding and mutual TLS from a keychain-backed daemon CA. Stage 3 adds server-side single-use OIDC transactions, RoleBinding roles, administrator-pinned TokenReview, single-use allowlisted break-glass sessions, and signed audit heads, with sign-in able to start right after Stage 1.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="380" rx="18" fill="#08060e"/>
+
+  <path class="r" d="M48 200H1072" marker-end="url(#m)"/>
+  <text class="cap" x="1072" y="224" text-anchor="end">rollout order</text>
+
+  <text class="pn" x="44" y="54">STAGE 0</text>
+  <rect class="plan" x="44" y="64" width="240" height="72" rx="10"/>
+  <text class="h" x="60" y="90">Immediate auth fixes</text>
+  <text class="s" x="60" y="111">logout, login prefix, env fix</text>
+  <text class="s" x="60" y="128">single-use approvals, auth log</text>
+  <path class="r" d="M164 136V192"/>
+  <circle cx="164" cy="200" r="8" fill="#2dd4bf"/>
+
+  <path class="r" d="M424 206V264"/>
+  <circle cx="424" cy="200" r="6" fill="#8a8594"/>
+  <text class="pn" x="304" y="254">STAGE 1</text>
+  <rect class="plan" x="304" y="264" width="240" height="72" rx="10"/>
+  <text class="h" x="320" y="290">Passkeys and sessions</text>
+  <text class="s" x="320" y="311">consumes op_, hashed sessions</text>
+  <text class="s" x="320" y="328">fresh approval proof, key slots</text>
+
+  <text class="pn" x="564" y="54">STAGE 2</text>
+  <rect class="plan" x="564" y="64" width="240" height="72" rx="10"/>
+  <text class="h" x="580" y="90">Channel-bound leases</text>
+  <text class="s" x="580" y="111">trusted proxy, copied-lease ban</text>
+  <text class="s" x="580" y="128">0400 lease, keychain CA mTLS</text>
+  <path class="r" d="M684 136V194"/>
+  <circle cx="684" cy="200" r="6" fill="#8a8594"/>
+
+  <path class="r" d="M944 206V264"/>
+  <circle cx="944" cy="200" r="6" fill="#8a8594"/>
+  <text class="pn" x="824" y="254">STAGE 3</text>
+  <rect class="plan" x="824" y="264" width="240" height="72" rx="10"/>
+  <text class="h" x="840" y="290">External IdP and roles</text>
+  <text class="s" x="840" y="311">server OIDC tx, pinned K8s CA</text>
+  <text class="s" x="840" y="328">one-use break-glass, audit heads</text>
+
+  <path class="r" d="M544 300H818" marker-end="url(#m)"/>
+  <text class="lbl" x="684" y="292" text-anchor="middle">sign-in can start</text>
+</svg>
