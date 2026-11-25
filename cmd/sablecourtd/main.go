@@ -535,7 +535,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 
 	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
-		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorToken: operatorToken})
+		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorToken: operatorToken, councilsDisabled: isCitadel})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
@@ -597,8 +597,11 @@ func reconcileDaemonPass(ctx context.Context, reconcileTasks func(context.Contex
 }
 
 type handlerConfig struct {
-	incidentTemplate string
-	operatorToken    string
+	incidentTemplate    string
+	operatorToken       string
+	councilsDisabled    bool
+	checkCouncilSandbox func(context.Context) error
+	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
@@ -1406,6 +1409,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
 	if conclaveBroker != nil {
+		mux.HandleFunc("POST /api/v1/councils", councilOpen(st, cfg))
 		mux.HandleFunc("GET /api/v1/conclaves", func(w http.ResponseWriter, r *http.Request) {
 			items, err := st.ListConclaves(r.Context())
 			if err != nil {
@@ -1431,7 +1435,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			writeJSON(w, http.StatusCreated, sess)
 		})
-		mux.HandleFunc("GET /api/v1/conclaves/{id}", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("GET /api/v1/conclaves/{id}", councilDetail(st, func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
 			sess, err := st.GetConclave(r.Context(), id)
 			if err != nil {
@@ -1445,7 +1449,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				"messages": msgs,
 				"relics":   relics,
 			})
-		})
+		}))
 		mux.HandleFunc("GET /api/v1/conclaves/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
 			flusher, ok := w.(http.Flusher)
