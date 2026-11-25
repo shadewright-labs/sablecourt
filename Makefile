@@ -16,13 +16,17 @@ vet:
 DOCS_TESTS = TestCLIReferenceIsCurrent|TestHTTPReferenceListsEveryRoute|TestManifestReferenceMatchesTypesAndLoader|TestLimitsReferenceMatchesConstants|TestMetricsReferenceListsEveryMetric
 DOCS_PKGS = ./cmd/sablectl ./cmd/sablecourtd ./internal/config ./internal/refdocs ./internal/telemetry
 
-# docs regenerates the generated blocks of docs/reference/cli.md.
+# docs regenerates the generated blocks of docs/reference/cli.md. Each command
+# package saves its rendered block to its own file in a scratch directory, and
+# one writer puts them into the page.
 docs:
-	SABLECOURT_UPDATE_DOCS=1 go test -count=1 -run 'TestCLIReferenceIsCurrent' ./cmd/sablectl ./cmd/sablecourtd
+	go run ./internal/clidoc/write docs/reference/cli.md ./cmd/sablectl ./cmd/sablecourtd
 
-# docs-check fails when any reference page is stale.
+# docs-check fails when any reference page is stale. It never writes: the
+# check tests only read the pages, and the block directory variable is
+# cleared so the render step cannot run.
 docs-check:
-	go test -count=1 -run '$(DOCS_TESTS)' $(DOCS_PKGS)
+	env -u SABLECOURT_CLI_BLOCK_DIR go test -count=1 -run '$(DOCS_TESTS)' $(DOCS_PKGS)
 
 build:
 	mkdir -p bin
