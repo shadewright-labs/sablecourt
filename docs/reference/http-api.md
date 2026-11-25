@@ -8,6 +8,7 @@ The route tables are checked by `TestHTTPReferenceListsEveryRoute` in `cmd/sable
 
 - `ANY` marks a pattern registered without a method: the router passes every method to the handler. The purpose then says which methods the handler accepts (`Methods:`). The test finds them by sending `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` and the extension method `PROPFIND` with a valid task lease, and `any` means all eight; a method not listed is answered with 405. A method counts as accepted only when the handler really takes it: the Model Gate forwards it once to the upstream, the MCP route answers an `initialize` request with 200, and the action route reaches its catalog lookup. Any other answer fails the test. The probe cannot show that an action runs, because that needs an approval and makes a change.
 - A path ending in `/` matches everything below it. `{$}` matches the path exactly, so `GET /{$}` is the root page only.
+- A body or reply written as `{"a","b"}` lists the field names of a JSON object. It is not a body to copy.
 - A `GET` pattern also answers `HEAD`, as Go's router does.
 - The Model Gate is one mount at `/gate/model/`; its rows list the provider paths it forwards, taken from the gate's own route table. Any other path below the mount is refused with 404.
 
