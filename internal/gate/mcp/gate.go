@@ -365,6 +365,13 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 
 		result, err := fn(ctx, ac.Workload, ac.Lease.TaskID, req.Payload)
+		if errors.Is(err, errToolRefused) {
+			// A refused target is a policy outcome, not a failing dependency: the
+			// breaker does not count it.
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"error":%q,"approval_id":%q}`, redact.String(err.Error()), approvalUsed))
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
+			return
+		}
 		if err != nil {
 			if g.breaker != nil {
 				g.breaker.RecordFailure(capability)

@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os/exec"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
@@ -43,9 +46,36 @@ type GitHubPROpener struct {
 	Secrets secret.SecretStore
 	APIURL  string
 	Client  *http.Client
+	// Timeout bounds one API call; zero means defaultGitHubTimeout.
+	Timeout time.Duration
+}
+
+const defaultGitHubTimeout = 30 * time.Second
+
+// httpClient returns a client that never follows redirects, so the gate's token
+// cannot be replayed to another URL, and that gives up after the timeout.
+func (gh *GitHubPROpener) httpClient() *http.Client {
+	var cli http.Client
+	if gh.Client != nil {
+		cli = *gh.Client
+	}
+	cli.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if gh.Timeout > 0 {
+		cli.Timeout = gh.Timeout
+	}
+	if cli.Timeout <= 0 {
+		cli.Timeout = defaultGitHubTimeout
+	}
+	return &cli
 }
 
 func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, error) {
+	if err := validateRepoName("owner", in.Owner); err != nil {
+		return "", err
+	}
+	if err := validateRepoName("repo", in.Repo); err != nil {
+		return "", err
+	}
 	if gh.Secrets == nil {
 		return "", errors.New("secret store unavailable for github_token")
 	}
@@ -57,10 +87,7 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	if apiBase == "" {
 		apiBase = "https://api.github.com"
 	}
-	cli := gh.Client
-	if cli == nil {
-		cli = http.DefaultClient
-	}
+	cli := gh.httpClient()
 
 	payload, _ := json.Marshal(map[string]string{
 		"title": in.Title,
@@ -68,7 +95,7 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 		"base":  in.Base,
 		"body":  in.Body,
 	})
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls", strings.TrimRight(apiBase, "/"), in.Owner, in.Repo)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls", strings.TrimRight(apiBase, "/"), url.PathEscape(in.Owner), url.PathEscape(in.Repo))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return "", err
@@ -148,6 +175,9 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		if strings.TrimSpace(in.Owner) == "" || strings.TrimSpace(in.Repo) == "" || strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Base) == "" {
 			return nil, errors.New("owner, repo, base, and title are required")
 		}
+		if err := checkOpenPRTarget(ctx, repoRoot, in.Owner, in.Repo); err != nil {
+			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
+		}
 		if prOpener == nil {
 			return nil, errors.New("PR opener not configured")
 		}
@@ -184,6 +214,73 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 			"next":     "open PR to change metadata.zone from sandbox to runtime",
 		}, nil
 	})
+}
+
+var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+
+// validateRepoName accepts one GitHub owner or repository name: letters, digits,
+// '_', '.', '-', and not made of dots alone, so it is a single path segment.
+func validateRepoName(field, name string) error {
+	if !repoNamePattern.MatchString(name) || strings.Trim(name, ".") == "" {
+		return fmt.Errorf("invalid %s for git.open_pr", field)
+	}
+	return nil
+}
+
+// checkOpenPRTarget allows a pull request only against the GitHub repository
+// that the gate's GitOps actions work in: the origin remote of repoRoot, where
+// git.create_branch makes the head branch. Workload grants name actions, not
+// repositories, so this is the narrowest target the manifests can bind today.
+func checkOpenPRTarget(ctx context.Context, repoRoot, owner, repo string) error {
+	if err := validateRepoName("owner", owner); err != nil {
+		return err
+	}
+	if err := validateRepoName("repo", repo); err != nil {
+		return err
+	}
+	if repoRoot == "" {
+		return errors.New("repo root not configured for git.open_pr")
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return errors.New("repo root has no origin remote for git.open_pr")
+	}
+	allowedOwner, allowedRepo, ok := parseGitHubRemote(strings.TrimSpace(string(out)))
+	if !ok {
+		return errors.New("origin remote of the repo root is not a GitHub repository")
+	}
+	if !strings.EqualFold(owner, allowedOwner) || !strings.EqualFold(repo, allowedRepo) {
+		return fmt.Errorf("git.open_pr target %s/%s is not the configured repository", owner, repo)
+	}
+	return nil
+}
+
+// parseGitHubRemote reads owner and repository from a github.com remote URL in
+// HTTPS, SSH URL or scp-like form.
+func parseGitHubRemote(remote string) (owner, repo string, ok bool) {
+	var path string
+	switch {
+	case strings.HasPrefix(remote, "git@github.com:"):
+		path = strings.TrimPrefix(remote, "git@github.com:")
+	default:
+		u, err := url.Parse(remote)
+		if err != nil || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", false
+		}
+		if (u.Scheme != "https" && u.Scheme != "ssh") || !strings.EqualFold(u.Hostname(), "github.com") {
+			return "", "", false
+		}
+		if u.Port() != "" && u.Scheme == "https" {
+			return "", "", false
+		}
+		path = strings.TrimPrefix(u.Path, "/")
+	}
+	path = strings.TrimSuffix(strings.TrimSuffix(path, "/"), ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || validateRepoName("owner", parts[0]) != nil || validateRepoName("repo", parts[1]) != nil {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func decodeStrict(raw json.RawMessage, dst any) error {
