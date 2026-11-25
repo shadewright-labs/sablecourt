@@ -16,7 +16,8 @@ const (
 )
 
 // BuildFailureHandoff packages failure reason, redacted artifacts, and recent events
-// into a standardized Markdown block for closed-loop remediation.
+// into a standardized Markdown block for closed-loop remediation. Each part is
+// redacted before it is cut, so a cut cannot split a secret out of its pattern.
 func BuildFailureHandoff(task domain.Task, events []domain.TaskEvent, messages []domain.TaskMessage, reason string) string {
 	var b strings.Builder
 	b.WriteString("# Failure Handoff\n\n")
@@ -41,7 +42,7 @@ func BuildFailureHandoff(task domain.Task, events []domain.TaskEvent, messages [
 		if err := json.Unmarshal([]byte(task.ArtifactsJSON), &arts); err == nil && len(arts) > 0 {
 			b.WriteString("\n## Captured Artifacts\n\n")
 			for _, a := range arts {
-				txt := strings.TrimSpace(a.Text)
+				txt := strings.TrimSpace(redact.String(a.Text))
 				if txt == "" {
 					continue
 				}
@@ -60,7 +61,7 @@ func BuildFailureHandoff(task domain.Task, events []domain.TaskEvent, messages [
 		}
 		b.WriteString("\n## Recent Messages\n\n")
 		for _, m := range messages[start:] {
-			body := strings.TrimSpace(m.Content)
+			body := strings.TrimSpace(redact.String(m.Content))
 			if len(body) > 1024 {
 				body = body[:1024] + "...[truncated]"
 			}
@@ -88,7 +89,7 @@ func BuildVerifierPrompt(authorTask domain.Task, stepPrompt string) string {
 		if err := json.Unmarshal([]byte(authorTask.ArtifactsJSON), &arts); err == nil && len(arts) > 0 {
 			b.WriteString("## Author Artifacts\n\n")
 			for _, a := range arts {
-				txt := strings.TrimSpace(a.Text)
+				txt := strings.TrimSpace(redact.String(a.Text))
 				if txt == "" {
 					continue
 				}
