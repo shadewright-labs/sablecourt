@@ -40,8 +40,10 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
      sablecourt-harness-claude:<tag> claude auth status
    ```
 
+   For `codex` and `agy`, replace both the image and the volume with that harness's own: `sablecourt-harness-codex:<tag>` and `sablecourt-harness-codex` (or `agy`), using the tag step 1 printed for it.
+
    Before a login it prints `"loggedIn": false`. For `codex` the end of the command is `codex login status` (prints `Not logged in`, exit code 1). `agy` has no status command; `agy --version` only proves the container starts.
-4. Sign in by running the same command with `-it` added after `--rm` and the login command in place of the status command: `claude auth login`, `codex login --device-auth`, or `agy` alone (finish the sign-in, then type `/exit`). Open the printed address in your host browser. Like step 3, this container uses Docker's default network.
+4. Sign in by running the same command with `-it` added after `--rm` and the login command in place of the status command: `claude auth login`, `codex login --device-auth`, or `agy` alone (finish the sign-in, then type `/exit`). Open the printed address in your host browser. Use the same image and volume substitutions as in step 3. Like step 3, this container uses Docker's default network.
 
 ## Check it worked
 
