@@ -12,10 +12,10 @@ Approval Queue
 :   The part of the daemon that holds approvals and asks a person to confirm them. On macOS the confirmation is a native dialog. The third of the capability gates.
 
 Audit chain
-:   The `audit_log` table in which each row holds the SHA-256 of the row before it. See [audit](how-it-works/audit.md).
+:   The `audit_log` table in which each new row holds the SHA-256 of the row before it. See [audit](how-it-works/audit.md).
 
 Barrier
-:   In a council, the rule that round two starts only when all three roles have recorded an answer for round one. See [council](how-it-works/council.md).
+:   In a council, the rule that round two starts only when every participating role has a completed answer for round one and not all of them said they have nothing to add. See [council](how-it-works/council.md).
 
 Budget
 :   A `Budget` manifest: per-task token and cost limits and a daily cost limit. Enforced by the Model Gate.
@@ -30,7 +30,7 @@ Conclave
 :   A room where several workloads, the Vassals, exchange messages and files on one topic under limits. Manifest kind `Conclave`; states `active`, `input-required`, `completed`, `cancelled`. See [Conclaves](how-it-works/conclaves.md).
 
 Council
-:   A Conclave of `claude`, `codex` and `agy` that answers one question in bounded rounds. Started with `sablectl council`.
+:   A Conclave of `claude`, `codex` and `agy` (or a subset chosen with `--with`) that answers one question in bounded rounds. Started with `sablectl council`.
 
 Court Memory
 :   The key-value memory shown on `/memory` and read through `memory.*` MCP tools. Not a place for secrets.
@@ -39,7 +39,7 @@ Data and Action Gate
 :   The MCP Gate: serves allowed tools over MCP Streamable HTTP and runs typed actions after policy. Route `/gate/mcp`, with actions under `/gate/actions/`.
 
 Decree
-:   A message from the operator to a Conclave, issued with `sablectl conclave decree` or the web UI. It steers the room and resumes one a Ward paused.
+:   A message from the operator to a Conclave, issued with `sablectl conclave decree` or the web UI. It steers the room and can resume one a Ward paused, except one paused at its deadline.
 
 Deterministic controller
 :   A workload class that runs a non-model program. It cannot hold a Model Gate grant.
@@ -51,10 +51,10 @@ Grant
 :   What a workload may ask for, listed in `spec.grants`: Model Gate access, `mcpTools`, `mcpServers`, `actions`, `delegateTo`.
 
 Harness
-:   A coding CLI that Sablecourt launches: `claude`, `codex` or `agy`. In a council each runs in its own container.
+:   A coding CLI that Sablecourt launches: `claude`, `codex` or `agy`. In a council each runs in its own container when the Docker council runtime is configured.
 
 Idempotency key
-:   A key stored with a task so that submitting the same work twice does not start it twice.
+:   A key stored with a task. Submitting a second task with a key that already exists returns the existing task for the same workload instead of creating another.
 
 Lease
 :   The scoped, short-lived credential of a task: `sc_task_` plus 64 hex characters, stored only as a hash. See [identity and access](how-it-works/identity-and-access.md).
@@ -81,7 +81,7 @@ Policy
 :   A `Policy` manifest of rules that allow, approve or deny a capability for a workload. The default is deny.
 
 Promotion
-:   Moving a workload from the sandbox zone to the runtime zone by a reviewed change to its manifest. `sablectl promote` creates the branch.
+:   Moving a workload from the sandbox zone to the runtime zone by a reviewed change to its manifest. `sablectl promote` asks the daemon to create the branch.
 
 Proxy
 :   The per-launch container that is the only member of a harness container's internal network with egress. See [harness containers](how-it-works/harness-containers.md).
@@ -108,7 +108,7 @@ Scry
 :   Read-only, redacted live view of a task's output (`sablectl task scry`). Takeover, exclusive input to a task, is parked.
 
 Session marker
-:   The environment variable `SABLECOURT_MANAGED=1` and the file `.sablecourt-session.json` that tell Nightloom a session is managed by Sablecourt.
+:   The environment variable `SABLECOURT_MANAGED=1` and, in coding worktrees, the file `.sablecourt-session.json` that mark a session as managed by Sablecourt.
 
 Task
 :   One run of a workload. States: `submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`.
