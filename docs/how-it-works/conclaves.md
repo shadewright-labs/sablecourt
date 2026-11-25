@@ -34,15 +34,7 @@ A Decree is a message from the operator (`sablectl conclave decree <id> <message
 
 The states are `active`, `input-required`, `completed` and `cancelled`. `sablectl conclave close` ends a room as `completed`, and the close call can also set `cancelled`. A plain room that reaches its wall time pauses in `input-required` with the reason `wall_time_reached`; a council is cancelled at its deadline instead.
 
-```mermaid
-stateDiagram-v2
-    [*] --> active: open
-    active --> input_required: Ward trips
-    input_required --> active: Decree
-    active --> completed: close
-    active --> cancelled: stop
-    input_required --> cancelled: stop
-```
+[![States of a Conclave: active, input-required, completed and cancelled, and what moves a room between them.](../diagrams/conclave-states.svg)](../diagrams/conclave-states.svg "Open full size")
 
 A Relic is a named file (`sablectl conclave relic put <id> <name>`, or the gate for a Vassal). Its body is redacted and its SHA-256 is stored with it. Relics cannot be added to a paused or closed room.
 

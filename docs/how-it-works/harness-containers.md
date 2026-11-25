@@ -34,17 +34,7 @@ The hop from harness to proxy is plain HTTP inside the per-launch network, so th
 
 Before it creates the proxy, the daemon probes how a container can reach it. On native Linux it listens on a per-launch Unix socket in a private directory it owns and mounts only that socket, read-only, into the proxy. On Docker Desktop a host socket cannot be mounted, so it serves the gate on a loopback port over TLS 1.3 with a fresh P-256 key, and the proxy pins the key's SHA-256 and takes no resumed sessions. Only a probe that explicitly reports "socket unsupported" selects TLS; any other failure stops the launch. The proxy never falls back to plain TCP. Either way the per-launch gate allows 32 connections, 2 MiB bodies and 30 seconds per request, checks the route list and lease again, and hands the request to the daemon in process.
 
-```mermaid
-sequenceDiagram
-    participant D as sablecourtd
-    participant E as Docker engine
-    D->>E: probe socket, create internal network
-    D->>E: create proxy, attach egress, start
-    D->>E: proxy answers 401 on a probe call
-    D->>E: create harness, send lease and prompt
-    E-->>D: exit code and output
-    D->>E: remove harness, proxy, network
-```
+[![Order of a container launch: probe, network, proxy, readiness, harness, exit and removal.](../diagrams/harness-launch.svg)](../diagrams/harness-launch.svg "Open full size")
 
 ## Cleanup
 
