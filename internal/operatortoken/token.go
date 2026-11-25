@@ -10,14 +10,71 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 const (
-	Filename = "operator.token"
-	prefix   = "op_"
-	size     = len(prefix) + 64
+	Filename     = "operator.token"
+	LockFilename = "daemon.lock"
+	prefix       = "op_"
+	size         = len(prefix) + 64
 )
+
+type stateLock struct {
+	once sync.Once
+	file *os.File
+	root *os.Root
+	err  error
+}
+
+func (l *stateLock) Close() error {
+	l.once.Do(func() {
+		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		l.err = errors.Join(l.file.Close(), l.root.Close())
+	})
+	return l.err
+}
+
+// LockStateDir acquires an exclusive non-blocking lock on the state directory for a running daemon.
+func LockStateDir(dir string) (io.Closer, error) {
+	safeDir, err := resolveSafeStateDir(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(safeDir, 0o700); err != nil {
+		return nil, err
+	}
+	root, err := openState(safeDir)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.OpenFile(LockFilename, os.O_CREATE|os.O_RDWR|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || !ownedByCaller(info) {
+		_ = f.Close()
+		_ = root.Close()
+		return nil, errors.New("operator state lock must be a regular file owned by the current user")
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = root.Close()
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		_ = root.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, errors.New("operator state directory is already locked by another daemon")
+		}
+		return nil, fmt.Errorf("lock operator state directory: %w", err)
+	}
+	return &stateLock{file: f, root: root}, nil
+}
 
 // StateDir returns the state directory shared by the daemon and CLI.
 func StateDir() (string, error) {
