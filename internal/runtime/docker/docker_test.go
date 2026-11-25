@@ -12,6 +12,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -158,5 +159,48 @@ func TestCollectPreservesExit(t *testing.T) {
 	}
 	if e.removed {
 		t.Fatal("collection removed container before exit was recorded")
+	}
+}
+
+type logEngine struct {
+	fakeEngine
+	observed chan context.Context
+}
+
+func (e *logEngine) ContainerLogs(ctx context.Context, _ string, _ client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
+	e.observed <- ctx
+	return nil, nil
+}
+
+func TestLogCancellation(t *testing.T) {
+	for _, lifetime := range []string{"start", "daemon"} {
+		t.Run(lifetime, func(t *testing.T) {
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			start, finishStart := context.WithCancel(ctx)
+			defer finishStart()
+			e := &logEngine{observed: make(chan context.Context, 1)}
+			a := NewAdapter(e, "")
+			a.AttachHub = attach.NewHub()
+			if lifetime == "daemon" {
+				a.SetAttachHub(ctx, a.AttachHub)
+			}
+			var spec scruntime.LaunchSpec
+			spec.Workload.Spec.Runtime.Image = "fixture"
+			if _, err := a.Start(start, spec); err != nil {
+				t.Fatal(err)
+			}
+			stream := <-e.observed
+			finishStart()
+			if lifetime == "daemon" {
+				if stream.Err() != nil {
+					t.Fatal("finishing Start canceled live attach")
+				}
+				stop()
+			}
+			if stream.Err() != context.Canceled {
+				t.Fatal("container log request ignored cancellation")
+			}
+		})
 	}
 }

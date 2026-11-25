@@ -113,7 +113,7 @@ func (s *Scheduler) Fire(ctx context.Context, sc domain.Schedule) error {
 		slots[slot] = time.Time{}
 		s.firedMu.Unlock()
 
-		_, err := s.reconciler.StartWorkflow(ctx, sc.Spec.TargetName, sc.Spec.Input)
+		_, err := s.reconciler.startWorkflow(ctx, sc.Spec.TargetName, "wf:"+idemKey, sc.Spec.Input)
 
 		s.firedMu.Lock()
 		if err != nil {
