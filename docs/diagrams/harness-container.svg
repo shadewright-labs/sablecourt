@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 764" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Harness container boundaries</title>
+  <desc id="d">The host holds the daemon, sablecourtd, and a per-launch internal network with no gateway. The daemon contains a per-launch gate that checks the lease digest, the route list and request size, and a council broker that starts the harness container and hands it the task lease on standard input. The harness container holds the harness CLI and three mounts: its own login volume, the checkout (read-only, or writable for the writer only) and a memory-backed scratch directory. Inside the network the harness sends plain HTTP with its lease to the proxy container, the only member with egress. The proxy relays gate calls to the daemon gate over a per-launch Unix socket or pinned TLS 1.3 and opens tunnels on port 443 to the harness's listed provider hosts outside the host. Refused: the harness has no direct route to the daemon, the host files, the Docker socket or the internet, and the proxy denies every other host.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  
+  <rect width="1120" height="764" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="760" height="608" rx="14"/>
+  <text class="lanet" x="44" y="52">HOST</text>
+  <rect class="lane" x="56" y="60" width="696" height="170" rx="14"/>
+  <text class="lanet" x="76" y="88">SABLECOURTD</text>
+  <rect class="lane" x="56" y="260" width="696" height="348" rx="14"/>
+  <text class="lanet" x="76" y="288">INTERNAL NETWORK</text>
+  <rect class="lane" x="80" y="296" width="290" height="296" rx="14"/>
+  <text class="lanet" x="100" y="324">HARNESS CONTAINER</text>
+  <rect class="box" x="88" y="150" width="230" height="64" rx="10"/>
+  <text class="h" x="104" y="177">Council broker</text>
+  <text class="s" x="104" y="198">starts turns, reads output</text>
+  <rect class="box" x="400" y="150" width="250" height="64" rx="10"/>
+  <text class="h" x="416" y="177">Per-launch gate</text>
+  <text class="s" x="416" y="198">lease hash, routes, size</text>
+  <rect class="box" x="104" y="332" width="258" height="64" rx="10"/>
+  <text class="h" x="120" y="359">Harness CLI</text>
+  <text class="s" x="120" y="380">claude, codex or agy</text>
+  <rect class="box" x="104" y="404" width="258" height="52" rx="10"/>
+  <text class="h" x="120" y="431">Login volume</text>
+  <text class="s" x="120" y="452">its own harness only</text>
+  <rect class="box" x="104" y="464" width="258" height="52" rx="10"/>
+  <text class="h" x="120" y="491">Checkout</text>
+  <text class="s" x="120" y="512">read-only, writer only writable</text>
+  <rect class="box" x="104" y="524" width="258" height="52" rx="10"/>
+  <text class="h" x="120" y="551">Scratch</text>
+  <text class="s" x="120" y="572">memory-backed tmpfs</text>
+  <rect class="key" x="450" y="332" width="220" height="72" rx="12"/>
+  <text class="h" x="466" y="359">Proxy container</text>
+  <text class="s" x="466" y="380">only member with egress</text>
+  <rect class="ext" x="850" y="332" width="210" height="64" rx="10"/>
+  <text class="h" x="866" y="359">Provider hosts</text>
+  <text class="s" x="866" y="380">listed, port 443 only</text>
+  <rect class="bad" x="430" y="664" width="240" height="64" rx="10"/>
+  <text class="h" x="446" y="691">Other hosts</text>
+  <text class="s" x="446" y="712">private addresses</text>
+  <rect class="bad" x="104" y="664" width="258" height="64" rx="10"/>
+  <text class="h" x="120" y="691">Host files, Docker socket</text>
+  <text class="s" x="120" y="712">direct egress</text>
+  <path class="f" d="M300 214V292" marker-end="url(#a)"/>
+  <text class="lbl" x="310" y="250" text-anchor="start">lease on stdin</text>
+  <path class="f" d="M362 368H444" marker-end="url(#a)"/>
+  <text class="lbl" x="403" y="360" text-anchor="middle">HTTP, lease</text>
+  <path class="f" d="M560 328V218" marker-end="url(#a)"/>
+  <text class="lbl" x="570" y="300" text-anchor="start">socket or TLS</text>
+  <path class="f" d="M670 368H844" marker-end="url(#a)"/>
+  <text class="lbl" x="757" y="360" text-anchor="middle">CONNECT 443</text>
+  <path class="deny" d="M560 404V660" marker-end="url(#x)"/>
+  <text class="no" x="570" y="640" text-anchor="start">denied</text>
+  <path class="deny" d="M233 592V660" marker-end="url(#x)"/>
+  <text class="no" x="243" y="630" text-anchor="start">never</text>
+  <rect class="ext" x="24" y="738" width="28" height="16" rx="4"/>
+  <text class="lbl" x="62" y="751" text-anchor="start">outside Sablecourt</text>
+  <path class="deny" d="M250 746H290" marker-end="url(#x)"/>
+  <text class="lbl" x="300" y="751" text-anchor="start">refused</text>
+</svg>

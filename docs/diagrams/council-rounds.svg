@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1112" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">One council round</title>
+  <desc id="d">One seat of one council round. sablectl sends the question and operator token to the daemon, which records the council, reserves the turn and stores only the hash of the task lease. The daemon starts a per-launch proxy and gives it the lease digest, then starts the harness container and hands it the lease and prompt on standard input. The harness reaches the daemon only through the proxy, with the lease in a bearer header; the proxy checks the route and the digest and relays to the daemon. The harness reaches its provider only through the proxy as a tunnel on port 443 to listed hosts; a connection to any other host is denied. When the harness exits, the daemon reads its output and exit code directly from the container engine, records the answer, vote and task events, waits for all three seats, repeats for round two with peer excerpts, writes the digest and closes. sablectl prints the answers and the digest. Replies are dashed, and the legend marks the provider outside Sablecourt and the refused connection.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  
+  <rect width="1280" height="1112" rx="18" fill="#08060e"/>
+  <rect class="box" x="40" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="130" y="58" text-anchor="middle">sablectl</text>
+  <rect class="key" x="300" y="24" width="180" height="56" rx="12"/>
+  <text class="h" x="390" y="58" text-anchor="middle">sablecourtd</text>
+  <rect class="box" x="560" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="650" y="58" text-anchor="middle">Harness container</text>
+  <rect class="box" x="820" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="910" y="58" text-anchor="middle">Proxy container</text>
+  <rect class="ext" x="1060" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="1150" y="58" text-anchor="middle">Provider</text>
+  <path class="life" d="M130 80V1036"/>
+  <path class="life" d="M390 80V1036"/>
+  <path class="life" d="M650 80V1036"/>
+  <path class="life" d="M910 80V1036"/>
+  <path class="life" d="M1150 80V1036"/>
+  <path class="f" d="M136 130H384" marker-end="url(#a)"/>
+  <text class="lbl" x="260" y="122" text-anchor="middle">question and token</text>
+  <rect class="box" x="260" y="150" width="260" height="52" rx="10"/>
+  <text class="h" x="390" y="172" text-anchor="middle" font-size="14">Records the council</text>
+  <text class="s" x="390" y="192" text-anchor="middle">question, ceilings, deadline</text>
+  <rect class="box" x="260" y="222" width="260" height="52" rx="10"/>
+  <text class="h" x="390" y="244" text-anchor="middle" font-size="14">Reserves the turn</text>
+  <text class="s" x="390" y="264" text-anchor="middle">lease minted, only its hash stored</text>
+  <path class="f" d="M396 320H904" marker-end="url(#a)"/>
+  <text class="lbl" x="650" y="312" text-anchor="middle">start, lease digest</text>
+  <path class="f" d="M396 372H644" marker-end="url(#a)"/>
+  <text class="lbl" x="520" y="364" text-anchor="middle">lease on stdin</text>
+  <path class="f" d="M656 436H904" marker-end="url(#a)"/>
+  <text class="lbl" x="780" y="428" text-anchor="middle">gate read, lease</text>
+  <path class="f" d="M904 488H396" marker-end="url(#a)"/>
+  <text class="lbl" x="650" y="480" text-anchor="middle">digest checked</text>
+  <path class="f" d="M656 552H904" marker-end="url(#a)"/>
+  <text class="lbl" x="780" y="544" text-anchor="middle">CONNECT provider</text>
+  <path class="f" d="M916 604H1144" marker-end="url(#a)"/>
+  <text class="lbl" x="1030" y="596" text-anchor="middle">tunnel, port 443</text>
+  <path class="deny" d="M656 668H904" marker-end="url(#x)"/>
+  <text class="lbl" x="780" y="660" text-anchor="middle">other host</text>
+  <text class="no" x="780" y="688" text-anchor="middle">denied</text>
+  <path class="r" d="M644 752H396" marker-end="url(#m)"/>
+  <text class="lbl" x="520" y="744" text-anchor="middle">stdout, exit code</text>
+  <rect class="box" x="260" y="776" width="260" height="52" rx="10"/>
+  <text class="h" x="390" y="798" text-anchor="middle" font-size="14">Records the answer</text>
+  <text class="s" x="390" y="818" text-anchor="middle">answer, vote, task events</text>
+  <rect class="box" x="260" y="844" width="260" height="52" rx="10"/>
+  <text class="h" x="390" y="866" text-anchor="middle" font-size="14">Barrier, then round two</text>
+  <text class="s" x="390" y="886" text-anchor="middle">repeat with peer excerpts</text>
+  <rect class="box" x="260" y="912" width="260" height="52" rx="10"/>
+  <text class="h" x="390" y="934" text-anchor="middle" font-size="14">Closes and writes the digest</text>
+  <text class="s" x="390" y="954" text-anchor="middle">digest Relic, audit rows</text>
+  <path class="r" d="M384 1000H136" marker-end="url(#m)"/>
+  <text class="lbl" x="260" y="992" text-anchor="middle">answers, digest</text>
+  <rect class="ext" x="60" y="1068" width="28" height="16" rx="4"/>
+  <text class="lbl" x="98" y="1081">outside Sablecourt</text>
+  <path class="deny" d="M270 1076H310" marker-end="url(#x)"/>
+  <text class="lbl" x="320" y="1081">refused</text>
+  <path class="r" d="M420 1076H460" marker-end="url(#m)"/>
+  <text class="lbl" x="470" y="1081">reply or output</text>
+</svg>
