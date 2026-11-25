@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1112" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Sablecourt system context</title>
+  <desc id="d">Three callers reach the sablecourtd control plane: sablectl and the web UI submit, steer and approve; Shadewright sends incidents and verifications with a scoped token; Nightloom sends read-only requests with an observer token. The control plane, the Model Gate, the MCP Gate and the Approval Queue all run inside the sablecourtd process. The control plane records to the store, which holds the audit chain, and a dashed box lists the parts parked by ADR-0011: Citadel mode, the Kubernetes runtime, PostgreSQL, A2A and the GitHub webhook. The control plane launches three kinds of workload, each with a task lease: a Docker workload, a host coding run and a harness container for one council turn. The Docker workload calls the Model Gate for inference and the MCP Gate for tools. The host coding run calls the MCP Gate. The harness container reaches the MCP Gate through its proxy and reaches only its provider hosts for login and inference, outside the Model Gate. The Model Gate forwards to the model providers with the provider key. The MCP Gate sends actions that policy marks approve to the Approval Queue, which waits for a person, and opens pull requests on the Git host.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="1112" rx="18" fill="#08060e"/>
+
+  <rect class="lane" x="24" y="24" width="1232" height="144" rx="14"/>
+  <text class="lanet" x="44" y="54">CALLERS</text>
+  <rect class="box" x="44" y="80" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="106">sablectl and web UI</text>
+  <text class="s" x="60" y="127">operator token or session</text>
+  <rect class="ext" x="302" y="80" width="210" height="64" rx="10"/>
+  <text class="h" x="318" y="106">Shadewright</text>
+  <text class="s" x="318" y="127">scoped integration token</text>
+  <rect class="ext" x="560" y="80" width="210" height="64" rx="10"/>
+  <text class="h" x="576" y="106">Nightloom</text>
+  <text class="s" x="576" y="127">read-only observer token</text>
+
+  <rect class="lane" x="24" y="196" width="796" height="228" rx="14"/>
+  <text class="lanet" x="44" y="226">CONTROL PLANE</text>
+  <rect class="key" x="44" y="250" width="756" height="150" rx="12"/>
+  <text class="h" x="60" y="276">sablecourtd</text>
+  <text class="s" x="60" y="297">reconciler and scheduler, Conclave broker, web UI</text>
+  <text class="s" x="60" y="314">mints a task lease for every launch</text>
+  <text class="s" x="60" y="331">listens on 127.0.0.1:7432 by default</text>
+
+  <rect class="lane" x="900" y="196" width="356" height="228" rx="14"/>
+  <text class="lanet" x="920" y="226">STATE AND PARKED</text>
+  <rect class="box" x="920" y="250" width="316" height="64" rx="10"/>
+  <text class="h" x="936" y="276">Store</text>
+  <text class="s" x="936" y="297">SQLite with the audit chain</text>
+  <rect class="plan" x="920" y="330" width="316" height="72" rx="10"/>
+  <text class="h" x="936" y="356">Parked by ADR-0011</text>
+  <text class="s" x="936" y="377">Citadel, Kubernetes, PostgreSQL,</text>
+  <text class="s" x="936" y="394">A2A, GitHub webhook</text>
+
+  <rect class="lane" x="24" y="452" width="1232" height="144" rx="14"/>
+  <text class="lanet" x="44" y="482">WORKLOADS</text>
+  <rect class="box" x="44" y="506" width="346" height="64" rx="10"/>
+  <text class="h" x="60" y="532">Docker workload</text>
+  <text class="s" x="60" y="553">long-lived agent or controller</text>
+  <rect class="box" x="430" y="506" width="210" height="64" rx="10"/>
+  <text class="h" x="446" y="532">Host coding run</text>
+  <text class="s" x="446" y="553">CLI harness in Seatbelt</text>
+  <rect class="box" x="670" y="506" width="210" height="64" rx="10"/>
+  <text class="h" x="686" y="532">Harness container</text>
+  <text class="s" x="686" y="553">council turn, internal net</text>
+
+  <rect class="lane" x="24" y="624" width="1232" height="246" rx="14"/>
+  <text class="lanet" x="44" y="654">GATES</text>
+  <rect class="box" x="44" y="678" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="704">Model Gate</text>
+  <text class="s" x="60" y="725">lease, grant, budget</text>
+  <rect class="box" x="302" y="678" width="404" height="64" rx="10"/>
+  <text class="h" x="318" y="704">MCP Gate</text>
+  <text class="s" x="318" y="725">tools and typed actions, policy decides</text>
+  <rect class="wait" x="302" y="782" width="210" height="64" rx="10"/>
+  <text class="h" x="318" y="808">Approval Queue</text>
+  <text class="s" x="318" y="829">pins the digest, asks you</text>
+
+  <rect class="lane" x="24" y="898" width="1232" height="144" rx="14"/>
+  <text class="lanet" x="44" y="928">OUTSIDE</text>
+  <rect class="ext" x="44" y="952" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="978">Model providers</text>
+  <text class="s" x="60" y="999">API endpoints</text>
+  <rect class="ext" x="540" y="952" width="210" height="64" rx="10"/>
+  <text class="h" x="556" y="978">Git host</text>
+  <text class="s" x="556" y="999">pull requests</text>
+  <rect class="ext" x="790" y="952" width="210" height="64" rx="10"/>
+  <text class="h" x="806" y="978">Provider hosts</text>
+  <text class="s" x="806" y="999">login and inference only</text>
+
+  <path class="f" d="M230 144V250" marker-end="url(#a)"/>
+  <text class="lbl" x="242" y="184">submit, steer, approve</text>
+  <path class="f" d="M407 144V250" marker-end="url(#a)"/>
+  <text class="lbl" x="419" y="184">incidents</text>
+  <path class="r" d="M665 144V250" marker-end="url(#m)"/>
+  <text class="lbl" x="677" y="184">read-only requests</text>
+
+  <path class="f" d="M800 282H914" marker-end="url(#a)"/>
+  <text class="lbl" x="860" y="274" text-anchor="middle">records</text>
+  <path class="r" d="M800 366H914" marker-end="url(#m)"/>
+  <text class="lbl" x="860" y="358" text-anchor="middle">parked</text>
+
+  <path class="f" d="M217 400V506" marker-end="url(#a)"/>
+  <text class="lbl" x="229" y="440">launches with a lease</text>
+  <path class="f" d="M535 400V506" marker-end="url(#a)"/>
+  <text class="lbl" x="547" y="440">launches</text>
+  <path class="f" d="M775 400V506" marker-end="url(#a)"/>
+  <text class="lbl" x="787" y="440">launches</text>
+
+  <path class="f" d="M149 570V678" marker-end="url(#a)"/>
+  <text class="lbl" x="161" y="612">inference</text>
+  <path class="f" d="M340 570V678" marker-end="url(#a)"/>
+  <text class="lbl" x="352" y="612">tools</text>
+  <path class="f" d="M535 570V678" marker-end="url(#a)"/>
+  <text class="lbl" x="547" y="612">tools</text>
+  <path class="f" d="M690 570V678" marker-end="url(#a)"/>
+  <text class="lbl" x="702" y="612">via proxy</text>
+  <path class="f" d="M820 570V952" marker-end="url(#a)"/>
+  <text class="lbl" x="832" y="800">own login, via proxy</text>
+
+  <path class="f" d="M407 742V782" marker-end="url(#a)"/>
+  <text class="lbl" x="419" y="768">approve</text>
+  <path class="f" d="M149 742V952" marker-end="url(#a)"/>
+  <text class="lbl" x="161" y="850">forwards with the key</text>
+  <path class="f" d="M620 742V952" marker-end="url(#a)"/>
+  <text class="lbl" x="632" y="850">opens a pull request</text>
+
+  <rect class="key" x="44" y="1068" width="22" height="14" rx="3"/>
+  <text class="lbl" x="76" y="1080">the subject of the page</text>
+  <rect class="ext" x="276" y="1068" width="22" height="14" rx="3"/>
+  <text class="lbl" x="308" y="1080">outside Sablecourt</text>
+  <rect class="wait" x="508" y="1068" width="22" height="14" rx="3"/>
+  <text class="lbl" x="540" y="1080">waits for a person</text>
+  <rect class="plan" x="740" y="1068" width="22" height="14" rx="3"/>
+  <text class="lbl" x="772" y="1080">parked</text>
+</svg>
