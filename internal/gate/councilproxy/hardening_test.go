@@ -107,7 +107,9 @@ func TestGateSocketMountSourceIsRevalidated(t *testing.T) {
 	if err := os.Chmod(mid, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyGateSocketMountSource(filepath.Join(base, "..", filepath.Base(base), "mid", "gates")); err == nil {
+	// filepath.Join would clean the dot component away, so build the alias by hand.
+	alias := filepath.Dir(sockPath) + string(filepath.Separator) + "." + string(filepath.Separator) + filepath.Base(sockPath)
+	if err := verifyGateSocketMountSource(alias); err == nil {
 		t.Fatal("non-canonical mount source accepted")
 	}
 }
