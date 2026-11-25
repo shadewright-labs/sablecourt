@@ -18,6 +18,7 @@ Architecture decisions live in [docs/adr/](docs/adr/README.md). Technical docume
 - [docs/architecture.md](docs/architecture.md) - system topology, package map, Sanctum/Citadel modes, and request lifecycle
 - [docs/reference.md](docs/reference.md) - manifest kinds (`sablecourt.io/v1alpha1`), HTTP/SSE/MCP APIs, and `sablectl` CLI commands
 - [docs/integrations.md](docs/integrations.md) - upstream MCP server bridge, Shadewright Contract 3 escalation API, Kubernetes Deployments, Prometheus `/metrics`, Court Memory UI, and task retry
+- [docs/council-harnesses.md](docs/council-harnesses.md) - local harness images, one-time logins in container volumes, and the council preflight
 - [docs/design.md](docs/design.md) - original v0.1 design baseline
 
 ## State of the areas
