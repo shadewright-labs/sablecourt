@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
 )
 
 // demo-agent is a minimal workload demonstrating Sablecourt's Three Doors gates:
@@ -74,14 +76,14 @@ func postJSON(url, token string, v any) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw)) // #nosec G704 -- main appends the fixed action path to the data gate URL injected by runDaemon.
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	client := gatehttp.NewClient(nil, 10*time.Second)
+	resp, err := client.Do(req) // #nosec G704 -- main supplies the injected data gate host and gatehttp.NewClient refuses redirects.
 	if err != nil {
 		return 0, nil, err
 	}
