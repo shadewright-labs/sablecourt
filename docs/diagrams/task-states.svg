@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 468" role="img" aria-labelledby="t d" data-diagram="states" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Task states</title>
+  <desc id="d">States of a task. A start dot leads to Submitted, which moves to Working when claimed. Working moves to Completed when exit 0 is seen, to Failed on a launch, exit or loss failure, to Input-required when an approval is needed and back when decided, and to Suspended on suspend and back on resume. Cancelled is reached by cancel from submitted, working, input-required or suspended. A note says a submitted task also fails if its workload or adapter is missing.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="468" rx="18" fill="#08060e"/>
+  <circle cx="140" cy="48" r="5" fill="#2dd4bf"/>
+  <path class="f" d="M140 53V94" marker-end="url(#a)"/>
+  <rect class="box" x="40" y="100" width="200" height="64" rx="10"/>
+  <text class="h" x="56" y="126">Submitted</text>
+  <text class="s" x="56" y="147">stored with its key</text>
+  <rect class="key" x="320" y="100" width="280" height="64" rx="12"/>
+  <text class="h" x="336" y="126">Working</text>
+  <text class="s" x="336" y="147">runtime observed every pass</text>
+  <rect class="box" x="880" y="100" width="200" height="64" rx="10"/>
+  <text class="h" x="896" y="126">Completed</text>
+  <text class="s" x="896" y="147">exit 0 observed</text>
+  <rect class="wait" x="160" y="240" width="200" height="64" rx="10"/>
+  <text class="h" x="176" y="266">Input-required</text>
+  <text class="s" x="176" y="287">waits for an approval</text>
+  <rect class="box" x="420" y="240" width="160" height="64" rx="10"/>
+  <text class="h" x="436" y="266">Suspended</text>
+  <text class="s" x="436" y="287">operator action</text>
+  <rect class="bad" x="880" y="240" width="200" height="64" rx="10"/>
+  <text class="no" x="896" y="266">Failed</text>
+  <text class="s" x="896" y="287">launch, exit or loss</text>
+  <rect class="bad" x="840" y="340" width="240" height="72" rx="10"/>
+  <text class="no" x="856" y="366">Cancelled</text>
+  <text class="s" x="856" y="387">cancel, from any state that</text>
+  <text class="s" x="856" y="404">is not terminal</text>
+  <path class="f" d="M240 132H314" marker-end="url(#a)"/>
+  <text class="lbl" x="277" y="124" text-anchor="middle">claimed</text>
+  <path class="f" d="M600 132H874" marker-end="url(#a)"/>
+  <text class="lbl" x="737" y="124" text-anchor="middle">exit 0 seen</text>
+  <path class="f" d="M328 164V234" marker-end="url(#a)"/>
+  <text class="lbl" x="320" y="205" text-anchor="end">needs approval</text>
+  <path class="f" d="M352 240V170" marker-end="url(#a)"/>
+  <text class="lbl" x="360" y="205">decided</text>
+  <path class="f" d="M440 164V234" marker-end="url(#a)"/>
+  <text class="lbl" x="448" y="205">suspend</text>
+  <path class="f" d="M560 240V170" marker-end="url(#a)"/>
+  <text class="lbl" x="552" y="205" text-anchor="end">resume</text>
+  <path class="deny" d="M590 164V272H874" marker-end="url(#x)"/>
+  <text class="lbl" x="700" y="264" text-anchor="middle">failure seen</text>
+  <text class="cap" x="40" y="190">also failed if the workload</text>
+  <text class="cap" x="40" y="208">or its adapter is missing</text>
+  <rect class="wait" x="40" y="432" width="28" height="16" rx="4"/>
+  <text class="lbl" x="76" y="444">waits for a person</text>
+  <rect class="bad" x="230" y="432" width="28" height="16" rx="4"/>
+  <text class="lbl" x="266" y="444">ended or refused</text>
+</svg>
