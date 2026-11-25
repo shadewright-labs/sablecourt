@@ -475,7 +475,7 @@ func TestCheckWrappedTarget(t *testing.T) {
 		{name: "empty shebang", content: "#!   \n"},
 		{name: "comment after interpreter", content: "#!" + shell + "#comment\n", wantMissing: runtime.GOOS != "darwin"},
 		{name: "comment after missing interpreter", content: "#!" + filepath.Join(dir, "no-such-interp") + "#comment\n", wantMissing: true},
-		{name: "comment only shebang", content: "#!#comment\n"},
+		{name: "comment only shebang", content: "#!#comment\n", wantMissing: runtime.GOOS != "darwin"},
 		{name: "oversized shebang", content: "#!" + strings.Repeat("a", 520) + "\n"},
 		{name: "binary without shebang", content: "\xcf\xfa\xed\xfe\x00\x00"},
 		{name: "empty file", content: ""},
