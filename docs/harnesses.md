@@ -96,3 +96,185 @@ Tested on macOS (`darwin`) on 2026-11-25 against the installed binaries (`claude
 - `claude`: isolation possible: partly (all config, hooks, MCP servers, and memory move into `CLAUDE_CONFIG_DIR` and the Keychain entry is hashed per directory, but on macOS the subscription token still lives in `$HOME/Library/Keychains/login.keychain-db` and caches remain under `$HOME/Library/Caches/claude-cli-nodejs/`)
 - `codex`: isolation possible: yes (`CODEX_HOME` relocates all config, hooks, MCP servers, memory, skills, and SQLite state, and the default `file` credential store keeps the subscription token in `$CODEX_HOME/auth.json` without touching `$HOME/.codex`, `$HOME/.agents`, or macOS Keychain)
 - `agy`: isolation possible: partly (`agy` has no config-directory env var, so isolation requires overriding `HOME`; that isolates `$HOME/.gemini/` and hides the shared `gemini`/`antigravity` Keychain entry, but breaks macOS default Keychain lookup, relies on file-storage fallback, and shifts `HOME` for all child processes)
+
+## Harnesses in containers
+
+Tested on Docker Desktop (`linux/arm64`, Docker Engine `29.9.3`, Linux kernel `7.0.14-linuxkit`) on 2026-11-25 without logging in to any provider and without mounting any host profile, credential file, Keychain, or Docker socket. Every container ran as non-root (`10001:10001`) with `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, a named Docker volume at `/home/harness`, a throwaway Git repository bind-mounted read-only at `/workspace:ro`, a writable scratch mount at `/scratch` (`TMPDIR=/scratch`), no other mounts, and stdin closed (`</dev/null`).
+
+### Summary table
+
+| Field | `claude` | `codex` | `agy` |
+| --- | --- | --- | --- |
+| Linux `arm64` build | Yes (`2.1.332 (Claude Code)`), standalone binary via `https://claude.ai/install.sh` | Yes (`codex-cli 0.172.0`, `aarch64-unknown-linux-musl`), standalone bundle via `https://chatgpt.com/codex/install.sh` | Yes (`1.5.16`, `linux_arm64`), standalone binary via `https://antigravity.google/cli/install.sh` |
+| Tolerates `--read-only` rootfs | Yes (writes state under `/home/harness/.claude` and `/home/harness/.claude.json`, temp dir `/scratch/claude-10001`; subprocesses hardcoding `/tmp` may need a `/tmp` tmpfs once logged in) | Yes up to auth (writes under `/home/harness/.codex`); no for inner bubblewrap sandbox (`Read-only file system (os error 30)` without writable `/tmp`, plus `EPERM` on `unshare`) | Yes (writes under `/home/harness/.gemini/` and `/home/harness/.config/`; logs that `/usr/local/bin` is not writable and skips auto-update) |
+| Headless result without login | Exit `1`; `stdout`: `Not logged in · Please run /login`; `stderr` empty | Exit `1`; `stderr` prints banner, bubblewrap warning, 5 WebSocket retries and 5 HTTPS retries, ending in `ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses` | Exit `1`; `stderr` prints hosted-callback OAuth URL (`redirect_uri=https://antigravity.google/oauth-callback`), waits 60s with closed stdin, then exits `1` with `Error: authentication timed out.` and `error: authentication failed or timed out` |
+| Credential path inside volume | `/home/harness/.claude/.credentials.json` (plus metadata in `/home/harness/.claude.json`); no Keychain or host path | `/home/harness/.codex/auth.json` (default `file` store); no Keychain or host path | File-based token storage under `/home/harness/.gemini/` (`oauth_tokens.json`, logged as `Using file-based token storage because no D-Bus session bus detected`) and plugin secrets at `/home/harness/.config/antigravity/plugin-secrets.json`; no Keychain or host path |
+| One-time login command | `docker run --rm -it --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges -v sablecourt-spike-claude:/home/harness -v <scratch>:/scratch sablecourt-spike-claude:local claude auth login` | `docker run --rm -it --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges -v sablecourt-spike-codex:/home/harness -v <scratch>:/scratch sablecourt-spike-codex:local codex login --device-auth` | `docker run --rm -it --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges -v sablecourt-spike-agy:/home/harness -v <scratch>:/scratch sablecourt-spike-agy:local agy` (then `/exit`; no `login` subcommand) |
+| Login completes without in-container browser | Yes (prints OAuth URL for a host browser and accepts pasted authorization code in the terminal; no port forwarding) | Yes (`--device-auth` prints a verification URL and one-time code for a host browser; requires device-code sign-in enabled in account security settings; plain `codex login` requires a localhost callback on port `1455`) | Yes (`xdg-open` is absent, so `agy` prints a URL using `https://antigravity.google/oauth-callback` and prompts to paste the authorization code into the terminal; no port forwarding) |
+| Hosts contacted on unauthenticated startup | `api.anthropic.com:443` | `api.openai.com:443`, `github.com:443` (clones OpenAI plugins repo into `/home/harness/.codex/.tmp/plugins`) | `play.googleapis.com:443` |
+| Start time to first output | `365.8 ms` (`stdout`; `821.0 ms` total) | `175.6 ms` cold (`stderr`; `15529.1 ms` total), `123.3 ms` warm (`stderr`; `15124.0 ms` total) | `204.7 ms` (`stderr`; `65317.9 ms` total including 60s auth timeout and 5s server shutdown timeout) |
+
+### Dockerfiles
+
+All three CLI images share one pinned Debian `bookworm-slim` base image so binaries live read-only under `/usr/local/bin` (and `/opt/codex` for `codex`) outside the mounted `/home/harness` state volume.
+
+`Dockerfile.base`:
+
+```dockerfile
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        gzip \
+        libstdc++6 \
+        tar \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 harness \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/harness --shell /bin/bash harness \
+    && mkdir -p /workspace /scratch \
+    && chown 10001:10001 /home/harness /scratch
+
+ENV HOME=/home/harness \
+    TMPDIR=/scratch \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+WORKDIR /workspace
+```
+
+`Dockerfile.claude`:
+
+```dockerfile
+FROM sablecourt-spike-base:local
+
+RUN HOME=/opt/claude-install bash -c 'curl -fsSL https://claude.ai/install.sh | bash' \
+    && install -m 0755 "$(readlink -f /opt/claude-install/.local/bin/claude)" /usr/local/bin/claude \
+    && rm -rf /opt/claude-install
+
+USER 10001:10001
+WORKDIR /workspace
+```
+
+`Dockerfile.codex`:
+
+```dockerfile
+FROM sablecourt-spike-base:local
+
+RUN mkdir -p /opt/codex \
+    && CODEX_INSTALL_DIR=/usr/local/bin \
+       CODEX_HOME=/opt/codex \
+       CODEX_NON_INTERACTIVE=true \
+       sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
+    && chmod -R a+rX /opt/codex /usr/local/bin/codex*
+
+USER 10001:10001
+WORKDIR /workspace
+```
+
+`Dockerfile.agy` (passing `HOME=/root` during install prevents the installer from leaving root-owned `.cache/antigravity` files in `/home/harness`):
+
+```dockerfile
+FROM sablecourt-spike-base:local
+
+RUN HOME=/root bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin' \
+    && rm -rf /root/.cache/antigravity \
+    && chmod 0755 /usr/local/bin/agy
+
+USER 10001:10001
+WORKDIR /workspace
+```
+
+### Exact headless test commands
+
+Build and setup:
+
+```sh
+docker build --platform linux/arm64 -f Dockerfile.base -t sablecourt-spike-base:local .
+docker build --platform linux/arm64 -f Dockerfile.claude -t sablecourt-spike-claude:local .
+docker build --platform linux/arm64 -f Dockerfile.codex -t sablecourt-spike-codex:local .
+docker build --platform linux/arm64 -f Dockerfile.agy -t sablecourt-spike-agy:local .
+docker volume create sablecourt-spike-claude
+docker volume create sablecourt-spike-codex
+docker volume create sablecourt-spike-agy
+docker network create --internal sablecourt-spike-internal
+```
+
+Headless runs (each run with `</dev/null`, via a dual-homed forward proxy `sablecourt-spike-proxy` on `sablecourt-spike-internal` and `bridge`):
+
+```sh
+docker run --rm --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --network sablecourt-spike-internal \
+  -e HTTP_PROXY=http://sablecourt-spike-proxy:8888 -e HTTPS_PROXY=http://sablecourt-spike-proxy:8888 \
+  -e http_proxy=http://sablecourt-spike-proxy:8888 -e https_proxy=http://sablecourt-spike-proxy:8888 \
+  -v sablecourt-spike-claude:/home/harness -v <repo>:/workspace:ro -v <scratch>:/scratch \
+  sablecourt-spike-claude:local \
+  claude --model haiku --permission-mode plan --no-session-persistence --output-format text -p "Reply with OK" </dev/null
+
+docker run --rm --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --network sablecourt-spike-internal \
+  -e HTTP_PROXY=http://sablecourt-spike-proxy:8888 -e HTTPS_PROXY=http://sablecourt-spike-proxy:8888 \
+  -e http_proxy=http://sablecourt-spike-proxy:8888 -e https_proxy=http://sablecourt-spike-proxy:8888 \
+  -v sablecourt-spike-codex:/home/harness -v <repo>:/workspace:ro -v <scratch>:/scratch \
+  sablecourt-spike-codex:local \
+  codex exec --sandbox read-only --ephemeral -m gpt-5.6-luna "Reply with OK" </dev/null
+
+docker run --rm --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --network sablecourt-spike-internal \
+  -e HTTP_PROXY=http://sablecourt-spike-proxy:8888 -e HTTPS_PROXY=http://sablecourt-spike-proxy:8888 \
+  -e http_proxy=http://sablecourt-spike-proxy:8888 -e https_proxy=http://sablecourt-spike-proxy:8888 \
+  -v sablecourt-spike-codex:/home/harness -v <repo>:/workspace:ro -v <scratch>:/scratch \
+  sablecourt-spike-codex:local \
+  codex exec --sandbox workspace-write --ephemeral -m gpt-5.6-luna "Reply with OK" </dev/null
+
+docker run --rm --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --network sablecourt-spike-internal \
+  -e HTTP_PROXY=http://sablecourt-spike-proxy:8888 -e HTTPS_PROXY=http://sablecourt-spike-proxy:8888 \
+  -e http_proxy=http://sablecourt-spike-proxy:8888 -e https_proxy=http://sablecourt-spike-proxy:8888 \
+  -v sablecourt-spike-agy:/home/harness -v <repo>:/workspace:ro -v <scratch>:/scratch \
+  sablecourt-spike-agy:local \
+  agy --model gemini-3.8-flash-low --output-format text --sandbox -p "Reply with OK" </dev/null
+```
+
+### Codex inner sandbox inside the container
+
+Both `codex exec --sandbox read-only` and `codex exec --sandbox workspace-write` started, printed `warning: Codex could not find bubblewrap on PATH... Codex will use the bundled bubblewrap in the meantime.`, and reached the `401 Unauthorized` response without a sandbox error at startup because `codex` only invokes its sandbox when running a model-requested tool command.
+
+Running `codex sandbox -- /bin/sh -c 'echo sandbox-ok'` directly inside the same hardened container (`--read-only --cap-drop ALL --security-opt no-new-privileges --network none`) exited `1` immediately with:
+
+```text
+error building bubblewrap command: Read-only file system (os error 30)
+```
+
+In addition, `unshare -Ur true` inside the same container failed with `unshare: unshare failed: Operation not permitted` (`CapEff: 0000000000000000`, `NoNewPrivs: 1`, `Seccomp: 2`, kernel `max_user_namespaces=31871`), so Docker's default seccomp profile blocks the user namespaces that bubblewrap requires even if `/tmp` is writable. That is the Linux container equivalent of the macOS nested-Seatbelt failure (exit `71`). Whether an authenticated `codex exec` session can still run tools by configuring a Landlock-only fallback (without passing any global permission-bypass flag) cannot be confirmed without a login and needs a logged-in verification run.
+
+### Network allow-list and Sablecourt host gate reachability
+
+Attaching harness containers only to an `--internal` Docker network (`sablecourt-spike-internal`) removes all direct egress. A DNS lookup to an external domain failed with `curl` exit `6`, and a direct HTTPS request to a public IP failed immediately with `curl` exit `7`. A non-root forward proxy container connected to both `sablecourt-spike-internal` and `bridge` with `ALLOW_HOSTS=api.anthropic.com,api.openai.com,play.googleapis.com` returned `403 Host example.com not in allow list` for `https://example.com` while allowing `CONNECT api.anthropic.com:443`. Authenticated runs and login flows will require additional vendor hosts in the allow-list (such as `claude.ai` for `claude`, `auth.openai.com` for `codex`, and `accounts.google.com`, `oauth2.googleapis.com`, `antigravity.google`, plus Google API endpoints for `agy`).
+
+With a test HTTP server bound strictly to host loopback (`<loopback>:<port>`), a container on `sablecourt-spike-internal` could not reach it via container loopback (exit `7`), via `host.docker.internal` without `--add-host` (exit `6`, unresolved), or even with `--add-host host.docker.internal:host-gateway` (resolves in `/etc/hosts` to `<host-gateway-ip>`, then fails immediately with exit `7` because an `--internal` network has no route off the bridge). By contrast, a container on the non-internal `bridge` network with `--add-host host.docker.internal:host-gateway` reached the host loopback server (`200`).
+
+Because `host.docker.internal:host-gateway` does not route from an `--internal` container, reaching a Sablecourt gate daemon on the host requires an explicit bridge that keeps arbitrary host loopback ports unreachable:
+
+1. Run a dual-homed gate and egress proxy on `sablecourt-internal` plus `bridge` (with `--add-host host.docker.internal:host-gateway`) that allows only the single pinned `host.docker.internal:<gate-port>` destination (verified: the proxy returned `403` when `host.docker.internal` was omitted and forwarded the request when allowed).
+2. Alternatively, bind-mount a dedicated `sablecourtd` workload Unix socket (enforcing scoped task-lease auth, separate from operator endpoints) into the container while leaving the container on `--internal` with no TCP path to the host.
+
+### Container mode verdicts
+
+- `claude`: container mode: works up to login
+- `codex`: container mode: works up to login (inner bubblewrap sandbox fails under `--read-only --cap-drop ALL --security-opt no-new-privileges`; post-login tool execution needs a verified Landlock or container-only sandbox configuration)
+- `agy`: container mode: works up to login
+
+### Changes needed in `internal/runtime/docker`
+
+Read from `internal/runtime/docker/docker.go`, `internal/runtime/runtime.go`, and `internal/domain/types.go`:
+
+- `docker.go:164-176` and `EngineClient`: `Start` currently bind-mounts only `spec.WorkDir:/workspace` read-write. Add support for read-only `/workspace:ro` on review tasks, a separate writable `/scratch` bind or tmpfs (`TMPDIR=/scratch`, plus optional `/tmp` tmpfs if needed), and a named Docker volume mounted at `/home/harness` with `VolumeInspect` and `VolumeCreate` on `EngineClient`.
+- `docker.go:184-198`: `ContainerCreate` sets neither `User` (to enforce non-root `10001:10001`), nor `WorkingDir` (`/workspace`), nor `Cmd` (to run the per-harness CLI command and flags). It also sets `OpenStdin: a.AttachHub != nil`, which leaves stdin open and stalls `codex exec` waiting for EOF; headless runs need `OpenStdin: false`, and one-time login runs need a separate interactive TTY attach path (`Tty: true`, `OpenStdin: true`).
+- `docker.go:103-118` and `docker.go:169-182`: `Start` attaches containers to an `Internal: true` network while adding `ExtraHosts: []string{"host.docker.internal:host-gateway"}` and expecting `http://host.docker.internal:<port>` URLs to route. Replace that with either a managed dual-homed allow-list egress and gate-pinning proxy container (injecting `HTTP_PROXY`/`HTTPS_PROXY` and `NO_PROXY`) or a bind-mounted workload Unix socket for `sablecourtd`.
+- `docker.go:146-162`: omit `SABLECOURT_MODEL_GATE_URL` in subscription-harness mode per ADR-0011, and pass `HOME=/home/harness`, `TMPDIR=/scratch`, and the proxy environment variables.
+- `docker.go:239-269` and `docker.go:322-324`: `stripDockerMuxHeader` strips only one 8-byte header per read buffer and merges `stdout` and `stderr`, and `CollectArtifacts` returns `nil, nil`. Demultiplex Docker streams properly (keeping clean final answers on `stdout` separate from diagnostics on `stderr`) and collect final output (`stdout` or scratch `-o` file) before container removal.
+- `internal/runtime/runtime.go` and `internal/domain/types.go`: extend `RuntimeConfig` and `LaunchSpec` with fields for the state volume name, workspace read-only flag, scratch directory, command/args, and per-harness egress allow-list hosts.
