@@ -1,0 +1,27 @@
+# Tests malformed PEM boundaries with synthetic key contents.
+[[allowlists]]
+paths = ['''^internal/conclave/council_results_test\.go$''']
+
+# Exercises URL validation using deliberately fake credential values.
+[[allowlists]]
+paths = ['''^internal/store/sqlite/learning_test\.go$''']
+
+# Covers parsing synthetic task metadata that resembles a generic API key.
+[[allowlists]]
+paths = ['''^cmd/sablectl/council_test\.go$''']
+
+# Tests chunked redaction with placeholder PEM and token strings.
+[[allowlists]]
+paths = ['''^internal/attach/hub_test\.go$''']
+
+# Uses fixed hash-shaped values to test worktree state validation.
+[[allowlists]]
+paths = ['''^internal/runtime/coding/hardening_test\.go$''']
+
+# Tests rendering and redaction of synthetic credentials in UI data.
+[[allowlists]]
+paths = ['''^internal/ui/ui_test\.go$''']
+
+# Tests upstream response redaction with a fake GitHub token.
+[[allowlists]]
+paths = ['''^internal/gate/mcp/upstream_test\.go$''']
