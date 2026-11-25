@@ -63,6 +63,7 @@ On macOS, the outer Seatbelt profile causes the `codex` inner sandbox to fail wi
 
 - Choose between the pinned gate proxy and the per-workload Unix socket. The spike verified proxy forwarding to a loopback test server. Verify the chosen transport against the Sablecourt gate with task lease authentication.
 - Run `codex` after login and verify tool execution under the container restrictions. Check whether the Landlock fallback works. [Codex inner sandbox](../harnesses.md#codex-inner-sandbox-inside-the-container).
+- Host-mode `codex` is refused until a test shows that its own sandbox, for the pinned `codex` version, denies reading `operator.token`, the other harness directories and the normal CLI state. Record the result here. If the policy cannot be confirmed, host mode runs without `codex`.
 - The user checks whether each provider's terms allow use of a subscription login from a container on the same machine.
 - Measure image sizes and repeat startup measurements after login. In the unauthenticated spike, first output took `365.8 ms` for `claude`, `175.6 ms` cold and `123.3 ms` warm for `codex`, and `204.7 ms` for `agy`. [Container startup measurements](../harnesses.md#summary-table-1).
 
