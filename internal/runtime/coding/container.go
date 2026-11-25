@@ -332,7 +332,7 @@ func (a *Adapter) startCouncilContainer(
 		default:
 		}
 		// Stop and Observe retry Close if Docker or socket removal fails here.
-		_ = session.Close(context.Background())
+		_ = session.Close(context.WithoutCancel(runCtx))
 	}()
 	a.containers.Store(taskBase, proc)
 	select {
