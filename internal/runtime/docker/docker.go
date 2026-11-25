@@ -47,6 +47,14 @@ type Adapter struct {
 	NetworkName      string
 	AttachHub        *attach.Hub
 	attachCtx        context.Context
+	discoverSocket   func() string
+}
+
+func (a *Adapter) dockerSocket() string {
+	if a.discoverSocket != nil {
+		return a.discoverSocket()
+	}
+	return discoverDockerSocket()
 }
 
 // SetAttachHub ties log streams to the daemon lifetime across individual Start calls.
