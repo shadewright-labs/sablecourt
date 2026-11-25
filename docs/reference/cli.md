@@ -1,6 +1,6 @@
 # CLI reference
 
-The command-line tools: `sablectl` talks to a running daemon over its HTTP API, and `sablecourtd` is the daemon. Run `sablectl <command> --help` for the generated help of any command.
+The command-line programs: `sablectl` talks to a running daemon over its HTTP API, `sablecourtd` is the daemon, and `sablecourt-agent` is the agent loop that runs inside a Workload. Run `sablectl <command> --help` for the generated help of any command.
 
 Status: built.
 
@@ -12,9 +12,10 @@ Source: `cmd/sablectl/main.go`.
 | --- | --- | --- |
 | `--api` | `http://127.0.0.1:7432` | Base URL of the daemon. |
 | `--json` | off | Print raw JSON where a command supports it. |
-| `--token` | empty | Operator token. Falls back to the `SABLECOURT_OPERATOR_TOKEN` environment variable. With neither, a client talking to a local daemon reads `operator.token` from the [state directory](configuration.md#state-directory). A token is only sent over HTTPS or to a local daemon. |
-| `--socket` | empty | Path of the daemon's Unix socket. Replaces `--api` and the token. |
+| `--socket` | empty | Path of the daemon's Unix socket. Replaces the host in `--api`; the operator token is still read and sent. |
 | `--secret-file` | empty | Optional JSON secret file (mode 0600) used by the `secret` commands instead of the OS keyring. |
+
+There is no token flag, because a token on the command line shows in the process table. `sablectl` takes the operator token from the `SABLECOURT_OPERATOR_TOKEN` environment variable. With it unset, a client talking to a local daemon (a loopback host or `--socket`) reads `operator.token` from the [state directory](configuration.md#state-directory), and every call fails if that file cannot be read. The token is sent only over HTTPS or to a local daemon, and only to the host named in `--api`. Each command sets its own request timeout, listed under [limits](limits.md#sablectl).
 
 ## sablectl commands
 
@@ -61,21 +62,21 @@ Source: `cmd/sablectl/*.go`. The route column names the API route that the comma
 | `conclave open <template>` | `--title`, `--decree` | `POST /api/v1/conclaves` | built |
 | `conclave list` | none | `GET /api/v1/conclaves` | built |
 | `conclave inspect <id>` | none | `GET /api/v1/conclaves/{id}` | built |
-| `conclave watch <id>` | none (polls every 500 ms) | `GET /api/v1/conclaves/{id}` | built |
+| `conclave watch <id>` | none | `GET /api/v1/conclaves/{id}/stream`, then `GET /api/v1/conclaves/{id}` on each event | built |
 | `conclave decree <id> <message>` | `--to` (default `all`) | `POST /api/v1/conclaves/{id}/decree` | built |
 | `conclave relic put <id> <name>` | `--body` (reads standard input if empty), `--type` (default `text/plain`) | `POST /api/v1/conclaves/{id}/relics` | built |
 | `conclave relic get <id> <name>` | none | `GET /api/v1/conclaves/{id}/relics/{name}` | built |
-| `conclave close <id>` | none | `POST /api/v1/conclaves/{id}/close` | built |
+| `conclave close <id>` | none | `POST /api/v1/conclaves/{id}/close` with state `completed`, then `GET /api/v1/tasks` and `POST /api/v1/tasks/{id}/cancel` for each unfinished task of that Conclave | built |
 | `council [question]` | `--repo` (default `.`), `--ref`, `--live`, `--rounds` (default 2), `--with` (default `claude,codex,agy`), `--sequential` | `POST /api/v1/councils` | built |
 
-`council` prompts for the question when none is given, and the question is at most 30 KiB. `--ref` and `--live` exclude each other; with neither, the daemon reads the working tree live. The command sends a fresh `Idempotency-Key` of the form `ccl_req_<random>`. The API fields `writer`, `starts` and `durationSeconds` have no flag. See the [body table](http-api.md#councils-and-conclaves).
+`council` prompts for the question when none is given, and the question is at most 30 KiB. It needs the `claude`, `codex` and `agy` executables on the client's path and `--rounds` of at least 1. It polls the Conclave every 500 ms and, if polling fails repeatedly, closes the council and cancels its tasks. `--ref` and `--live` exclude each other; with neither, the daemon reads the working tree live. The command sends a fresh `Idempotency-Key` of the form `ccl_req_<random>`. The API fields `writer`, `starts` and `durationSeconds` have no flag. See the [body table](http-api.md#councils-and-conclaves).
 
 ### Manifests, memory, providers and secrets
 
 | Command | Flags and arguments | Route or effect | Status |
 | --- | --- | --- | --- |
 | `init` | `--out` (default `sablecourt.yaml`), `--force` | Writes a starter manifest (one Budget, one Policy, Workloads `coder` and `reviewer`, one Conclave) with mode 0600. Refuses to overwrite without `--force`. | built |
-| `validate <path>` | none | Loads the manifests locally and prints counts of Workloads, Policies, Budgets and Workflows. No daemon needed. | built |
+| `validate <path>` | none | Loads the manifests locally and prints counts of Workloads, Policies, Budgets and Workflows and the first 12 characters of the manifest digest (the full digest with `--json`). Schedules and Conclaves are validated but not counted. No daemon needed. | built |
 | `apply` | none | `POST /api/v1/reload` | built |
 | `memory list` | `--namespace`, `--q` | `GET /api/v1/memory` | built |
 | `memory set <namespace> <key> <value>` | none | `POST /api/v1/memory` | built |
@@ -91,10 +92,11 @@ Source: `cmd/sablectl/*.go`. The route column names the API route that the comma
 
 | Command | Flags and arguments | Route or effect | Status |
 | --- | --- | --- | --- |
-| `service install` | `--listen`, `--db`, `--manifests` | Writes a launchd job `io.shadewright.sablecourtd` on macOS or a systemd user unit `sablecourtd.service` on Linux, with `--mode=sanctum`. The database goes in the data directory as `sablecourt.db`, logs in `sablecourtd.out.log` and `sablecourtd.err.log`. | built |
-| `doctor` | none | Reports daemon health, audit chain validity, connected providers, and whether `docker`, `kubectl`, `ollama`, `claude`, `codex`, `agy` and `whisper-server` are on the path. | built |
+| `service install` | `--listen` (default `127.0.0.1:7432`), `--db` (default `sablecourt.db` in `.local/share/sablecourt` under the home directory), `--manifests` (default `.config/sablecourt/manifests` under the home directory) | Writes a launchd job `io.shadewright.sablecourtd` (a plist in `Library/LaunchAgents`) on macOS or a systemd user unit `sablecourtd.service` on Linux, runs `--mode=sanctum`, and loads it. On macOS the job writes `sablecourtd.out.log` and `sablecourtd.err.log` in `.local/share/sablecourt`; the Linux unit sets no log files. | built |
+| `doctor` | none | Calls `GET /healthz`, `GET /api/v1/audit/verify`, `GET /api/v1/providers` and `GET /api/v1/voice/status`, and reports daemon health, audit chain validity, connected providers, the speech backends, and whether `docker`, `kubectl`, `ollama`, `claude`, `codex`, `agy` and `whisper-server` are on the path. | built |
 | `version` | none | Prints the version. | built |
-| `completion` | shell name | Prints a shell completion script. | built |
+| `completion bash`, `fish`, `powershell` or `zsh` | none | Prints the completion script for that shell. Generated by the command framework. | built |
+| `help [command]` | a command path | Prints the generated help of a command. Generated by the command framework. | built |
 | `mcp-server` | none | Runs a stdio MCP server for an editor or agent. Tools: `sablecourt_list_workloads`, `sablecourt_submit_task`, `sablecourt_inspect_task`, `sablecourt_open_conclave`, `sablecourt_conclave_decree`, `sablecourt_inspect_conclave`, `sablecourt_budget_status`, `sablecourt_council_convene`, `sablecourt_council_read`, `sablecourt_council_say`. Arguments are limited to 256 KiB. | built |
 | `voice status` | none | `GET /api/v1/voice/status` | parked |
 | `voice speak <text>` | `--out`, `--voice` | `POST /api/v1/voice/speak` | parked |
@@ -112,7 +114,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `--listen` | `127.0.0.1:7432` | TCP address. Citadel changes the default to `0.0.0.0:7432`. |
 | `--allow-host` | none | Extra `Host` header values to accept. Repeatable. A bare host uses the listen port. |
 | `--socket` | empty | Also serve on this Unix socket, mode 0600. |
-| `--gate-host` | `host.docker.internal:<port>` when the listen host is loopback | Authority that containers use to reach `/gate/`. |
+| `--gate-host` | `host.docker.internal:<port>` when the listen host is `127.0.0.1` or empty, otherwise the listen address | Authority that containers use to reach `/gate/`. Required when the listener is a wildcard address. |
 | `--db` | `sablecourt.db` | SQLite file. Relative to the working directory. |
 | `--postgres-dsn` | empty | PostgreSQL connection string (parked). Also `SABLECOURT_POSTGRES_DSN`. |
 | `--manifests` | empty | Manifest file or directory. With none, the daemon tries `manifests`, then `examples/local-demo.yaml`, then the user config directory (`.config/sablecourt/manifests` under the home directory). |
@@ -120,17 +122,21 @@ Source: `cmd/sablecourtd/main.go`.
 | `--manifests-git-branch` | `main` | Branch to sync. |
 | `--manifests-git-interval` | `60s` | Sync interval. |
 | `--coding-branch-retention` | `0` | How long to keep coding task branches. `0` keeps them. |
-| `--max-concurrent` | `4` | Maximum tasks launched in parallel. |
+| `--max-concurrent` | `4` | Maximum tasks launched in parallel. `0` means unlimited. |
 | `--model-gateway-url` | empty | Send every Model Gate provider to this URL, with no provider secret. Also `SABLECOURT_MODEL_GATEWAY_URL`. |
 | `--incident-conclave-template` | empty | Default Conclave template for Shadewright incidents. |
 | `--secret-file` | empty | Secrets file read after the OS keyring. |
-| `--repo-root` | `.` | Git root used by `promote` and the `git.create_branch` action. |
+| `--repo-root` | `.` | Git root used by the `git.create_branch` action. `promote` runs `git branch` in the daemon's working directory instead. |
 | `--runtime` | `docker` | `docker` or `k8s`. Citadel forces `k8s` when it is `docker` or empty. |
 | `--k8s-namespace` | `default` | Namespace for Kubernetes workloads (parked). |
 | `--k8s-runtime-class` | empty | Runtime class for Kubernetes workloads (parked). |
 | `--kubeconfig` | empty | Kubeconfig path (parked). |
 
 `--operator-auth-required` is hidden and deprecated. It is ignored, and operator authentication is always required.
+
+## sablecourt-agent
+
+Source: `cmd/sablecourt-agent/main.go`. The program that a Workload image can run as its agent loop; the starter manifest from `sablectl init` names an image `sablecourt-agent:0.1.0` for it. You do not run it by hand. It has no flags and reads its environment: `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` are required (it exits 1 without them), and `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_INPUT_JSON` are optional. The task input may carry `provider` (default `anthropic`), `model` and `prompt`. It talks only to the Model Gate and the data gate, for at most 4 turns.
 
 ## Not built yet
 

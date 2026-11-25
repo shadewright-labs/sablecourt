@@ -11,17 +11,21 @@ Source: `internal/operatortoken/token.go` and `cmd/sablecourtd/main.go`. The dir
 | Entry | Purpose |
 | --- | --- |
 | `operator.token` | The operator token, `op_` followed by 64 hex characters, mode 0600. The daemon creates it on first start. `sablectl` reads it when it talks to a local daemon and has no other token. |
+| `operator.token.pending` | Short-lived file the daemon writes while it creates `operator.token`. |
 | `daemon.lock` | Lock file. A second daemon on the same directory refuses to start. |
 | `gates/` | One `gate.sock` per council launch, removed on cleanup. |
 
-## Files outside the state directory
+## Other files
+
+Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, `internal/runtime/coding/worktree.go`.
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. `sablectl service install` puts it in the data directory. |
+| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
 | `worktrees/` next to the database | Coding adapter | Per task: `<task>/` (the Git worktree), `<task>.state.json`, `<task>.log`, `<task>.run/`, `<task>.exclude-config`, plus a `.councils/` directory and `.coding-scratch-*` directories. |
 | `.sablecourt-session.json`, `.sablecourt-context.md` | Coding adapter | Written into the task worktree. |
-| `sablecourtd.out.log`, `sablecourtd.err.log` | The service job | Written by `sablectl service install`. |
+| `sablecourtd.out.log`, `sablecourtd.err.log` | The launchd job (macOS only) | Standard output and error of the job, in `.local/share/sablecourt` under the home directory. The Linux systemd unit sets no log files. |
+| `Library/LaunchAgents/io.shadewright.sablecourtd.plist`, `.config/systemd/user/sablecourtd.service` | `sablectl service install` | The service definition, mode 0600, under the home directory: the plist on macOS, the unit on Linux. |
 | `.config/sablecourt/manifests` under the home directory | You | Last place the daemon looks for manifests. |
 | `sablecourt.yaml` | `sablectl init` | Starter manifest in the working directory, mode 0600. |
 
@@ -43,7 +47,7 @@ Source: `internal/secret`. The daemon reads a secret from the OS keyring (servic
 | `notify_webhook_url` | Chat alerts | Parked. Also read from `SABLECOURT_NOTIFY_WEBHOOK_URL`. |
 | `secretName` of an upstream MCP server | Upstream MCP calls | Parked. The name comes from the manifest. |
 
-Voice settings resolve in the order secret, environment variable, default. All voice routes are parked.
+Voice settings resolve in the order secret, environment variable, default (source: `internal/voice/voice.go`). All voice routes are parked.
 
 | Secret | Environment variable | Default |
 | --- | --- | --- |
@@ -66,13 +70,15 @@ Source: `internal/gate/model/gate.go`. With `--model-gateway-url` set, every pro
 
 ## Environment variables
 
+Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`.
+
 | Variable | Read by | Meaning |
 | --- | --- | --- |
 | `SABLECOURT_STATE_DIR` | both | State directory, absolute path. |
 | `SABLECOURT_MODE` | `sablecourtd` | Mode, used only when `--mode` is empty, `sanctum` or `local`. |
 | `SABLECOURT_MODEL_GATEWAY_URL` | `sablecourtd` | Same as `--model-gateway-url`. |
 | `SABLECOURT_POSTGRES_DSN` | `sablecourtd` | Same as `--postgres-dsn` (parked). |
-| `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | Same as `--token`. |
+| `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | The operator token. Without it, `sablectl` reads `operator.token` from the state directory when the daemon is local. Sent only over HTTPS or to a local daemon. There is no matching flag. |
 | `SABLECOURT_GITHUB_CLIENT_ID` | `sablectl` | Same as `auth github --client-id` (parked). |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
 | `DOCKER_HOST` | `sablecourtd` | Docker endpoint, as for the Docker client. |

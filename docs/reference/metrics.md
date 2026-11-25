@@ -1,6 +1,6 @@
 # Metrics reference
 
-`GET /metrics` returns Prometheus text format 0.0.4, written by hand in the daemon. It needs the operator credential, so a scraper sends `Authorization: Bearer <operator token>`.
+`GET /metrics` returns Prometheus text format 0.0.4, written by hand in the daemon. It needs the operator credential, so a scraper sends `Authorization: Bearer <operator token>`. A store failure while reading workloads is a plain-text 500.
 
 Status: built.
 
@@ -16,7 +16,7 @@ Source: `internal/telemetry/metrics.go`.
 | `sablecourt_budget_input_tokens_total` | counter | none | Input tokens recorded in the budget ledger. |
 | `sablecourt_budget_output_tokens_total` | counter | none | Output tokens recorded in the budget ledger. |
 | `sablecourt_budget_cost_microusd_total` | counter | none | Cost in millionths of a US dollar. |
-| `sablecourt_conclaves_total` | gauge | `state` | Conclave sessions per state: `active`, `input-required`, `completed`, `cancelled`. |
+| `sablecourt_conclaves_total` | gauge | `state` | Conclave sessions per state: `active`, `input-required`, `completed`, `cancelled`. Only states that have sessions appear. |
 | `sablecourt_conclave_ward_trips_recent` | gauge | none | Audit rows with action `conclave.ward` among the last 500 rows. |
 | `sablecourt_model_fallbacks_recent` | gauge | none | Audit rows with action `model.fallback` among the last 500 rows. |
 | `sablecourt_audit_events_recent` | gauge | `outcome` | The last 500 audit rows, counted by outcome. The set of outcomes is open. |

@@ -1,14 +1,14 @@
 # Reference
 
-Facts to look up, kept apart from the guides. Every table names its source file and was written from the code on `main`, not from an earlier page.
+Facts to look up, kept apart from the guides. Every table names its source file, and each page was written from the code on `main`.
 
 Status: built.
 
 - [Manifests](manifests.md): the six manifest kinds, every field, its default and its validation errors.
-- [HTTP API](http-api.md): every route of `sablecourtd`, grouped by the credential that reaches it.
-- [CLI](cli.md): every `sablectl` command and flag, and every `sablecourtd` flag.
+- [HTTP API](http-api.md): every route that `sablecourtd` registers, grouped by the credential that reaches it.
+- [CLI](cli.md): every `sablectl` command and flag, every `sablecourtd` flag, and the environment of `sablecourt-agent`.
 - [Configuration](configuration.md): the state directory, secret names, environment variables and files the daemon writes.
-- [Limits](limits.md): every numeric limit, ceiling and timeout with its default and source file.
+- [Limits](limits.md): the limits, ceilings and timeouts that refuse, cut or time out a request, a task or a stored value, with the default and the source file.
 - [Metrics](metrics.md): the Prometheus metrics at `GET /metrics`.
 
 ## Status values in the tables
