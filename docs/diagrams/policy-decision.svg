@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 368" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Policy decision</title>
+  <desc id="d">Flow of one tool or action call. The call with a task lease passes fixed checks: forbidden capability prefixes, sandbox zone, workload grant and circuit breaker. A failed check ends in Denied. Otherwise policy rules are read: allow runs the handler and redacts the result, approve creates an approval in the Approval Queue and answers 202 while the task waits, and deny or no matching rule ends in Denied.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="368" rx="18" fill="#08060e"/>
+  <rect class="box" x="24" y="128" width="168" height="64" rx="10"/>
+  <text class="h" x="40" y="154">Call</text>
+  <text class="s" x="40" y="175">task lease</text>
+  <rect class="box" x="248" y="128" width="216" height="64" rx="10"/>
+  <text class="h" x="264" y="154">Fixed checks</text>
+  <text class="s" x="264" y="175">prefix, zone, grant, breaker</text>
+  <polygon class="key" points="520,160 600,112 680,160 600,208"/>
+  <text class="s" x="600" y="165" text-anchor="middle">Policy rules?</text>
+  <rect class="box" x="736" y="128" width="216" height="64" rx="10"/>
+  <text class="h" x="752" y="154">Handler runs</text>
+  <text class="s" x="752" y="175">result redacted, audited</text>
+  <rect class="wait" x="492" y="280" width="216" height="64" rx="10"/>
+  <text class="h" x="508" y="306">Approval Queue</text>
+  <text class="s" x="508" y="327">202, input-required</text>
+  <rect class="bad" x="492" y="24" width="216" height="64" rx="10"/>
+  <text class="no" x="508" y="50">Denied</text>
+  <text class="s" x="508" y="71">403 or error, audited</text>
+  <path class="f" d="M192 160H242" marker-end="url(#a)"/>
+  <path class="f" d="M464 160H514" marker-end="url(#a)"/>
+  <path class="f" d="M680 160H730" marker-end="url(#a)"/>
+  <text class="lbl" x="705" y="152" text-anchor="middle">allow</text>
+  <path class="f" d="M600 208V274" marker-end="url(#a)"/>
+  <text class="lbl" x="610" y="246">approve</text>
+  <path class="deny" d="M600 112V94" marker-end="url(#x)"/>
+  <text class="no" x="610" y="106">deny or no match</text>
+  <path class="deny" d="M356 128V56H486" marker-end="url(#x)"/>
+  <text class="no" x="364" y="100">check fails</text>
+</svg>
