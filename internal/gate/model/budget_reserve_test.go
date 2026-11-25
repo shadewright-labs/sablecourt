@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -280,5 +282,254 @@ func TestModelGateSettlesReservedEstimateWithoutUsage(t *testing.T) {
 	code, body := c.post(`{"model":"gpt-5","stream":true,"max_tokens":3}`)
 	if code != http.StatusTooManyRequests || !strings.Contains(body, "child_output_tokens") {
 		t.Fatalf("second response = %d %s, want 429 child_output_tokens", code, body)
+	}
+}
+
+func TestModelGateReservesFallbackProviderCost(t *testing.T) {
+	// With default pricing, openai charges 10 microUSD per output token (plus 2.5 per input):
+	// max_tokens=10 with 1 input token estimates 103 microUSD on openai and 1 microUSD (floor) on local.
+	const reqBody = `{"model":"gpt-5","max_tokens":10}`
+
+	tests := []struct {
+		name           string
+		route          string
+		providers      []string
+		upstreams      map[string]UpstreamConfig
+		pricing        map[string]PricePerMillionTokens
+		ceiling        string
+		wantCode       int
+		wantBodySubstr string
+		wantCalls      int32
+	}{
+		{
+			name:           "local with openai fallback reserves openai cost",
+			route:          "/local/v1/chat/completions",
+			providers:      []string{"local", "openai"},
+			ceiling:        `{"maxCostUSD":0.000100}`,
+			wantCode:       http.StatusTooManyRequests,
+			wantBodySubstr: "child_cost_usd",
+			wantCalls:      0,
+		},
+		{
+			name:      "local without openai grant reserves local cost",
+			route:     "/local/v1/chat/completions",
+			providers: []string{"local"},
+			ceiling:   `{"maxCostUSD":0.000100}`,
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{
+			name:      "local without configured openai upstream reserves local cost",
+			route:     "/local/v1/chat/completions",
+			providers: []string{"local", "openai"},
+			upstreams: map[string]UpstreamConfig{
+				"local": {BaseURL: "http://127.0.0.1:11434", SecretName: "local_model_api_key", RequireSecret: false},
+			},
+			ceiling:   `{"maxCostUSD":0.000100}`,
+			wantCode:  http.StatusOK,
+			wantCalls: 1,
+		},
+		{
+			name:      "openai with costlier local fallback reserves local cost",
+			route:     "/openai/v1/chat/completions",
+			providers: []string{"openai", "local"},
+			pricing: map[string]PricePerMillionTokens{
+				"local": {InputUSD: 50.0, OutputUSD: 50.0},
+			},
+			ceiling:        `{"maxCostUSD":0.000200}`,
+			wantCode:       http.StatusTooManyRequests,
+			wantBodySubstr: "child_cost_usd",
+			wantCalls:      0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			})
+			c := newChildGate(t, tt.ceiling, upstream)
+			wl := c.gate.bundle.Workloads["ai-agent"]
+			wl.Spec.Grants.ModelGate.Providers = tt.providers
+			c.gate.bundle.Workloads["ai-agent"] = wl
+			if tt.upstreams != nil {
+				c.gate.upstreams = tt.upstreams
+			}
+			if tt.pricing != nil {
+				c.gate.pricing = tt.pricing
+			}
+
+			rec := doGateRequest(c.gate.Handler(), http.MethodPost, tt.route, reqBody,
+				map[string]string{"Authorization": "Bearer " + c.token})
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d body = %s, want %d", rec.Code, rec.Body.String(), tt.wantCode)
+			}
+			if tt.wantBodySubstr != "" && !strings.Contains(rec.Body.String(), tt.wantBodySubstr) {
+				t.Fatalf("body = %s, want substring %q", rec.Body.String(), tt.wantBodySubstr)
+			}
+			if calls.Load() != tt.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", calls.Load(), tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestModelGateConcurrentLocalFallbackRespectsCostCeiling(t *testing.T) {
+	const workers = 6
+	const ceilingMicroUSD = 150
+	const reqBody = `{"model":"gpt-5","max_tokens":10}` // openai reserve = 103 microUSD
+
+	admissionDone := make(chan struct{}, 2*workers)
+	finishOpenAI := make(chan struct{})
+	var openaiCalls atomic.Int32
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Host, "127.0.0.1") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		openaiCalls.Add(1)
+		admissionDone <- struct{}{}
+		<-finishOpenAI
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":10}}`))
+	})
+
+	c := newChildGate(t, `{"maxCostUSD":0.000150}`, upstream)
+	wl := c.gate.bundle.Workloads["ai-agent"]
+	wl.Spec.Grants.ModelGate.Providers = []string{"local", "openai"}
+	c.gate.bundle.Workloads["ai-agent"] = wl
+
+	start := make(chan struct{})
+	var okCount, deniedCount, otherCount atomic.Int32
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := doGateRequest(c.gate.Handler(), http.MethodPost, "/local/v1/chat/completions", reqBody,
+				map[string]string{"Authorization": "Bearer " + c.token})
+			admissionDone <- struct{}{}
+			switch rec.Code {
+			case http.StatusOK:
+				okCount.Add(1)
+			case http.StatusTooManyRequests:
+				if strings.Contains(rec.Body.String(), "child_cost_usd") {
+					deniedCount.Add(1)
+				} else {
+					otherCount.Add(1)
+					t.Errorf("unexpected 429 body = %s", rec.Body.String())
+				}
+			default:
+				otherCount.Add(1)
+				t.Errorf("unexpected status = %d body = %s", rec.Code, rec.Body.String())
+			}
+		}()
+	}
+	close(start)
+	for range workers {
+		<-admissionDone
+	}
+	close(finishOpenAI)
+	wg.Wait()
+
+	if okCount.Load() != 1 || deniedCount.Load() != workers-1 || otherCount.Load() != 0 {
+		t.Fatalf("ok=%d denied=%d other=%d, want ok=1 denied=%d other=0", okCount.Load(), deniedCount.Load(), otherCount.Load(), workers-1)
+	}
+	if openaiCalls.Load() != 1 {
+		t.Fatalf("openai fallback calls = %d, want 1", openaiCalls.Load())
+	}
+	totals, err := c.st.TaskBudgetTotals(t.Context(), "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.CostMicroUSD > ceilingMicroUSD {
+		t.Fatalf("settled cost = %d microUSD, exceeds ceiling %d", totals.CostMicroUSD, ceilingMicroUSD)
+	}
+}
+
+type settlementCtxCaptureStore struct {
+	store.Store
+	mu          sync.Mutex
+	calls       int
+	ctxErr      error
+	hasDeadline bool
+	deadline    time.Time
+	observedAt  time.Time
+}
+
+func (s *settlementCtxCaptureStore) SettleBudgetReservation(ctx context.Context, id string, actual *domain.BudgetEntry) error {
+	s.mu.Lock()
+	s.calls++
+	s.ctxErr = ctx.Err()
+	s.deadline, s.hasDeadline = ctx.Deadline()
+	s.observedAt = time.Now()
+	s.mu.Unlock()
+	return s.Store.SettleBudgetReservation(ctx, id, actual)
+}
+
+func TestModelGateSettlementContextIsDetachedAndBounded(t *testing.T) {
+	if settleReservationTimeout != 10*time.Second {
+		t.Fatalf("settleReservationTimeout = %v, want 10s", settleReservationTimeout)
+	}
+	const wantTimeout = settleReservationTimeout
+
+	tests := []struct {
+		name       string
+		statusCode int
+		respBody   string
+	}{
+		{
+			name:       "settle with usage after caller cancel",
+			statusCode: http.StatusOK,
+			respBody:   `{"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		},
+		{
+			name:       "release without usage after caller cancel",
+			statusCode: http.StatusInternalServerError,
+			respBody:   `{"error":"upstream failed"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqCtx, cancelReq := context.WithCancel(t.Context())
+			defer cancelReq()
+
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.respBody))
+				cancelReq()
+			})
+			c := newChildGate(t, `{"maxOutputTokens":50}`, upstream)
+			capture := &settlementCtxCaptureStore{Store: c.st}
+			c.gate.store = capture
+
+			before := time.Now()
+			req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/openai/v1/chat/completions",
+				strings.NewReader(`{"model":"gpt-5","max_tokens":3}`)).WithContext(reqCtx)
+			req.Header.Set("Authorization", "Bearer "+c.token)
+			rec := httptest.NewRecorder()
+			c.gate.Handler().ServeHTTP(rec, req)
+
+			if capture.calls != 1 {
+				t.Fatalf("SettleBudgetReservation calls = %d, want 1", capture.calls)
+			}
+			if capture.ctxErr != nil {
+				t.Fatalf("settlement ctx.Err() = %v, want nil (detached from caller cancellation)", capture.ctxErr)
+			}
+			if !capture.hasDeadline {
+				t.Fatal("settlement context has no deadline, want bounded timeout")
+			}
+			if capture.deadline.Before(before.Add(wantTimeout)) || capture.deadline.After(capture.observedAt.Add(wantTimeout)) {
+				t.Fatalf("settlement deadline = %v, want within [%v, %v]",
+					capture.deadline, before.Add(wantTimeout), capture.observedAt.Add(wantTimeout))
+			}
+		})
 	}
 }

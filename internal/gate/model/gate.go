@@ -228,7 +228,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
-	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing)
+	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing, g.fallbackProviders(provider, workload)...)
 
 	// Take a fresh timestamp: the body read above is not bounded by time, and the
 	// reservation lifetime must start when the reservation is inserted.
@@ -376,18 +376,34 @@ func isFallbackStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 }
 
+// fallbackProviders returns the wire-compatible fallback providers granted to wl
+// and configured in g.upstreams for a request originally routed to primary.
+func (g *Gate) fallbackProviders(primary string, wl domain.Workload) []string {
+	if primary != "openai" && primary != "local" {
+		return nil
+	}
+	var out []string
+	for _, cand := range wl.Spec.Grants.ModelGate.Providers {
+		if cand == primary || (cand != "openai" && cand != "local") {
+			continue
+		}
+		if _, ok := g.upstreams[cand]; !ok {
+			continue
+		}
+		if !slices.Contains(out, cand) {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
 func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider, upstreamPath string, reqBody []byte, wl domain.Workload) (string, *http.Response, error) {
-	if failedProvider != "openai" && failedProvider != "local" {
+	cands := g.fallbackProviders(failedProvider, wl)
+	if len(cands) == 0 {
 		return "", nil, errors.New("no wire-compatible fallback")
 	}
-	for _, cand := range wl.Spec.Grants.ModelGate.Providers {
-		if cand == failedProvider || (cand != "openai" && cand != "local") {
-			continue
-		}
-		upCfg, ok := g.upstreams[cand]
-		if !ok {
-			continue
-		}
+	for _, cand := range cands {
+		upCfg := g.upstreams[cand]
 		var key string
 		if upCfg.SecretName != "" && g.secrets != nil {
 			k, err := g.secrets.Get(ctx, upCfg.SecretName)
@@ -439,18 +455,27 @@ func (g *Gate) reserveBudget(ctx context.Context, taskID, workloadName string, b
 	return res.ReservationID, res.Exceeded, res.Reason, nil
 }
 
-// settleReservationAttempts bounds the immediate retries of a failed settlement.
-const settleReservationAttempts = 3
+const (
+	// settleReservationAttempts bounds the immediate retries of a failed settlement.
+	settleReservationAttempts = 3
+	// settleReservationTimeout bounds detached reservation settlement and release
+	// so a held lock or exhausted pool cannot block a request goroutine indefinitely.
+	settleReservationTimeout = 10 * time.Second
+)
 
 // settleReservation settles or, when actual is nil, releases a reservation. A failed
 // transaction rolls back and leaves the reservation in place, so retrying is safe.
 // A missing or mismatched reservation is final and is returned without retry.
 func (g *Gate) settleReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleReservationTimeout)
+	defer cancel()
 	var err error
 	for range settleReservationAttempts {
 		err = g.store.SettleBudgetReservation(ctx, reservationID, actual)
 		if err == nil || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+			return err
+		}
+		if ctx.Err() != nil {
 			return err
 		}
 	}
