@@ -12,7 +12,7 @@ import (
 )
 
 type stubApprover struct {
-	allow bool
+	allow  bool
 	tamper bool
 }
 
