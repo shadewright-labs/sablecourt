@@ -316,7 +316,7 @@ func (d referenceDaemon) acceptedMethods(t *testing.T, path string) string {
 	return "`" + strings.Join(accepted, "`, `") + "`"
 }
 
-var methodsNote = regexp.MustCompile("Methods: ([^.]+)\\.")
+var methodsNote = regexp.MustCompile(`Methods: ([^.]+)\.`)
 
 // TestHTTPReferenceListsEveryRoute fails when the route tables of
 // docs/reference/http-api.md differ from the routes the daemon registers:
