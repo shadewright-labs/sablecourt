@@ -27,10 +27,10 @@ import (
 const TokenPrefix = "sc_task_"
 
 type UpstreamConfig struct {
-	BaseURL         string
-	SecretName      string
-	RequireSecret   bool
-	AnthropicVer    string
+	BaseURL       string
+	SecretName    string
+	RequireSecret bool
+	AnthropicVer  string
 }
 
 type Options struct {
@@ -214,7 +214,11 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); err != nil {
+	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); errors.Is(err, errInvalidChildBudgetCeiling) {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"invalid_child_budget_ceiling"}`)
+		writeErr(w, http.StatusForbidden, errInvalidChildBudgetCeiling.Error())
+		return
+	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "budget check failed")
 		return
 	} else if exceeded {
@@ -409,7 +413,15 @@ func (g *Gate) checkBudget(ctx context.Context, taskID, workloadName string, b d
 			return true, "daily_cost_usd", nil
 		}
 	}
-	return false, "", nil
+	task, err := g.store.GetTask(ctx, taskID)
+	if err != nil {
+		return false, "", err
+	}
+	if task.ParentTaskID == "" {
+		return false, "", nil
+	}
+	reason, err := childBudgetReason(task.BudgetCeilingJSON, taskTotals)
+	return reason != "", reason, err
 }
 
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
