@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 576" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">From manifest to process</title>
-  <desc id="d">Manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule, Conclave) declare a workload with a class, zone, runtime and grants. A task is one run of that workload with its own lease; a retry creates a new task. sablectl, a workflow step, a schedule or a Conclave submits tasks. A council attempt, numbered by round, role and attempt, maps to one task. The task is started by the runtime adapter that the workload class picks, with the lease. The adapter starts one of three things: a host process (coding adapter under macOS Seatbelt, a harness CLI) for a coding-agent workload, a council container (coding adapter through Docker, a harness CLI with its own login) for a council turn when Docker is configured, or a container (Docker adapter, for a long-lived agent, or a deterministic controller through the controller wrapper).</desc>
+  <desc id="d">Manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule, Conclave) declare a workload with a class, zone, runtime and grants. A task is one run of that workload, launched with a lease (resume mints a new one); a retry creates a new task. sablectl, a workflow step, a schedule or a Conclave submits tasks. A council attempt, numbered by round, role and attempt, maps to one task. The task is started by the runtime adapter that the workload class picks, with the lease. The adapter starts one of three things: a host process (coding adapter under macOS Seatbelt, a harness CLI) for a coding-agent workload, a council container (coding adapter through Docker, a harness CLI with its own login) for a council turn when Docker is configured, or a container (Docker adapter by default, or a Pod under --runtime k8s, for a long-lived agent, or a deterministic controller through the controller wrapper).</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -54,7 +54,7 @@
 
   <rect class="key" x="380" y="256" width="360" height="72" rx="12"/>
   <text class="h" x="396" y="282">Task</text>
-  <text class="s" x="396" y="303">one run of a workload, own lease</text>
+  <text class="s" x="396" y="303">one run of a workload, leased at launch</text>
   <text class="s" x="396" y="320">a retry creates a new task</text>
 
   <rect class="box" x="816" y="256" width="260" height="72" rx="10"/>
@@ -93,6 +93,6 @@
 
   <rect class="box" x="756" y="480" width="320" height="72" rx="10"/>
   <text class="h" x="772" y="506">Container</text>
-  <text class="s" x="772" y="527">Docker adapter, long-lived agent</text>
-  <text class="s" x="772" y="544">controller through a wrapper</text>
+  <text class="s" x="772" y="527">Docker adapter (k8s: a Pod)</text>
+  <text class="s" x="772" y="544">long-lived agent, controller</text>
 </svg>

@@ -8,9 +8,9 @@ Status: partly built. Missing: the preflight that checks harness images and logi
 
 ## Daemon and CLI
 
-`sablecourtd` (`cmd/sablecourtd`) is the one long-running process. It loads the manifests, keeps the store, runs the reconciler and scheduler, serves the HTTP API, the web UI and the gate routes on its listener (`127.0.0.1:7432` by default), and launches workloads through runtime adapters. The gates run inside this process, not as separate services. For a council turn in a container the daemon also opens a per-launch gate listener (a Unix socket or a loopback TLS port) for that turn's proxy. The council proxy itself is a separate binary that runs in its own container per council turn.
+`sablecourtd` (`cmd/sablecourtd`) is the one long-running process. It loads the manifests, keeps the store, runs the reconciler and scheduler, serves the HTTP API, the web UI and the gate routes on its listener (`127.0.0.1:7432` by default), and launches workloads through runtime adapters. The gates run inside this process, not as separate services. For a council turn in a container the daemon also opens a per-launch gate listener for that turn's proxy: a Unix socket when the probe shows the platform supports it, otherwise a loopback TLS port. `--listen` changes the main listener, and citadel mode moves it to `0.0.0.0:7432`. The council proxy itself is a separate binary that runs in its own container per council turn.
 
-`sablectl` (`cmd/sablectl`) is an HTTP client of the daemon. It does not run tasks itself. It sends requests to `--api` (default `http://127.0.0.1:7432`) and attaches the operator token, read from `SABLECOURT_OPERATOR_TOKEN` or, for a local daemon, from the state directory. It refuses to send the token to a daemon that is neither local nor HTTPS.
+`sablectl` (`cmd/sablectl`) is an HTTP client of the daemon: its task, approval, audit and council commands send requests and run nothing themselves. A few commands (`service install`, `harness build`, `init`) act on the local machine instead. Requests go to `--api` (default `http://127.0.0.1:7432`), or over a Unix socket with `--socket`. The operator token is read from `SABLECOURT_OPERATOR_TOKEN` or, for a local daemon, from the state directory. `sablectl` refuses to send the token to a daemon that is neither local nor HTTPS.
 
 Not to be confused with: a workload. The daemon and the CLI are the control plane; neither is launched by Sablecourt.
 
@@ -35,11 +35,11 @@ Not to be confused with: runtime state. Tasks, leases, budget entries, approvals
 
 A workload (`domain.Workload`) is a declaration. Its `class` is `coding-agent`, `long-lived-agent` or `deterministic-controller`, and its zone is `runtime` or `sandbox`. A workload by itself runs nothing.
 
-A task (`domain.Task`, table `tasks`) is one run of one workload. It has an ID, an idempotency key, a state (`submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`), its input and its artifacts. One task gets one lease and at most one runtime handle. Tasks are submitted by `sablectl` through the API, by a workflow step, by a schedule and by a Conclave when one of its Vassals is activated. See [tasks](tasks.md).
+A task (`domain.Task`, table `tasks`) is one run of one workload. It has an ID, an idempotency key, a state (`submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`), its input and its artifacts. A task is launched with its own lease and holds at most one runtime handle at a time. Resuming a suspended task mints a new lease, because suspend revokes the old one. Tasks are submitted by `sablectl` through the API, by a workflow step, by a schedule and by a Conclave when one of its Vassals is activated. A running task can also create a child task when policy allows `delegate:<workload>`, and a retry creates a new task. See [tasks](tasks.md).
 
 "Attempt" has no type of its own outside councils, and it is the word most often used loosely:
 
-- Retrying a task does not restart it. Retry is allowed only on a task in a terminal state, and `Reconciler.RetryTaskWithHandoff` creates a new task whose input carries `retry_count` and `retried_from`. Outside a Conclave its idempotency key is `retry-<original id>-<n>`. The original task keeps its state.
+- Retrying a task does not restart it. Retry is allowed only on a task in a terminal state with no runtime cleanup pending, and `Reconciler.RetryTaskWithHandoff` creates a new task whose input carries `retry_count` and `retried_from`. Outside a Conclave its idempotency key is `retry-<original id>-<n>`. The original task keeps its state. A council turn is not retried this way; the council driver plans its retries.
 - In a council, `store.CouncilAttempt` numbers the launches of one seat: a row of (council, round, role, attempt number) points at exactly one task. A turn that ended without an answer can be retried as attempt n+1, which is again a new task.
 - Inside the code, a container create also carries a random `CreateAttempt` label, so that recovery after a restart removes only the container that launch created.
 
@@ -47,16 +47,16 @@ Example: a council turn for `codex` in round 2 that fails is attempt 1 of seat (
 
 ## Runtime adapter
 
-A runtime adapter implements `runtime.Adapter` (`internal/runtime/runtime.go`): `Start`, `Observe`, `Suspend`, `Resume`, `Stop` and `CollectArtifacts`. The reconciler holds one adapter per workload class, and the daemon fills that map at startup in `cmd/sablecourtd/main.go`. The class picks the adapter. `runtime.type` (`docker` or `worktree-cli`) is checked by the loader, and `docker` requires an image, but it does not choose the adapter.
+A runtime adapter implements `runtime.Adapter` (`internal/runtime/runtime.go`): `Start`, `Observe`, `Suspend`, `Resume`, `Stop` and `CollectArtifacts`. The reconciler holds one adapter per workload class, and the daemon fills that map at startup in `cmd/sablecourtd/main.go`. The class picks the adapter, and the default `--runtime docker` fills the two container classes with the Docker adapter. `runtime.type` (`docker` or `worktree-cli`) is checked by the loader, and `docker` requires an image, but it does not choose the adapter.
 
 | Adapter | Package | Class | Launches |
 | --- | --- | --- | --- |
 | Coding | `internal/runtime/coding` | `coding-agent` | A harness CLI as a host process under macOS Seatbelt in a Git worktree, or, for a council turn with Docker configured, in a harness container. |
-| Docker | `internal/runtime/docker` | `long-lived-agent` | A container from a local image (never pulled) on the internal bridge network `sablecourt-internal`, with all capabilities dropped and `no-new-privileges`. |
-| Controller | `internal/runtime/controller` | `deterministic-controller` | Nothing of its own: it wraps the Docker adapter and refuses a workload of another class or one with a Model Gate grant, URL or token. |
-| Kubernetes | `internal/runtime/k8s` | `long-lived-agent`, `deterministic-controller` | A Pod, only with `--runtime k8s`. Built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). |
+| Docker | `internal/runtime/docker` | `long-lived-agent` | By default, a container from a local image (never pulled) on the internal bridge network `sablecourt-internal`, with all capabilities dropped and `no-new-privileges`. |
+| Controller | `internal/runtime/controller` | `deterministic-controller` | Nothing of its own: it wraps the Docker adapter (or the Kubernetes adapter under `--runtime k8s`) and refuses a workload of another class or one with a Model Gate grant, URL or token. |
+| Kubernetes | `internal/runtime/k8s` | `long-lived-agent`, `deterministic-controller` | A Pod, only with `--runtime k8s`, which citadel mode selects by default; it replaces the Docker adapter for both classes. Built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). |
 
-The host coding adapter is registered only when the Seatbelt probe passes, which needs macOS; there is no Linux host sandbox. If the daemon cannot configure a Docker client and the runtime is not `k8s`, it does not start. Details are in [workloads and runtimes](workloads-and-runtimes.md).
+The host coding adapter is registered only when the Seatbelt probe passes, which needs macOS, and never in citadel mode; there is no Linux host sandbox. When a Docker council runtime is configured (and the mode is not citadel), the daemon also registers a coding adapter for council containers, so that adapter can exist without Seatbelt. If the daemon cannot configure a Docker client and the runtime is not `k8s`, it does not start. Under `k8s`, a failed Kubernetes setup is logged and the two container classes have no adapter. Details are in [workloads and runtimes](workloads-and-runtimes.md).
 
 Not to be confused with: the runtime zone (`zone: runtime`, a trust setting of a workload) and `runtime.type` (a manifest field). Three different things share the word.
 
@@ -66,16 +66,16 @@ A harness is a vendor's coding CLI that Sablecourt launches as a black box: `cla
 
 A harness runs one of two ways, both started by the coding adapter:
 
-- Host process: `sandbox-exec` with a deny-by-default Seatbelt profile that allows outbound network, reading system files, the binary, the worktree and a scratch directory, and writing the scratch directory (and the worktree unless the run is read-only). `HOME` and `TMPDIR` point at that empty scratch directory, and the profile gives no read access to your home directory, so the harness does not see a login stored there. The environment carries the data gate URL and the lease.
-- Container, for council turns when a Docker engine is configured: one container per turn, with the harness's own named volume `sablecourt-harness-<role>` mounted at `/home/harness`. The login in that volume is made once inside a container and is separate from your normal CLI login. The lease arrives on standard input. [Harness containers](harness-containers.md) shows what is mounted, the network and the proxy in its two diagrams; this page does not repeat them.
+- Host process: `sandbox-exec` with a deny-by-default Seatbelt profile that allows outbound network, reading system files, the binary, the worktree and a scratch directory, and writing the scratch directory (and the worktree unless the run is read-only). `HOME` and `TMPDIR` point at a scratch directory, and the profile gives no read access to your home directory, so the harness does not see a login stored there. `seatbelt` is the only sandbox value a launch accepts outside tests. The environment carries the data gate URL and the lease.
+- Container, for council turns when a Docker engine is configured: one container per turn, with the harness's own named volume `sablecourt-harness-<role>` mounted at `/home/harness`. The login in that volume is made inside a container and is separate from your normal CLI login. The lease arrives on standard input. [Harness containers](harness-containers.md) shows what is mounted, the network and the proxy in its two diagrams; this page does not repeat them.
 
 The harness list and its arguments are spread over several files, so a new harness touches all of them:
 
 | What | Where |
 | --- | --- |
 | Allowed values of `coding.harness` | `internal/config/loader.go`, `internal/runtime/coding/coding.go` |
-| Host arguments (`--permission-mode plan`, `--mode plan`, `exec --sandbox read-only`, `-p`) | `internal/runtime/coding/launch.go` (`launchInput.args`) |
-| Container arguments (`--no-session-persistence`, `exec --sandbox danger-full-access --ephemeral`, `--sandbox`) | `internal/runtime/docker/council_config.go` (`councilCommand`) |
+| Host arguments (`--permission-mode plan`, `--mode plan` and `exec --sandbox read-only` on read-only runs, `-p`) | `internal/runtime/coding/launch.go` (`launchInput.args`) |
+| Container arguments (`--no-session-persistence`, `exec --sandbox danger-full-access --ephemeral`, `--sandbox`, and `--permission-mode acceptEdits` for `claude` on a writer checkout) | `internal/runtime/docker/council_config.go` (`councilCommand`) |
 | CLI version, login command, image and volume names | `internal/harnessimages/images.go` (`Lookup`) |
 | Provider hosts each harness may tunnel to | `internal/gate/councilproxy/proxy.go` |
 | The council panel | `cmd/sablecourtd/councils.go` (`councilPanel`) |
@@ -86,55 +86,55 @@ Example: in a council with a `ref` checkout, `claude` runs in its container as `
 
 ## Built-in agent
 
-`cmd/sablecourt-agent` is Sablecourt's own small agent program, built into the image `sablecourt-agent:0.1.0` by `make agent-image`. A workload uses it by naming that image with class `long-lived-agent`, as the `llm-agent` workload in `examples/local-demo.yaml` does. It reads `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` and exits if either is missing, sends the conversation to the Model Gate for up to 4 turns, and may call MCP tools or typed actions in between when the model replies with a JSON directive. It posts replies to the task thread through `/gate/task/messages`.
+`cmd/sablecourt-agent` is Sablecourt's own small agent program, built into the image `sablecourt-agent:0.1.0` by `make agent-image`. A workload uses it by naming that image with class `long-lived-agent`, as the `llm-agent` workload in `examples/local-demo.yaml` does. It reads `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` and exits if either is missing, sends the conversation to the Model Gate in up to 4 model calls, and may call MCP tools or typed actions in between when the model replies with a JSON directive. The provider and model come from the task input, with `anthropic` as the default provider. It posts its final reply, or a notice that a model call failed, to the task thread through `/gate/task/messages`.
 
-Not to be confused with: a harness. The built-in agent holds no login and no provider key; every model call it makes goes through the Model Gate and is counted against the workload's budget.
+Not to be confused with: a harness. The built-in agent holds no login and no provider key; every model call it makes goes to the Model Gate, which counts a successful call against the workload's budget.
 
 "Agent" alone is ambiguous in the code: it can mean the classes `coding-agent` and `long-lived-agent`, this binary, or the `agentCard` of a workload (a description and skill list). These docs say which.
 
 ## Deterministic controller
 
-A `deterministic-controller` workload runs a program that makes no model calls, in a container. The rule is enforced three times: the loader refuses a Model Gate grant on it, the reconciler gives it no Model Gate URL or token, and the controller adapter and the Model Gate each refuse it again. It can still use its lease for the MCP Gate within its grants.
+A `deterministic-controller` workload is a container that Sablecourt gives no access to the Model Gate. The refusal is made at four points: the loader refuses a Model Gate grant on it, the reconciler gives it no Model Gate URL or token, and the controller adapter and the Model Gate each refuse it again. Sablecourt does not look inside the image, so the refusal bounds its use of the gate, not what the program does. It can still use its lease for the MCP Gate within its grants.
 
-Example: the `health-controller` step of the `issue-to-pr` workflow in `examples/local-demo.yaml` runs checks with no model.
+Example: the `health-controller` step of the `issue-to-pr` workflow in `examples/local-demo.yaml` uses the `alpine:3.21` image and holds no Model Gate grant.
 
 ## Gates
 
-A gate is a checkpoint that a workload's request crosses, holding the credential the workload must not have.
+A gate is a checkpoint that a workload's request crosses, and each one checks the lease. The Model Gate also holds the provider key the workload must not have; its `local` provider needs no key.
 
 | Gate | Code | What crosses in | What it adds or checks |
 | --- | --- | --- | --- |
-| Model Gate | `internal/gate/model`, route `/gate/model/<provider>/...` | An inference request (OpenAI and local chat completions or responses, Anthropic messages, Gemini generate content) with the lease as bearer token. | Lease, workload grant, provider allow-list, budget reservation; strips the caller's auth headers and adds the provider key from the secret store; settles usage and writes an audit row. |
-| MCP Gate (Data and Action Gate) | `internal/gate/mcp`, routes `/gate/mcp` and `/gate/actions/<name>` | MCP tool calls and typed action payloads, with the lease. | Policy (grant, zone, circuit breaker, rules, default deny); `approve` sends the payload to the Approval Queue; redacts tool output; audits each decision. |
+| Model Gate | `internal/gate/model`, route `/gate/model/<provider>/...` | An inference request (OpenAI and local chat completions or responses, Anthropic messages, Gemini generate content) with the lease as bearer token. | Lease, workload grant, provider allow-list, budget reservation; strips the caller's auth headers and adds the provider key from the secret store (optional for `local`); on a 2xx reply settles usage; writes an audit row for denials, errors and settled calls. An upstream error status that is not a 2xx is relayed with no audit row, and the reservation is released. |
+| MCP Gate (Data and Action Gate) | `internal/gate/mcp`, routes `/gate/mcp` and `/gate/actions/<name>` | MCP tool calls and typed action payloads, with the lease. | Policy (grant, zone, circuit breaker, rules, default deny); `approve` sends the payload to the Approval Queue; redacts the output of allowed tool calls; writes an audit row for allowed, denied and error outcomes. The queue writes the row for a pending approval, and an approval that cannot be queued writes none. |
 | Council proxy | `internal/gate/councilproxy`, one container per council turn | From the harness container: `CONNECT host:443` to that harness's provider hosts, and gate calls on a fixed route list. | Host allow-list and public addresses for tunnels; for gate calls, a single bearer header whose SHA-256 matches the lease it was started with. It relays tunnel bytes without reading them. |
 
 Not to be confused with: the policy engine (`internal/policy`), which the MCP Gate consults, and the Approval Queue (`internal/approval`), where a person confirms an `approve` decision. See [model gate](model-gate.md), [tools and actions](tools-and-actions.md), [approvals](approvals.md).
 
 ## Task lease
 
-A lease (`domain.Lease`) is the credential a task holds: `sc_task_` plus 64 hex characters, minted at launch by `model.MintTaskTokenUntil`. The store keeps only its SHA-256 hash, with the task and workload it is bound to. It expires after one hour, or at the council deadline if that is sooner, and the reconciler revokes it when the task ends, is cancelled or is suspended. The same lease authenticates the task at the Model Gate and the MCP Gate.
+A lease (`domain.Lease`) is the credential a task holds: `sc_task_` plus 64 hex characters, minted at launch by `model.MintTaskTokenUntil`. The store keeps only its SHA-256 hash, with the task and workload it is bound to. It expires one hour after launch, or at the council deadline if that is sooner, and the reconciler pushes the expiry forward by an hour each time it observes the workload running (still capped at the council deadline). The reconciler revokes it when the task ends, is cancelled or is suspended, and when a launch or resume fails. The same lease authenticates the task at the MCP Gate, and at the Model Gate when the workload has a grant.
 
-Not to be confused with: the operator token (the person's credential for the API) and a harness login (the vendor's credential, which Sablecourt never holds). See [identity and access](identity-and-access.md).
+Not to be confused with: the operator token (the person's credential for the API) and a harness login (the vendor's credential, which the daemon does not read). See [identity and access](identity-and-access.md).
 
 ## Vassal, Conclave and council
 
 These group workloads above the task level.
 
-- A Conclave manifest is a room template. Opening it creates a room (`domain.ConclaveSession`) with states `active`, `input-required`, `completed` and `cancelled`, governed by Wards (run, message and ping-pong limits and the budget).
+- A Conclave manifest is a room template. Opening it creates a room (`domain.ConclaveSession`) with states `active`, `input-required`, `completed` and `cancelled`, governed by Wards (run, message and ping-pong limits) and a budget reference.
 - A Vassal (`domain.ConclaveVassal`) is a seat in a room: a role bound to a workload, an activation (`always-on` or `on-mention`) and the roles it may message. Each time a Vassal is activated, the daemon submits a task for its workload.
-- A council is a room opened by `POST /api/v1/councils` (`sablectl council`), with no Conclave manifest. Its policy (question, rounds, starts, deadline, checkout) is pinned when it opens. Its Vassals are the built-in workloads `claude`, `codex` and `agy`: sandbox zone, class `coding-agent`, no grants. The daemon accepts the panel only with all three, once each.
+- A council is a room opened by `POST /api/v1/councils` (`sablectl council`), with no Conclave manifest. Its policy (question, rounds, starts, deadline, checkout) is pinned when it opens. Its Vassals are the built-in workloads `claude`, `codex` and `agy`: sandbox zone, class `coding-agent`, no grants. The daemon accepts the panel only with all three, once each; if the request names no panel, it uses all three.
 
 Example: a two-round council is one room and three Vassals. It has three seats of (round, role) in round 1 and three more in round 2 if round 2 starts (it does not when every member said it has nothing to add), and one task for each attempt at a seat. See [Conclaves](conclaves.md) and [council](council.md).
 
 ## Store and audit
 
-The store (`internal/store`, interface `store.Store`) holds runtime state: tasks and task events, leases (as hashes), budget reservations and the ledger, approvals, the audit log, rooms and council attempts, memory and learnings. SQLite (`internal/store/sqlite`) is the default. PostgreSQL is used when `SABLECOURT_POSTGRES_DSN` is set; it is built and parked by ADR-0011.
+The store (`internal/store`, interface `store.Store`) holds runtime state: tasks and task events, leases (as hashes), budget reservations and the ledger, approvals, the audit log, rooms and council attempts, memory and learnings. SQLite (`internal/store/sqlite`) is the default. PostgreSQL is used when `--postgres-dsn` or `SABLECOURT_POSTGRES_DSN` is set; it is built and parked by ADR-0011.
 
-The audit log is the `audit_log` table. Each row stores the hash of the row before it (`domain.ComputeAuditRowHash`, anchored at `genesis`). The gates, the reconciler, the Conclave broker, the approval queue and the integrations write rows. Verification cannot detect deletion of the newest rows (#10). See [audit](audit.md).
+The audit log is the `audit_log` table. Each row stores the hash of the row before it (`domain.ComputeAuditRowHash`, anchored at `genesis`). The gates, the reconciler, the Conclave broker, the approval queue, the integrations and the memory endpoints, among others, write rows. Verification cannot detect deletion of the newest rows (#10). See [audit](audit.md).
 
 ## Integrations
 
-`internal/integrations/shadewright.go` serves `POST /api/v1/integrations/shadewright/incidents` and `.../verifications`, authenticated with a bearer token kept in the secret store as `shadewright_bearer_token`, and records what arrives in a room as the role `integration:shadewright`. For Nightloom the daemon serves `/api/v1/observer/snapshot` and `/api/v1/observer/stream` and marks managed sessions with `SABLECOURT_MANAGED=1` and the session file. See [integrations](integrations.md).
+`internal/integrations/shadewright.go` serves `POST /api/v1/integrations/shadewright/incidents` and `.../verifications`, authenticated with a bearer token kept in the secret store as `shadewright_bearer_token`, and records what arrives in a room as the role `integration:shadewright`. For Nightloom the daemon serves `/api/v1/observer/snapshot` and `/api/v1/observer/stream` and marks tasks it launches with `SABLECOURT_MANAGED=1` and, for a host harness, a session file. See [integrations](integrations.md).
 
 ## How a harness run differs from a model call
 
@@ -144,12 +144,12 @@ The top lane is a council turn in a container; the bottom lane is the built-in a
 
 | Step | Harness with its own login | Built-in agent through the Model Gate |
 | --- | --- | --- |
-| Who holds the provider credential | The harness, in its login volume, made inside its container. The daemon does not read it. In host mode Sablecourt gives the harness no login at all. | The daemon, in its secret store (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`). The agent holds only the lease. |
-| What the workload is given | A prompt, a checkout, the data gate URL and the lease (on standard input in a container, in the environment on the host). No Model Gate URL. | `SABLECOURT_MODEL_GATE_URL`, the data gate URL, the lease and its input, in the container environment. |
-| Path to the provider | Harness to council proxy over plain HTTP on the per-launch internal network, then a `CONNECT` tunnel to one of its provider hosts; TLS runs end to end between harness and provider. On the host, direct outbound traffic, which Seatbelt allows. | Agent to the Model Gate in the daemon, which forwards to the provider over HTTPS. |
-| What the daemon sees | Gate calls the harness makes, the turn's exit code, output and artifacts. Not the prompts it sends to the provider, the replies or token counts. | Every request and response body passes through the daemon; it reads the model name and usage. |
-| Budget | None from the Model Gate. A council's budget Ward sums the ledger, which these turns do not write to. The turn is bounded by the council's rounds, starts and wall time, and the container's CPU, memory and process limits. | The workload's `Budget`: an estimate is reserved before forwarding and settled with reported usage (or the estimate if none is reported); per-task, daily and child ceilings apply. |
-| Audit | No row for provider traffic: the proxy writes no audit and its log driver is `none`. Calls the harness makes to the MCP Gate are audited as for any workload. | One audit row per call: allowed (with model, tokens and cost), denied (with the reason) or error. |
+| Who holds the provider credential | The harness, in its login volume, made inside its container. The daemon does not read it. In host mode Sablecourt gives the harness no login at all. | The daemon, in its secret store (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`; `local_model_api_key` is optional). The agent holds only the lease. |
+| What the workload is given | A prompt, a checkout, the data gate URL and the lease (on standard input in a container, in the environment on the host). No Model Gate URL. | `SABLECOURT_MODEL_GATE_URL`, the data gate URL, the lease and its input, in the workload's environment. |
+| Path to the provider | Harness to council proxy over plain HTTP on the per-launch internal network, then a `CONNECT` tunnel to one of its provider hosts; TLS runs end to end between harness and provider. On the host, direct outbound traffic, which Seatbelt allows. | Agent to the Model Gate in the daemon, which forwards to the provider over HTTPS by default. The `local` provider defaults to `http://127.0.0.1:11434`. |
+| What the daemon sees | Gate calls the harness makes, the turn's exit code, output and artifacts. Not the prompts it sends to the provider, the replies or token counts. | Every request and response body passes through the daemon; it reads the model name and usage where the reply carries them. |
+| Budget | None from the Model Gate, and these turns write no ledger entry. The turn is bounded by the council's rounds, starts and wall time, and the container's CPU, memory and process limits. | The workload's `Budget`: an estimate is reserved before forwarding and settled with reported usage (or the estimate if none is reported); per-task, daily and child ceilings apply. |
+| Audit | No row for provider traffic: the proxy writes no audit and its log driver is `none`. The built-in council workloads hold no MCP grants. | An audit row for a call that is allowed (with model, tokens and cost), denied (with the reason) or ends in an error the gate records. An upstream non-2xx reply writes none, and a call that falls back to another provider writes a second row, `model.fallback`. |
 
 [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) accepts this as a narrow exception to invariant 2: only the three named harnesses may use their own provider login, and that inference runs outside Model Gate accounting.
 
