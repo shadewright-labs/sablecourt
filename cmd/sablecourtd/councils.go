@@ -17,8 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -34,8 +36,9 @@ const (
 var councilPanel = [...]string{"claude", "codex", "agy"}
 
 type councilOpenRequest struct {
-	title, question, repo, ref string
-	spec                       store.CouncilSpec
+	title, question, repo, ref, writer string
+	live                               bool
+	spec                               store.CouncilSpec
 }
 
 func decodeCouncilOpen(raw []byte, operatorToken string) (councilOpenRequest, error) {
@@ -99,22 +102,41 @@ func decodeCouncilOpen(raw []byte, operatorToken string) (councilOpenRequest, er
 		req.title = "Council"
 	}
 
-	if live {
-		return req, errors.New("live council checkout is unavailable; specify a ref")
-	}
-	if fields["writer"] != nil {
-		return req, errors.New("writer council checkout is unavailable")
-	}
+	hasRef := fields["ref"] != nil
+	hasLive := fields["live"] != nil
+	hasWriter := fields["writer"] != nil
+
 	req.repo = strings.TrimSpace(req.repo)
 	if len(req.repo) > 4096 || !filepath.IsAbs(req.repo) || strings.ContainsRune(req.repo, 0) ||
 		redact(req.repo) != req.repo {
 		return req, errors.New("council repo must be a valid absolute directory")
 	}
 	req.ref = strings.TrimSpace(req.ref)
-	if len(req.ref) == 0 || len(req.ref) > 256 || strings.HasPrefix(req.ref, "-") ||
-		redact(req.ref) != req.ref {
-		return req, errors.New("a valid council ref is required; live checkout is unavailable")
+	req.writer = strings.TrimSpace(writer)
+	if live && hasRef {
+		return req, errors.New("council ref and live checkout cannot be combined")
 	}
+	if live && hasWriter {
+		return req, errors.New("council writer and live checkout cannot be combined")
+	}
+	if hasLive && !live && !hasRef && !hasWriter {
+		return req, errors.New("a valid council ref or live checkout is required")
+	}
+	if hasRef {
+		if len(req.ref) == 0 || len(req.ref) > 256 || strings.HasPrefix(req.ref, "-") ||
+			redact(req.ref) != req.ref {
+			return req, errors.New("a valid council ref is required")
+		}
+	}
+	if hasWriter {
+		if !slices.Contains(councilPanel[:], req.writer) {
+			return req, errors.New("council writer must be one of claude, codex, or agy")
+		}
+		if !hasRef {
+			req.ref = "HEAD"
+		}
+	}
+	req.live = live || (!hasRef && !hasWriter)
 
 	if n := req.spec.MaxRounds; n != nil && *n < 1 {
 		return req, errors.New("rounds must be a positive integer")
@@ -189,7 +211,7 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		req.spec.Checkout, err = preflightCouncilRef(ctx, req.repo, req.ref, cfg.operatorToken)
+		req.spec.Checkout, err = preflightCouncilCheckout(ctx, req.repo, req.ref, req.writer, req.live, cfg.operatorToken)
 		if err != nil {
 			if ctx.Err() != nil {
 				fail(http.StatusServiceUnavailable, "council checkout preflight timed out")
@@ -225,7 +247,7 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 	}
 }
 
-func preflightCouncilRef(ctx context.Context, repo, ref, operatorToken string) (store.CouncilCheckout, error) {
+func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, live bool, operatorToken string) (store.CouncilCheckout, error) {
 	checkout := store.CouncilCheckout{}
 	source, err := filepath.EvalSymlinks(repo)
 	if err != nil || operatorToken != "" && strings.Contains(source, operatorToken) ||
@@ -248,16 +270,22 @@ func preflightCouncilRef(ctx context.Context, repo, ref, operatorToken string) (
 		out, err := cmd.Output()
 		return strings.TrimSpace(string(out)), err
 	}
-	badRef := errors.New("council ref must identify a branch, tag, HEAD, or full commit ID")
-	if _, err := git("check-ref-format", "--allow-onelevel", ref); err != nil {
-		return checkout, badRef
-	}
 	commitFor := func(name string) string {
 		id, err := git("rev-parse", "--verify", "--end-of-options", name+"^{commit}")
 		if err != nil || !councilCommitID(id) {
 			return ""
 		}
 		return id
+	}
+	if live {
+		if commitFor("HEAD") == "" {
+			return checkout, errors.New("council repo HEAD must identify a commit")
+		}
+		return store.CouncilCheckout{Source: source}, nil
+	}
+	badRef := errors.New("council ref must identify a branch, tag, HEAD, or full commit ID")
+	if _, err := git("check-ref-format", "--allow-onelevel", ref); err != nil {
+		return checkout, badRef
 	}
 	exactRefCommit := func(name string) string {
 		id, err := git("show-ref", "--verify", "--hash", "--", name)
@@ -290,7 +318,68 @@ func preflightCouncilRef(ctx context.Context, repo, ref, operatorToken string) (
 	if commit == "" {
 		return checkout, badRef
 	}
-	return store.CouncilCheckout{Source: source, Ref: ref, Commit: commit}, nil
+	return store.CouncilCheckout{Source: source, Ref: ref, Commit: commit, WriterRole: writer}, nil
+}
+
+func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.Bundle) (*config.Bundle, error) {
+	if b == nil {
+		b = &config.Bundle{}
+	}
+	if b.Workloads == nil {
+		b.Workloads = make(map[string]domain.Workload, len(councilPanel))
+	}
+	for _, role := range councilPanel {
+		if _, exists := b.Workloads[role]; exists {
+			continue
+		}
+		w := domain.Workload{
+			Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox},
+			Spec: domain.WorkloadSpec{
+				Class:  domain.ClassCodingAgent,
+				Coding: &domain.CodingConfig{Harness: role, Sandbox: "seatbelt"},
+			},
+		}
+		if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
+			Name:  w.Metadata.Name,
+			Zone:  w.Metadata.Zone,
+			Class: w.Spec.Class,
+		}); err != nil {
+			return nil, err
+		}
+		b.Workloads[role] = w
+	}
+	return b, nil
+}
+
+func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.WorkloadClass]scruntime.Adapter) func(context.Context, store.CouncilCheckout) error {
+	return func(_ context.Context, checkout store.CouncilCheckout) error {
+		if adapters == nil || adapters[domain.ClassCodingAgent] == nil {
+			return errors.New("coding adapter unavailable")
+		}
+		if getBundle == nil {
+			return errors.New("workload bundle unavailable")
+		}
+		b := getBundle()
+		if b == nil {
+			return errors.New("workload bundle unavailable")
+		}
+		for _, role := range councilPanel {
+			wl, ok := b.Workloads[role]
+			if !ok || wl.Metadata.Zone != domain.ZoneSandbox || wl.Spec.Class != domain.ClassCodingAgent ||
+				wl.Spec.Coding == nil || wl.Spec.Coding.Harness != role || wl.Spec.Coding.Sandbox != "seatbelt" ||
+				wl.Spec.Grants.ModelGate.Allowed {
+				return errors.New("council panel workload unavailable: " + role)
+			}
+			if wl.Spec.Coding.RepoPath != "" && checkout.Source != "" {
+				ra, errA := filepath.EvalSymlinks(checkout.Source)
+				rb, errB := filepath.EvalSymlinks(wl.Spec.Coding.RepoPath)
+				if checkout.Source != wl.Spec.Coding.RepoPath && (errA != nil || errB != nil || ra != rb) {
+					return errors.New("council panel workload repo mismatch: " + role)
+				}
+			}
+		}
+		return nil
+	}
 }
 
 func councilCommitID(id string) bool {

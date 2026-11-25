@@ -1113,7 +1113,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if commit != "" && !supportsPin {
 		return errAuthorCheckoutUnavailable
 	}
-	inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
+	wl, inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
 	if err != nil {
 		return err
 	}

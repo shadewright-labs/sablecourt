@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -120,23 +121,41 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 	return "", false, nil
 }
 
+func sameCheckoutSource(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
 // The coding adapter chooses its checkout in Start from these reserved fields.
-func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[string]json.RawMessage, assignment store.ConclaveAssignment, wl domain.Workload) error {
+func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[string]json.RawMessage, assignment store.ConclaveAssignment, wl domain.Workload) (domain.Workload, error) {
 	councils, err := store.Councils(r.store)
 	if err != nil {
-		return err
+		return wl, err
 	}
 	s, err := councils.CouncilSnapshot(ctx, assignment.ConclaveID)
 	if err != nil {
-		return err
+		return wl, err
 	}
 	c := s.Checkout
 	if wl.Spec.Coding == nil && c == (store.CouncilCheckout{}) {
-		return nil
+		return wl, nil
 	}
-	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil ||
-		(c.Source != "" && c.Source != wl.Spec.Coding.RepoPath) {
-		return errors.New("council checkout isolation unavailable")
+	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
+		return wl, errors.New("council checkout isolation unavailable")
+	}
+	if wl.Spec.Coding.RepoPath == "" {
+		if c.Source == "" || !filepath.IsAbs(c.Source) {
+			return wl, errors.New("council checkout isolation unavailable")
+		}
+		cfg := *wl.Spec.Coding
+		cfg.RepoPath = c.Source
+		wl.Spec.Coding = &cfg
+	} else if c.Source != "" && !sameCheckoutSource(c.Source, wl.Spec.Coding.RepoPath) {
+		return wl, errors.New("council checkout isolation unavailable")
 	}
 
 	// Rebuild from the pinned policy and seat, including reservations made
@@ -158,10 +177,10 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	}
 	payload["checkoutMode"], _ = json.Marshal(mode)
 	payload["role"], _ = json.Marshal(assignment.Role)
-	return nil
+	return wl, nil
 }
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
 	var payload map[string]json.RawMessage
@@ -174,19 +193,21 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
-		return task.InputJSON, nil
+		return wl, task.InputJSON, nil
 	}
 
 	// Only the dispatcher can create a round reservation. Its immutable input
 	// carries the already filtered packet. Other tasks receive an assembled one.
 	var markdown string
 	if council {
-		if err := r.prepareCouncilCheckout(ctx, payload, assignment, wl); err != nil {
-			return "", err
+		var err error
+		wl, err = r.prepareCouncilCheckout(ctx, payload, assignment, wl)
+		if err != nil {
+			return wl, "", err
 		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
@@ -194,7 +215,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
 			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
 			redact.String(markdown) != markdown {
-			return "", errors.New("invalid reserved council packet")
+			return wl, "", errors.New("invalid reserved council packet")
 		}
 	}
 	// Typed consumers may match field names case-insensitively.
@@ -213,7 +234,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
 		raw, err := json.Marshal(payload)
-		return string(raw), err
+		return wl, string(raw), err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -222,7 +243,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		})
 		sanitized, err := json.Marshal(precheckInput)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 		task.InputJSON = string(sanitized)
 	}
@@ -230,21 +251,21 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	if raw, ok := payload["tier"]; ok {
 		var tier, provider, model string
 		if err := json.Unmarshal(raw, &tier); err != nil || tier == "" {
-			return "", errors.New("invalid model tier")
+			return wl, "", errors.New("invalid model tier")
 		}
 		if raw, ok := payload["provider"]; ok {
 			if err := json.Unmarshal(raw, &provider); err != nil || provider == "" {
-				return "", errors.New("invalid tier provider")
+				return wl, "", errors.New("invalid tier provider")
 			}
 		}
 		if raw, ok := payload["model"]; ok {
 			if err := json.Unmarshal(raw, &model); err != nil || model == "" {
-				return "", errors.New("invalid tier model")
+				return wl, "", errors.New("invalid tier model")
 			}
 		}
 		provider, model, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 		payload["provider"], _ = json.Marshal(provider)
 		payload["model"], _ = json.Marshal(model)
@@ -255,7 +276,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
-	return string(raw), err
+	return wl, string(raw), err
 }
 
 func referencesCouncil(ctx context.Context, st store.Store, payload map[string]json.RawMessage) (bool, error) {

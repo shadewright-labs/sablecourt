@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,17 +18,32 @@ import (
 
 func TestCouncilCheckoutAtDispatch(t *testing.T) {
 	commit := strings.Repeat("a", 40)
+	realDir := t.TempDir()
+	canonDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name     string
+		repoPath string
 		checkout store.CouncilCheckout
 		allowed  bool
+		wantRepo string
 	}{
-		{"working tree", store.CouncilCheckout{}, true},
-		{"pinned reader", store.CouncilCheckout{Commit: commit, Source: "project"}, true},
-		{"wrong project", store.CouncilCheckout{Commit: commit, Source: "other"}, false},
-		{"writer", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "reader"}, true},
-		{"writer peer", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "author"}, true},
-		{"stale writer fields", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "author"}, true},
+		{"working tree", "project", store.CouncilCheckout{}, true, "project"},
+		{"pinned reader", "project", store.CouncilCheckout{Commit: commit, Source: "project"}, true, "project"},
+		{"wrong project", "project", store.CouncilCheckout{Commit: commit, Source: "other"}, false, ""},
+		{"writer", "project", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "reader"}, true, "project"},
+		{"writer peer", "project", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "author"}, true, "project"},
+		{"stale writer fields", "project", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "author"}, true, "project"},
+		{"builtin panel binds checkout source", "", store.CouncilCheckout{Commit: commit, Source: canonDir}, true, canonDir},
+		{"builtin panel rejects empty source", "", store.CouncilCheckout{Commit: commit}, false, ""},
+		{"builtin panel rejects relative source", "", store.CouncilCheckout{Commit: commit, Source: "relative/repo"}, false, ""},
+		{"symlinked repo matches canonical source", linkDir, store.CouncilCheckout{Commit: commit, Source: canonDir}, true, linkDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -34,7 +51,7 @@ func TestCouncilCheckoutAtDispatch(t *testing.T) {
 			w := r.bundle.Workloads["worker"]
 			w.Metadata.Zone = domain.ZoneSandbox
 			w.Spec.Class = domain.ClassCodingAgent
-			w.Spec.Coding = &domain.CodingConfig{RepoPath: "project"}
+			w.Spec.Coding = &domain.CodingConfig{RepoPath: tc.repoPath}
 			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: w.Metadata.Zone, Class: w.Spec.Class}); err != nil {
 				t.Fatal(err)
 			}
@@ -77,6 +94,9 @@ func TestCouncilCheckoutAtDispatch(t *testing.T) {
 			if tc.allowed {
 				if err != nil || adapter.pin != "" || adapter.lastSpec.TaskID != task.ID {
 					t.Fatalf("pinned checkout %q, read-only %t, err %v", adapter.pin, adapter.readOnly, err)
+				}
+				if adapter.lastSpec.Workload.Spec.Coding == nil || adapter.lastSpec.Workload.Spec.Coding.RepoPath != tc.wantRepo {
+					t.Fatalf("launch repo = %+v, want %q", adapter.lastSpec.Workload.Spec.Coding, tc.wantRepo)
 				}
 				var got struct {
 					Role, CheckoutMode, CheckoutRef, CheckoutWriter string
