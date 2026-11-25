@@ -387,10 +387,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Approvals: approvalQueue,
 	})
 	// The repository git.open_pr may target is read from the repo root's origin
-	// now and on each reload, never per request.
+	// once, here. A reload only compares the origin with it (reloadGitOps);
+	// changing the repository needs a restart.
 	repoBinding := mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
-	if err := repoBinding.Resolve(ctx); err != nil {
-		logger.Warn("git.open_pr has no target repository; every call is refused", "error", err)
+	if pinned, err := repoBinding.Pinned(); err != nil {
+		logger.Warn("git.open_pr has no target repository; every call is refused until a restart", "error", err)
+	} else {
+		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
 	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
@@ -468,10 +471,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		bundle = b
 		bundleMu.Unlock()
 		modelGate.SetBundle(b)
-		dataActionGate.Reload(b, pol)
-		if err := repoBinding.Resolve(ctx); err != nil {
-			logger.Warn("git.open_pr has no target repository after reload; every call is refused", "error", err)
-		}
+		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
 		registerUpstreamMCP(b)
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)
@@ -1859,6 +1859,19 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		return nil, "", "", err
 	}
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
+}
+
+// reloadGitOps applies a reloaded bundle and policy to the action gate and
+// checks the repo root's origin against the repository pinned at start. Every
+// reload trigger (POST /api/v1/reload, the dashboard and the manifests git
+// sync) runs it through the daemon's one reload function. It never re-pins: a
+// changed or unreadable origin keeps git.open_pr refused and is logged here and
+// written to the audit log by Recheck.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
+	gate.Reload(b, pol)
+	if err := binding.Recheck(ctx); err != nil {
+		logger.Warn("git.open_pr refused after reload", "error", err)
+	}
 }
 
 // policyLoader reads the manifests, records the declared workloads and builds

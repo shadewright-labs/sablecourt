@@ -179,30 +179,22 @@ func TestOpenPRTargetIsPinnedAtStart(t *testing.T) {
 	}
 }
 
-// M5: an explicit reload re-reads the origin; a reload that cannot read a
-// GitHub origin leaves no repository allowed.
+// M5: a binding whose start read found no GitHub origin refuses every target,
+// and a later reload with a GitHub origin does not pin one: the pin is taken
+// only at start.
 func TestRepoBindingResolveOnReload(t *testing.T) {
 	tg := setupTypedGate(t, typedGateOptions{effect: domain.EffectAllow})
+	tg.setOrigin(t, "https://gitlab.example/acme/widgets.git")
+	tg.gate.SetAllowedRepo("")
 	binding := &RepoBinding{gate: tg.gate, repoRoot: tg.repo}
-	other := strings.Replace(validOpenPR, `"widgets"`, `"other"`, 1)
-
-	tg.setOrigin(t, "https://github.com/acme/other.git")
-	if err := binding.Resolve(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, err := binding.Pinned(); err == nil {
+		t.Fatal("a non-GitHub origin was pinned")
 	}
-	if rec := tg.post("ops-agent", "git.open_pr", `{"payload":`+other+`}`); rec.Code != http.StatusOK {
-		t.Fatalf("after reload: want 200 for acme/other, got %d: %s", rec.Code, rec.Body.String())
+	tg.setOrigin(t, "https://github.com/acme/widgets.git")
+	if err := binding.Recheck(context.Background()); err == nil {
+		t.Fatal("Recheck after a failed start pin must report that nothing is pinned")
 	}
 	if rec := tg.post("ops-agent", "git.open_pr", `{"payload":`+validOpenPR+`}`); rec.Code != http.StatusForbidden {
-		t.Fatalf("after reload: want 403 for acme/widgets, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	tg.setOrigin(t, "https://gitlab.example/acme/other.git")
-	if err := binding.Resolve(context.Background()); err == nil {
-		t.Fatal("Resolve accepted a non-GitHub origin")
-	}
-	tg.setOrigin(t, "https://github.com/acme/other.git")
-	if rec := tg.post("ops-agent", "git.open_pr", `{"payload":`+other+`}`); rec.Code != http.StatusForbidden {
-		t.Fatalf("failed reload must leave nothing allowed, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("nothing pinned at start: want 403 after reload, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
