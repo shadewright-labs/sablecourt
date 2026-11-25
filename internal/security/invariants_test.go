@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -99,13 +101,18 @@ func TestSixHardSecurityInvariants(t *testing.T) {
 			"leaked=sk-ant-api03-secretvalue1234567890\n" +
 			"operator=" + opToken + "\n" +
 			strings.Repeat("more text ", 10000)
-		start := time.Now()
 		res := redact.Text(big)
-		if elapsed := time.Since(start); elapsed > 2*time.Second {
-			t.Fatalf("redaction too slow: %v", elapsed)
-		}
 		if res.Hits < 2 || strings.Contains(res.Text, "sk-ant-api03-secretvalue") || strings.Contains(res.Text, opToken) {
 			t.Fatal("failed to redact secret or operator token inside large payload")
+		}
+
+		const smallSize = 1 << 15
+		const largeSize = 4 * smallSize
+		ratio := growthRatio(func(size int) {
+			redact.Text(strings.Repeat("x", size))
+		}, smallSize, largeSize, 5)
+		if ratio > 10 {
+			t.Fatalf("redaction growth ratio %.2f exceeded linear bound", ratio)
 		}
 	})
 
@@ -151,4 +158,61 @@ func TestSixHardSecurityInvariants(t *testing.T) {
 			t.Fatalf("expected ErrSecretNotFound, got %v", err)
 		}
 	})
+}
+
+func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		run        func(int)
+		wantLinear bool
+	}{
+		{
+			name: "linear redactor",
+			run: func(size int) {
+				redact.Text(strings.Repeat("x", size))
+			},
+			wantLinear: true,
+		},
+		{
+			name: "deliberately bad a-star-z pattern",
+			run: func(size int) {
+				input := strings.Repeat("a", size)
+				for start := 0; start < len(input); start++ {
+					for end := start; end < len(input); end++ {
+						if input[end] == 'z' {
+							break
+						}
+					}
+				}
+			},
+			wantLinear: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ratio := growthRatio(tc.run, 1024, 4096, 5)
+			gotLinear := ratio <= 10
+			if gotLinear != tc.wantLinear {
+				t.Fatalf("growth ratio %.2f classified linear=%t, want %t", ratio, gotLinear, tc.wantLinear)
+			}
+		})
+	}
+}
+
+func growthRatio(run func(int), smallSize, largeSize, rounds int) float64 {
+	measure := func(size int) time.Duration {
+		samples := make([]time.Duration, rounds)
+		for i := range samples {
+			start := time.Now()
+			run(size)
+			samples[i] = time.Since(start)
+		}
+		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		return samples[len(samples)/2]
+	}
+	small := measure(smallSize)
+	large := measure(largeSize)
+	if small == 0 {
+		return math.Inf(1)
+	}
+	return float64(large) / float64(small)
 }

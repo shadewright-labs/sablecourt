@@ -31,7 +31,7 @@ func hostAllowlistMiddleware(next http.Handler, listenAddr string, extraHosts []
 		}
 		allowed[key] = true
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The local CLI uses a synthetic authority over the private Unix socket.
 		if len(unixSocket) > 0 && unixSocket[0] && r.Host == "unix" {
 			next.ServeHTTP(w, r)
@@ -43,7 +43,7 @@ func hostAllowlistMiddleware(next http.Handler, listenAddr string, extraHosts []
 			return
 		}
 		next.ServeHTTP(w, r)
-	}), nil
+	})), nil
 }
 
 func validHTTPPort(port string) bool {

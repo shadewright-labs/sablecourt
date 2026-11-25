@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -865,7 +867,7 @@ func TestCouncilTerminalLease(t *testing.T) {
 }
 
 func TestCouncilRelicTextBoundaries(t *testing.T) {
-	for _, tc := range []string{"sensitive metadata", "oversized media type", "invalid text"} {
+	for _, tc := range []string{"sensitive metadata", "oversized media type", "invalid text", "digest", "long name", "too many"} {
 		t.Run(tc, func(t *testing.T) {
 			ctx := t.Context()
 			s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
@@ -879,6 +881,21 @@ func TestCouncilRelicTextBoundaries(t *testing.T) {
 			}
 			r := domain.ConclaveRelic{ConclaveID: room.ID, AuthorRole: "reviewer", Name: "result", ContentType: "text/plain", Body: "answer"}
 			switch tc {
+			case "digest":
+				r.Name = "digest"
+			case "long name":
+				r.Name = strings.Repeat("x", 256)
+			case "too many":
+				for i := range 16 {
+					r.Name = fmt.Sprintf("item-%d", i)
+					if err := s.PutCouncilRelic(ctx, task.ID, r); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := s.PutCouncilRelic(ctx, task.ID, r); err != nil {
+					t.Fatal("replay at limit", err)
+				}
+				r.Name = "extra"
 			case "sensitive metadata":
 				r.Name = "password=fixture-value"
 			case "oversized media type":
@@ -911,6 +928,154 @@ func TestCouncilSeatDrift(t *testing.T) {
 			snap, err := s.CouncilSnapshot(ctx, room.ID)
 			if err != nil || len(snap.Attempts) != 0 || snap.Members[0].Zone != domain.ZoneSandbox {
 				t.Fatalf("pinned seat or starts changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCouncilResultTransactions(t *testing.T) {
+	for _, fault := range []string{"answer link", "digest insert", "two writers", "legacy post", "stale retry"} {
+		t.Run(fault, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "state.db")
+			s := councilDB(t, path)
+			peer := councilDB(t, path)
+			room, spec := councilFixture()
+			if err := s.CreateCouncil(ctx, room, spec); err != nil {
+				t.Fatal(err)
+			}
+			task := councilTask("author", 1, 1)
+			if err := reserve(t, s, task); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateCompleted, "done", "{}"); err != nil {
+				t.Fatal(err)
+			}
+			msg := domain.ConclaveMessage{ConclaveID: room.ID, TaskID: task.ID, FromRole: "author", ToRole: "all", Kind: "review", Body: "result", CreatedAt: time.Now().UTC()}
+			switch fault {
+			case "digest insert":
+				if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_digest BEFORE INSERT ON conclave_relics BEGIN SELECT RAISE(ABORT,'injected'); END`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.CloseCouncil(ctx, room.ID, domain.ConclaveStateCancelled, "owner_stop"); err == nil {
+					t.Fatal("closed through fault")
+				}
+				saved, err := peer.GetConclave(ctx, room.ID)
+				if err != nil || saved.State != domain.ConclaveStateActive || saved.WardReason != "" {
+					t.Fatal(saved, err)
+				}
+				if _, err := peer.GetConclaveRelic(ctx, room.ID, "digest"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatal("unexpected digest", err)
+				}
+				if _, err := s.db.ExecContext(ctx, "DROP TRIGGER fail_digest"); err != nil {
+					t.Fatal(err)
+				}
+				d, err := peer.CloseCouncil(ctx, room.ID, domain.ConclaveStateCancelled, "owner_stop")
+				if err != nil {
+					t.Fatal(err)
+				}
+				d.Body = "forged"
+				if err := s.PutConclaveRelic(ctx, d); err == nil {
+					t.Fatal("overwrote closed digest")
+				}
+				return
+			case "stale retry":
+				if err := reserve(t, s, councilTask("author", 1, 2)); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := peer.RecordCouncilAnswer(ctx, msg, false); !errors.Is(err, store.ErrConflict) {
+					t.Fatal("stale answer", err)
+				}
+				msgs, err := s.ListConclaveMessages(ctx, room.ID, 0)
+				if err != nil || len(msgs) != 0 {
+					t.Fatal("stale post", err)
+				}
+				return
+			case "legacy post":
+				if _, err := s.AppendConclaveMessage(ctx, msg); err != nil {
+					t.Fatal(err)
+				}
+			case "answer link":
+				if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_link BEFORE UPDATE OF answer_id ON council_attempts BEGIN SELECT RAISE(ABORT,'injected'); END`); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := s.RecordCouncilAnswer(ctx, msg, false); err == nil {
+					t.Fatal("recorded through fault")
+				}
+				msgs, err := peer.ListConclaveMessages(ctx, room.ID, 0)
+				if err != nil || len(msgs) != 0 {
+					t.Fatal("post survived rollback", err)
+				}
+				if _, err := s.db.ExecContext(ctx, "DROP TRIGGER fail_link"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var writers = []*SQLiteStore{peer}
+			if fault == "two writers" {
+				writers = append(writers, s)
+			}
+			start := make(chan struct{})
+			results := make(chan error, len(writers))
+			for _, w := range writers {
+				go func() { <-start; _, _, err := w.RecordCouncilAnswer(ctx, msg, false); results <- err }()
+			}
+			close(start)
+			for range writers {
+				if err := <-results; err != nil {
+					t.Fatal(err)
+				}
+			}
+			msgs, err := peer.ListConclaveMessages(ctx, room.ID, 0)
+			if err != nil || len(msgs) != 1 {
+				t.Fatalf("got %d posts: %v", len(msgs), err)
+			}
+			snap, err := s.CouncilSnapshot(ctx, room.ID)
+			if err != nil || len(snap.Turns) != 1 || snap.Turns[0].Answer == nil || snap.Turns[0].Answer.ID != msgs[0].ID {
+				t.Fatal("missing linked answer", err)
+			}
+		})
+	}
+}
+
+func TestCouncilLegacyOversizedEvidence(t *testing.T) {
+	ctx := t.Context()
+	s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+	room, spec := councilFixture()
+	if err := s.CreateCouncil(ctx, room, spec); err != nil {
+		t.Fatal(err)
+	}
+	task := councilTask("reviewer", 1, 1)
+	if err := reserve(t, s, task); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 17 {
+		name := fmt.Sprintf("%02d", i) + strings.Repeat("é", (store.MaxCouncilText-2)/2)
+		_, err := s.db.ExecContext(ctx, `INSERT INTO conclave_relics(conclave_id,name,author_role,content_type,body,sha256,created_at,council_task_id)
+			VALUES(?,?,'reviewer','text/plain','body',?,?,?)`, room.ID, name, fmt.Sprintf("%x", sha256.Sum256([]byte("body"))), nowRFC3339(), task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := s.CloseCouncil(ctx, room.ID, domain.ConclaveStateCancelled, "owner_stop")
+	if err != nil || len(d.Body) > store.MaxConclaveTurnInput || !utf8.ValidString(d.Body) || !strings.Contains(d.Body, "[omitted]") || !strings.HasSuffix(d.Body, "  \"author\"\n    Missing answer\n") {
+		t.Fatalf("legacy digest %d bytes: %v", len(d.Body), err)
+	}
+}
+
+func TestCouncilTerminalUpdateConflict(t *testing.T) {
+	for _, state := range []domain.ConclaveState{domain.ConclaveStateCompleted, domain.ConclaveStateCancelled} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := t.Context()
+			s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+			room, spec := councilFixture()
+			if err := s.CreateCouncil(ctx, room, spec); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateConclaveState(ctx, room.ID, state, "original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateConclaveState(ctx, room.ID, state, "different"); err == nil {
+				t.Fatal("reported a change to the terminal stop reason")
 			}
 		})
 	}

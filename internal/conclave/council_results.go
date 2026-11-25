@@ -3,9 +3,9 @@ package conclave
 import (
 	"context"
 	"encoding/json/v2"
+
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -17,18 +17,9 @@ import (
 // CouncilNothingToAdd is a vote only when it is the entire trimmed final answer.
 const CouncilNothingToAdd = "NOTHING TO ADD"
 
-type councilAnswerKey struct{ room, task string }
-
-var councilAnswersInFlight sync.Map
-
 // RecordCouncilAnswer links a completed current attempt's persisted final answer.
 // The room driver must reconcile results before reserving retries or closing.
 func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string) (bool, error) {
-	key := councilAnswerKey{roomID, taskID}
-	if _, pending := councilAnswersInFlight.LoadOrStore(key, struct{}{}); pending {
-		return false, store.ErrConflict
-	}
-	defer councilAnswersInFlight.Delete(key)
 	councils, err := store.Councils(b.store)
 	if err != nil {
 		return false, err
@@ -74,15 +65,15 @@ func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string)
 		ConclaveID: roomID, FromRole: turn.Role, ToRole: to, TaskID: taskID,
 		Kind: "review", Body: body, CreatedAt: exitedAt,
 	}
-	id, err := b.postCouncilAnswer(ctx, snap.Session, msg)
+	id, reason, err := councils.RecordCouncilAnswer(ctx, msg, vote)
+	if reason != "" && reason != snap.Session.WardReason {
+		b.recordWard(ctx, snap.Session, taskID, reason)
+	}
 	if err != nil {
 		return false, err
 	}
 	if id <= 0 {
 		return false, store.ErrConflict
-	}
-	if err := councils.AcceptCouncilAnswer(ctx, taskID, id, vote); err != nil {
-		return false, err
 	}
 	return true, nil
 }
@@ -111,7 +102,7 @@ func councilFinalAnswer(raw string) (body string, vote bool) {
 		return "", false
 	}
 	rawBody := strings.TrimSpace(final.Text)
-	body = redact.String(rawBody)
+	body = store.RedactCouncilAnswer(rawBody)
 	if !store.ValidCouncilText(body) {
 		return "", false
 	}
@@ -162,33 +153,4 @@ func councilAnswerRecipient(members []store.CouncilMember, role, workload string
 		return role
 	}
 	return ""
-}
-
-func (b *Broker) postCouncilAnswer(ctx context.Context, room domain.ConclaveSession, msg domain.ConclaveMessage) (int64, error) {
-	msgs, err := b.store.ListConclaveMessages(ctx, room.ID, 0)
-	if err != nil {
-		return 0, err
-	}
-	var id int64
-	for _, saved := range msgs {
-		// The exit timestamp and exact payload identify a prior post when linking
-		// failed. Earlier peer posts cannot satisfy the completion evidence.
-		if saved.TaskID == msg.TaskID && saved.CreatedAt.Equal(msg.CreatedAt) &&
-			saved.ConclaveID == msg.ConclaveID && saved.FromRole == msg.FromRole &&
-			saved.ToRole == msg.ToRole && saved.Kind == msg.Kind && saved.Body == msg.Body {
-			if id != 0 || saved.ID <= 0 {
-				return 0, store.ErrConflict
-			}
-			id = saved.ID
-		}
-	}
-	if id != 0 {
-		return id, nil
-	}
-	// The store applies the pinned Wards. This post cannot wake a peer.
-	id, reason, _, err := store.AppendConclavePost(ctx, b.store, msg, store.ConclaveLimits{Now: b.now}, false, false)
-	if reason != "" && reason != room.WardReason {
-		b.recordWard(ctx, room, msg.TaskID, reason)
-	}
-	return id, err
 }

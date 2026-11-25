@@ -86,6 +86,9 @@ func TestCouncilResultArtifacts(t *testing.T) {
 		state                       domain.TaskState
 	}{
 		{name: "redacts and replays", artifacts: resultArtifact("Use plan one. password=syntheticfixture"), want: "Use plan one. password=[REDACTED:secret]"},
+		{name: "unclosed private key", artifacts: resultArtifact("Before\n-----BEGIN RSA PRIVATE KEY-----\nfixture\ntrailer"), want: "Before\n[REDACTED:private_key]"},
+		{name: "mismatched key footer", artifacts: resultArtifact("Before\n-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END EC PRIVATE KEY-----\ntrailer"), want: "Before\n[REDACTED:private_key]"},
+		{name: "closed then unclosed key", artifacts: resultArtifact("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\nkeep\n-----BEGIN OPENSSH PRIVATE KEY-----\ny"), want: "[REDACTED:private_key]\nkeep\n[REDACTED:private_key]"},
 		{name: "explicit vote", artifacts: resultArtifact(" \n" + CouncilNothingToAdd + "\n"), want: CouncilNothingToAdd, vote: true},
 		{name: "quotes peer", artifacts: resultArtifact("> " + CouncilNothingToAdd + "\nI object."), want: "> " + CouncilNothingToAdd + "\nI object."},
 		{name: "phrase in prose", artifacts: resultArtifact("I read NOTHING TO ADD in the peer answer."), want: "I read NOTHING TO ADD in the peer answer."},
@@ -157,8 +160,8 @@ type resultLinkFailure struct {
 
 var errResultLink = errors.New("injected link failure")
 
-func (s resultLinkFailure) AcceptCouncilAnswer(context.Context, string, int64, bool) error {
-	return errResultLink
+func (s resultLinkFailure) RecordCouncilAnswer(context.Context, domain.ConclaveMessage, bool) (int64, string, error) {
+	return 0, "", errResultLink
 }
 
 func TestCouncilResultRecovery(t *testing.T) {
@@ -191,6 +194,9 @@ func TestCouncilResultRecovery(t *testing.T) {
 			snap, err := councils.CouncilSnapshot(t.Context(), room.ID)
 			if err != nil || len(snap.Turns) != 1 || snap.Turns[0].Answer != nil || snap.Turns[0].NothingToAdd {
 				t.Fatalf("unlinked answer counted: %v", err)
+			}
+			if msgs, err := st.ListConclaveMessages(t.Context(), room.ID, oldID); err != nil || len(msgs) != 0 {
+				t.Fatalf("failed acceptance left %d new posts: %v", len(msgs), err)
 			}
 			reopened := NewBroker(Options{Store: st})
 			if recorded, err := reopened.RecordCouncilAnswer(t.Context(), room.ID, task.ID); !recorded || err != nil {
@@ -239,7 +245,11 @@ func TestCouncilResultDigest(t *testing.T) {
 			if _, err := b.RecordCouncilAnswer(ctx, room.ID, task.ID); err != nil {
 				t.Fatal(err)
 			}
-			got, err := b.PrepareCouncilDigest(ctx, room.ID, "owner_stop")
+			preview, err := b.PrepareCouncilDigest(ctx, room.ID, "owner_stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := b.CloseCouncil(ctx, room.ID, "owner_stop")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -259,11 +269,15 @@ Round 2
   "author"
     Missing answer
 `, sha256.Sum256([]byte("evidence body")))
-			if got.Body != want || got.Name != "digest" || got.AuthorRole != "system" || got.ConclaveID != room.ID ||
+			saved, readErr := st.GetConclaveRelic(ctx, room.ID, CouncilDigestRelicName)
+			if readErr != nil || saved != got {
+				t.Fatalf("closing digest was not stored: %v", readErr)
+			}
+			if preview.Body != want || got.Body != want || got.Name != "digest" || got.AuthorRole != "system" || got.ConclaveID != room.ID ||
 				got.ContentType != "text/plain" || got.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(want))) {
 				t.Fatalf("unexpected digest: %+v", got)
 			}
-			again, err := b.PrepareCouncilDigest(ctx, room.ID, "owner_stop")
+			again, err := b.CloseCouncil(ctx, room.ID, "owner_stop")
 			if err != nil || again != got {
 				t.Fatalf("digest changed on replay: %v", err)
 			}
@@ -277,11 +291,11 @@ type resultBlockedRead struct {
 	listed, resume chan struct{}
 }
 
-func (s resultBlockedRead) ListConclaveMessages(ctx context.Context, roomID string, since int64) ([]domain.ConclaveMessage, error) {
-	msgs, err := s.Store.ListConclaveMessages(ctx, roomID, since)
+func (s resultBlockedRead) CouncilSnapshot(ctx context.Context, roomID string) (store.CouncilSnapshot, error) {
+	snap, err := s.CouncilStore.CouncilSnapshot(ctx, roomID)
 	close(s.listed)
 	<-s.resume
-	return msgs, err
+	return snap, err
 }
 
 func TestCouncilResultConcurrentReplay(t *testing.T) {
@@ -308,7 +322,13 @@ func TestCouncilResultConcurrentReplay(t *testing.T) {
 			select {
 			case <-listed:
 			case err := <-result:
-				t.Fatalf("first call returned before listing posts: %v", err)
+				t.Fatalf("first call returned before reading the snapshot: %v", err)
+			}
+			separate, _, otherRoom := resultCouncil(t, "reviewer")
+			independent := reserveResult(t, separate, otherRoom.ID, "reviewer", 1, 1)
+			finishResult(t, separate, independent, domain.TaskStateCompleted, `{"exit_code":0}`, resultArtifact(answer))
+			if ok, err := NewBroker(Options{Store: separate}).RecordCouncilAnswer(t.Context(), otherRoom.ID, independent.ID); !ok || err != nil {
+				t.Errorf("independent room: %v, %v", ok, err)
 			}
 			other := NewBroker(Options{Store: st})
 			recorded, err := other.RecordCouncilAnswer(t.Context(), room.ID, task.ID)
@@ -316,7 +336,7 @@ func TestCouncilResultConcurrentReplay(t *testing.T) {
 			if firstErr := <-result; firstErr != nil {
 				t.Errorf("first call failed: %v", firstErr)
 			}
-			if recorded || !errors.Is(err, store.ErrConflict) {
+			if !recorded || err != nil {
 				t.Fatalf("overlapping call recorded %v, err %v", recorded, err)
 			}
 			if recorded, err := other.RecordCouncilAnswer(t.Context(), room.ID, task.ID); !recorded || err != nil {
@@ -352,6 +372,141 @@ func TestCouncilResultRecipient(t *testing.T) {
 			}
 			if got := councilAnswerRecipient(members, "reviewer", "worker"); got != tc.want {
 				t.Fatalf("recipient %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCouncilResultClose(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		state  domain.ConclaveState
+	}{{"owner_stop", domain.ConclaveStateCancelled}, {"round_cap", domain.ConclaveStateCompleted}} {
+		t.Run(tc.reason, func(t *testing.T) {
+			st, _, room := resultCouncil(t, "one", "two", "three")
+			b := NewBroker(Options{Store: st})
+			for _, role := range []string{"one", "two", "three"} {
+				task := reserveResult(t, st, room.ID, role, 1, 1)
+				body := "begin" + strings.Repeat("\n", store.MaxCouncilText-8) + "end"
+				finishResult(t, st, task, domain.TaskStateCompleted, `{"exit_code":0}`, resultArtifact(body))
+				if ok, err := b.RecordCouncilAnswer(t.Context(), room.ID, task.ID); !ok || err != nil {
+					t.Fatal(ok, err)
+				}
+			}
+			d, err := b.PrepareCouncilDigest(t.Context(), room.ID, tc.reason)
+			if err != nil || len(d.Body) > store.MaxConclaveTurnInput || strings.Count(d.Body, "[omitted]") != 3 || strings.Count(d.Body, "begin") != 3 {
+				t.Fatalf("bounded digest: %d bytes, %v", len(d.Body), err)
+			}
+			d, err = b.CloseCouncil(t.Context(), room.ID, tc.reason)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := st.GetConclaveRelic(t.Context(), room.ID, "digest")
+			if err != nil || saved != d {
+				t.Fatalf("stored digest differs: %v", err)
+			}
+			closed, err := st.GetConclave(t.Context(), room.ID)
+			if err != nil || closed.State != tc.state || closed.WardReason != tc.reason {
+				t.Fatalf("state %v: %v", closed, err)
+			}
+			replay, err := NewBroker(Options{Store: st}).CloseCouncil(t.Context(), room.ID, "deadline")
+			if err != nil || replay != d {
+				t.Fatalf("replay differs: %v", err)
+			}
+		})
+	}
+}
+
+type resultSnapshot struct {
+	store.Store
+	store.CouncilStore
+	snapshot store.CouncilSnapshot
+}
+
+func (s resultSnapshot) CouncilSnapshot(context.Context, string) (store.CouncilSnapshot, error) {
+	return s.snapshot, nil
+}
+
+func TestCouncilDigestInvalidTurn(t *testing.T) {
+	for _, turn := range []store.CouncilTurn{{Role: "unknown", Round: 1}, {Role: "author", Round: 1, NothingToAdd: true}} {
+		t.Run(turn.Role, func(t *testing.T) {
+			st, c, room := resultCouncil(t, "author")
+			snap, err := c.CouncilSnapshot(t.Context(), room.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap.Turns = []store.CouncilTurn{turn}
+			b := NewBroker(Options{Store: resultSnapshot{st, c, snap}})
+			if _, err := b.PrepareCouncilDigest(t.Context(), room.ID, "owner_stop"); err == nil {
+				t.Fatal("accepted invalid turn")
+			}
+		})
+	}
+}
+
+func TestCouncilAnswerVisibility(t *testing.T) {
+	st := brokerTestStore(t)
+	c, err := store.Councils(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	room := domain.ConclaveSession{ID: "panel", State: domain.ConclaveStateActive, CreatedAt: time.Now().UTC()}
+	spec := store.CouncilSpec{Question: "question"}
+	roles := []string{"reviewer", "one", "two", "restricted"}
+	for i, role := range roles {
+		zone := domain.ZoneSandbox
+		workload := "worker"
+		if i == 3 {
+			zone = domain.ZoneRuntime
+			workload = "restricted-worker"
+		}
+		if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: workload, Zone: zone}); err != nil {
+			t.Fatal(err)
+		}
+		spec.Members = append(spec.Members, store.CouncilMember{Vassal: domain.ConclaveVassal{Role: role, Workload: workload, CanMessage: []string{"one", "two"}}, Zone: zone})
+	}
+	if err := c.CreateCouncil(ctx, room, spec); err != nil {
+		t.Fatal(err)
+	}
+	task := reserveResult(t, st, room.ID, "reviewer", 1, 1)
+	finishResult(t, st, task, domain.TaskStateCompleted, `{"exit_code":0}`, resultArtifact("reviewer conclusion"))
+	if ok, err := NewBroker(Options{Store: st}).RecordCouncilAnswer(ctx, room.ID, task.ID); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	snap, err := c.CouncilSnapshot(ctx, room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel := CouncilSnapshot{Question: snap.Question}
+	for _, m := range snap.Members {
+		panel.Members = append(panel.Members, CouncilMember(m))
+	}
+	turns := turnsByRound{1: {"reviewer": CouncilTurn(snap.Turns[0])}}
+	for _, m := range panel.Members {
+		p, err := panel.packet(2, m, turns)
+		want := m.Vassal.Role == "one" || m.Vassal.Role == "two"
+		if err != nil || strings.Contains(p.Markdown, "reviewer conclusion") != want {
+			t.Errorf("%s visibility, want %t: %v", m.Vassal.Role, want, err)
+		}
+	}
+}
+
+func TestCouncilOperatorClose(t *testing.T) {
+	for _, state := range []domain.ConclaveState{domain.ConclaveStateCancelled, domain.ConclaveStateCompleted} {
+		t.Run(string(state), func(t *testing.T) {
+			st, _, room := resultCouncil(t, "author")
+			b := NewBroker(Options{Store: st})
+			if err := b.Close(t.Context(), room.ID, state); err != nil {
+				t.Fatal(err)
+			}
+			closed, err := st.GetConclave(t.Context(), room.ID)
+			if err != nil || closed.State != state || closed.WardReason == "" {
+				t.Fatal("missing terminal reason", err)
+			}
+			d, err := st.GetConclaveRelic(t.Context(), room.ID, "digest")
+			if err != nil || !strings.Contains(d.Body, closed.WardReason) || !strings.Contains(d.Body, "Missing answer") {
+				t.Fatal("missing operator digest", err)
 			}
 		})
 	}

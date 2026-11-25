@@ -45,6 +45,10 @@ func TestHostAllowlistBeforeRouting(t *testing.T) {
 			if w.Code != tc.want {
 				t.Fatalf("status = %d, want %d", w.Code, tc.want)
 			}
+			if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("X-Frame-Options") != "DENY" ||
+				w.Header().Get("Referrer-Policy") != "no-referrer" || w.Header().Get("Content-Security-Policy") == "" {
+				t.Fatalf("missing security headers on status %d: %+v", w.Code, w.Header())
+			}
 		})
 	}
 	for _, unixSocket := range []bool{false, true} {
