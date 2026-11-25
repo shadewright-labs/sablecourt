@@ -238,3 +238,21 @@ func TestGateRedirect(t *testing.T) {
 		})
 	}
 }
+
+func TestReadTaskInputFromStdin(t *testing.T) {
+	t.Setenv("SABLECOURT_INPUT_JSON", `{"prompt":"from env"}`)
+	t.Setenv("SABLECOURT_INPUT_STDIN", "1")
+	got, err := readTaskInput(strings.NewReader(`{"prompt":"from stdin"}` + "\x00takeover bytes"))
+	if err != nil || got != `{"prompt":"from stdin"}` {
+		t.Fatalf("readTaskInput = %q, %v", got, err)
+	}
+	for _, bad := range []string{`{"prompt":"no end"}`, strings.Repeat("x", maxTaskInput+1) + "\x00"} {
+		if _, err := readTaskInput(strings.NewReader(bad)); err == nil {
+			t.Fatalf("accepted input of %d bytes without a valid terminator", len(bad))
+		}
+	}
+	t.Setenv("SABLECOURT_INPUT_STDIN", "")
+	if got, err := readTaskInput(strings.NewReader("ignored\x00")); err != nil || got != `{"prompt":"from env"}` {
+		t.Fatalf("env fallback = %q, %v", got, err)
+	}
+}

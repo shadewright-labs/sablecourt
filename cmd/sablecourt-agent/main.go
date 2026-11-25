@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,7 +65,11 @@ func main() {
 	}
 
 	var in taskInput
-	rawIn := strings.TrimSpace(os.Getenv("SABLECOURT_INPUT_JSON"))
+	rawIn, err := readTaskInput(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sablecourt-agent could not read task input:", err)
+		os.Exit(1)
+	}
 	if rawIn != "" {
 		if err := json.Unmarshal([]byte(rawIn), &in); err != nil {
 			in.Prompt = rawIn
@@ -154,6 +160,25 @@ func main() {
 		}
 		return
 	}
+}
+
+const maxTaskInput = 4 << 20
+
+// readTaskInput returns the task input. The Docker runtime sends it on stdin
+// ended by a NUL and sets SABLECOURT_INPUT_STDIN, so it never sits in the
+// container configuration; other runtimes still set SABLECOURT_INPUT_JSON.
+func readTaskInput(stdin io.Reader) (string, error) {
+	if os.Getenv("SABLECOURT_INPUT_STDIN") != "1" {
+		return strings.TrimSpace(os.Getenv("SABLECOURT_INPUT_JSON")), nil
+	}
+	raw, err := bufio.NewReader(io.LimitReader(stdin, maxTaskInput+1)).ReadBytes(0)
+	if err != nil {
+		if len(raw) > maxTaskInput {
+			return "", errors.New("task input is too large")
+		}
+		return "", fmt.Errorf("task input ended before its terminator: %w", err)
+	}
+	return strings.TrimSpace(string(raw[:len(raw)-1])), nil
 }
 
 func loadThreadHistory(gateRoot, token string) []chatMessage {

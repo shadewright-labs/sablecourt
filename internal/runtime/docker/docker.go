@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -210,6 +211,12 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if spec.Workload.Spec.Runtime.Image == "" {
 		return scruntime.Handle{}, errors.New("docker runtime requires runtime.image")
 	}
+	// Task input goes to the process on stdin, never into the container
+	// configuration, which Docker stores and returns on inspect. NUL ends it.
+	input := spec.InputJSON
+	if strings.ContainsRune(input, 0) {
+		return scruntime.Handle{}, errors.New("task input contains a NUL byte")
+	}
 	image, err := a.localImage(ctx, spec.Workload.Spec.Runtime.Image)
 	if err != nil {
 		return scruntime.Handle{}, err
@@ -224,8 +231,8 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		"SABLECOURT_TASK_ID=" + spec.TaskID,
 		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
 	}
-	if spec.InputJSON != "" {
-		env = append(env, "SABLECOURT_INPUT_JSON="+spec.InputJSON)
+	if input != "" {
+		env = append(env, "SABLECOURT_INPUT_STDIN=1")
 	}
 	if spec.DataGateURL != "" {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)
@@ -262,7 +269,10 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		Config: &container.Config{
 			Image:     image.ID,
 			Env:       env,
-			OpenStdin: a.AttachHub != nil,
+			OpenStdin: a.AttachHub != nil || input != "",
+			// Without takeover, closing the attachment after the input
+			// gives the process EOF.
+			StdinOnce: a.AttachHub == nil && input != "",
 			Labels: map[string]string{
 				"sablecourt.io/task-id":  spec.TaskID,
 				"sablecourt.io/workload": spec.Workload.Metadata.Name,
@@ -282,7 +292,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		WorkDir:     spec.WorkDir,
 	}
 	var stdinCloser io.WriteCloser
-	if a.AttachHub != nil {
+	if a.AttachHub != nil || input != "" {
 		if att, ok := a.Client.(containerAttacher); ok {
 			if hijacked, err := att.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
 				Stream: true,
@@ -292,12 +302,24 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 			}
 		}
 	}
+	if input != "" && stdinCloser == nil {
+		return handle, errors.Join(errors.New("attach container stdin for task input"), a.removeCreated(created.ID))
+	}
 
 	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		if stdinCloser != nil {
 			_ = stdinCloser.Close()
 		}
 		return handle, fmt.Errorf("start container %s: %w", created.ID, err)
+	}
+	if input != "" {
+		if err := deliverInput(stdinCloser, input, a.AttachHub == nil); err != nil {
+			_ = stdinCloser.Close()
+			return handle, errors.Join(fmt.Errorf("deliver task input to container %s: %w", created.ID, err), a.Stop(context.WithoutCancel(ctx), handle))
+		}
+		if a.AttachHub == nil {
+			stdinCloser = nil
+		}
 	}
 
 	if a.AttachHub != nil {
@@ -313,6 +335,37 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}
 
 	return handle, nil
+}
+
+const inputWriteTimeout = 30 * time.Second
+
+// deliverInput writes the task input and a NUL to the container's stdin. A
+// process that never reads cannot hold the launch past inputWriteTimeout.
+func deliverInput(conn io.WriteCloser, input string, closeAfter bool) error {
+	timer := time.AfterFunc(inputWriteTimeout, func() { _ = conn.Close() })
+	defer timer.Stop()
+	if _, err := io.WriteString(conn, input+"\x00"); err != nil {
+		return err
+	}
+	if !closeAfter {
+		return nil
+	}
+	if cw, ok := conn.(client.CloseWriter); ok {
+		if err := cw.CloseWrite(); err != nil {
+			return err
+		}
+	}
+	return conn.Close()
+}
+
+func (a *Adapter) removeCreated(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := a.Client.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: true})
+	if err == nil || isMissing(err) {
+		return nil
+	}
+	return err
 }
 
 func (a *Adapter) streamLogs(ctx context.Context, taskID, containerID string, ls logStreamer) {
