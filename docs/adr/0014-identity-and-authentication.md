@@ -41,7 +41,7 @@ One authorisation model governs both `sanctum` and `citadel`: every caller resol
 Every authenticated caller maps to one of five typed URN forms persisted on tasks, approvals, learnings, and audit records:
 
 - `local:operator` for the person running `sanctum` locally.
-- `oidc:<issuer>:<subject>` for a person authenticated by an external OpenID Connect provider in shared mode. For Microsoft Entra ID, `<subject>` is `<tid>:<oid>` rather than `sub`, because Entra's v2.0 `sub` claim is pairwise per client application ([ID token claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference)).
+- `oidc:<issuer>:<subject>` for a person authenticated by an external OpenID Connect provider in shared mode. For Microsoft Entra ID, `<subject>` is `<tid>:<oid>` rather than `sub`, because Entra's v2.0 `sub` claim is pairwise per client application ([ID token claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference)). Issuer and subject are each percent-encoded ([RFC 3986](https://www.rfc-editor.org/rfc/rfc3986), always encoding `:` and `%`) before joining, so no two issuer and subject pairs produce the same principal string; the Entra `<tid>` and `<oid>` GUIDs contain no colon and keep `:` as their separator.
 - `device:<id>` for an enrolled hardware-backed P-256 approval device bound to a person principal.
 - `workload:<name>:<task>` for a launched task attempt calling `/gate/*` routes.
 - `integration:<name>` for external machine callers such as `integration:observer` and `integration:shadewright`.
