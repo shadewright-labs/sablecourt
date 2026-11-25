@@ -12,6 +12,30 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
+func (s *SQLiteStore) ListReconcileCouncils(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id FROM councils p JOIN conclaves c ON c.id=p.id
+		WHERE c.state IN ('active','input-required') OR EXISTS (
+			SELECT 1 FROM council_attempts a JOIN tasks t ON t.id=a.task_id
+			WHERE a.council_id=c.id AND t.state IN ('submitted','working','input-required')
+		)
+		ORDER BY c.created_at DESC, c.id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *SQLiteStore) CouncilSnapshot(ctx context.Context, id string) (store.CouncilSnapshot, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {

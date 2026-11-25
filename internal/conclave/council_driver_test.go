@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +85,11 @@ type driverFixture struct {
 
 func driverRoom(t *testing.T, sequential bool, maxStarts, maxRuns int) *driverFixture {
 	t.Helper()
+	return driverRoomWithCheckout(t, sequential, maxStarts, maxRuns, store.CouncilCheckout{})
+}
+
+func driverRoomWithCheckout(t *testing.T, sequential bool, maxStarts, maxRuns int, checkout store.CouncilCheckout) *driverFixture {
+	t.Helper()
 	st := brokerTestStore(t)
 	cs, err := store.Councils(st)
 	if err != nil {
@@ -91,7 +97,7 @@ func driverRoom(t *testing.T, sequential bool, maxStarts, maxRuns int) *driverFi
 	}
 	f := &driverFixture{Store: st, CouncilStore: cs, clock: time.Now().UTC(), stub: &councilStub{starts: map[string]string{}, answers: map[string]string{}}}
 	roles := []domain.ConclaveVassal{}
-	spec := store.CouncilSpec{Question: "Which change should land?", Sequential: sequential, MaxStarts: &maxStarts, Wards: domain.ConclaveWards{MaxRuns: maxRuns}}
+	spec := store.CouncilSpec{Question: "Which change should land?", Sequential: sequential, Checkout: checkout, MaxStarts: &maxStarts, Wards: domain.ConclaveWards{MaxRuns: maxRuns}}
 	for i, name := range []string{"north", "south", "west"} {
 		v := domain.ConclaveVassal{Role: name, Workload: "worker", Activation: domain.ActivationOnMention, CanMessage: []string{"all"}}
 		if i == 0 {
@@ -466,8 +472,158 @@ func TestCouncilDriverDeadlineOnReadFailure(t *testing.T) {
 				f.pass(t)
 			}
 			s = f.snapshot(t, 3)
-			if s.Turns[0].Answer == nil || !councilClosed(&s) {
-				t.Fatal("partial result lost on retry")
+			if !councilClosed(&s) || (s.Turns[0].Answer == nil) != closed {
+				t.Fatal("unexpected terminal evidence after retry")
+			}
+			if closed && !strings.Contains(s.Session.WardReason, errResultLink.Error()) {
+				t.Fatalf("missing stop detail: %q", s.Session.WardReason)
+			}
+		})
+	}
+}
+
+func TestCouncilDriverOwnerCloseOnAnswerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		state domain.ConclaveState
+		cause error
+	}{
+		{domain.ConclaveStateCancelled, errResultLink},
+		{domain.ConclaveStateCompleted, store.ErrConflict},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			f := driverRoom(t, false, 6, 6)
+			f.pass(t)
+			f.launch(t, 3)
+			s := f.snapshot(t, 3)
+			f.answer(t, s.Turns[0].TaskID, "partial")
+			f.Broker.store = &interruptedCouncilPost{f.Store, f.CouncilStore, tc.cause}
+			if !f.clock.Before(s.Deadline) {
+				t.Fatal("fixture must close before the deadline")
+			}
+			if err := f.Broker.Close(t.Context(), "room", tc.state); !errors.Is(err, tc.cause) {
+				t.Fatalf("close error = %v, want %v", err, tc.cause)
+			}
+			s = f.snapshot(t, 3)
+			if s.Session.State != tc.state || !strings.Contains(s.Session.WardReason, tc.cause.Error()) {
+				t.Errorf("close state = %s, detail = %q", s.Session.State, s.Session.WardReason)
+			}
+			digest, err := f.GetConclaveRelic(t.Context(), "room", CouncilDigestRelicName)
+			if err != nil || !strings.Contains(digest.Body, tc.cause.Error()) {
+				t.Errorf("missing digest stop detail: %v", err)
+			}
+			for _, a := range s.Attempts[1:] {
+				if a.State != domain.TaskStateCancelled {
+					t.Errorf("task state = %s, want cancelled", a.State)
+				}
+				if _, err := f.GetActiveLeaseByTokenHash(t.Context(), model.HashToken(f.stub.starts[a.TaskID]), time.Now()); !errors.Is(err, store.ErrNotFound) {
+					t.Errorf("lease lookup = %v, want not found", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCouncilDriverCurrentAnswerWards(t *testing.T) {
+	f := driverRoom(t, false, 6, 6)
+	f.pass(t)
+	f.launch(t, 3)
+	for _, a := range f.snapshot(t, 3).Attempts {
+		f.answer(t, a.TaskID, "completed answer")
+	}
+	tpl := f.bundle.Conclaves["council"]
+	tpl.Spec.Wards.MaxMessages = 1
+	f.bundle.Conclaves["council"] = tpl
+	f.pass(t)
+	s := f.snapshot(t, 3)
+	messages, err := f.ListConclaveMessages(t.Context(), "room", 0)
+	reviews := slices.DeleteFunc(messages, func(msg domain.ConclaveMessage) bool { return msg.Kind != "review" })
+	if err != nil || len(reviews) != 1 || s.Turns[0].Answer == nil || s.Turns[1].Answer != nil || s.Turns[2].Answer != nil ||
+		s.Session.State != domain.ConclaveStateInputRequired || s.Session.WardReason != "max_messages_reached(1)" {
+		t.Fatalf("reviews = %d, state = %s, ward = %q, err = %v", len(reviews), s.Session.State, s.Session.WardReason, err)
+	}
+}
+
+type councilSnapshotReads struct {
+	store.Store
+	store.CouncilStore
+	ids []string
+}
+
+func (s *councilSnapshotReads) CouncilSnapshot(ctx context.Context, id string) (store.CouncilSnapshot, error) {
+	s.ids = append(s.ids, id)
+	return s.CouncilStore.CouncilSnapshot(ctx, id)
+}
+
+func TestCouncilDriverTickCandidates(t *testing.T) {
+	ctx := t.Context()
+	f := driverRoom(t, false, 6, 6)
+	s := f.snapshot(t, 0)
+	for _, id := range []string{"ordinary-open", "ordinary-closed", "closed-idle", "closed-pending"} {
+		room := domain.ConclaveSession{ID: id, State: domain.ConclaveStateActive, TemplateName: "council", CreatedAt: f.clock}
+		if strings.HasPrefix(id, "ordinary") {
+			if err := f.CreateConclave(ctx, room); err != nil {
+				t.Fatal(err)
+			}
+			if id == "ordinary-closed" {
+				if err := f.UpdateConclaveState(ctx, id, domain.ConclaveStateCompleted, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			continue
+		}
+		if err := f.CreateCouncil(ctx, room, store.CouncilSpec{Question: s.Question, Members: s.Members}); err != nil {
+			t.Fatal(err)
+		}
+		if id == "closed-pending" {
+			reserveResult(t, f.Store, id, "north", 1, 1)
+		}
+		if _, err := f.CouncilStore.CloseCouncil(ctx, id, domain.ConclaveStateCancelled, "owner_stop"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reads := &councilSnapshotReads{Store: f.Store, CouncilStore: f.CouncilStore}
+	f.Broker.store = reads
+	for _, want := range [][]string{{"closed-pending", "room"}, {"room"}} {
+		reads.ids = nil
+		if err := f.ReconcileCouncils(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(reads.ids)
+		if !slices.Equal(reads.ids, want) {
+			t.Errorf("snapshot reads = %v, want %v", reads.ids, want)
+		}
+	}
+}
+
+func TestCouncilDriverReservedCheckout(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	for _, tc := range []struct {
+		mode     string
+		checkout store.CouncilCheckout
+	}{
+		{"live", store.CouncilCheckout{Source: "project"}},
+		{"ref", store.CouncilCheckout{Source: "project", Ref: "main", Commit: commit}},
+		{"writer", store.CouncilCheckout{Source: "project", Ref: "main", Commit: commit, WriterRole: "north"}},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			f := driverRoomWithCheckout(t, false, 6, 6, tc.checkout)
+			f.pass(t)
+			for _, a := range f.snapshot(t, 3).Attempts {
+				task, err := f.GetTask(t.Context(), a.TaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var input struct {
+					Mode   string `json:"checkoutMode"`
+					Ref    string `json:"checkoutRef"`
+					Writer string `json:"checkoutWriter"`
+				}
+				if err := json.Unmarshal([]byte(task.InputJSON), &input); err != nil {
+					t.Fatal(err)
+				}
+				if input.Mode != tc.mode || input.Ref != tc.checkout.Commit || input.Writer != tc.checkout.WriterRole {
+					t.Errorf("role %s checkout input = %+v", a.Role, input)
+				}
 			}
 		})
 	}
@@ -613,13 +769,13 @@ type interruptedCouncilPost struct {
 	refusal error
 }
 
-func (s *interruptedCouncilPost) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
+func (s *interruptedCouncilPost) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
 	if s.refusal != nil {
 		err := s.refusal
 		s.refusal = nil
-		return 0, "", err
+		return 0, err
 	}
-	return s.CouncilStore.RecordCouncilAnswer(ctx, msg, vote)
+	return s.Store.AppendConclaveMessage(ctx, msg)
 }
 
 func TestCouncilDriverWardResumeDuringCollection(t *testing.T) {
@@ -647,16 +803,45 @@ func TestCouncilDriverWardResumeDuringCollection(t *testing.T) {
 }
 
 func TestCouncilDriverStaleReservationAtCap(t *testing.T) {
-	for _, limit := range []int{1, 2} {
-		t.Run(fmt.Sprint(limit), func(t *testing.T) {
-			f := driverRoom(t, false, limit, 6)
+	for _, tc := range []struct {
+		name               string
+		maxStarts, maxRuns int
+	}{
+		{"start ceiling", 2, 6},
+		{"run ward", 6, 3},
+		{"message ward", 6, 3},
+		{"deadline", 6, 3},
+		{"closed", 6, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := driverRoom(t, false, tc.maxStarts, tc.maxRuns)
 			f.pass(t)
-			s := f.snapshot(t, limit)
+			count := min(3, tc.maxStarts)
+			s := f.snapshot(t, count)
+			limits := store.ConclaveLimits{}
+			switch tc.name {
+			case "message ward":
+				if _, err := f.PostMessage(t.Context(), "room", "north", "all", "review", "one post", ""); err != nil {
+					t.Fatal(err)
+				}
+				limits.MaxMessages = 1
+			case "deadline":
+				f.clock = s.Deadline
+			case "closed":
+				if err := f.Broker.Close(t.Context(), "room", domain.ConclaveStateCancelled); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := f.snapshot(t, count)
 			// Replay a proposal from another driver's older snapshot.
 			input := turnInput{ConclaveAssignment: store.ConclaveAssignment{ConclaveID: "room", Role: "north", Round: 1, Attempt: 1}, Packet: "Review?"}
-			_, err := f.submitTurn(t.Context(), s.Members[0].Vassal, input, store.ConclaveLimits{})
-			if !errors.Is(err, store.ErrConclaveRunLimit) {
-				t.Fatal(err)
+			task, err := f.submitTurn(t.Context(), s.Members[0].Vassal, input, limits)
+			if err != nil || task.ID != s.Turns[0].TaskID {
+				t.Fatalf("replay = %q, %v, want %q", task.ID, err, s.Turns[0].TaskID)
+			}
+			after := f.snapshot(t, count)
+			if after.Session != before.Session {
+				t.Fatalf("replay changed session from %+v to %+v", before.Session, after.Session)
 			}
 			audit, err := f.ListAudit(t.Context(), 100)
 			if err != nil {

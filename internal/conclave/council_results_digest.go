@@ -12,14 +12,18 @@ const CouncilDigestRelicName = store.CouncilDigestRelicName
 
 // CloseCouncil persists the daemon's digest and returns the original Relic on replay.
 func (b *Broker) CloseCouncil(ctx context.Context, roomID, reason string) (domain.ConclaveRelic, error) {
-	councils, err := store.Councils(b.store)
-	if err != nil {
-		return domain.ConclaveRelic{}, err
-	}
 	state := domain.ConclaveStateCompleted
 	switch reason {
 	case "owner_stop", "deadline", "wall_time_reached":
 		state = domain.ConclaveStateCancelled
+	}
+	return b.closeCouncil(ctx, roomID, state, reason)
+}
+
+func (b *Broker) closeCouncil(ctx context.Context, roomID string, state domain.ConclaveState, reason string) (domain.ConclaveRelic, error) {
+	councils, err := store.Councils(b.store)
+	if err != nil {
+		return domain.ConclaveRelic{}, err
 	}
 	return councils.CloseCouncil(ctx, roomID, state, reason)
 }

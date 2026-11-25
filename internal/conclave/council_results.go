@@ -65,7 +65,7 @@ func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string)
 		ConclaveID: roomID, FromRole: turn.Role, ToRole: to, TaskID: taskID,
 		Kind: "review", Body: body, CreatedAt: exitedAt,
 	}
-	id, reason, err := councils.RecordCouncilAnswer(ctx, msg, vote)
+	id, reason, err := store.AppendReservedCouncilAnswer(ctx, b.store, msg, vote, b.councilLimits(b.bundle(), snap.Session))
 	if reason != "" && reason != snap.Session.WardReason {
 		b.recordWard(ctx, snap.Session, taskID, reason)
 	}
