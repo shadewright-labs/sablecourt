@@ -10,8 +10,10 @@ import (
 var errInvalidChildBudgetCeiling = store.ErrInvalidChildBudgetCeiling
 
 // estimateRequestReserve derives conservative pre-flight token and cost reservation bounds
-// from a provider request body while preserving a 1-unit minimum per dimension.
-func estimateRequestReserve(provider, modelName string, body []byte, pricing map[string]PricePerMillionTokens) domain.BudgetTotals {
+// from a provider request body while preserving a 1-unit minimum per dimension. When
+// fallbackProviders are supplied, cost uses the largest estimate across primary and
+// fallback providers so a fallback dispatch cannot settle above the reserved cost.
+func estimateRequestReserve(provider, modelName string, body []byte, pricing map[string]PricePerMillionTokens, fallbackProviders ...string) domain.BudgetTotals {
 	inTokens := int64(1)
 	outTokens := int64(1)
 
@@ -33,6 +35,11 @@ func estimateRequestReserve(provider, modelName string, body []byte, pricing map
 	}
 
 	costMicro := EstimateMicroUSD(provider, modelName, inTokens, outTokens, pricing)
+	for _, fb := range fallbackProviders {
+		if fbCost := EstimateMicroUSD(fb, modelName, inTokens, outTokens, pricing); fbCost > costMicro {
+			costMicro = fbCost
+		}
+	}
 	if costMicro < 1 {
 		costMicro = 1
 	}
