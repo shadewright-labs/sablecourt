@@ -1,6 +1,6 @@
 # Identity and access
 
-Who and what may call the daemon, with which credential, and what each credential reaches. Today the callers are you, the integrations, workloads and the per-launch gate proxy. There are no individual identities: everything done with the operator credential is recorded as the single principal `operator`.
+Who and what may call the daemon, with which credential, and what each credential reaches. Today the callers are you, the integrations, workloads and the per-launch gate proxy. There are no individual identities: the operator credential carries no verified identity, and the actor recorded for a request is a label that depends on the route (see [Who decided](#who-decided)).
 
 Status: partly built. What this page describes is in the code. Passkeys, server-side sessions, roles and the rest of [ADR-0014](../adr/0014-identity-and-authentication.md) (Proposed) are under [Not built yet](#not-built-yet).
 
@@ -49,13 +49,13 @@ The "session key" in the diagram is 32 random bytes held in the daemon's memory,
 - The daemon serves a request only if its `Host` is `localhost`, `127.0.0.1` or `::1` on the listen port, an `--allow-host` entry, or the container gate host for `/gate/` paths; others get 403. This keeps a page that rebinds its own DNS name to the loopback address from reaching the daemon.
 - The optional Unix socket (`--socket`) is set to mode `0600` after it is created and sits behind the same operator authentication.
 
-A cookie does not prove who holds it, and it is not derived from the token. Any process that can read the token file can sign in, which is why harnesses run in containers or under Seatbelt ([threat model](../threat-model.md)). On `localhost` browsers do not separate cookies by port, so another web service on `localhost` that you visit in the same browser can receive the cookie.
+A cookie does not prove who holds it, and it is not derived from the token. Any process that can read the token file can sign in, which is why harnesses run in containers or under Seatbelt ([threat model](../threat-model.md)). On `localhost` browsers do not isolate cookies by port (RFC 6265 section 8.5, cited in [ADR-0014](../adr/0014-identity-and-authentication.md)), so another web service on `localhost` that you visit in the same browser can receive the cookie.
 
 ## Leases
 
 A lease is made for each launch: `sc_task_` plus 64 hex characters from 32 random bytes. Only its SHA-256 is stored, with the task, the workload and an expiry.
 
-- The control plane sets the lifetime to one hour; for a council turn the expiry is cut to the council deadline. Leases are not extended: a resume or a new turn gets a new lease.
+- The control plane sets the first expiry to one hour; for a council turn the expiry is cut to the council deadline. While a task is `working` or `input-required`, each fresh reconcile pass extends its lease to one hour past the observation (cut to the council deadline for a council turn), so a running task is not limited to one hour. A resume or a new turn gets a new lease.
 - Leases are revoked when the task is cancelled or suspended, when it ends, and when recovery or a failed launch cleans up.
 - The Model Gate and the MCP Gate look the hash up on every call and then check the workload's grants, so a valid lease reaches only what its workload is granted.
 - Host and generic container runs get the lease in the environment variable `SABLECOURT_TASK_TOKEN`. A council turn receives it on standard input; the bootstrap writes it to a file in the turn's scratch directory under `umask 077` and unsets the variable. The council proxy holds the SHA-256 of the lease and refuses gate requests that carry another; its provider tunnels need no lease.
@@ -63,7 +63,7 @@ A lease is made for each launch: `sc_task_` plus 64 hex characters from 32 rando
 
 ## Who decided
 
-Requests made with the operator credential are recorded as the literal `operator`. The approve and deny routes take a `decidedBy` field from the request body (default `operator`) and write it to the audit row as sent, so it is a label, not a verified identity. An approval by dialog or by device signature records its method in the row. The takeover and stdin routes likewise take an operator name from the body.
+The operator credential carries no name, so the recorded actor is a label set by the route, not a verified identity. The approve and deny routes take a `decidedBy` field from the request body (default `operator`) and write it to the audit row as sent; the web UI approve and deny buttons record `operator-ui`, the UI task retry records `operator_ui_retry`, `sablectl task takeover` sends `sablectl`, `detach` records an empty name when none is sent, and a device-signed approval records `device:` plus the device ID. An approval by dialog or by device signature also records its method in the row. The takeover and stdin routes likewise take an operator name from the body.
 
 ## Integration tokens
 
@@ -73,7 +73,7 @@ The three integration secrets (and the webhook secret) live in the secret store:
 
 Everything below is decided in [ADR-0014](../adr/0014-identity-and-authentication.md), whose status is Proposed. None of it is in force.
 
-- Server-side hashed sessions with revocation of one session, session-bound CSRF tokens, and the optional local TLS mode with a `__Host-` cookie (stage 1). What exists instead is the stateless cookie above. `POST /logout` rotates the signing key, which differs from the ADR's Stage 0 text: that text says logout clears only the caller's cookie.
+- Server-side hashed sessions with revocation of one session, session-bound CSRF tokens, and the optional local TLS mode with a `__Host-` cookie (stage 1). What exists instead is the stateless cookie above. `POST /logout` rotates the signing key, which differs from the ADR's Stage 0 text: that text says logout clears only the browser cookie.
 - Passkey sign-in that consumes `operator.token` on first enrolment, typed principal URNs such as `local:operator`, the `viewer`, `operator` and `approver` roles, and OIDC sign-in with `IdentityProvider` and `RoleBinding` manifests (stages 1 and 3).
 - A fresh proof for every approval, a single-use `consumed` state, an expiry check when the action runs, and refusing a self-approval. Today an approved approval can be presented again until the task's lease ends, and an empty `expectedSha256` is accepted (issue 9). Device pairing returns 503 until a confirmed enrolment exists (issue 5).
 - Authentication rows in the audit chain. Today no sign-in, failure or logout is recorded ([audit](audit.md)).
@@ -83,7 +83,7 @@ Everything below is decided in [ADR-0014](../adr/0014-identity-and-authenticatio
 
 [![The four stages of ADR-0014, all planned.](../diagrams/identity-stages.svg)](../diagrams/identity-stages.svg "Open full size")
 
-The diagram shows the four planned stages. Parts of Stage 0 are on `main`: the logout route, no token flag in `sablectl`, the state directory checks and the Seatbelt probe at daemon start and council open. The rest is not.
+The diagram shows the four planned stages. The code has parts of Stage 0: the logout route, no token flag in `sablectl`, the state directory checks and the Seatbelt probe at daemon start and council open. The rest is not.
 
 ## In depth
 

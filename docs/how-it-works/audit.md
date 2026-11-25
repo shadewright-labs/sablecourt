@@ -51,21 +51,22 @@ Two places return the error when the append fails: the Shadewright integration (
 
 This detects:
 
-- a changed field in a hashed row, unless the row hash and every later hash were recomputed;
-- a hashed row deleted from, or inserted into, the middle of the chain, because the next row's previous hash no longer matches;
+- a changed field in a hashed row, unless the row hash and every later hash were recomputed, or the change only moves a `|` between two adjacent hashed fields;
+- a hashed row (not one with an empty hash) deleted from, or inserted into, the middle of the chain, because the next row's previous hash no longer matches;
 - a blanked hash on a row that has a later hashed row, for the same reason.
 
 ## What verification misses
 
 - Deletion of the last rows. Nothing follows them, so no link is left to check: any surviving prefix of the chain verifies.
-- Rows with an empty hash are skipped. Blanking the hash of the newest row, or of every row, passes; the report then counts fewer rows, or zero.
+- Rows with an empty hash are skipped. Blanking the hash of the newest row, or of every row, passes, and so does an unhashed row inserted into the middle; the report then counts fewer rows, or zero. The next append after a blank newest hash stores `genesis` as its previous hash instead of continuing the chain.
+- Field separator. The hashed fields are joined with a `|` that is not escaped, so moving a `|` between two adjacent fields leaves the hash unchanged.
 - Renumbering. The row ID is not hashed, so changing IDs while keeping their order passes.
 - A full rewrite. The hash has no key and no copy of the newest hash is kept elsewhere, so whoever can write the database can edit a row and recompute every row after it.
 - Completeness. A pass says nothing about events that were never recorded; the previous section lists them.
 
 A pass therefore means that the hashed rows present link up and match their fields. The how-to [verify the audit chain](../how-to/verify-the-audit-chain.md) describes a manual checkpoint for the first gap.
 
-Dated note, 2026-11-25: [ADR-0009](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md) says verification detects any modified or deleted historical entry. The code does not do that for deleted last rows, blanked hashes or renumbered rows, and the ADR text is unchanged. The gaps are tracked in issue 10 ("Tracking: audit chain is weaker than ADR-0009 says").
+Dated note, 2026-11-25: [ADR-0009](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md) says verification detects any modified or deleted historical entry. The code does not do that for deleted last rows, blanked hashes, renumbered rows or a moved `|`, and the ADR text is unchanged. The gaps are tracked in issue 10 ("Tracking: audit chain is weaker than ADR-0009 says").
 
 ## Reading and exporting
 

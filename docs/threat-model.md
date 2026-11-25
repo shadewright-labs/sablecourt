@@ -2,7 +2,7 @@
 
 What Sablecourt protects, where its trust boundaries are, who it defends against, and for each threat two separate lists: the controls that exist in the code (with the package that implements each one) and the gaps (with the issue that tracks each one). Anything decided but not built is in its own section at the end, and no control below depends on it.
 
-Status: partly built. Local operation (Sanctum) is built. Of the identity work in [ADR-0014](adr/0014-identity-and-authentication.md), which is Proposed, only parts of Stage 0 exist (the logout route, the state directory checks, the sandbox probe). The audit chain has known holes.
+Status: partly built. Local operation (Sanctum) is built. Of the identity work in [ADR-0014](adr/0014-identity-and-authentication.md), which is Proposed, the code has only parts of Stage 0 (the logout route, the state directory checks, the sandbox probe). The audit chain has known holes.
 
 ## What is protected
 
@@ -39,11 +39,11 @@ Controls that exist:
 - A policy whose `defaultEffect` is not `deny` is rejected at load (`internal/config`), and the policy engine returns deny when no rule matches (`internal/policy`).
 - An action name that is not registered is refused with 404 and a `denied` audit row (`internal/gate/mcp`).
 - An action whose policy effect is `approve` runs only with the ID of an approval that is `approved` for the same task, capability and payload digest (`internal/gate/mcp`, `internal/approval`).
-- MCP tool output, action results, Conclave messages and Relics, Court Memory writes and council prompts pass through pattern-based redaction (`internal/redact`, `internal/gate/mcp`, `internal/conclave`).
+- MCP tool output, action results, Conclave messages and Relics, Court Memory writes and council prompts pass through pattern-based redaction (`internal/redact`, `internal/gate/mcp`, `internal/conclave`). Redaction covers the memory value and the Relic body only; the memory namespace and key, the learning proposal namespace, key and target namespace, and the Relic name and content type are stored unredacted, and the Relic name is also written to the audit row.
 
 Gaps:
 
-- Redaction matches a fixed list of patterns; other secrets pass. The Model Gate redacts neither requests nor responses. Tracked in issue 8.
+- Redaction matches a fixed list of patterns; other secrets pass, and the fields named above are not redacted at all. The Model Gate redacts neither requests nor responses. Tracked in issue 8.
 - An approved approval can be presented again, and its expiry is not checked when the action runs. Tracked in issues 9 and 101.
 - An MCP tool whose effect is `approve` cannot complete, and `git.open_pr` does not validate `owner`, `repo` or `base`. Tracked in issue 9.
 - Learnings are reported to reach prompts sent to remote providers, which ADR-0012 forbids. Tracked in issue 99.
@@ -93,7 +93,7 @@ Gaps:
 Controls that exist:
 
 - A lease is `sc_task_` plus 32 random bytes in hex; only its SHA-256 is stored (`internal/gate/model`).
-- The control plane issues leases with a lifetime of one hour, cut to the council deadline for a council turn, and revokes a task's leases on cancel, suspend, the end of the task, recovery and a failed launch (`internal/controlplane`).
+- The control plane issues leases with a lifetime of one hour, cut to the council deadline for a council turn, and renews the lease of a running task to one hour past the latest observation on each reconcile pass (still cut to the council deadline for a council turn), and revokes a task's leases on cancel, suspend, the end of the task, recovery and a failed launch (`internal/controlplane`).
 - The Model Gate and the MCP Gate look the lease up on every call and then check the workload's grants (`internal/gate/model`, `internal/gate/mcp`).
 - The council proxy and its per-launch gate accept on gate routes only the lease the launch was started with (`internal/gate/councilproxy`).
 
@@ -112,7 +112,7 @@ Controls that exist (all in `cmd/sablecourtd`):
 
 Gaps:
 
-- On `localhost`, browsers share cookies across ports, so another local web service you visit can receive the session cookie. Tracked in issue 104.
+- On `localhost`, browsers do not isolate cookies by port (RFC 6265 section 8.5, cited in ADR-0014), so another local web service you visit can receive the session cookie. Tracked in issue 104.
 
 ### Guessing the operator token
 
@@ -190,11 +190,11 @@ Gaps:
 
 Controls that exist:
 
-- Each row stores the hash of the row before it, and `audit verify` recomputes the chain; it detects a changed field in a hashed row (unless every later hash was recomputed) and a row deleted from or inserted into the middle (`internal/domain`, `internal/store`).
+- Each row stores the hash of the row before it, and `audit verify` recomputes the chain; it detects a changed field in a hashed row (unless every later hash was recomputed, and except a `|` moved between adjacent hashed fields) and a hashed row deleted from or inserted into the middle (`internal/domain`, `internal/store`).
 
 Gaps (all tracked in issue 10):
 
-- Verification skips rows with an empty hash, accepts any surviving prefix of the chain, and does not hash the row ID.
+- Verification skips rows with an empty hash (an unhashed row inserted into the middle passes), accepts any surviving prefix of the chain, does not hash the row ID, and joins the hashed fields with an unescaped `|`, so moving a `|` between adjacent fields passes. The next append after a row with an empty hash starts again from `genesis`.
 - The hash has no key and no copy of the newest hash is kept elsewhere, so whoever can write the database can rewrite the chain.
 - Almost every writer ignores a failed append.
 

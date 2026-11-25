@@ -57,6 +57,6 @@
   <path class="f" d="M911 216V112" marker-end="url(#a)"/>
   <text class="lbl" x="921" y="170">reads</text>
 
-  <text class="cap" x="40" y="322">Row hash: SHA-256 of previous hash, category, task, workload, action, outcome, detail and created at, joined with |. The row ID is not hashed.</text>
+  <text class="cap" x="40" y="322">Row hash: SHA-256 of previous hash, category, task, workload, action, outcome, detail and created at, joined with an unescaped |. The row ID is not hashed.</text>
   <text class="cap" x="40" y="344">Verify recomputes each hash from those fields and checks each prev_hash against the last hashed row. Any surviving prefix passes.</text>
 </svg>

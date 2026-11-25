@@ -40,7 +40,7 @@ When the check passes, `sablectl doctor` shows it on its audit line (`valid`, wi
 
 ## What a pass does not prove
 
-A pass means the hashed rows present link up and match their fields. It does not detect deletion of the newest rows, a row whose hash was emptied (the check skips it), renumbered rows (the ID is not hashed), or a rewrite of the whole chain by someone who can write the database, because the hash has no key. It says nothing about events that are never recorded, such as sign-ins. `sablectl doctor` prints no audit line at all when the check fails, so use `sablectl audit verify` to see the failure. The full list is in [audit](../how-it-works/audit.md); the checkpoint in step 4 is a manual workaround for the first gap, not a feature of the product.
+A pass means the hashed rows present link up and match their fields. It does not detect deletion of the newest rows, a row whose hash was emptied (the check skips it), renumbered rows (the ID is not hashed), a `|` moved between adjacent fields (the separator is not escaped), an unhashed row inserted into the middle, or a rewrite of the whole chain by someone who can write the database, because the hash has no key. It says nothing about events that are never recorded, such as sign-ins. `sablectl doctor` prints no audit line at all when the check fails, so use `sablectl audit verify` to see the failure. The full list is in [audit](../how-it-works/audit.md); the checkpoint in step 4 is a manual workaround for the first gap, not a feature of the product.
 
 ## In depth
 
