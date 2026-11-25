@@ -121,6 +121,53 @@ func TestCodingAdapterHandleAlive(t *testing.T) {
 	}
 }
 
+func TestCodingAdapterProbeInaccessibleWorktreeRootReturnsError(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "worktrees")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := resolvedPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := "task_inaccessible_root"
+	workDir := filepath.Join(resolvedRoot, sanitizeSegment(taskID))
+	branch := "sablecourt/" + sanitizeSegment(taskID)
+	if err := writeWorktreeState(workDir, &worktreeState{
+		TaskID: taskID,
+		Branch: branch,
+		Base:   strings.Repeat("a", 40),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start, err := scruntime.ProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := scruntime.Handle{
+		AdapterName:      "coding:claude",
+		ExternalID:       taskID,
+		WorkDir:          workDir,
+		Branch:           branch,
+		PID:              os.Getpid(),
+		ProcessStartTime: start,
+		LogPath:          workDir + ".log",
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+	adapter := NewAdapter(root)
+	if alive, err := adapter.HandleAlive(context.Background(), handle); err == nil || alive {
+		t.Fatalf("HandleAlive on inaccessible root = (%t, %v), want (false, error)", alive, err)
+	}
+	if exited, err := adapter.HandleExited(context.Background(), handle); err == nil || exited {
+		t.Fatalf("HandleExited on inaccessible root = (%t, %v), want (false, error)", exited, err)
+	}
+}
+
 func TestAdapterLaunchIdentity(t *testing.T) {
 	shellHarness(t, "exit 0")
 	a, spec := codingFixture(t)

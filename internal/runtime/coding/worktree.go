@@ -28,6 +28,10 @@ type worktreeState struct {
 	beforeGit    func() error
 	configLock   func(context.Context) (func(), error)
 	TaskID       string
+	Mode         string `json:",omitempty"`
+	ReadOnly     bool   `json:",omitempty"`
+	CouncilKey   string `json:",omitempty"`
+	CheckoutDir  string `json:",omitempty"`
 	Repo         string
 	CommonDir    string
 	GitDir       string
@@ -41,6 +45,24 @@ type worktreeState struct {
 	Artifacts    []scruntime.Artifact
 	Worker       *workerIdentity `json:",omitempty"`
 	Result       *processResult  `json:",omitempty"`
+}
+
+func (s *worktreeState) checkoutDir(taskBase string) string {
+	if s.CheckoutDir != "" {
+		return s.CheckoutDir
+	}
+	return taskBase
+}
+
+func (a *Adapter) taskBase(taskID string) (string, error) {
+	if a == nil || a.WorktreeRoot == "" || taskID == "" {
+		return "", errors.New("worktree root and task ID are required")
+	}
+	root, err := resolvedPath(a.WorktreeRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, sanitizeSegment(taskID)), nil
 }
 
 func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (string, *worktreeState, error) {
@@ -210,6 +232,9 @@ func (s *worktreeState) excludeIncludeKey() string {
 }
 
 func (s *worktreeState) registrationPaths(dir string) []string {
+	if s.Mode != "" {
+		return []string{filepath.Join(s.GitDir, "commondir"), filepath.Join(s.GitDir, "gitdir")}
+	}
 	return []string{filepath.Join(s.GitDir, "commondir"), filepath.Join(s.GitDir, "gitdir"),
 		filepath.Join(s.GitDir, "info", "exclude"), dir + excludeConfigSuffix}
 }
@@ -284,13 +309,26 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	if err != nil {
 		return nil, err
 	}
-	segment := sanitizeSegment(handle.ExternalID)
-	if handle.ExternalID == "" || handle.WorkDir != filepath.Join(root, segment) || handle.Branch != "sablecourt/"+segment {
+	if handle.ExternalID == "" {
 		return nil, errors.New("invalid coding worktree handle")
 	}
-	state, err := readWorktreeState(handle.WorkDir + stateSuffix)
+	segment := sanitizeSegment(handle.ExternalID)
+	taskBase := filepath.Join(root, segment)
+	if handle.LogPath != "" && handle.LogPath != taskBase+".log" {
+		return nil, errors.New("invalid coding worktree handle")
+	}
+	state, err := readWorktreeState(taskBase + stateSuffix)
 	if err != nil {
 		return nil, err
+	}
+	if state.Mode == "" {
+		if handle.WorkDir != taskBase || handle.Branch != "sablecourt/"+segment {
+			return nil, errors.New("invalid coding worktree handle")
+		}
+	} else {
+		if handle.WorkDir != state.checkoutDir(taskBase) || handle.Branch != state.Branch {
+			return nil, errors.New("invalid coding worktree handle")
+		}
 	}
 	if state.Worker != nil && (state.Worker.PID != handle.PID || state.Worker.Start.IsZero() || !state.Worker.Start.Equal(handle.ProcessStartTime)) {
 		return nil, errors.New("coding worker identity does not match handle")

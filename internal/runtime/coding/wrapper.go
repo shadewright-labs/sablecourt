@@ -24,6 +24,7 @@ type wrapperSpec struct {
 	Args         []string
 	Env          []string
 	Dir, Scratch string
+	StateBase    string
 	Limit        time.Duration
 }
 
@@ -56,22 +57,26 @@ func runWrapper() error {
 	if len(spec.Args) == 0 {
 		return errors.New("missing coding command")
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return err
+	base := spec.StateBase
+	if base == "" {
+		var err error
+		base, err = os.Getwd()
+		if err != nil {
+			return err
+		}
 	}
-	run := dir + ".run"
+	run := base + ".run"
 	start, err := scruntime.ProcessStartTime(os.Getpid())
 	if err != nil {
 		return err
 	}
 	id := workerIdentity{os.Getpid(), start}
-	state, err := readWorktreeState(dir + stateSuffix)
+	state, err := readWorktreeState(base + stateSuffix)
 	if err != nil {
 		return err
 	}
 	state.Worker = &id
-	if err := writeWorktreeState(dir, state); err != nil {
+	if err := writeWorktreeState(base, state); err != nil {
 		return err
 	}
 	ready := os.NewFile(3, "ready")
@@ -95,7 +100,7 @@ func runWrapper() error {
 		return err
 	}
 	defer stderr.Close()
-	p, err := startProcess(cmd, dir, spec.Scratch, spec.Limit, os.Stdout, &boundedLog{file: stdout}, &boundedLog{file: stderr})
+	p, err := startProcess(cmd, base, spec.Scratch, spec.Limit, os.Stdout, &boundedLog{file: stdout}, &boundedLog{file: stderr})
 	if err != nil {
 		return err
 	}
@@ -144,12 +149,12 @@ func (w attachWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func launchWrapper(cmd *exec.Cmd, dir, scratch, taskID string, limit time.Duration, hub *attach.Hub) (_ *codingProcess, id workerIdentity, err error) {
+func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.Duration, hub *attach.Hub) (_ *codingProcess, id workerIdentity, err error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, id, err
 	}
-	run := dir + ".run"
+	run := stateBase + ".run"
 	if err = os.Mkdir(run, 0700); err != nil {
 		return nil, id, err
 	}
@@ -158,7 +163,14 @@ func launchWrapper(cmd *exec.Cmd, dir, scratch, taskID string, limit time.Durati
 			_ = os.RemoveAll(run)
 		}
 	}()
-	data, err := json.Marshal(wrapperSpec{cmd.Args, cmd.Env, cmd.Dir, scratch, limit})
+	data, err := json.Marshal(wrapperSpec{
+		Args:      cmd.Args,
+		Env:       cmd.Env,
+		Dir:       cmd.Dir,
+		Scratch:   scratch,
+		StateBase: stateBase,
+		Limit:     limit,
+	})
 	if err != nil {
 		return nil, id, err
 	}
@@ -169,7 +181,7 @@ func launchWrapper(cmd *exec.Cmd, dir, scratch, taskID string, limit time.Durati
 	defer ready.Close()
 	defer child.Close()
 	wrapper := exec.Command(exe, wrapperArg)
-	wrapper.Dir = dir
+	wrapper.Dir = filepath.Dir(stateBase)
 	wrapper.Env = []string{}
 	wrapper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	wrapper.Stdin = bytes.NewReader(data)
@@ -221,7 +233,11 @@ func readBounded(path string, limit int) ([]byte, error) {
 }
 
 func recordedExit(h scruntime.Handle) (*processResult, error) {
-	dir := h.WorkDir + ".run"
+	return recordedExitAt(h.WorkDir, h)
+}
+
+func recordedExitAt(stateBase string, h scruntime.Handle) (*processResult, error) {
+	dir := stateBase + ".run"
 	raw, err := readBounded(filepath.Join(dir, "exit"), 512)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -250,7 +266,7 @@ func recordedExit(h scruntime.Handle) (*processResult, error) {
 	return result, nil
 }
 
-func stopVerified(ctx context.Context, h scruntime.Handle, state *worktreeState) error {
+func stopVerified(ctx context.Context, h scruntime.Handle, stateBase string, state *worktreeState) error {
 	alive, err := scruntime.ProcessAliveWithStartTime(h.PID, h.ProcessStartTime)
 	if err != nil || !alive {
 		return err
@@ -269,7 +285,7 @@ func stopVerified(ctx context.Context, h scruntime.Handle, state *worktreeState)
 			return err
 		}
 		state.Result = &processResult{PID: h.PID, Start: h.ProcessStartTime, ExitCode: -1, Message: "coding task was stopped"}
-		return writeWorktreeState(h.WorkDir, state)
+		return writeWorktreeState(stateBase, state)
 	}
 	// The wrapper handles TERM, stops and reaps the harness group, then records exit.
 	if err := syscall.Kill(-group, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
