@@ -1906,3 +1906,138 @@ func TestLiveModeWithoutGitInfoExclude(t *testing.T) {
 		t.Fatal("expected symlinked .git/info to be rejected")
 	}
 }
+
+func TestWriterRetryRecreatesCleanWorktreeFromLastTip(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("native Seatbelt test requires macOS (running on %s)", runtime.GOOS)
+	}
+	for _, afterSuccess := range []bool{false, true} {
+		name := "after_initial_failure"
+		if afterSuccess {
+			name = "after_prior_success_then_failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := initTempGitRepo(t)
+			baseCommit := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+			harnessDir := t.TempDir()
+			worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
+			adapter := NewAdapter(worktreeRoot)
+			adapter.HarnessPaths = map[string]string{
+				"claude": filepath.Join(harnessDir, "claude"),
+			}
+			conclaveID := "ccl-writer-retry-" + name
+			t.Cleanup(func() { _ = adapter.CleanupCouncil(context.Background(), conclaveID) })
+
+			makeSpec := func(taskID string) scruntime.LaunchSpec {
+				return scruntime.LaunchSpec{
+					TaskID: taskID,
+					Workload: domain.Workload{
+						Metadata: domain.ObjectMeta{Name: "claude", Zone: domain.ZoneSandbox},
+						Spec: domain.WorkloadSpec{
+							Class:  domain.ClassCodingAgent,
+							Coding: &domain.CodingConfig{RepoPath: repo, Harness: "claude", Sandbox: "seatbelt"},
+						},
+					},
+					InputJSON: mustMarshalInput(t, map[string]any{
+						"checkoutMode":   "writer",
+						"checkoutWriter": "claude",
+						"conclaveId":     conclaveID,
+						"role":           "claude",
+						"prompt":         "implement",
+					}),
+				}
+			}
+
+			expectedTip := baseCommit
+			if afterSuccess {
+				testWrite(t, harnessDir, "claude", "#!/bin/sh\nset -e\nprintf 'good-r1\\n' > good-r1.txt\nprintf 'ok-r1\\n'\n", 0o700)
+				h1, err := adapter.Start(ctx, makeSpec("w-r1"))
+				if err != nil {
+					t.Fatalf("Start r1: %v", err)
+				}
+				t.Cleanup(func() { _ = adapter.Stop(context.Background(), h1) })
+				waitUntil(t, func() bool { return outputClosed(adapter.processForHandle(h1).done) })
+				if obs, err := adapter.Observe(ctx, h1); err != nil || obs.State != scruntime.StateCompleted {
+					t.Fatalf("Observe r1 = %+v, err = %v", obs, err)
+				}
+				arts, err := adapter.CollectArtifacts(ctx, h1)
+				if err != nil {
+					t.Fatalf("CollectArtifacts r1: %v", err)
+				}
+				for _, art := range arts {
+					if art.Name == "git-commit" {
+						expectedTip = art.Text
+					}
+				}
+				if expectedTip == "" || expectedTip == baseCommit {
+					t.Fatalf("expected r1 to advance tip, got %q", expectedTip)
+				}
+			}
+
+			// Failed attempt leaves a local commit, a modified tracked file, and an untracked file.
+			testWrite(t, harnessDir, "claude", `#!/bin/sh
+set -e
+printf 'failed-commit\n' > failed-commit.txt
+git add -- failed-commit.txt
+git commit --no-gpg-sign -m 'failed attempt commit'
+printf 'dirty-edit\n' >> README.md
+printf 'partial-untracked\n' > partial.txt
+exit 1
+`, 0o700)
+			hFail, err := adapter.Start(ctx, makeSpec("w-fail"))
+			if err != nil {
+				t.Fatalf("Start failed attempt: %v", err)
+			}
+			t.Cleanup(func() { _ = adapter.Stop(context.Background(), hFail) })
+			waitUntil(t, func() bool { return outputClosed(adapter.processForHandle(hFail).done) })
+			if obs, err := adapter.Observe(ctx, hFail); err != nil || obs.State != scruntime.StateFailed {
+				t.Fatalf("Observe failed attempt = %+v, err = %v", obs, err)
+			}
+
+			// Retry makes no changes, verifies clean tree at expectedTip, and must publish no git-diff.
+			goodCheck := ""
+			if afterSuccess {
+				goodCheck = `test "$(/bin/cat good-r1.txt)" = "good-r1" || { echo "MISSING_GOOD_R1" >&2; exit 12; }` + "\n"
+			}
+			retryScript := fmt.Sprintf(`#!/bin/sh
+set -u
+if [ "$(git rev-parse HEAD)" != %q ]; then
+    echo "WRONG_HEAD:$(git rev-parse HEAD)" >&2
+    exit 10
+fi
+if [ -e failed-commit.txt ] || [ -e partial.txt ]; then
+    echo "LEAKED_FAILED_FILE" >&2
+    exit 11
+fi
+%sif [ -n "$(git status --porcelain)" ]; then
+    echo "DIRTY_TREE:$(git status --porcelain)" >&2
+    exit 13
+fi
+echo "clean-retry-ok"
+`, expectedTip, goodCheck)
+			testWrite(t, harnessDir, "claude", retryScript, 0o700)
+
+			hRetry, err := adapter.Start(ctx, makeSpec("w-retry"))
+			if err != nil {
+				t.Fatalf("Start retry attempt: %v", err)
+			}
+			t.Cleanup(func() { _ = adapter.Stop(context.Background(), hRetry) })
+			waitUntil(t, func() bool { return outputClosed(adapter.processForHandle(hRetry).done) })
+			logData, _ := os.ReadFile(hRetry.LogPath)
+			obs, err := adapter.Observe(ctx, hRetry)
+			if err != nil || obs.State != scruntime.StateCompleted {
+				t.Fatalf("Observe retry = %+v, err = %v\nlog:\n%s", obs, err, string(logData))
+			}
+			arts, err := adapter.CollectArtifacts(ctx, hRetry)
+			if err != nil {
+				t.Fatalf("CollectArtifacts retry: %v", err)
+			}
+			for _, art := range arts {
+				if art.Name == "git-diff" {
+					t.Fatalf("no-op retry published leftover diff:\n%s", art.Text)
+				}
+			}
+		})
+	}
+}

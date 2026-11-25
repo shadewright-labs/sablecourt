@@ -1027,3 +1027,38 @@ func TestCouncilStdinPromptCancelsOnContextDone(t *testing.T) {
 		t.Fatal("council question prompt remained blocked after context cancellation")
 	}
 }
+
+func TestCouncilClientSendsIdempotencyKey(t *testing.T) {
+	installStubHarnesses(t, "claude", "codex", "agy")
+	repoDir := t.TempDir()
+
+	var gotKey string
+	rt := &handlerRoundTripper{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/councils":
+			gotKey = r.Header.Get("Idempotency-Key")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"ccl-idem-1","title":"Review","state":"active"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-idem-1/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-idem-1":
+			_, _ = w.Write([]byte(`{"conclave":{"id":"ccl-idem-1","state":"completed"},"messages":[{"id":1,"conclaveId":"ccl-idem-1","fromRole":"claude","toRole":"all","kind":"proposal","body":"ok","round":1}],"relics":[{"name":"digest","authorRole":"system","body":"ok"}],"turns":[{"round":1,"role":"claude","state":"completed"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+
+	root := newRootCmdWithTransport(rt)
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--api", "http://unix", "council", "Review this", "--repo", repoDir})
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("council command failed: %v (stderr=%s)", err, stderr.String())
+	}
+	if strings.TrimSpace(gotKey) == "" {
+		t.Fatal("expected sablectl council to send a non-empty Idempotency-Key header")
+	}
+}

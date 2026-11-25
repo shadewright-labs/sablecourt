@@ -587,3 +587,223 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 		t.Fatal("expected Model Gate grant on council panel workload to fail runtime check")
 	}
 }
+
+func TestCouncilCheckoutAdmissionOwnershipAndPrivatePaths(t *testing.T) {
+	_, _, token := councilTestInputs(t)
+
+	initRepo := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		councilTestGit(t, dir, "init", "--template=", "-q")
+		councilTestGit(t, dir, "commit", "--allow-empty", "-qm", "initial")
+	}
+
+	t.Run("checkout containing daemon state dir refused", func(t *testing.T) {
+		repo := t.TempDir()
+		initRepo(t, repo)
+		stateDir := filepath.Join(repo, "state")
+		t.Setenv("SABLECOURT_STATE_DIR", stateDir)
+		if _, err := operatortoken.LoadOrCreate(stateDir); err != nil {
+			t.Fatal(err)
+		}
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		body := fmt.Sprintf(`{"question":"Review","repo":%q,"live":true}`, repo)
+		res := councilTestRequest(h, http.MethodPost, "/api/v1/councils", token, body)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("POST = %d %s, want 400 rejecting state dir overlap", res.Code, res.Body)
+		}
+		councilAssertEmpty(t, st)
+	})
+
+	t.Run("checkout inside daemon state dir refused", func(t *testing.T) {
+		stateDir := filepath.Join(t.TempDir(), "state")
+		t.Setenv("SABLECOURT_STATE_DIR", stateDir)
+		if _, err := operatortoken.LoadOrCreate(stateDir); err != nil {
+			t.Fatal(err)
+		}
+		repo := filepath.Join(stateDir, "nested-repo")
+		initRepo(t, repo)
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		body := fmt.Sprintf(`{"question":"Review","repo":%q,"live":true}`, repo)
+		res := councilTestRequest(h, http.MethodPost, "/api/v1/councils", token, body)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("POST = %d %s, want 400 rejecting checkout inside state dir", res.Code, res.Body)
+		}
+		councilAssertEmpty(t, st)
+	})
+
+	t.Run("checkout overlapping home credential dirs refused", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("SABLECOURT_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+
+		for _, rel := range []string{"", ".ssh", ".aws", ".gnupg", ".config/gh", ".kube"} {
+			t.Run("rel="+rel, func(t *testing.T) {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				repo := home
+				if rel != "" {
+					repo = filepath.Join(home, rel)
+				}
+				initRepo(t, repo)
+				st := daemonTestStore(t)
+				h := councilTestHandler(st, nil, councilTestOptions(token))
+				body := fmt.Sprintf(`{"question":"Review","repo":%q,"live":true}`, repo)
+				res := councilTestRequest(h, http.MethodPost, "/api/v1/councils", token, body)
+				if res.Code != http.StatusBadRequest {
+					t.Fatalf("POST (%s) = %d %s, want 400 rejecting credential path overlap", rel, res.Code, res.Body)
+				}
+				councilAssertEmpty(t, st)
+			})
+		}
+	})
+
+	t.Run("checkout owned by another user refused", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root")
+		}
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		body := `{"question":"Review","repo":"/usr","live":true}`
+		res := councilTestRequest(h, http.MethodPost, "/api/v1/councils", token, body)
+		if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "owned") {
+			t.Fatalf("POST (/usr) = %d %s, want 400 mentioning ownership", res.Code, res.Body)
+		}
+		councilAssertEmpty(t, st)
+	})
+}
+
+func TestReservedCouncilPanelNamesRefused(t *testing.T) {
+	for _, role := range councilPanel {
+		t.Run("ensureCouncilPanelWorkloads refuses "+role, func(t *testing.T) {
+			st := daemonTestStore(t)
+			b := &config.Bundle{
+				Workloads: map[string]domain.Workload{
+					role: {
+						Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox},
+						Spec: domain.WorkloadSpec{
+							Class:  domain.ClassCodingAgent,
+							Coding: &domain.CodingConfig{Harness: role, Sandbox: "seatbelt"},
+							Grants: domain.GrantSet{MCPTools: []string{"conclave.read"}},
+						},
+					},
+				},
+			}
+			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b); err == nil {
+				t.Fatalf("ensureCouncilPanelWorkloads accepted manifest workload named %q", role)
+			}
+		})
+	}
+
+	t.Run("runtime checker refuses extra grants on panel workload", func(t *testing.T) {
+		st := daemonTestStore(t)
+		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := &config.Bundle{Workloads: maps.Clone(bundle.Workloads)}
+		wl := bad.Workloads["claude"]
+		wl.Spec.Grants.MCPTools = []string{"conclave.read"}
+		bad.Workloads["claude"] = wl
+		adapters := map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: &councilTestAdapter{}}
+		if err := councilRuntimeChecker(func() *config.Bundle { return bad }, adapters)(t.Context(), store.CouncilCheckout{Source: t.TempDir()}); err == nil {
+			t.Fatal("expected extra MCP grants on council panel workload to fail runtime check")
+		}
+	})
+}
+
+func TestCouncilOpenIdempotency(t *testing.T) {
+	repo, _, token := councilTestInputs(t)
+	bodyA := fmt.Sprintf(`{"question":"Review A","repo":%q,"ref":"HEAD"}`, repo)
+	bodyB := fmt.Sprintf(`{"question":"Review B","repo":%q,"ref":"HEAD"}`, repo)
+
+	postWithKey := func(h http.Handler, key, body string, sendKey bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/councils", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+token)
+		if sendKey {
+			r.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	t.Run("same key and payload returns first council", func(t *testing.T) {
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		r1 := postWithKey(h, "idem-key-1", bodyA, true)
+		if r1.Code != http.StatusCreated {
+			t.Fatalf("first POST = %d %s", r1.Code, r1.Body)
+		}
+		var first domain.ConclaveSession
+		if err := json.Unmarshal(r1.Body.Bytes(), &first); err != nil || first.ID == "" {
+			t.Fatalf("decode first: %v", err)
+		}
+		r2 := postWithKey(h, "idem-key-1", bodyA, true)
+		if r2.Code != http.StatusOK && r2.Code != http.StatusCreated {
+			t.Fatalf("second POST = %d %s", r2.Code, r2.Body)
+		}
+		var second domain.ConclaveSession
+		if err := json.Unmarshal(r2.Body.Bytes(), &second); err != nil {
+			t.Fatalf("decode second: %v", err)
+		}
+		if second.ID != first.ID {
+			t.Fatalf("repeated POST created %q instead of returning %q", second.ID, first.ID)
+		}
+		rooms, err := st.ListConclaves(t.Context())
+		if err != nil || len(rooms) != 1 {
+			t.Fatalf("rooms = %d, err = %v, want 1", len(rooms), err)
+		}
+	})
+
+	t.Run("same key with different payload refused", func(t *testing.T) {
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		r1 := postWithKey(h, "idem-key-2", bodyA, true)
+		if r1.Code != http.StatusCreated {
+			t.Fatalf("first POST = %d %s", r1.Code, r1.Body)
+		}
+		r2 := postWithKey(h, "idem-key-2", bodyB, true)
+		if r2.Code != http.StatusConflict {
+			t.Fatalf("second POST with different payload = %d %s, want 409", r2.Code, r2.Body)
+		}
+		rooms, err := st.ListConclaves(t.Context())
+		if err != nil || len(rooms) != 1 {
+			t.Fatalf("rooms = %d, err = %v, want 1", len(rooms), err)
+		}
+	})
+
+	t.Run("no key creates a new council each time", func(t *testing.T) {
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		r1 := postWithKey(h, "", bodyA, false)
+		r2 := postWithKey(h, "", bodyA, false)
+		if r1.Code != http.StatusCreated || r2.Code != http.StatusCreated {
+			t.Fatalf("POSTs without key = %d, %d", r1.Code, r2.Code)
+		}
+		var first, second domain.ConclaveSession
+		_ = json.Unmarshal(r1.Body.Bytes(), &first)
+		_ = json.Unmarshal(r2.Body.Bytes(), &second)
+		if first.ID == "" || second.ID == "" || first.ID == second.ID {
+			t.Fatalf("expected two distinct councils without key, got %q and %q", first.ID, second.ID)
+		}
+		rooms, err := st.ListConclaves(t.Context())
+		if err != nil || len(rooms) != 2 {
+			t.Fatalf("rooms = %d, err = %v, want 2", len(rooms), err)
+		}
+	})
+
+	t.Run("blank key refused", func(t *testing.T) {
+		st := daemonTestStore(t)
+		h := councilTestHandler(st, nil, councilTestOptions(token))
+		r := postWithKey(h, "   ", bodyA, true)
+		if r.Code != http.StatusBadRequest {
+			t.Fatalf("blank Idempotency-Key = %d %s, want 400", r.Code, r.Body)
+		}
+		councilAssertEmpty(t, st)
+	})
+}
