@@ -8,11 +8,11 @@ Status: built. Parts that are partly built or parked are marked in the [status t
 
 ## What happens to a request
 
-1. A caller submits work. The callers are you through `sablectl` or the web UI (operator token or session), Shadewright (scoped integration token) and a `Schedule` or workflow step inside the daemon. Nightloom only reads. The daemon stores a task in state `submitted` with an idempotency key. See [tasks](tasks.md).
-2. The reconciler picks up `submitted` tasks, at most four running at once by default. For each it mints a lease, assembles a redacted context packet and starts the workload through the runtime that matches its class: a host coding run, a Docker container, or, for a council turn, a harness container with a per-launch proxy. See [workloads and runtimes](workloads-and-runtimes.md) and [harness containers](harness-containers.md).
+1. A caller submits work. The main callers are you through `sablectl` or the web UI (operator token or session), Shadewright (scoped integration token) and a `Schedule` or workflow step inside the daemon. The parked A2A and GitHub webhook routes can also submit tasks. Nightloom only reads. The daemon stores a task in state `submitted` with an idempotency key. See [tasks](tasks.md).
+2. The reconciler picks up `submitted` tasks, at most four running at once by default. For each it mints a lease, assembles a redacted context packet (deterministic controllers get none) and starts the workload through the runtime that matches its class: a host coding run, a Docker container, or, for a council turn, a harness container with a per-launch proxy. See [workloads and runtimes](workloads-and-runtimes.md) and [harness containers](harness-containers.md).
 3. The workload asks for what it needs through the gates, presenting the lease. The Model Gate checks the lease, grant and budget and forwards inference to the provider with the key it holds ([model gate](model-gate.md)). The MCP Gate serves granted tools and typed actions after policy ([tools and actions](tools-and-actions.md)). An action whose effect is `approve` goes to the Approval Queue, the task waits in `input-required`, and a person confirms the pinned digest ([approvals](approvals.md)).
 4. The reconciler observes the workload, moves the task to `completed`, `failed` or `cancelled`, and revokes its lease. A restart of the daemon recovers running tasks instead of dropping them.
-5. Every state change, policy decision, approval and model call is appended to the [audit chain](audit.md).
+5. The gates, the reconciler, the Conclave broker and the approval queue append policy decisions, approvals, task submission, cancellation, suspension and resumption, and most model calls to the [audit chain](audit.md). Some outcomes are not appended: a task moving from `submitted` to `working` on dispatch is recorded as a task event only, and an upstream error status that the Model Gate passes through leaves no audit row.
 
 Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [council](council.md) is the Conclave of the three harnesses. Context and learning are in [context and learning](context-and-learning.md), and who may call what is in [identity and access](identity-and-access.md) and [integrations](integrations.md).
 
@@ -20,7 +20,7 @@ Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [cou
 
 | Rule | Enforced by |
 | --- | --- |
-| 1. Model output is never authorization | The policy engine (`internal/policy`) decides each capability; an `approve` effect needs a person to confirm the pinned digest (`internal/approval`). |
+| 1. Model output is never authorization | The policy engine (`internal/policy`) decides each tool, action and delegation request; an `approve` effect needs a person to confirm the pinned digest (`internal/approval`). |
 | 2. Workloads hold no raw secrets | Provider keys stay in the secret store and the Model Gate; a workload gets a lease and a stripped environment. The subscription logins of ADR-0011 are the one exception. |
 | 3. External input is untrusted | `internal/redact` runs at the MCP Gate, in Conclave messages and Relics, in Court Memory writes, in Scry output and in council context. |
 | 4. Separate identities, fail closed | Policy defaults to deny, a manifest with another default is rejected, an exhausted budget stops a call, a missing sandbox stops a launch. |

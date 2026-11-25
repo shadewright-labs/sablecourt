@@ -1,6 +1,6 @@
 # Sablecourt
 
-Sablecourt runs coding agents and deterministic programs on one machine under limits you set. Workloads get no raw keys: every model call, tool call and approval goes through a gate that checks a short-lived lease, a grant, a policy and a budget, and every decision is written to an audit chain. Today it is built for a local council in which `claude`, `codex` and `agy` answer one question in rounds, and for the Shadewright incident contract.
+Sablecourt runs coding agents and deterministic programs on one machine under limits you set. Workloads get no raw provider keys. Model calls, tool calls and approvals go through gates that check a short-lived lease and the workload's grants, then policy or budget where they apply, and most decisions are written to an audit chain. The one exception is the council harnesses, which use their own subscription login. Today it is built for a local council in which `claude`, `codex` and `agy` answer one question in rounds, and for the Shadewright incident contract.
 
 ## What it refuses to do
 

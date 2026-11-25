@@ -93,7 +93,7 @@
   <text class="s" x="60" y="999">API endpoints</text>
   <rect class="ext" x="540" y="952" width="210" height="64" rx="10"/>
   <text class="h" x="556" y="978">Git host</text>
-  <text class="s" x="556" y="999">branches, pull requests</text>
+  <text class="s" x="556" y="999">pull requests</text>
   <rect class="ext" x="790" y="952" width="210" height="64" rx="10"/>
   <text class="h" x="806" y="978">Provider hosts</text>
   <text class="s" x="806" y="999">login and inference only</text>
