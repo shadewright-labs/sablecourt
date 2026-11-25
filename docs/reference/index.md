@@ -1,15 +1,15 @@
 # Reference
 
-Facts to look up, kept apart from the guides. Every table names its source file, and each page was written from the code on `main`.
+Facts to look up, kept apart from the guides. Each page is generated from the code or checked against it by a test that `go test ./...` runs, so a page that falls behind the code fails CI. `make docs` regenerates the generated parts and `make docs-check` runs the checks.
 
 Status: built.
 
-- [Manifests](manifests.md): the six manifest kinds, every field, its default and its validation errors.
-- [HTTP API](http-api.md): every route that `sablecourtd` registers, grouped by the credential that reaches it.
-- [CLI](cli.md): every `sablectl` command and flag, every `sablecourtd` flag, and the environment of `sablecourt-agent`.
+- [Manifests](manifests.md): the six manifest kinds and every field with its type, whether the loader requires it, and what it means. Tested against the manifest types and the loader.
+- [HTTP API](http-api.md): every route that `sablecourtd` registers, with its method, grouped by the credential that reaches it. Tested against the registered routes.
+- [CLI](cli.md): every visible `sablectl` command and flag and every `sablecourtd` flag, generated from the command trees, and the environment of `sablecourt-agent`.
 - [Configuration](configuration.md): the state directory, secret names, environment variables and files the daemon writes.
-- [Limits](limits.md): the limits, ceilings and timeouts that refuse, cut or time out a request, a task or a stored value, with the default and the source file.
-- [Metrics](metrics.md): the Prometheus metrics at `GET /metrics`.
+- [Limits](limits.md): limits, ceilings and timeouts that refuse, cut or time out a request, a task or a stored value, each with the constant that sets it. Tested against those constants.
+- [Metrics](metrics.md): the Prometheus metrics at `GET /metrics`. Names and types tested against the handler.
 
 ## Status values in the tables
 

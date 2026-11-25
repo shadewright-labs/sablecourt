@@ -13,7 +13,7 @@ Source: `internal/operatortoken/token.go` and `cmd/sablecourtd/main.go`. The dir
 | `operator.token` | The operator token, `op_` followed by 64 hex characters, mode 0600. The daemon creates it on first start. `sablectl` reads it when it talks to a local daemon and has no other token. |
 | `operator.token.pending` | Short-lived file the daemon writes while it creates `operator.token`. |
 | `daemon.lock` | Lock file. A second daemon on the same directory refuses to start. |
-| `gates/` | One `gate.sock` per council launch, removed on cleanup. |
+| `gates/` | Council gate sockets. A council launch in Unix socket mode keeps its `gate.sock` here until cleanup; a launch in host-gateway mode uses a TLS gate and keeps no socket. |
 
 ## Other files
 
