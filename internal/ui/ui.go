@@ -179,14 +179,14 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	}, nil
 }
 
-// Router is the part of *http.ServeMux that RegisterRoutes uses.
-type Router interface {
+// router is the part of *http.ServeMux that RegisterRoutes uses.
+type router interface {
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
 
 // RegisterRoutes attaches the dashboard pages and form posts to mux.
-func (d *Dashboard) RegisterRoutes(mux Router) {
+func (d *Dashboard) RegisterRoutes(mux router) {
 	mux.Handle("GET /{$}", d)
 	mux.HandleFunc("GET /tasks/{id}", d.handleTaskDetail)
 	mux.HandleFunc("GET /providers", d.handleProvidersPage)
