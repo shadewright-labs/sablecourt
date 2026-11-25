@@ -19,10 +19,12 @@ import (
 // below it. Hidden commands, hidden or deprecated flags and the help flag
 // that every command has are left out.
 // Cobra's default help and completion commands are added first, so the
-// output matches what a user sees.
+// output matches what a user can run. Cobra adds the completion command to
+// a root without subcommands only when it is called, so Render asks for it
+// by name: "sablecourtd completion bash" works and is listed.
 func Render(root *cobra.Command) string {
 	root.InitDefaultHelpCmd()
-	root.InitDefaultCompletionCmd()
+	root.InitDefaultCompletionCmd("completion")
 
 	var b strings.Builder
 	cmds := visible(root)

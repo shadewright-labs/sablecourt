@@ -138,6 +138,21 @@ var conversions = map[string]bool{
 	"float32": true, "float64": true,
 }
 
+// convert applies a numeric conversion as Go does for a constant, so that
+// arithmetic after it uses the operand type: int(1025.0) / 2 is 512 and
+// float64(3) / 2 is 1.5. A value the type cannot hold exactly is an error.
+func convert(typ string, a value) (value, error) {
+	if strings.HasPrefix(typ, "float") {
+		a.v = constant.ToFloat(a.v)
+	} else {
+		a.v = constant.ToInt(a.v)
+	}
+	if a.v.Kind() == constant.Unknown {
+		return value{}, fmt.Errorf("%s: constant not representable", typ)
+	}
+	return a, nil
+}
+
 func (e *evaluator) eval(d *constDecl, x ast.Expr) (value, error) {
 	switch x := x.(type) {
 	case *ast.BasicLit:
@@ -229,12 +244,13 @@ func (e *evaluator) eval(d *constDecl, x ast.Expr) (value, error) {
 		switch fn := x.Fun.(type) {
 		case *ast.Ident:
 			if conversions[fn.Name] {
-				return arg, nil
+				return convert(fn.Name, arg)
 			}
 		case *ast.SelectorExpr:
 			if isTimeDuration(fn) {
+				arg, err := convert("int64", arg)
 				arg.duration = true
-				return arg, nil
+				return arg, err
 			}
 		}
 		return value{}, fmt.Errorf("unsupported call")
@@ -427,5 +443,39 @@ func TestLimitsReferenceMatchesConstants(t *testing.T) {
 		if want.Cmp(have) != 0 {
 			t.Errorf("limits.md:%d: %s is %s in the code, the page says %s", row.line, row.constantRef, have.RatString(), row.value)
 		}
+	}
+}
+
+// TestEvalConversions checks that a conversion sets the operand type of the
+// arithmetic that follows it.
+func TestEvalConversions(t *testing.T) {
+	for _, tc := range []struct {
+		expr, want string
+		duration   bool
+	}{
+		{"int(1025.0) / 2", "512", false},
+		{"int64(7) / 2", "3", false},
+		{"float64(3) / 2", "1.5", false},
+		{"7 / 2", "3", false},
+		{"7.0 / 2", "3.5", false},
+		{"time.Duration(1025.0) / 2", "512", true},
+		{"(1 << 20) / 4", "262144", false},
+	} {
+		x, err := parser.ParseExpr(tc.expr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := newEvaluator().eval(&constDecl{}, x)
+		if err != nil {
+			t.Errorf("%s: %v", tc.expr, err)
+			continue
+		}
+		if got.v.String() != tc.want || got.duration != tc.duration {
+			t.Errorf("%s = %s (duration %v), want %s (duration %v)", tc.expr, got.v.String(), got.duration, tc.want, tc.duration)
+		}
+	}
+	x, _ := parser.ParseExpr("int(1.5)")
+	if _, err := newEvaluator().eval(&constDecl{}, x); err == nil {
+		t.Error("int(1.5) evaluated; want an error, as Go refuses it")
 	}
 }

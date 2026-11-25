@@ -65,8 +65,8 @@ Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/ups
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `spec.grants.mcpServers[].name` | string | no | Prefix of the proxied tool names; an entry without a name is skipped. |
-| `spec.grants.mcpServers[].url` | string | no | Streamable HTTP endpoint of the server; an entry without a URL is skipped. |
-| `spec.grants.mcpServers[].secretName` | string | no | Secret store entry sent as the credential; with none, calls carry no credential. |
+| `spec.grants.mcpServers[].url` | string | no | Streamable HTTP endpoint of the server; an entry without a URL is skipped. A call needs an `http` or `https` URL with a host. With `http`, the `secretName` credential crosses the network unencrypted. |
+| `spec.grants.mcpServers[].secretName` | string | no | Secret store entry sent as the credential on every call, whatever the URL scheme; with none, calls carry no credential. |
 | `spec.grants.mcpServers[].authHeader` | string | no | Header that carries the secret, `Authorization` when empty. |
 | `spec.grants.mcpServers[].authPrefix` | string | no | Text put before the secret, `Bearer ` when empty and the header is `Authorization`. |
 | `spec.grants.mcpServers[].allowedTools` | list of strings | no | The only tools of this server that are registered. |

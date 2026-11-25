@@ -600,6 +600,46 @@ Sablecourt local-first and enterprise Kubernetes control plane daemon
 | `--secret-file` | string | empty | Optional 0600 JSON secret file fallback path |
 | `--socket` | string | empty | Optional Unix domain socket path for local CLI access (0600) |
 
+### `sablecourtd completion`
+
+Generate the autocompletion script for the specified shell
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablecourtd completion bash`
+
+Generate the autocompletion script for bash
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
+### `sablecourtd completion fish`
+
+Generate the autocompletion script for fish
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
+### `sablecourtd completion powershell`
+
+Generate the autocompletion script for powershell
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
+### `sablecourtd completion zsh`
+
+Generate the autocompletion script for zsh
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
 <!-- END GENERATED sablecourtd -->
 
 ## sablecourt-agent

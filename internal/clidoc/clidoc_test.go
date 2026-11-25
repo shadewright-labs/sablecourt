@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 const page = "intro\n<!-- BEGIN GENERATED a: do not edit, run `make docs` -->\n\nold a\n\n<!-- END GENERATED a -->\nmid\n<!-- BEGIN GENERATED b: do not edit, run `make docs` -->\n\nold b\n\n<!-- END GENERATED b -->\n"
@@ -76,6 +79,32 @@ func TestWriteBlocks(t *testing.T) {
 			for name, content := range tc.blocks {
 				if err := Check(path, name, content); err != nil {
 					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderListsCompletion checks that the completion commands appear for
+// a root with subcommands and for a root without any, since cobra serves
+// "completion" in both cases.
+func TestRenderListsCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sub  bool
+	}{
+		{"root with subcommands", true},
+		{"root without subcommands", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := &cobra.Command{Use: "tool", Run: func(*cobra.Command, []string) {}}
+			if tc.sub {
+				root.AddCommand(&cobra.Command{Use: "run", Short: "Run it", Run: func(*cobra.Command, []string) {}})
+			}
+			out := Render(root)
+			for _, want := range []string{"### `tool completion`", "### `tool completion bash`", "### `tool completion zsh`"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("Render output lacks %s:\n%s", want, out)
 				}
 			}
 		})

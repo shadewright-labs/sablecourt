@@ -186,6 +186,9 @@ func TestConfigurationStateDirectory(t *testing.T) {
 			continue
 		}
 		accounted[name] = true
+		if _, ok := rows[name]; !ok {
+			t.Errorf("State directory: the daemon creates %s (%s); it is missing from the table", name, src.file)
+		}
 	}
 	for name := range rows {
 		if !accounted[name] {
