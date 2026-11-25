@@ -181,6 +181,11 @@ type textRedactor struct {
 	labelLen   int
 	assignment assignmentState
 	bearerPos  int
+	// quote is the quote that opened a secret value, so the value runs to
+	// its closing quote (JSON strings may hold spaces); escaped tracks a
+	// backslash inside it.
+	quote   byte
+	escaped bool
 }
 
 func (r *textRedactor) write(out *strings.Builder, raw []byte) {
@@ -191,9 +196,9 @@ func (r *textRedactor) write(out *strings.Builder, raw []byte) {
 	for len(raw) != 0 {
 		if r.kind != noCredential {
 			n := 0
-			for n < len(raw) && credentialByte(r.kind, raw[n]) {
+			for n < len(raw) && r.valueByte(raw[n]) {
 				b := raw[n]
-				if (r.kind == secret || r.kind == bearer) && r.assignmentAt(b) == secret {
+				if r.quote == 0 && (r.kind == secret || r.kind == bearer) && r.assignmentAt(b) == secret {
 					// A nested assignment can extend past the bearer value.
 					r.kind = secret
 				}
@@ -250,7 +255,7 @@ func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 	}
 	value := string(r.value)
 	switch {
-	case r.overflow:
+	case r.overflow, kind == secret && r.quote != 0:
 		value = ""
 	case kind == secret:
 		if utf8.RuneCount(r.value) >= 6 || eof {
@@ -274,6 +279,24 @@ func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 	r.kind = noCredential
 	r.value = r.value[:0]
 	r.overflow = false
+	r.quote = 0
+	r.escaped = false
+}
+
+// valueByte reports whether b continues the current credential value.
+func (r *textRedactor) valueByte(b byte) bool {
+	if r.kind != secret || r.quote == 0 {
+		return credentialByte(r.kind, b)
+	}
+	if b == '\n' || b == '\r' || b == r.quote && !r.escaped {
+		return false
+	}
+	r.escaped = b == '\\' && !r.escaped
+	return true
+}
+
+func quoteByte(b byte) bool {
+	return b == '"' || b == '\''
 }
 
 func credentialByte(kind credentialKind, b byte) bool {
@@ -313,7 +336,8 @@ func redactSpace(b byte) bool {
 // separators are sent to the caller. Only the value needs to be withheld.
 func (r *textRedactor) assignmentAt(b byte) credentialKind {
 	space := redactSpace(b)
-	if r.labelLen != 0 && (space || b == ':' || b == '=') {
+	// A closing quote after the label covers JSON keys such as "password".
+	if r.labelLen != 0 && (space || b == ':' || b == '=' || quoteByte(b)) {
 		label := r.label[:r.labelLen]
 		switch {
 		case secretLabel.Match(label):
@@ -324,7 +348,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 	}
 	switch r.assignment {
 	case secretSeparator:
-		if space {
+		if space || quoteByte(b) {
 			return noCredential
 		}
 		if b == ':' || b == '=' {
@@ -335,18 +359,27 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 		if space {
 			return noCredential
 		}
-		if b == '"' || b == '\'' {
+		if quoteByte(b) {
 			r.assignment = secretQuotedValue
+			r.quote = b
 			return noCredential
 		}
+		r.quote = 0
 		fallthrough
 	case secretQuotedValue:
 		r.assignment = noAssignment
+		if r.quote != 0 {
+			if b != r.quote && b != '\n' && b != '\r' {
+				return secret
+			}
+			r.quote = 0
+			return noCredential
+		}
 		if credentialByte(secret, b) {
 			return secret
 		}
 	case bearerColon:
-		if space {
+		if space || quoteByte(b) {
 			return noCredential
 		}
 		if b == ':' {
@@ -355,7 +388,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 			return noCredential
 		}
 	case bearerWord:
-		if space && r.bearerPos == 0 {
+		if (space || quoteByte(b)) && r.bearerPos == 0 {
 			return noCredential
 		}
 		const word = "bearer"
