@@ -532,19 +532,14 @@ func Routes() []string {
 	return out
 }
 
+// routeProvider finds the route of path in routes, the one list of providers
+// and paths the gate dispatches and documents.
 func routeProvider(path string) (provider, upstreamPath string, ok bool) {
-	for _, p := range []string{"openai", "anthropic", "gemini", "local"} {
-		rest, found := strings.CutPrefix(path, "/"+p+"/")
-		if !found {
-			continue
+	for _, r := range routes {
+		rest, found := strings.CutPrefix(path, "/"+r.provider)
+		if found && strings.HasPrefix(rest, "/") && matchRoute(r.path, rest) {
+			return r.provider, rest, true
 		}
-		rest = "/" + rest
-		for _, r := range routes {
-			if r.provider == p && matchRoute(r.path, rest) {
-				return p, rest, true
-			}
-		}
-		return "", "", false
 	}
 	return "", "", false
 }
