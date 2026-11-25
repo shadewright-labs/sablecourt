@@ -453,6 +453,52 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var rowTask, rowCapability, rowDigest, status, expires string
+	err = tx.QueryRowContext(ctx, `
+		SELECT task_id, capability, payload_sha256, status, expires_at
+		FROM approvals WHERE id = ?
+	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != string(domain.ApprovalApproved) || rowTask != taskID || rowCapability != capability || rowDigest != payloadSHA256 {
+		return store.ErrConflict
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
+	if err != nil {
+		return fmt.Errorf("parse approval expiry: %w", err)
+	}
+	next, outcome := domain.ApprovalConsumed, error(nil)
+	if !now.Before(expiresAt) {
+		next, outcome = domain.ApprovalExpired, store.ErrExpired
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE approvals SET status = ? WHERE id = ? AND status = ?
+	`, string(next), id, string(domain.ApprovalApproved))
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return store.ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return outcome
+}
+
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)

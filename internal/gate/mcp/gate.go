@@ -291,6 +291,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 		decision := snap.policy.Evaluate(ac.Workload, capability)
+		approvalUsed := ""
 		switch decision.Effect {
 		case domain.EffectDeny:
 			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q}`, decision.Reason))
@@ -317,20 +318,42 @@ func (g *Gate) ActionHandler() http.Handler {
 				return
 			}
 
-			// Verify an existing approved decision matches this exact task, capability, and canonical payload digest.
-			apr, err := g.store.GetApproval(ctx, req.ApprovalID)
-			if err != nil {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval not found"})
-				return
-			}
+			// Consume the approval: one store transaction checks it is approved, unexpired and
+			// pinned to this task, capability and canonical payload digest, and moves it to
+			// consumed. The approval is spent before the side effect runs, so a failed or
+			// interrupted action needs a fresh approval instead of reusing this one.
 			_, digest, err := approval.CanonicalizeAndHash(canonicalPayload)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
 				return
 			}
-			if apr.Status != domain.ApprovalApproved || apr.TaskID != ac.Lease.TaskID || apr.Capability != capability || apr.PayloadSHA256 != digest {
-				g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", `{"reason":"approval_mismatch_or_unapproved"}`)
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval does not authorize this payload"})
+			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest, g.now()); err != nil {
+				reason := "approval_mismatch_or_unapproved"
+				switch {
+				case errors.Is(err, store.ErrExpired):
+					reason = "approval_expired"
+				case errors.Is(err, store.ErrNotFound):
+					reason = "approval_not_found"
+				case !errors.Is(err, store.ErrConflict):
+					reason = "approval_check_failed"
+				}
+				g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q,"approval_id":%q}`, reason, req.ApprovalID))
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval does not authorize this payload: " + reason})
+				return
+			}
+			approvalUsed = req.ApprovalID
+			// The consumption record is what tells a crash between this point and the side
+			// effect apart from a refused call, so the action does not run without it.
+			if err := g.store.AppendAudit(ctx, domain.AuditRecord{
+				Category:     "approval",
+				TaskID:       ac.Lease.TaskID,
+				WorkloadName: ac.Workload.Metadata.Name,
+				Action:       capability,
+				Outcome:      "consumed",
+				DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"payload_sha256":%q}`, req.ApprovalID, digest),
+				CreatedAt:    g.now(),
+			}); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record approval use failed"})
 				return
 			}
 
@@ -346,7 +369,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			if g.breaker != nil {
 				g.breaker.RecordFailure(capability)
 			}
-			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
+			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q,"approval_id":%q}`, redact.String(err.Error()), approvalUsed))
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
@@ -355,7 +378,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
-		g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d}`, red.Hits))
+		g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d,"approval_id":%q}`, red.Hits, approvalUsed))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
