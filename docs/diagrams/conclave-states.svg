@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 372" role="img" aria-labelledby="t d" data-diagram="states" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 392" role="img" aria-labelledby="t d" data-diagram="states" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Conclave states</title>
-  <desc id="d">A Conclave opens Active. Active moves to Completed on close, and to Input-required when a Ward trips. A Decree moves Input-required back to Active. Input-required moves to Cancelled on a stop, and close and stop end either open state. A plain room that reaches its wall time stays Input-required and a Decree cannot resume it.</desc>
+  <desc id="d">A Conclave opens Active. Active moves to Completed on close, and to Input-required when a Ward trips. A Decree moves Input-required back to Active. Input-required moves to Cancelled on a stop, and close and stop end either open state. For a plain room a close request can also move Cancelled to Completed and back; a council's end state is locked. A plain room that reaches its wall time stays Input-required and a Decree cannot resume it.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -31,7 +31,7 @@
     </style>
   </defs>
   
-  <rect width="1120" height="372" rx="18" fill="#08060e"/>
+  <rect width="1120" height="392" rx="18" fill="#08060e"/>
   <circle cx="140" cy="48" r="5" fill="#2dd4bf"/>
   <path class="f" d="M140 53V94" marker-end="url(#a)"/>
   <rect class="key" x="40" y="100" width="200" height="64" rx="12"/>
@@ -39,21 +39,24 @@
   <text class="s" x="56" y="147">Vassals take turns</text>
   <rect class="box" x="400" y="100" width="200" height="64" rx="10"/>
   <text class="h" x="416" y="126">Completed</text>
-  <text class="s" x="416" y="147">closed, terminal</text>
+  <text class="s" x="416" y="147">closed</text>
   <rect class="wait" x="40" y="240" width="200" height="64" rx="10"/>
   <text class="h" x="56" y="266">Input-required</text>
   <text class="s" x="56" y="287">paused by a Ward</text>
   <rect class="box" x="400" y="240" width="200" height="64" rx="10"/>
   <text class="h" x="416" y="266">Cancelled</text>
-  <text class="s" x="416" y="287">stopped, terminal</text>
+  <text class="s" x="416" y="287">stopped</text>
   <path class="f" d="M240 132H394" marker-end="url(#a)"/>
   <text class="lbl" x="317" y="124" text-anchor="middle">close</text>
   <path class="f" d="M100 164V234" marker-end="url(#a)"/>
   <text class="lbl" x="110" y="206" text-anchor="start">Ward trips</text>
   <path class="f" d="M180 234V170" marker-end="url(#a)"/>
   <text class="lbl" x="190" y="190" text-anchor="start">Decree</text>
+  <path class="r" d="M500 170V234" marker-start="url(#m)" marker-end="url(#m)"/>
+  <text class="lbl" x="510" y="206" text-anchor="start">close request (plain room)</text>
   <path class="f" d="M240 272H394" marker-end="url(#a)"/>
   <text class="lbl" x="317" y="264" text-anchor="middle">stop</text>
   <text class="cap" x="416" y="330" text-anchor="start">close and stop end either open state</text>
   <text class="cap" x="40" y="352" text-anchor="start">a plain room at its wall time stays Input-required and a Decree cannot resume it</text>
+  <text class="cap" x="40" y="376" text-anchor="start">a council's Completed and Cancelled are locked; a plain room can switch between them on a close request</text>
 </svg>

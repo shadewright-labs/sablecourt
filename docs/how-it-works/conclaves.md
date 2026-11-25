@@ -24,7 +24,7 @@ A Ward is a limit that pauses the room instead of failing it. Defaults are twice
 - `maxRuns`: Vassal turns started in the current run window.
 - The budget named by `budgetRef`, and a 15-minute wall time for the whole room.
 
-Tripping one moves the room to `input-required`, records the reason, posts a `system` message and writes a `conclave.ward` audit row. Further Vassal posts fail with a paused error.
+Tripping one moves the room to `input-required`, records the reason and posts a `system` message. The `conclave.ward` audit row is written when a Vassal post, a report or a council answer trips the Ward, and when a turn is refused on `maxRuns`. A trip on the wall time, on a council budget or message check while a turn is reserved, while a task is claimed, or on a retry handoff pauses the room and blocks the turn without that audit row. Further Vassal posts fail with a paused error.
 
 ## What a Decree resets
 
@@ -32,7 +32,7 @@ A Decree is a message from the operator (`sablectl conclave decree <id> <message
 
 ## States, Relics and Scry
 
-The states are `active`, `input-required`, `completed` and `cancelled`. `sablectl conclave close` ends a room as `completed`, and the close call can also set `cancelled`. A plain room that reaches its wall time pauses in `input-required` with the reason `wall_time_reached`; a council is cancelled at its deadline instead.
+The states are `active`, `input-required`, `completed` and `cancelled`. `sablectl conclave close` ends a room as `completed`, and the close call can also set `cancelled`. For a plain room the close call overwrites the state without checking it, so a close request can move a `cancelled` room to `completed` and a `completed` room to `cancelled`. A council's `completed` and `cancelled` states are locked. A plain room that reaches its wall time pauses in `input-required` with the reason `wall_time_reached`; a council is cancelled at its deadline instead.
 
 [![States of a Conclave: active, input-required, completed and cancelled, and what moves a room between them.](../diagrams/conclave-states.svg)](../diagrams/conclave-states.svg "Open full size")
 
