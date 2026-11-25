@@ -42,14 +42,14 @@ const (
 
 // body returns a deterministic string of n characters from alphabet. The
 // seed spreads the bodies so no two forms share a fragment.
-func body(seed, n int, alphabet string) string {
+func body(seed uint32, n int, alphabet string) string {
 	var b strings.Builder
-	x := uint32(seed*2654435761 + 1)
+	x := seed*2654435761 + 1
 	for range n {
 		x ^= x << 13
 		x ^= x >> 17
 		x ^= x << 5
-		b.WriteByte(alphabet[int(x%uint32(len(alphabet)))])
+		b.WriteByte(alphabet[int(x)%len(alphabet)])
 	}
 	return b.String()
 }
