@@ -136,6 +136,7 @@ func (s *PostgresStore) ListWorkloads(ctx context.Context) ([]domain.WorkloadRec
 }
 
 func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
+	t = store.RedactTaskForWrite(t)
 	now := nowRFC3339()
 	created := now
 	if !t.CreatedAt.IsZero() {
@@ -203,6 +204,7 @@ func (s *PostgresStore) ListTaskEvents(ctx context.Context, taskID string) ([]do
 }
 
 func (s *PostgresStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error {
+	msg = store.RedactTaskMessageForWrite(msg)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO task_messages (task_id, role, content, created_at)
 		VALUES ($1, $2, $3, $4)

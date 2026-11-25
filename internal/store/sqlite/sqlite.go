@@ -155,6 +155,7 @@ func (s *SQLiteStore) ListWorkloads(ctx context.Context) ([]domain.WorkloadRecor
 }
 
 func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
+	t = store.RedactTaskForWrite(t)
 	now := nowRFC3339()
 	created := now
 	if !t.CreatedAt.IsZero() {
@@ -243,6 +244,7 @@ func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]doma
 }
 
 func (s *SQLiteStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error {
+	msg = store.RedactTaskMessageForWrite(msg)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO task_messages (task_id, role, content, created_at)
 		VALUES (?, ?, ?, ?)
