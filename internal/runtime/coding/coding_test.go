@@ -225,6 +225,10 @@ func TestTaskSessionFilesAreExcludedLocally(t *testing.T) {
 			adapter, spec := codingFixture(t)
 			spec.InputJSON = tc.input
 			handle := startTestTask(t, adapter, spec)
+			// The wrapper keeps writing its exit record under the task's .run
+			// directory until it is reaped. Wait for that before the test body
+			// and TempDir cleanup, so nothing is left writing into the tree.
+			<-adapter.processForHandle(handle).done
 			for _, file := range []string{".sablecourt-session.json", ".sablecourt-context.md"} {
 				if file == ".sablecourt-context.md" && tc.input == "" {
 					continue
