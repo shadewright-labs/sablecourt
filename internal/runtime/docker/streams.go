@@ -79,7 +79,7 @@ func (b *councilOutput) visible(prompt, lease string) string {
 		return outputLimitMarker
 	}
 	raw := b.buf.String()
-	for _, secret := range []string{prompt, lease} {
+	for _, secret := range []string{lease, prompt} {
 		if secret != "" {
 			raw = strings.ReplaceAll(raw, secret, "[REDACTED]")
 		}

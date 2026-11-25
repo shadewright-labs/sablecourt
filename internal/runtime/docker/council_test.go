@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -313,7 +314,7 @@ func TestCouncilFailureCleanupAndRetry(t *testing.T) {
 	}
 }
 func TestCouncilRefusals(t *testing.T) {
-	for _, step := range []string{"network missing", "network transient", "external network", "missing volume", "bind volume", "wrong volume", "image missing", "cpu", "memory", "pids", "time", "checkout", "relative", "socket", "harness", "model", "empty lease", "empty prompt", "option prompt", "unfinished key", "no recorder", "proxy credentials", "direct gate"} {
+	for _, step := range []string{"network missing", "network transient", "external network", "missing volume", "bind volume", "wrong volume", "image missing", "cpu", "memory", "pids", "time", "checkout", "relative", "socket", "symlinked socket", "symlinked socket target", "harness", "model", "empty lease", "empty prompt", "option prompt", "unfinished key", "no recorder", "proxy credentials", "direct gate"} {
 		t.Run(step, func(t *testing.T) {
 			a, f, s := fixtureRun(t)
 			cfg := a.CouncilHarnesses[s.Harness]
@@ -346,7 +347,44 @@ func TestCouncilRefusals(t *testing.T) {
 			case "relative":
 				s.Checkout.Path = "."
 			case "socket":
-				s.Checkout.Path = s.Checkout.Path + "/docker.sock"
+				sock := filepath.Join(s.Checkout.Path, "docker.sock")
+				if err := os.WriteFile(sock, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				a.discoverSocket = func() string { return sock }
+			case "symlinked socket":
+				realDir := filepath.Join(t.TempDir(), "run")
+				if err := os.Mkdir(realDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(realDir, "docker.sock"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				linkDir := filepath.Join(t.TempDir(), "var-run")
+				if err := os.Symlink(realDir, linkDir); err != nil {
+					t.Fatal(err)
+				}
+				s.Checkout.Path = realDir
+				a.discoverSocket = func() string { return filepath.Join(linkDir, "docker.sock") }
+			case "symlinked socket target":
+				targetDir := filepath.Join(t.TempDir(), "engine")
+				if err := os.Mkdir(targetDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				targetSock := filepath.Join(targetDir, "engine.sock")
+				if err := os.WriteFile(targetSock, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				linkDir := filepath.Join(t.TempDir(), "var-run")
+				if err := os.Mkdir(linkDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				linkSock := filepath.Join(linkDir, "docker.sock")
+				if err := os.Symlink(targetSock, linkSock); err != nil {
+					t.Fatal(err)
+				}
+				s.Checkout.Path = targetDir
+				a.discoverSocket = func() string { return linkSock }
 			case "harness":
 				s.Harness = "sh"
 			case "model":
@@ -373,6 +411,9 @@ func TestCouncilRefusals(t *testing.T) {
 			}
 			if (step == "network missing" || step == "missing volume" || step == "image missing") && !isMissing(err) {
 				t.Fatal("missing classification was lost")
+			}
+			if (step == "socket" || step == "symlinked socket" || step == "symlinked socket target") && !strings.Contains(err.Error(), "unsafe checkout directory") {
+				t.Fatalf("expected unsafe checkout directory, got %v", err)
 			}
 		})
 	}
@@ -531,5 +572,76 @@ func TestCouncilLoginVolumeIdentity(t *testing.T) {
 		if err == nil || len(f.calls) != 0 {
 			t.Errorf("mounted volume with labels %v", labels)
 		}
+	}
+}
+
+type swappedVolumeEngine struct {
+	*councilEngine
+	afterCreate volume.Volume
+}
+
+func (f *swappedVolumeEngine) ContainerCreate(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	res, err := f.councilEngine.ContainerCreate(ctx, o)
+	if err == nil {
+		f.vol = f.afterCreate
+	}
+	return res, err
+}
+
+func TestCouncilRevalidatesLoginVolumeAfterCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		vol  volume.Volume
+	}{
+		{"unlabelled autocreated", volume.Volume{Name: "sablecourt-login-claude", Driver: "local"}},
+		{"wrong harness", volume.Volume{Name: "sablecourt-login-claude", Driver: "local", Labels: CouncilLoginVolumeLabels("agy")}},
+		{"bind options", volume.Volume{Name: "sablecourt-login-claude", Driver: "local", Labels: CouncilLoginVolumeLabels("claude"), Options: map[string]string{"type": "bind"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, f, s := fixtureRun(t)
+			a.Client = &swappedVolumeEngine{councilEngine: f, afterCreate: tc.vol}
+			_, err := a.RunCouncil(t.Context(), s, discardResult)
+			if err == nil || f.exists || slices.Contains(f.calls, "start") || slices.Contains(f.calls, "attach") {
+				t.Fatalf("calls=%v present=%t err=%v", f.calls, f.exists, err)
+			}
+		})
+	}
+}
+
+type unbufferedWaitEngine struct {
+	*councilEngine
+	release chan struct{}
+	sent    chan struct{}
+}
+
+func (f *unbufferedWaitEngine) ContainerWait(context.Context, string, client.ContainerWaitOptions) client.ContainerWaitResult {
+	resultC := make(chan container.WaitResponse)
+	errC := make(chan error, 1)
+	go func() {
+		<-f.release
+		resultC <- container.WaitResponse{StatusCode: 7}
+		close(f.sent)
+	}()
+	return client.ContainerWaitResult{Result: resultC, Error: errC}
+}
+
+func TestCouncilExitDrainsUnbufferedWaitOnCancel(t *testing.T) {
+	a, f, _ := fixtureRun(t)
+	release := make(chan struct{})
+	sent := make(chan struct{})
+	engine := &unbufferedWaitEngine{councilEngine: f, release: release, sent: sent}
+	a.Client = engine
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	res := rt.CouncilResult{ContainerID: "container-id"}
+	err := a.councilExit(ctx, engine, &res)
+	close(release)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("unbuffered ContainerWait sender remained blocked after cancellation")
 	}
 }

@@ -91,7 +91,7 @@ func proxyEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func councilWorkspace(s rt.CouncilCheckout) (mount.Mount, error) {
+func councilWorkspace(s rt.CouncilCheckout, socket string) (mount.Mount, error) {
 	switch s.Kind {
 	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter:
 	default:
@@ -117,9 +117,24 @@ func councilWorkspace(s rt.CouncilCheckout) (mount.Mount, error) {
 		return mount.Mount{}, err
 	}
 	contains := func(target string) bool {
-		return path == target || strings.HasPrefix(target, path+string(filepath.Separator))
+		return target != "" && (path == target || strings.HasPrefix(target, path+string(filepath.Separator)))
 	}
-	if filepath.Dir(path) == path || contains(home) || contains(discoverDockerSocket()) {
+	containsSocket := func(sock string) bool {
+		if sock == "" {
+			return false
+		}
+		if contains(sock) {
+			return true
+		}
+		if resolved, err := filepath.EvalSymlinks(sock); err == nil && contains(resolved) {
+			return true
+		}
+		if parent, err := filepath.EvalSymlinks(filepath.Dir(sock)); err == nil && contains(filepath.Join(parent, filepath.Base(sock))) {
+			return true
+		}
+		return false
+	}
+	if filepath.Dir(path) == path || contains(home) || containsSocket(socket) {
 		return mount.Mount{}, errors.New("unsafe checkout directory")
 	}
 	return mount.Mount{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: s.Kind != rt.CouncilWriter, BindOptions: &mount.BindOptions{NonRecursive: true}}, nil
@@ -176,7 +191,7 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
-		m, err := councilWorkspace(s.Checkout)
+		m, err := councilWorkspace(s.Checkout, a.dockerSocket())
 		if err != nil {
 			return o, err
 		}
@@ -250,17 +265,24 @@ func (a *Adapter) inspectCouncilHarness(ctx context.Context, engine councilEngin
 			return "", errors.New("council image has unexpected environment defaults")
 		}
 	}
-	vol, err := engine.VolumeInspect(ctx, cfg.LoginVolume, client.VolumeInspectOptions{})
-	if err != nil {
-		return "", fmt.Errorf("inspect council login volume: %w", err)
+	if err := inspectCouncilLoginVolume(ctx, engine, harness, cfg.LoginVolume); err != nil {
+		return "", err
 	}
-	if vol.Volume.Name != cfg.LoginVolume || vol.Volume.Driver != "local" || len(vol.Volume.Options) != 0 {
-		return "", errors.New("invalid council login volume")
+	return image.ID, nil
+}
+
+func inspectCouncilLoginVolume(ctx context.Context, engine councilEngineAPI, harness, name string) error {
+	vol, err := engine.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect council login volume: %w", err)
+	}
+	if vol.Volume.Name != name || vol.Volume.Driver != "local" || len(vol.Volume.Options) != 0 {
+		return errors.New("invalid council login volume")
 	}
 	for k, v := range CouncilLoginVolumeLabels(harness) {
 		if vol.Volume.Labels[k] != v {
-			return "", errors.New("login volume does not belong to this council harness")
+			return errors.New("login volume does not belong to this council harness")
 		}
 	}
-	return image.ID, nil
+	return nil
 }

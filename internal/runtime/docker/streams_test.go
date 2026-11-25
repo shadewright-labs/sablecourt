@@ -42,19 +42,26 @@ func TestDockerStreams(t *testing.T) {
 }
 
 func TestCouncilVisibleOutput(t *testing.T) {
-	for _, tc := range []struct{ name, input string }{
-		{"split prompt", "reply to me"}, {"split lease", "lease-value"},
-		{"credential", "password=sample-secret"}, {"unfinished private key", "-----BEGIN PRIVATE KEY-----\nprivate bytes"},
-		{"large line", strings.Repeat("x", maxCouncilOutput+1)},
+	for _, tc := range []struct {
+		name, prompt, lease, input string
+	}{
+		{"split prompt", "reply to me", "lease-value", "reply to me"},
+		{"split lease", "reply to me", "lease-value", "lease-value"},
+		{"prompt substring of lease", "lease", "lease-value", "lease-value"},
+		{"prompt overlaps lease prefix", "ask lease-", "lease-value", "ask lease-value"},
+		{"prompt overlaps lease suffix", "value done", "lease-value", "lease-value done"},
+		{"credential", "reply to me", "lease-value", "password=sample-secret"},
+		{"unfinished private key", "reply to me", "lease-value", "-----BEGIN PRIVATE KEY-----\nprivate bytes"},
+		{"large line", "reply to me", "lease-value", strings.Repeat("x", maxCouncilOutput+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf councilOutput
 			for i := 0; i < len(tc.input); i += 3 {
 				_, _ = io.WriteString(&buf, tc.input[i:min(i+3, len(tc.input))])
 			}
-			got := buf.visible("reply to me", "lease-value")
-			if len(got) > maxCouncilOutput || strings.Contains(got, tc.input) || strings.Contains(got, "private bytes") || !strings.Contains(got, "[REDACTED") {
-				t.Fatalf("unsafe output, length %d", len(got))
+			got := buf.visible(tc.prompt, tc.lease)
+			if len(got) > maxCouncilOutput || strings.Contains(got, tc.input) || strings.Contains(got, tc.lease) || strings.Contains(got, "lease") || strings.Contains(got, "value") || strings.Contains(got, "private bytes") || !strings.Contains(got, "[REDACTED") {
+				t.Fatalf("unsafe output %q, length %d", got, len(got))
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -76,6 +77,10 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	if len(created.Warnings) > 0 {
 		return result, errors.New("Docker reported a warning applying council configuration")
+	}
+	// Revalidate once the container pins the named volume so an autocreated or replaced volume cannot start.
+	if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
+		return result, err
 	}
 	stream, err := engine.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{Stream: true, Stdin: true, Stdout: true, Stderr: true})
 	if err != nil {
@@ -158,14 +163,31 @@ func (a *Adapter) cleanupCouncil(ctx context.Context, r *rt.CouncilResult) error
 }
 
 func (a *Adapter) councilExit(ctx context.Context, engine councilEngineAPI, result *rt.CouncilResult) error {
-	wait := engine.ContainerWait(ctx, result.ContainerID, client.ContainerWaitOptions{})
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
+	wait := engine.ContainerWait(waitCtx, result.ContainerID, client.ContainerWaitOptions{})
+	type waitOutcome struct {
+		status  container.WaitResponse
+		ok      bool
+		errored bool
+	}
+	done := make(chan waitOutcome, 1)
+	go func() {
+		select {
+		case <-wait.Error:
+			done <- waitOutcome{errored: true}
+		case status, ok := <-wait.Result:
+			done <- waitOutcome{status: status, ok: ok}
+		}
+	}()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-wait.Error:
-		return errors.New("could not verify council exit")
-	case status, ok := <-wait.Result:
-		if !ok || status.Error != nil {
+	case out := <-done:
+		if out.errored {
+			return errors.New("could not verify council exit")
+		}
+		if !out.ok || out.status.Error != nil {
 			return errors.New("missing council wait status")
 		}
 		res, err := a.Client.ContainerInspect(ctx, result.ContainerID, client.ContainerInspectOptions{})
@@ -173,7 +195,7 @@ func (a *Adapter) councilExit(ctx context.Context, engine councilEngineAPI, resu
 			return fmt.Errorf("inspect council exit: %w", err)
 		}
 		st := res.Container.State
-		if res.Container.ID != result.ContainerID || st == nil || int64(st.ExitCode) != status.StatusCode {
+		if res.Container.ID != result.ContainerID || st == nil || int64(st.ExitCode) != out.status.StatusCode {
 			return errors.New("inconsistent council exit evidence")
 		}
 		finished, err := verifiedExit(st)
