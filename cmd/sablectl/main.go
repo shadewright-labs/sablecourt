@@ -53,7 +53,6 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 		apiURL     string
 		socketPath string
 		secretFile string
-		opToken    string
 		jsonOut    bool
 	)
 
@@ -64,11 +63,10 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api", "http://127.0.0.1:7432", "sablecourtd HTTP API base URL")
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", "", "Optional sablecourtd Unix domain socket path")
 	rootCmd.PersistentFlags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file instead of OS Keychain")
-	rootCmd.PersistentFlags().StringVar(&opToken, "token", "", "Optional operator bearer token (or set SABLECOURT_OPERATOR_TOKEN)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output raw JSON instead of styled tables")
 
 	httpClient := func(timeout time.Duration) (*http.Client, string) {
-		return newDaemonClientWithTransport(timeout, apiURL, socketPath, opToken, defaultTransport)
+		return newDaemonClientWithTransport(timeout, apiURL, socketPath, defaultTransport)
 	}
 
 	validateCmd := &cobra.Command{
@@ -1211,11 +1209,11 @@ func writeJSONOut(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func newDaemonClient(timeout time.Duration, apiURL, socketPath, opToken string) (*http.Client, string) {
-	return newDaemonClientWithTransport(timeout, apiURL, socketPath, opToken, http.DefaultTransport)
+func newDaemonClient(timeout time.Duration, apiURL, socketPath string) (*http.Client, string) {
+	return newDaemonClientWithTransport(timeout, apiURL, socketPath, http.DefaultTransport)
 }
 
-func newDaemonClientWithTransport(timeout time.Duration, apiURL, socketPath, opToken string, defaultTransport http.RoundTripper) (*http.Client, string) {
+func newDaemonClientWithTransport(timeout time.Duration, apiURL, socketPath string, defaultTransport http.RoundTripper) (*http.Client, string) {
 	if defaultTransport == nil {
 		defaultTransport = http.DefaultTransport
 	}
@@ -1242,10 +1240,8 @@ func newDaemonClientWithTransport(timeout time.Duration, apiURL, socketPath, opT
 		host = endpoint.Hostname()
 	}
 	local := socketPath != "" || host == "localhost" || net.ParseIP(host).IsLoopback()
-	tok := strings.TrimSpace(opToken)
-	if tok == "" {
-		tok = strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
-	}
+	// The credential never travels on the command line, where the process table exposes it.
+	tok := strings.TrimSpace(os.Getenv("SABLECOURT_OPERATOR_TOKEN"))
 	if tok == "" && local {
 		dir, err := operatortoken.StateDir()
 		if err == nil {

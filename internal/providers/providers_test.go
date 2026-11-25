@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/secret"
@@ -93,13 +96,7 @@ func TestRegistryConnectSyncAndDisconnect(t *testing.T) {
 	}
 }
 
-func TestParseAgyModelsAndCodexCacheAndCustomModels(t *testing.T) {
-	raw := "\r⠋ Fetching available models...\rgemini-4-neon-high             Gemini 4 Neon (High)\nclaude-opus-5-5-high           Claude Opus 5.5 (High)\n"
-	agy := parseAgyModelsOutput(raw)
-	if len(agy) != 2 || agy[0].ID != "gemini-4-neon-high" || agy[1].ID != "claude-opus-5-5-high" {
-		t.Fatalf("unexpected agy models: %+v", agy)
-	}
-
+func TestCustomCLIModels(t *testing.T) {
 	reg := NewRegistry(Options{})
 	if err := reg.SavePrefs(context.Background(), "cli:claude", "claude-fable-5-2", []string{"claude-opus-5-5", "claude-fable-5-2", "custom-model-x"}); err != nil {
 		t.Fatalf("SavePrefs: %v", err)
@@ -116,5 +113,35 @@ func TestParseAgyModelsAndCodexCacheAndCustomModels(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected custom-model-x to be preserved in cli:claude models")
+	}
+}
+
+func TestAgySyncUsesBuiltinCatalog(t *testing.T) {
+	def, _ := findCLIDef("cli:agy")
+	for _, present := range []bool{false, true} {
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "called")
+		t.Setenv("SYNC_TEST_MARKER", marker)
+		t.Setenv("PATH", dir)
+		if present {
+			if err := os.WriteFile(filepath.Join(dir, def.Bin), []byte("#!/bin/sh\n: > \"$SYNC_TEST_MARKER\"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reg := NewRegistry(Options{})
+		models, err := reg.SyncModels(t.Context(), def.ID)
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Error("sync executed CLI")
+		}
+		var ids []string
+		for _, m := range models {
+			if m.Provider != def.ID {
+				t.Error("wrong provider")
+			}
+			ids = append(ids, m.ID)
+		}
+		if err != nil || !slices.Equal(ids, def.DefaultModels) {
+			t.Errorf("installed %v: catalog %v, error %v", present, ids, err)
+		}
 	}
 }
