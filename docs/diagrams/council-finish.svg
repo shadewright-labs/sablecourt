@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 452" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">How a council ends</title>
+  <desc id="d">When a round completes, the council closes if all three seats said nothing to add, closes at the round cap, and otherwise starts the next round. Separately, a round that cannot finish because every start is spent and no turn is running closes with the start cap.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  
+  <rect width="1120" height="452" rx="18" fill="#08060e"/>
+  <rect class="box" x="44" y="128" width="200" height="64" rx="10"/>
+  <text class="h" x="60" y="154">Round complete</text>
+  <text class="s" x="60" y="175">all three recorded</text>
+  <polygon class="box" points="300,160 392,108 484,160 392,212"/>
+  <text class="s" x="392" y="157" text-anchor="middle">All said</text>
+  <text class="s" x="392" y="172" text-anchor="middle">nothing to add?</text>
+  <polygon class="box" points="560,160 652,108 744,160 652,212"/>
+  <text class="s" x="652" y="157" text-anchor="middle">Round cap</text>
+  <text class="s" x="652" y="172" text-anchor="middle">reached?</text>
+  <rect class="key" x="820" y="128" width="210" height="64" rx="12"/>
+  <text class="h" x="836" y="154">Next round</text>
+  <text class="s" x="836" y="175">packets with peer excerpts</text>
+  <rect class="box" x="292" y="256" width="200" height="64" rx="10"/>
+  <text class="h" x="308" y="282">Close</text>
+  <text class="s" x="308" y="303">nothing_to_add</text>
+  <rect class="box" x="552" y="256" width="200" height="64" rx="10"/>
+  <text class="h" x="568" y="282">Close</text>
+  <text class="s" x="568" y="303">round_cap</text>
+  <rect class="box" x="44" y="356" width="260" height="64" rx="10"/>
+  <text class="h" x="60" y="382">Round stuck</text>
+  <text class="s" x="60" y="403">starts spent, none running</text>
+  <rect class="box" x="400" y="356" width="200" height="64" rx="10"/>
+  <text class="h" x="416" y="382">Close</text>
+  <text class="s" x="416" y="403">start_cap</text>
+  <path class="f" d="M244 160H294" marker-end="url(#a)"/>
+  <path class="f" d="M392 212V250" marker-end="url(#a)"/>
+  <text class="lbl" x="402" y="238" text-anchor="start">yes</text>
+  <path class="f" d="M484 160H554" marker-end="url(#a)"/>
+  <text class="lbl" x="519" y="152" text-anchor="middle">no</text>
+  <path class="f" d="M652 212V250" marker-end="url(#a)"/>
+  <text class="lbl" x="662" y="238" text-anchor="start">yes</text>
+  <path class="f" d="M744 160H814" marker-end="url(#a)"/>
+  <text class="lbl" x="779" y="152" text-anchor="middle">no</text>
+  <path class="f" d="M304 388H394" marker-end="url(#a)"/>
+</svg>
