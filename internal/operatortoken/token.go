@@ -262,5 +262,5 @@ func readToken(root *os.Root) (string, error) {
 
 func ownedByCaller(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
+	return ok && stat.Uid == uint32(os.Geteuid()) // #nosec G115 -- os.Geteuid returns the kernel uid_t. Converting back to its 32-bit representation preserves every UID bit.
 }

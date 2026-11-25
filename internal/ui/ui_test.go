@@ -15,6 +15,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
@@ -320,4 +321,47 @@ type conclaveMessageLookupError struct {
 
 func (conclaveMessageLookupError) ListConclaveMessages(context.Context, string, int64) ([]domain.ConclaveMessage, error) {
 	return nil, errors.New("message lookup failed")
+}
+
+func TestTaskMessageRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	dash, err := NewDashboard(Options{Store: newUITestStore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dash.RegisterRoutes(mux)
+	for _, id := range []string{"task", "two/parts", "task?view", "task#section", `../\` + httptest.NewRequest(http.MethodGet, "/", nil).Host} {
+		t.Run(id, func(t *testing.T) {
+			segment := url.PathEscape(id)
+			r := httptest.NewRequest(http.MethodPost, "/ui/tasks/"+segment+"/messages", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther || loc != "/tasks/"+segment {
+				t.Fatalf("redirect = %d %q, want a single task path segment", w.Code, loc)
+			}
+		})
+	}
+}
+
+func TestModelScriptEscaping(t *testing.T) {
+	const model = `model</script>&"`
+	reg := providers.NewRegistry(providers.Options{})
+	if err := reg.SavePrefs(t.Context(), "local", model, []string{model}); err != nil {
+		t.Fatal(err)
+	}
+	dash, err := NewDashboard(Options{Store: newUITestStore(t), Providers: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	dash.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, name := range []string{"modelsByProvider", "defaultsByProv"} {
+		t.Run(name, func(t *testing.T) {
+			_, after, ok := strings.Cut(w.Body.String(), "const "+name+" = ")
+			declaration, _, _ := strings.Cut(after, ";")
+			if !ok || !strings.Contains(declaration, `model\u003c/script\u003e\u0026`) || strings.Contains(declaration, "</script>") {
+				t.Fatalf("unexpected script value for %s: %s", name, declaration)
+			}
+		})
+	}
 }

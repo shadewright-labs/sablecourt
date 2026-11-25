@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -32,7 +34,6 @@ type EngineClient interface {
 	NetworkInspect(ctx context.Context, networkID string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error)
 	NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
 	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (client.ImageInspectResult, error)
-	ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 	ContainerCreate(ctx context.Context, options client.ContainerCreateOptions) (client.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerInspect(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error)
@@ -41,9 +42,24 @@ type EngineClient interface {
 }
 
 type Adapter struct {
-	Client      EngineClient
-	NetworkName string
-	AttachHub   *attach.Hub
+	CouncilHarnesses map[string]CouncilHarness
+	Client           EngineClient
+	NetworkName      string
+	AttachHub        *attach.Hub
+	attachCtx        context.Context
+	discoverSocket   func() string
+}
+
+func (a *Adapter) dockerSocket() string {
+	if a.discoverSocket != nil {
+		return a.discoverSocket()
+	}
+	return discoverDockerSocket()
+}
+
+// SetAttachHub ties log streams to the daemon lifetime across individual Start calls.
+func (a *Adapter) SetAttachHub(ctx context.Context, hub *attach.Hub) {
+	a.attachCtx, a.AttachHub = ctx, hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -101,45 +117,70 @@ func NewAdapter(cli EngineClient, networkName string) *Adapter {
 }
 
 func (a *Adapter) EnsureInternalNetwork(ctx context.Context) error {
-	if _, err := a.Client.NetworkInspect(ctx, a.NetworkName, client.NetworkInspectOptions{}); err == nil {
-		return nil
-	}
-	_, err := a.Client.NetworkCreate(ctx, a.NetworkName, client.NetworkCreateOptions{
-		Driver:   "bridge",
-		Internal: true,
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "sablecourt",
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("create internal network %q: %w", a.NetworkName, err)
-	}
-	return nil
+	_, err := a.internalNetwork(ctx, true)
+	return err
 }
 
-func (a *Adapter) EnsureImage(ctx context.Context, imageRef string) error {
-	if _, err := a.Client.ImageInspect(ctx, imageRef); err == nil {
-		return nil
+func isMissing(err error) bool {
+	return errdefs.IsNotFound(err)
+}
+
+// Council runs use the network already provisioned for their proxy.
+func (a *Adapter) internalNetwork(ctx context.Context, create bool) (string, error) {
+	inspect := func() (string, error) {
+		r, err := a.Client.NetworkInspect(ctx, a.NetworkName, client.NetworkInspectOptions{})
+		if err != nil {
+			return "", err
+		}
+		n := r.Network
+		if n.ID == "" || n.Name != a.NetworkName || !n.Internal || n.Driver != "bridge" || n.Ingress || n.ConfigOnly {
+			return "", errors.New("expected a named internal bridge network")
+		}
+		return n.ID, nil
 	}
-	resp, err := a.Client.ImagePull(ctx, imageRef, client.ImagePullOptions{})
+	id, err := inspect()
+	if !create || !isMissing(err) {
+		return id, err
+	}
+	_, createErr := a.Client.NetworkCreate(ctx, a.NetworkName, client.NetworkCreateOptions{
+		Driver: "bridge", Internal: true, Labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt"},
+	})
+	// A concurrent launcher may have created it. Validate the winner.
+	id, err = inspect()
 	if err != nil {
-		return fmt.Errorf("pull image %q: %w", imageRef, err)
+		return "", errors.Join(createErr, err)
 	}
-	if resp != nil {
-		defer resp.Close()
-		_, _ = io.Copy(io.Discard, resp)
+	return id, nil
+}
+
+var imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func (a *Adapter) localImage(ctx context.Context, ref string) (client.ImageInspectResult, error) {
+	r, err := a.Client.ImageInspect(ctx, ref)
+	if err != nil {
+		return r, fmt.Errorf("inspect local image: %w", err)
 	}
-	return nil
+	if !imageDigest.MatchString(r.ID) {
+		return r, errors.New("invalid local image ID")
+	}
+	return r, nil
+}
+
+func (a *Adapter) EnsureImage(ctx context.Context, ref string) error {
+	_, err := a.localImage(ctx, ref)
+	return err
 }
 
 func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
 	if spec.Workload.Spec.Runtime.Image == "" {
 		return scruntime.Handle{}, errors.New("docker runtime requires runtime.image")
 	}
-	if err := a.EnsureInternalNetwork(ctx); err != nil {
+	image, err := a.localImage(ctx, spec.Workload.Spec.Runtime.Image)
+	if err != nil {
 		return scruntime.Handle{}, err
 	}
-	if err := a.EnsureImage(ctx, spec.Workload.Spec.Runtime.Image); err != nil {
+	networkID, err := a.internalNetwork(ctx, true)
+	if err != nil {
 		return scruntime.Handle{}, err
 	}
 
@@ -168,7 +209,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 
 	hostCfg := &container.HostConfig{
 		Binds:          binds,
-		NetworkMode:    container.NetworkMode(a.NetworkName),
+		NetworkMode:    container.NetworkMode(networkID),
 		ReadonlyRootfs: spec.Workload.Spec.Runtime.ReadOnlyRootfs,
 		CapDrop:        []string{"ALL"},
 		SecurityOpt:    []string{"no-new-privileges:true"},
@@ -177,14 +218,14 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 
 	netCfg := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
-			a.NetworkName: {},
+			networkID: {},
 		},
 	}
 
 	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-" + spec.TaskID,
 		Config: &container.Config{
-			Image:     spec.Workload.Spec.Runtime.Image,
+			Image:     image.ID,
 			Env:       env,
 			OpenStdin: a.AttachHub != nil,
 			Labels: map[string]string{
@@ -227,7 +268,10 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if a.AttachHub != nil {
 		if ls, ok := a.Client.(logStreamer); ok {
 			a.AttachHub.Register(spec.TaskID, stdinCloser)
-			go a.streamLogs(spec.TaskID, created.ID, ls)
+			if a.attachCtx != nil {
+				ctx = a.attachCtx
+			}
+			go a.streamLogs(ctx, spec.TaskID, created.ID, ls)
 		} else if stdinCloser != nil {
 			a.AttachHub.Register(spec.TaskID, stdinCloser)
 		}
@@ -236,9 +280,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	return handle, nil
 }
 
-func (a *Adapter) streamLogs(taskID, containerID string, ls logStreamer) {
+func (a *Adapter) streamLogs(ctx context.Context, taskID, containerID string, ls logStreamer) {
 	defer a.AttachHub.Close(taskID)
-	rc, err := ls.ContainerLogs(context.Background(), containerID, client.ContainerLogsOptions{
+	rc, err := ls.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
@@ -247,25 +291,18 @@ func (a *Adapter) streamLogs(taskID, containerID string, ls logStreamer) {
 		return
 	}
 	defer rc.Close()
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := rc.Read(buf)
-		if n > 0 {
-			chunk := stripDockerMuxHeader(buf[:n])
-			a.AttachHub.WriteOutput(taskID, chunk)
-		}
-		if readErr != nil {
-			return
-		}
-	}
+	output := hubOutput{a.AttachHub, taskID}
+	_ = copyDockerStreams(rc, output, output)
 }
 
-func stripDockerMuxHeader(p []byte) []byte {
-	// Docker non-TTY multiplexed stream frames start with [stream(1), 0, 0, 0, size(4)].
-	if len(p) >= 8 && (p[0] == 1 || p[0] == 2) && p[1] == 0 && p[2] == 0 && p[3] == 0 {
-		return p[8:]
-	}
-	return p
+type hubOutput struct {
+	hub  *attach.Hub
+	task string
+}
+
+func (w hubOutput) Write(p []byte) (int, error) {
+	w.hub.WriteOutput(w.task, p)
+	return len(p), nil
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
@@ -312,8 +349,7 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	timeout := 10
 	_, err := a.Client.ContainerStop(ctx, handle.ExternalID, client.ContainerStopOptions{Timeout: &timeout})
 	_, removeErr := a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
-	var missing interface{ NotFound() }
-	if removeErr == nil || errors.As(removeErr, &missing) {
+	if removeErr == nil || isMissing(removeErr) {
 		return nil
 	}
 	return errors.Join(err, removeErr)
