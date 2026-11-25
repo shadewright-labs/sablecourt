@@ -326,37 +326,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
+	policies := newPolicyLoader(st, manifestsPath)
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
-		var b *config.Bundle
-		var pol *policy.Engine
-		if manifestsPath == "" {
-			pol = policy.NewEngine(nil, nil)
-		} else {
-			loaded, err := config.LoadPath(manifestsPath)
-			if err != nil {
-				return nil, nil, fmt.Errorf("load manifests: %w", err)
-			}
-			for _, w := range loaded.Workloads {
-				cardBytes, err := json.Marshal(w.Spec.AgentCard)
-				if err != nil {
-					return nil, nil, err
-				}
-				if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
-					Name:           w.Metadata.Name,
-					Zone:           w.Metadata.Zone,
-					Class:          w.Spec.Class,
-					ManifestDigest: loaded.ManifestDigest,
-					AgentCardJSON:  string(cardBytes),
-				}); err != nil {
-					return nil, nil, err
-				}
-			}
-			var policies []domain.Policy
-			for _, p := range loaded.Policies {
-				policies = append(policies, p)
-			}
-			breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-			b, pol = loaded, policy.NewEngine(policies, breaker)
+		b, pol, err := policies.Load(ctx)
+		if err != nil {
+			return nil, nil, err
 		}
 		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
 			var err error
@@ -395,7 +369,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		logger.Info("model gate routing through external AI gateway", "url", cfg.modelGatewayURL)
 	}
 
-	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	breaker := policies.Breaker()
 	notifier := notify.New(notify.Options{Secrets: secretStore})
 	var oobApprover approval.Approver
 	if !isCitadel {
@@ -1893,4 +1867,52 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		return nil, "", "", err
 	}
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
+}
+
+// policyLoader reads the manifests, records the declared workloads and builds
+// the policy engine for each load.
+type policyLoader struct {
+	st            store.Store
+	manifestsPath string
+	gateBreaker   *policy.CircuitBreaker
+}
+
+func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
+	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+}
+
+// Breaker returns the circuit breaker the action gate records outcomes on.
+func (l *policyLoader) Breaker() *policy.CircuitBreaker {
+	return l.gateBreaker
+}
+
+func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine, error) {
+	if l.manifestsPath == "" {
+		return nil, policy.NewEngine(nil, nil), nil
+	}
+	loaded, err := config.LoadPath(l.manifestsPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load manifests: %w", err)
+	}
+	for _, w := range loaded.Workloads {
+		cardBytes, err := json.Marshal(w.Spec.AgentCard)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := l.st.UpsertWorkload(ctx, domain.WorkloadRecord{
+			Name:           w.Metadata.Name,
+			Zone:           w.Metadata.Zone,
+			Class:          w.Spec.Class,
+			ManifestDigest: loaded.ManifestDigest,
+			AgentCardJSON:  string(cardBytes),
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+	var policies []domain.Policy
+	for _, p := range loaded.Policies {
+		policies = append(policies, p)
+	}
+	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	return loaded, policy.NewEngine(policies, breaker), nil
 }

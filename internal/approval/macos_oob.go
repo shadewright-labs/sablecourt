@@ -28,19 +28,7 @@ func (m *MacOSDialogApprover) Confirm(ctx context.Context, req ConfirmationReque
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	shortDigest := req.PayloadSHA256
-	if len(shortDigest) > 16 {
-		shortDigest = shortDigest[:16]
-	}
-	summary := req.Summary
-	if len(summary) > 220 {
-		summary = summary[:220] + "..."
-	}
-
-	msg := fmt.Sprintf(
-		"Sablecourt Approval Request\n\nWorkload: %s\nCapability: %s\nTask: %s\nDigest: %s\nPayload: %s",
-		req.WorkloadName, req.Capability, req.TaskID, shortDigest, summary,
-	)
+	msg := confirmationMessage(req)
 
 	// Pass the message as an explicit argv argument to osascript (no shell interpolation).
 	script := `on run argv
@@ -64,4 +52,20 @@ end run`
 		ConfirmedAt: time.Now().UTC(),
 		Digest:      req.PayloadSHA256,
 	}, nil
+}
+
+// confirmationMessage builds the text the operator reads in the dialog.
+func confirmationMessage(req ConfirmationRequest) string {
+	shortDigest := req.PayloadSHA256
+	if len(shortDigest) > 16 {
+		shortDigest = shortDigest[:16]
+	}
+	summary := req.Summary
+	if len(summary) > 220 {
+		summary = summary[:220] + "..."
+	}
+	return fmt.Sprintf(
+		"Sablecourt Approval Request\n\nWorkload: %s\nCapability: %s\nTask: %s\nDigest: %s\nPayload: %s",
+		req.WorkloadName, req.Capability, req.TaskID, shortDigest, summary,
+	)
 }
