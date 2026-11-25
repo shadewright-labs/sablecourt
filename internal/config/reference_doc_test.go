@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,7 +19,7 @@ import (
 )
 
 // The manifests reference (docs/reference/manifests.md) has one field table
-// per kind, plus "Common fields" for the type and object metadata. Each table
+// per kind that the loader's switch accepts, plus "Common fields" for the type and object metadata. Each table
 // has the columns Field, Type, Required and Meaning. This test checks the
 // first three against the manifest types and the loader:
 //
@@ -35,6 +39,78 @@ var manifestKinds = map[string]reflect.Type{
 	"Workflow": reflect.TypeOf(domain.Workflow{}),
 	"Schedule": reflect.TypeOf(domain.Schedule{}),
 	"Conclave": reflect.TypeOf(domain.Conclave{}),
+}
+
+// loaderKinds returns the kind names the loader accepts, read from the case
+// labels of the switch on meta.Kind in loader.go, with each domain.Kind
+// constant resolved from internal/domain.
+func loaderKinds(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	consts := map[string]string{}
+	domainPkgs, err := parser.ParseDir(fset, filepath.Join("..", "domain"), func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range domainPkgs {
+		for _, f := range pkg.Files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				vs, ok := n.(*ast.ValueSpec)
+				if !ok {
+					return true
+				}
+				for i, name := range vs.Names {
+					if i < len(vs.Values) {
+						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							consts[name.Name], _ = strconv.Unquote(lit.Value)
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	f, err := parser.ParseFile(fset, "loader.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
+		}
+		tag, ok := sw.Tag.(*ast.SelectorExpr)
+		if !ok || tag.Sel.Name != "Kind" {
+			return true
+		}
+		if x, ok := tag.X.(*ast.Ident); !ok || x.Name != "meta" {
+			return true
+		}
+		for _, st := range sw.Body.List {
+			for _, e := range st.(*ast.CaseClause).List {
+				sel, ok := e.(*ast.SelectorExpr)
+				if !ok {
+					t.Errorf("loader.go: case %T on meta.Kind is not a domain constant", e)
+					continue
+				}
+				v, ok := consts[sel.Sel.Name]
+				if !ok {
+					t.Errorf("loader.go: cannot resolve %s", sel.Sel.Name)
+					continue
+				}
+				kinds = append(kinds, v)
+			}
+		}
+		return false
+	})
+	if len(kinds) == 0 {
+		t.Fatal("loader.go: no switch on meta.Kind found")
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 const commonSection = "Common fields"
@@ -190,8 +266,14 @@ var exampleDocs = map[string][]string{
 	"Policy": {
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Policy","metadata":{"name":"subject"},"spec":{"defaultEffect":"deny","rules":[{"workload":"*","capability":"mcp:memory.get","effect":"allow"}]}}`,
 	},
+	// At least one limit must be positive, so each limit is the only one in
+	// one example: deleting it there fails, deleting it elsewhere loads.
 	"Budget": {
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"subject"},"spec":{"perTask":{"maxInputTokens":10,"maxOutputTokens":10,"maxCostUSD":1},"daily":{"maxCostUSD":5}}}`,
+		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"subject"},"spec":{"perTask":{"maxInputTokens":10}}}`,
+		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"subject"},"spec":{"perTask":{"maxOutputTokens":10}}}`,
+		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"subject"},"spec":{"perTask":{"maxCostUSD":1}}}`,
+		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"subject"},"spec":{"daily":{"maxCostUSD":5}}}`,
 	},
 	"Workflow": {
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workflow","metadata":{"name":"subject","zone":"runtime"},"spec":{"description":"d","steps":[
@@ -290,6 +372,11 @@ func TestManifestReferenceMatchesTypesAndLoader(t *testing.T) {
 				t.Fatalf("%s example %d does not load: %v", kind, i, err)
 			}
 		}
+	}
+
+	kinds := loaderKinds(t)
+	if got := sortedKeys(manifestKinds); strings.Join(got, ",") != strings.Join(kinds, ",") {
+		t.Fatalf("the loader accepts the kinds %v, manifestKinds lists %v; add the new kind to manifestKinds and exampleDocs", kinds, got)
 	}
 
 	doc := documentedFields(t, filepath.Join("..", "..", "docs", "reference", "manifests.md"))
