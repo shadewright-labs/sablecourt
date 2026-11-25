@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -331,4 +332,47 @@ func (e *proxyImageEngine) ImageInspect(ctx context.Context, ref string, opts ..
 		r.Config.Volumes = map[string]struct{}{"/extra": {}}
 	}
 	return r, err
+}
+
+// lateListenerEngine refuses the first probes because the proxy has not bound its port yet.
+type lateListenerEngine struct {
+	*readinessEngine
+	refusals int
+	attempts int
+}
+
+func (e *lateListenerEngine) ExecCreate(ctx context.Context, id string, o client.ExecCreateOptions) (client.ExecCreateResult, error) {
+	if _, err := e.readinessEngine.ExecCreate(ctx, id, o); err != nil {
+		return client.ExecCreateResult{}, err
+	}
+	e.attempts++
+	return client.ExecCreateResult{ID: fmt.Sprintf("exec-%d", e.attempts)}, nil
+}
+
+func (e *lateListenerEngine) ExecAttach(context.Context, string, client.ExecAttachOptions) (client.ExecAttachResult, error) {
+	data := frame(1, "401")
+	if e.attempts <= e.refusals {
+		data = append(frame(1, "000"), frame(2, "curl: (7) Failed to connect")...)
+	}
+	return client.ExecAttachResult{HijackedResponse: client.HijackedResponse{Conn: &fixtureConn{}, Reader: bufio.NewReader(bytes.NewReader(data))}}, nil
+}
+
+func (e *lateListenerEngine) ExecInspect(_ context.Context, execID string, _ client.ExecInspectOptions) (client.ExecInspectResult, error) {
+	code := 0
+	if e.attempts <= e.refusals {
+		code = 7
+	}
+	return client.ExecInspectResult{ID: execID, ContainerID: e.containerID, ExitCode: code}, nil
+}
+
+func TestProxyReadinessRetriesUntilListenerBinds(t *testing.T) {
+	eng := &lateListenerEngine{readinessEngine: &readinessEngine{fakeProxyEngine: newFakeProxyEngine()}, refusals: 2}
+	a := NewAdapter(eng, "")
+	eng.containers["proxy"] = container.InspectResponse{ID: "cid", Config: &container.Config{}}
+	if err := a.StartProxy(t.Context(), "proxy"); err != nil {
+		t.Fatalf("probe did not retry a refused connection: %v", err)
+	}
+	if eng.attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", eng.attempts)
+	}
 }

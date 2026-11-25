@@ -174,6 +174,9 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 			return err
 		}
 		persistedAdapter := r.resolveRecoveryAdapter(task, rec, bundle)
+		if persistedAdapter == nil && isContainerHandle(persisted) {
+			persistedAdapter = r.persistedClassAdapter(rec)
+		}
 		if persistedAdapter == nil {
 			return errors.New("runtime adapter unavailable for cleanup")
 		}
