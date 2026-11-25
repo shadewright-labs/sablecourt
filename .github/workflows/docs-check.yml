@@ -1,0 +1,40 @@
+name: Docs check
+
+# Builds the docs site and checks it on pull requests that touch the docs or their build. Nothing is published:
+# there is no deploy job and no pages or write permission. The requirements are hash-locked (requirements-docs.txt).
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "zensical.toml"
+      - "requirements-docs.in"
+      - "requirements-docs.txt"
+      - "scripts/docs-*"
+      - ".github/workflows/docs-check.yml"
+
+permissions: {}
+
+jobs:
+  docs-check:
+    name: docs check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the docs requirements
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-docs.txt
+
+      - name: Build the site and check it
+        run: make docs-check

@@ -1,0 +1,49 @@
+# Differences between the navigation in zensical.toml and docs/ that are expected while the pages of the docs
+# plan are written. scripts/docs-nav-check.py reads this file (see its docstring). The list only shrinks: whoever
+# adds a listed page, or removes a listed old page, deletes its line in the same pull request. It is empty when
+# the set is complete, and the check is then fully strict.
+add concepts.md
+add design/architecture.md
+add design/index.md
+add design/storage.md
+add design/v0.1-baseline.md
+add diagrams/README.md
+add glossary.md
+add how-it-works/approvals.md
+add how-it-works/audit.md
+add how-it-works/conclaves.md
+add how-it-works/context-and-learning.md
+add how-it-works/council.md
+add how-it-works/harness-containers.md
+add how-it-works/identity-and-access.md
+add how-it-works/index.md
+add how-it-works/integrations.md
+add how-it-works/model-gate.md
+add how-it-works/tasks.md
+add how-it-works/tools-and-actions.md
+add how-it-works/workloads-and-runtimes.md
+add how-to/find-why-refused.md
+add how-to/index.md
+add how-to/install-and-start.md
+add how-to/log-in-harnesses.md
+add how-to/retry-with-handoff.md
+add how-to/review-an-approval.md
+add how-to/run-a-council.md
+add how-to/verify-the-audit-chain.md
+add how-to/watch-and-steer.md
+add how-to/write-manifests.md
+add index.md
+add overview.md
+add reference/cli.md
+add reference/configuration.md
+add reference/http-api.md
+add reference/index.md
+add reference/limits.md
+add reference/manifests.md
+add reference/metrics.md
+add threat-model.md
+add troubleshooting.md
+remove architecture.md
+remove design.md
+remove integrations.md
+remove reference.md

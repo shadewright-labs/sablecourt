@@ -1,0 +1,145 @@
+# Docs site for Sablecourt, built with Zensical on the model of the Shadewright docs.
+# Local use only: nothing here publishes the site. Preview and check with make docs-serve and make docs-check.
+# The navigation follows the docs tree of the documentation plan. Pages that are not written yet are listed
+# in scripts/docs-pending.txt, which scripts/docs-nav-check.py reads.
+
+[project]
+site_name = "Sablecourt"
+site_description = "Sablecourt runs agents and deterministic workloads under typed policy, budgets, approvals and an audit chain, one machine at a time."
+# The site is served under /sablecourt/ on the Shadewright Labs domain; the path comes from site_url.
+site_url = "https://shadewrightlabs.com/sablecourt/"
+repo_url = "https://github.com/shadewright-labs/sablecourt"
+repo_name = "shadewright-labs/sablecourt"
+extra_css = ["stylesheets/sablecourt.css"]
+nav = [
+  { "Overview" = [
+    { "Home" = "index.md" },
+    { "What it is and is not" = "overview.md" },
+    { "Concepts" = "concepts.md" },
+    { "Glossary" = "glossary.md" },
+  ] },
+  { "How it works" = [
+    { "The whole flow" = "how-it-works/index.md" },
+    { "Tasks" = "how-it-works/tasks.md" },
+    { "Workloads and runtimes" = "how-it-works/workloads-and-runtimes.md" },
+    { "The model gate" = "how-it-works/model-gate.md" },
+    { "Tools and actions" = "how-it-works/tools-and-actions.md" },
+    { "Approvals" = "how-it-works/approvals.md" },
+    { "Conclaves" = "how-it-works/conclaves.md" },
+    { "The council" = "how-it-works/council.md" },
+    { "Harness containers" = "how-it-works/harness-containers.md" },
+    { "Context and learning" = "how-it-works/context-and-learning.md" },
+    { "The audit chain" = "how-it-works/audit.md" },
+    { "Identity and access" = "how-it-works/identity-and-access.md" },
+    { "Integrations" = "how-it-works/integrations.md" },
+  ] },
+  { "How-to" = [
+    { "All how-to guides" = "how-to/index.md" },
+    { "Install and start" = "how-to/install-and-start.md" },
+    { "Write manifests" = "how-to/write-manifests.md" },
+    { "Log in the harnesses" = "how-to/log-in-harnesses.md" },
+    { "Run a council" = "how-to/run-a-council.md" },
+    { "Review an approval" = "how-to/review-an-approval.md" },
+    { "Watch and steer" = "how-to/watch-and-steer.md" },
+    { "Retry with handoff" = "how-to/retry-with-handoff.md" },
+    { "Verify the audit chain" = "how-to/verify-the-audit-chain.md" },
+    { "Find why something was refused" = "how-to/find-why-refused.md" },
+    { "Troubleshooting" = "troubleshooting.md" },
+  ] },
+  { "Reference" = [
+    { "Reference" = "reference/index.md" },
+    { "Manifests" = "reference/manifests.md" },
+    { "HTTP API" = "reference/http-api.md" },
+    { "Command line" = "reference/cli.md" },
+    { "Configuration" = "reference/configuration.md" },
+    { "Limits" = "reference/limits.md" },
+    { "Metrics" = "reference/metrics.md" },
+  ] },
+  { "Internals" = [
+    { "Threat model" = "threat-model.md" },
+    { "Design" = [
+      { "Overview" = "design/index.md" },
+      { "Architecture" = "design/architecture.md" },
+      { "Storage" = "design/storage.md" },
+      { "The v0.1 baseline" = "design/v0.1-baseline.md" },
+      { "Harness spike record" = "harnesses.md" },
+      { "Diagram standard" = "diagrams/README.md" },
+    ] },
+    { "Decisions" = [
+      { "Overview" = "adr/README.md" },
+      { "0001 Local-first control plane" = "adr/0001-local-first-control-plane-with-k8s-adapters.md" },
+      { "0002 Workload adapters in the MVP" = "adr/0002-heterogeneous-mvp-workload-adapters.md" },
+      { "0003 Hybrid workload isolation" = "adr/0003-hybrid-workload-isolation.md" },
+      { "0004 Capability gates, Three Doors" = "adr/0004-in-house-capability-gates-three-doors.md" },
+      { "0005 Dual-path approvals" = "adr/0005-dual-path-human-in-the-loop.md" },
+      { "0006 Hub-and-spoke A2A envelopes" = "adr/0006-hub-and-spoke-a2a-task-envelope.md" },
+      { "0007 Separation from Nightloom" = "adr/0007-strict-boundary-with-nightloom.md" },
+      { "0008 Conclaves, Wards, Decrees, Relics" = "adr/0008-conclaves-wards-and-live-attach.md" },
+      { "0009 Sanctum, Citadel, audit chain" = "adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md" },
+      { "0010 Context, learnings, verification" = "adr/0010-agentic-context-learnings-and-verification-pipeline.md" },
+      { "0011 Sanctum scope and CLI harnesses" = "adr/0011-sanctum-scope-trust-and-cli-harnesses.md" },
+      { "0012 Learning evidence and expiry" = "adr/0012-learning-evidence-and-expiry.md" },
+      { "0013 Bounded council rounds" = "adr/0013-bounded-council-rounds.md" },
+      { "0014 Identity and authentication" = "adr/0014-identity-and-authentication.md" },
+      { "Template" = "adr/0000-template.md" },
+    ] },
+  ] },
+]
+
+[project.theme]
+language = "en"
+# false: no Google Fonts request. Text uses the system font stacks set in sablecourt.css.
+font = false
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+# Dark only: one palette, so the theme renders no toggle and ignores the reader's colour preference.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+
+# The Zensical defaults, set explicitly, plus the Mermaid fence the how-it-works pages use.
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc.permalink = true
+pymdownx.arithmatex.generic = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}

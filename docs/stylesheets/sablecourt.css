@@ -1,0 +1,110 @@
+/*
+ * Sablecourt brand for the docs site: dark only, one palette, the same tokens as the SVG diagrams
+ * (docs/diagrams, sc-diagram skill). The site loads nothing from another host: system font stacks only.
+ *
+ * Contrast on the sRGB relative luminance of each pair (WCAG 2.2 AA needs 4.5:1):
+ *   body #efe9dc on #08060e 16.6, on tile #14111c 15.4
+ *   link and accent #2dd4bf on #08060e 10.8, on tile 10.0
+ *   muted #bbb4c5 on #08060e 10.0, on tile 9.3
+ *   grey #8a8594 on #08060e 5.6, on tile 5.2
+ */
+
+:root {
+  --sc-night: #08060e;
+  --sc-tile: #14111c;
+  --sc-slate: #111422;
+  --sc-line: #373040;
+  --sc-bone: #efe9dc;
+  --sc-muted: #bbb4c5;
+  --sc-grey: #8a8594;
+  --sc-jade: #2dd4bf;
+  --sc-jade-soft: #7fd6b4;
+  --sc-amber: #f0b86a;
+  --sc-coral: #f87171;
+  --md-text-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 270;
+  --md-default-bg-color: var(--sc-night);
+  --md-default-fg-color: var(--sc-bone);
+  --md-default-fg-color--light: var(--sc-muted);
+  --md-default-fg-color--lighter: var(--sc-grey);
+  --md-typeset-color: var(--sc-bone);
+  --md-typeset-a-color: var(--sc-jade);
+  --md-primary-fg-color: var(--sc-tile);
+  --md-primary-fg-color--light: var(--sc-slate);
+  --md-primary-fg-color--dark: var(--sc-night);
+  --md-primary-bg-color: var(--sc-bone);
+  --md-primary-bg-color--light: #efe9dcb3;
+  --md-accent-fg-color: var(--sc-jade-soft);
+  --md-accent-fg-color--transparent: #2dd4bf1f;
+  --md-code-bg-color: var(--sc-tile);
+  --md-code-fg-color: var(--sc-bone);
+  --md-code-hl-keyword-color: var(--sc-jade);
+  --md-code-hl-string-color: var(--sc-jade-soft);
+  --md-code-hl-number-color: var(--sc-amber);
+  --md-code-hl-comment-color: var(--sc-grey);
+  --md-footer-bg-color: var(--sc-tile);
+  --md-footer-bg-color--dark: var(--sc-night);
+
+  /* Mermaid blocks, in the palette of the SVG diagrams. The sources carry no colours, so GitHub
+     renders them in the reader's own theme. */
+  --md-mermaid-node-bg-color: var(--sc-tile);
+  --md-mermaid-node-fg-color: var(--sc-bone);
+  --md-mermaid-edge-color: var(--sc-jade);
+  --md-mermaid-label-bg-color: var(--sc-night);
+  --md-mermaid-label-fg-color: var(--sc-muted);
+  --md-mermaid-sequence-actor-bg-color: var(--sc-tile);
+  --md-mermaid-sequence-actor-fg-color: var(--sc-bone);
+  --md-mermaid-sequence-actor-border-color: var(--sc-jade);
+  --md-mermaid-sequence-actor-line-color: var(--sc-line);
+  --md-mermaid-sequence-message-fg-color: var(--sc-bone);
+  --md-mermaid-sequence-message-line-color: var(--sc-jade);
+  --md-mermaid-sequence-note-bg-color: var(--sc-slate);
+  --md-mermaid-sequence-note-fg-color: var(--sc-bone);
+  --md-mermaid-sequence-note-border-color: var(--sc-line);
+  --md-mermaid-sequence-loop-bg-color: transparent;
+  --md-mermaid-sequence-loop-fg-color: var(--sc-muted);
+  --md-mermaid-sequence-loop-border-color: var(--sc-line);
+  --md-mermaid-sequence-label-bg-color: var(--sc-tile);
+  --md-mermaid-sequence-label-fg-color: var(--sc-bone);
+  --md-mermaid-sequence-number-bg-color: var(--sc-jade);
+  --md-mermaid-sequence-number-fg-color: var(--sc-night);
+}
+
+.md-header,
+.md-tabs {
+  background-color: var(--sc-tile);
+}
+.md-header {
+  box-shadow: 0 1px 0 0 #2dd4bf66;
+}
+.md-header__title {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.md-typeset h1 {
+  color: var(--sc-bone);
+  font-weight: 650;
+}
+.md-typeset a:hover {
+  color: var(--sc-jade-soft);
+}
+
+.md-typeset table:not([class]) {
+  background-color: var(--sc-tile);
+  border: 0.05rem solid var(--sc-line);
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--sc-slate);
+  color: var(--sc-muted);
+}
+
+/* Linked SVG diagrams are dark standalone images: keep them on their own canvas. */
+.md-typeset img[src$=".svg"] {
+  border-radius: 0.6rem;
+  max-width: 100%;
+}

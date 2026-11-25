@@ -1,0 +1,8 @@
+# Warnings that scripts/docs-build.py tolerates, one occurrence per line: <page under docs/> | <message>.
+# The list only shrinks: a line that no longer matches a warning fails the build.
+#
+# ADR-0011 links to harnesses.md#summary-table-1. GitHub numbers the second "Summary table" heading
+# "summary-table-1"; Zensical numbers it "summary-table_1". ADR bodies are not edited, so the two links are
+# tolerated here. They work on GitHub, where the ADR is read today.
+adr/0011-sanctum-scope-trust-and-cli-harnesses.md | anchor does not exist
+adr/0011-sanctum-scope-trust-and-cli-harnesses.md | anchor does not exist

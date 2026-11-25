@@ -23,3 +23,7 @@ coverage.txt
 .DS_Store
 .idea/
 .vscode/
+
+# Docs site build
+/site/
+.venv/
