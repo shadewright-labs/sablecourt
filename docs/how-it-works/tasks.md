@@ -1,0 +1,99 @@
+# Tasks
+
+A task is one run of a workload. The daemon stores it, a loop called the reconciler launches and watches it, and every change of state is written as an event, so a restart can pick up where the last process stopped. This page explains how tasks start, which states they move through, and what keeps them from running twice.
+
+Status: partly built. Suspend and resume do not keep a workload alive (see [Not built yet](#not-built-yet)).
+
+## How a task is created
+
+Each of these ends in one call that stores a task in state `submitted`:
+
+- `sablectl task submit <workload>` and `POST /api/v1/tasks` (operator credential).
+- The web UI task form and workflow form.
+- A `Schedule` manifest. The cron expression is read in UTC, and minutes in which the daemon was not running are not made up.
+- A [Conclave](../glossary.md#conclave) turn, which the broker submits with a reserved key.
+- The next step of a `Workflow`, or a retry of a failed task.
+
+The GitHub webhook and A2A routes also submit tasks; both are parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
+
+A task carries an idempotency key. If none is given the task ID is used. Submitting the same key for the same workload returns the task that already exists; the same key for another workload is refused. Keys that start with `wf:` belong to workflows and keys that start with `conclave-` need a reservation, so an operator call cannot use them. A scheduled workload gets the key `sched:<name>:<UTC minute>`, so a double fire in one minute makes one task. A workflow run takes its root task ID from a hash of its key, so a schedule slot keeps one root across restarts.
+
+## States and what moves a task
+
+| State | Meaning | Left by |
+| --- | --- | --- |
+| `submitted` | Stored, nothing started. No lease, no heartbeat and no budget ceiling yet. | The reconciler claims it (`dispatch_claimed`) or fails it (`workload_missing`, `adapter_missing`); an operator cancels it. |
+| `working` | Launched; the runtime is observed on every pass. | Exit observed, a failure reason, cancel, suspend, or the MCP Gate asking for an approval. |
+| `input-required` | An action or tool call waits for an approval. | The reconciler returns it to `working` when every approval of the task is decided and none is pending (`approval_decided`). |
+| `suspended` | An operator suspended it. | Resume or cancel. |
+| `completed`, `failed`, `cancelled` | Terminal. | Nothing. A retry creates a new task. |
+
+```mermaid
+stateDiagram-v2
+    [*] --> submitted
+    submitted --> working: dispatch_claimed
+    submitted --> failed: workload or adapter missing
+    working --> input_required: approval_required
+    input_required --> working: approval_decided
+    working --> suspended: suspend
+    suspended --> working: resume
+    working --> completed: exit 0 observed
+    working --> failed: exit or loss observed
+    submitted --> cancelled: cancel
+    working --> cancelled: cancel
+    input_required --> cancelled: cancel
+    suspended --> cancelled: cancel
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
+The store does not check which transitions are allowed. Each change is a compare-and-swap on the current state (`UPDATE ... WHERE state = from`), so two callers cannot both move the same task, and each change adds a row to `task_events` with a reason. `sablectl task inspect` shows those events. Failure reasons include `launch_failed`, `lost_on_restart`, `observe_error`, `runtime_unknown` and `author_checkout_unavailable`.
+
+## What one pass of the reconciler does
+
+The daemon runs a pass every 2 seconds. ADR-0002 calls the loop observe, update, derive and act; in the code it is the flow below.
+
+```mermaid
+flowchart TD
+    A[Recover tasks with no live handle] --> B[List tasks to reconcile]
+    B --> C[Observe each working or input-required task]
+    C --> D{Runtime state}
+    D -->|running| E[Record heartbeat, renew leases]
+    D -->|exited| F[Collect artifacts, set terminal state, revoke leases]
+    D -->|lost or stale| G[Fail with a reason, revoke leases]
+    E --> H[Launch submitted tasks up to the limits]
+    F --> H
+    G --> H
+```
+
+- Observe: the adapter reports `running`, `suspended`, `completed` or `failed`. A running answer with a fresh timestamp is recorded as a heartbeat and extends the task's leases to one hour past the observation.
+- Stale: a working task with no heartbeat for more than 2 minutes, whose runtime has not exited, fails with `lost_on_restart`. Three observation errors in a row fail it with the error reason.
+- Launch: at most 4 tasks run at once by default (`--max-concurrent`, 0 means no limit) and at most 4 launches are in flight. A launch mints a lease valid for one hour, builds the input and calls the adapter with a 30 second start timeout.
+- Terminal: when the exit is observed the reconciler stores artifacts, sets `completed` or `failed`, revokes leases and stops what is left of the runtime. A completed workflow step submits the next step here.
+
+## Restart recovery
+
+Each running task has a handle (process ID and OS start time, or container identity) stored as a memory entry in a reserved namespace that tools cannot read or write. After a restart the first pass loads each handle and checks it:
+
+- A process handle is reattached only if the recorded ID and start time match a live process. An unverified ID is never signalled.
+- A container handle is always cleaned up (container, proxy and network of the old launch), then the task fails with `lost_on_restart`, because the old daemon's listeners are gone.
+- A missing or invalid handle fails the task with `lost_on_restart`.
+- A claim record keeps two daemons from recovering the same task.
+
+`submitted` tasks need no recovery; the next pass launches them. Because `submitted` to `working` is a compare-and-swap, no pass can launch a task twice, and the worktree and branch names are derived from the task ID (`sablecourt/<task id>`), so a repeat cannot create a second checkout.
+
+## Child tasks and sub-budgets
+
+A task may have a parent: workflow steps after the first and retries of those steps do. A parent-bound task that calls the Model Gate must carry a budget ceiling (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`); the gate refuses its calls at or past the ceiling (PR 66, PR 86) and refuses a missing or malformed one (see [Model Gate](model-gate.md#child-budgets)). The code that creates a delegated child, `delegate:<workload>` after a policy check, exists in the reconciler but no route or tool calls it on `main`.
+
+## Not built yet
+
+- Suspend and resume. `task suspend` asks the adapter for a checkpoint, then always stops the workload; the coding and Docker adapters keep nothing resumable, and `task resume` fails for coding tasks. Tracking issue #14 lists the faults; use cancel and retry instead.
+- Delegation of child tasks by an agent (see above).
+
+## In depth
+
+- [Workloads and runtimes](workloads-and-runtimes.md), [model gate](model-gate.md), [approvals](approvals.md)
+- [ADR-0002](../adr/0002-heterogeneous-mvp-workload-adapters.md), [ADR-0006](../adr/0006-hub-and-spoke-a2a-task-envelope.md)
+- Code: `internal/controlplane/reconciler.go`, `internal/controlplane/recovery.go`, `internal/controlplane/scheduler.go`, `internal/store/reconcile.go`
