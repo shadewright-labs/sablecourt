@@ -68,13 +68,30 @@ func (s *SQLiteStore) ListConclaves(ctx context.Context) ([]domain.ConclaveSessi
 }
 
 func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE conclaves SET state = ?, ward_reason = ?, updated_at = ? WHERE id = ?
-	`, string(state), wardReason, nowRFC3339(), id)
+	query := "UPDATE conclaves SET state=?,ward_reason=?,updated_at=? WHERE id=?"
+	terminal := state == domain.ConclaveStateCompleted || state == domain.ConclaveStateCancelled
+	if terminal {
+		// Council creation and the membership check serialize with this update.
+		query += " AND id NOT IN (SELECT id FROM councils)"
+	}
+	res, err := s.db.ExecContext(ctx, query, state, wardReason, nowRFC3339(), id)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 && terminal {
+		if wardReason == "" {
+			wardReason = "owner_close"
+			if state == domain.ConclaveStateCancelled {
+				wardReason = "owner_stop"
+			}
+		}
+		_, err := s.closeCouncil(ctx, id, state, wardReason, true)
+		return err
+	}
 	if n == 0 {
 		return store.ErrNotFound
 	}
@@ -142,9 +159,15 @@ func (s *SQLiteStore) PutConclaveRelic(ctx context.Context, relic domain.Conclav
 }
 
 func (s *SQLiteStore) GetConclaveRelic(ctx context.Context, conclaveID, name string) (domain.ConclaveRelic, error) {
+	return readConclaveRelic(ctx, s.db, conclaveID, name)
+}
+
+func readConclaveRelic(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, conclaveID, name string) (domain.ConclaveRelic, error) {
 	var r domain.ConclaveRelic
 	var createdAt string
-	err := s.db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 		SELECT conclave_id, name, author_role, content_type, body, sha256, created_at
 		FROM conclave_relics WHERE conclave_id = ? AND name = ?
 	`, conclaveID, name).Scan(&r.ConclaveID, &r.Name, &r.AuthorRole, &r.ContentType, &r.Body, &r.SHA256, &createdAt)
@@ -154,8 +177,8 @@ func (s *SQLiteStore) GetConclaveRelic(ctx context.Context, conclaveID, name str
 	if err != nil {
 		return domain.ConclaveRelic{}, err
 	}
-	r.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	return r, nil
+	r.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+	return r, err
 }
 
 func (s *SQLiteStore) ListConclaveRelics(ctx context.Context, conclaveID string) ([]domain.ConclaveRelic, error) {
