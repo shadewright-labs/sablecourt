@@ -63,8 +63,13 @@ func (a *controlledAdapter) Stop(context.Context, scruntime.Handle) error {
 
 func regressionFixture(t *testing.T) (*Reconciler, *sqlite.SQLiteStore, *controlledAdapter, domain.Task) {
 	t.Helper()
+	return regressionFixtureAt(t, filepath.Join(t.TempDir(), "state.db"))
+}
+
+func regressionFixtureAt(t *testing.T, path string) (*Reconciler, *sqlite.SQLiteStore, *controlledAdapter, domain.Task) {
+	t.Helper()
 	ctx := context.Background()
-	st, err := sqlite.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := sqlite.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

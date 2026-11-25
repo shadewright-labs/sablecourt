@@ -2,7 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -34,7 +36,9 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 		{"blank", "  ", false},
 		{"missing", nil, false},
 		{"oversize", strings.Repeat("p", (32<<10)+1), false},
-		{"secret", "fixture " + secret, false},
+		// Intake redacts task input, so a packet that held a secret arrives at
+		// launch already filtered and launches with the marker in its place.
+		{"secret", "fixture " + secret, true},
 		{"invalid UTF-8", "invalid-utf8-marker", false},
 	} {
 		for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent, domain.ClassDeterministicController} {
@@ -71,18 +75,6 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 				}
 				stub := &fakeAdapter{}
 				err = launchForTest(ctx, r, task, wl, stub)
-				if tc.name == "secret" {
-					// Intake redacts the secret, so neither the stored input nor
-					// anything handed to the adapter may hold it.
-					stored, getErr := st.GetTask(ctx, task.ID)
-					if getErr != nil {
-						t.Fatal(getErr)
-					}
-					if strings.Contains(stored.InputJSON, secret) || strings.Contains(stub.lastSpec.InputJSON, secret) {
-						t.Fatal("secret packet reached the store or launch")
-					}
-					return
-				}
 				if !tc.valid {
 					if err == nil || stub.lastSpec.TaskID != "" {
 						t.Fatal("invalid packet reached launch")
@@ -98,6 +90,19 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 				}
 				if err := json.Unmarshal([]byte(stub.lastSpec.InputJSON), &launch); err != nil {
 					t.Fatal(err)
+				}
+				if tc.name == "secret" {
+					if launch.Packet != "fixture [REDACTED:openai_key]" {
+						t.Fatalf("adapter received %q, want the redacted packet", launch.Packet)
+					}
+					stored, err := st.GetTask(ctx, task.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(stored.InputJSON, secret) {
+						t.Fatal("stored input holds the secret")
+					}
+					return
 				}
 				if launch.Packet != packet.Markdown {
 					t.Fatal("adapter did not receive the reserved packet")
@@ -272,6 +277,62 @@ func TestOrdinaryConclaveLaunchMatchesMain(t *testing.T) {
 			if !reflect.DeepEqual(launchFields, ordinaryFields) {
 				t.Errorf("launch input = %s, want original fields and ordinary Conclave packet", stub.lastSpec.InputJSON)
 			}
+		})
+	}
+}
+
+// TestLegacyCouncilPacketWithSecretIsRefused covers a reserved packet stored
+// before intake redaction: its row still holds the secret, so launch must
+// refuse it and fail the task without calling the adapter.
+func TestLegacyCouncilPacketWithSecretIsRefused(t *testing.T) {
+	secret := "sk-" + strings.Repeat("x", 32)
+	for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent, domain.ClassDeterministicController} {
+		t.Run(string(class), func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "state.db")
+			r, st, _, _ := regressionFixtureAt(t, path)
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = class
+			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneSandbox, Class: wl.Spec.Class}); err != nil {
+				t.Fatal(err)
+			}
+			room := domain.ConclaveSession{ID: "panel", State: domain.ConclaveStateActive}
+			member := store.CouncilMember{Vassal: domain.ConclaveVassal{Role: "reader", Workload: "worker"}, Zone: domain.ZoneSandbox}
+			if err := st.CreateCouncil(ctx, room, store.CouncilSpec{Members: []store.CouncilMember{member}, Question: "Which path?"}); err != nil {
+				t.Fatal(err)
+			}
+			a := store.ConclaveAssignment{ConclaveID: room.ID, Role: "reader", Round: 1, Attempt: 1}
+			input, err := json.Marshal(map[string]any{"conclaveId": room.ID, "role": a.Role, "round": a.Round, "attempt": a.Attempt, "context_packet": "fixture LEGACY-PLACEHOLDER"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := store.SubmitConclaveTurn(ctx, room.ID, a.TurnKey(), store.ConclaveLimits{MaxRuns: 6, MaxMessages: 8, MaxPingPong: 8}, func(ctx context.Context) (domain.Task, error) {
+				return r.SubmitTask(ctx, "worker", a.TurnKey(), string(input))
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Write the row as an older daemon would have stored it.
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.ExecContext(ctx, `UPDATE tasks SET input_json = replace(input_json, 'LEGACY-PLACEHOLDER', ?) WHERE id = ?`, secret, task.ID); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := st.GetTask(ctx, task.ID)
+			if err != nil || !strings.Contains(stored.InputJSON, secret) {
+				t.Fatalf("legacy row not written: %v", err)
+			}
+			stub := &fakeAdapter{}
+			if err := launchForTest(ctx, r, stored, wl, stub); err == nil {
+				t.Fatal("legacy packet with a secret launched")
+			}
+			if stub.lastSpec.TaskID != "" {
+				t.Fatal("legacy packet reached the adapter")
+			}
+			requireState(t, st, task.ID, domain.TaskStateFailed)
 		})
 	}
 }
