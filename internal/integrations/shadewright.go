@@ -592,7 +592,7 @@ func (h *ShadewrightHandler) authenticate(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	got := strings.TrimPrefix(authValues[0], "Bearer ")
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+	if got == "" || strings.HasPrefix(got, "op_") || strings.HasPrefix(got, "sc_task_") || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid integration bearer token"})
 		return false
