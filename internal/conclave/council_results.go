@@ -3,11 +3,11 @@ package conclave
 import (
 	"context"
 	"encoding/json/v2"
-
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
@@ -45,8 +45,8 @@ func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string)
 		a.Role != turn.Role || a.Round != turn.Round || a.Attempt != turn.Starts {
 		return false, store.ErrConflict
 	}
-	body, vote := councilFinalAnswer(task.ArtifactsJSON)
-	if body == "" {
+	artifacts := councilArtifacts(task.ArtifactsJSON)
+	if artifacts == nil {
 		return false, nil
 	}
 	events, err := b.store.ListTaskEvents(ctx, taskID)
@@ -55,6 +55,16 @@ func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string)
 	}
 	exitedAt := councilSuccessfulExit(events, taskID)
 	if exitedAt.IsZero() {
+		return false, nil
+	}
+	if turn.Role == snap.Checkout.WriterRole {
+		diff, valid := controlplane.CouncilWriterDiff(a, taskID, artifacts)
+		if !valid || !writerDiffRecorded(snap, turn, diff) {
+			return false, nil
+		}
+	}
+	body, vote := councilFinalAnswer(artifacts)
+	if body == "" {
 		return false, nil
 	}
 	to := councilAnswerRecipient(snap.Members, turn.Role, task.WorkloadName)
@@ -78,19 +88,36 @@ func (b *Broker) RecordCouncilAnswer(ctx context.Context, roomID, taskID string)
 	return true, nil
 }
 
-func councilFinalAnswer(raw string) (body string, vote bool) {
+func writerDiffRecorded(s store.CouncilSnapshot, turn store.CouncilTurn, diff *domain.ConclaveRelic) bool {
+	for _, a := range s.Attempts {
+		if a.TaskID != turn.TaskID || a.Role != turn.Role || a.Round != turn.Round || a.Number != turn.Starts || a.State != domain.TaskStateCompleted {
+			continue
+		}
+		for _, relic := range a.Relics {
+			if relic.Name == controlplane.CouncilWriterDiffName(a.TaskID) {
+				return diff != nil && relic.ConclaveID == diff.ConclaveID && relic.AuthorRole == diff.AuthorRole &&
+					relic.ContentType == diff.ContentType && relic.Body == diff.Body
+			}
+		}
+		return diff == nil
+	}
+	return false
+}
+
+func councilArtifacts(raw string) []*scruntime.Artifact {
 	if len(raw) > store.MaxConclaveTurnInput {
-		return "", false
+		return nil
 	}
 	var artifacts []*scruntime.Artifact
-	if json.Unmarshal([]byte(raw), &artifacts, json.RejectUnknownMembers(true)) != nil {
-		return "", false
+	if json.Unmarshal([]byte(raw), &artifacts, json.RejectUnknownMembers(true)) != nil || slices.Contains(artifacts, nil) {
+		return nil
 	}
+	return artifacts
+}
+
+func councilFinalAnswer(artifacts []*scruntime.Artifact) (body string, vote bool) {
 	var final *scruntime.Artifact
 	for _, a := range artifacts {
-		if a == nil {
-			return "", false
-		}
 		if a.Name == "final-message" {
 			if final != nil {
 				return "", false

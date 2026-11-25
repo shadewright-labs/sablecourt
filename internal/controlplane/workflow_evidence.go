@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
@@ -120,7 +123,104 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 	return "", false, nil
 }
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
+func sameCheckoutSource(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(absA)
+	rb, errB := filepath.EvalSymlinks(absB)
+	return errA == nil && errB == nil && ra == rb
+}
+
+// The coding adapter chooses its checkout in Start from these reserved fields.
+func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[string]json.RawMessage, assignment store.ConclaveAssignment, wl domain.Workload) (domain.Workload, error) {
+	councils, err := store.Councils(r.store)
+	if err != nil {
+		return wl, err
+	}
+	s, err := councils.CouncilSnapshot(ctx, assignment.ConclaveID)
+	if err != nil {
+		return wl, err
+	}
+	c := s.Checkout
+	if wl.Spec.Coding == nil && c == (store.CouncilCheckout{}) {
+		return wl, nil
+	}
+	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
+		return wl, errors.New("council checkout isolation unavailable")
+	}
+	if c.Source != "" {
+		if wl.Spec.Coding.RepoPath != "" && !sameCheckoutSource(c.Source, wl.Spec.Coding.RepoPath) {
+			return wl, errors.New("council checkout isolation unavailable")
+		}
+		admitted := c.Source
+		if c.SourceDev != 0 || c.SourceIno != 0 {
+			if !filepath.IsAbs(admitted) {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			resolved, err := filepath.EvalSymlinks(admitted)
+			if err != nil || resolved != admitted {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			info, err := os.Lstat(admitted)
+			if err != nil || !info.IsDir() {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || uint64(stat.Dev) != c.SourceDev || uint64(stat.Ino) != c.SourceIno {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+		} else if filepath.IsAbs(admitted) {
+			resolved, err := filepath.EvalSymlinks(admitted)
+			if err != nil {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			admitted = resolved
+		} else if wl.Spec.Coding.RepoPath == "" {
+			return wl, errors.New("council checkout isolation unavailable")
+		}
+		cfg := *wl.Spec.Coding
+		cfg.RepoPath = admitted
+		wl.Spec.Coding = &cfg
+	} else if wl.Spec.Coding.RepoPath == "" {
+		return wl, errors.New("council checkout isolation unavailable")
+	}
+
+	// Rebuild from the pinned policy and seat, including reservations made
+	// before the dispatcher started writing explicit checkout fields.
+	for key := range payload {
+		if strings.EqualFold(key, "role") || strings.EqualFold(key, "checkoutMode") ||
+			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") ||
+			strings.EqualFold(key, "checkoutSourceId") {
+			delete(payload, key)
+		}
+	}
+	mode := "live"
+	if c.Commit != "" {
+		mode = "ref"
+		payload["checkoutRef"], _ = json.Marshal(c.Commit)
+	}
+	if c.WriterRole != "" {
+		mode = "writer"
+		payload["checkoutWriter"], _ = json.Marshal(c.WriterRole)
+	}
+	if c.SourceDev != 0 || c.SourceIno != 0 {
+		payload["checkoutSourceId"], _ = json.Marshal(fmt.Sprintf("%d:%d", c.SourceDev, c.SourceIno))
+	}
+	payload["checkoutMode"], _ = json.Marshal(mode)
+	payload["role"], _ = json.Marshal(assignment.Role)
+	return wl, nil
+}
+
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
 	var payload map[string]json.RawMessage
@@ -133,24 +233,29 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
-		return task.InputJSON, nil
+		return wl, task.InputJSON, nil
 	}
 
 	// Only the dispatcher can create a round reservation. Its immutable input
 	// carries the already filtered packet. Other tasks receive an assembled one.
 	var markdown string
 	if council {
+		var err error
+		wl, err = r.prepareCouncilCheckout(ctx, payload, assignment, wl)
+		if err != nil {
+			return wl, "", err
+		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
 		// Check the stored bytes before JSON decoding can replace invalid UTF-8.
 		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
 			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
 			redact.String(markdown) != markdown {
-			return "", errors.New("invalid reserved council packet")
+			return wl, "", errors.New("invalid reserved council packet")
 		}
 	}
 	// Typed consumers may match field names case-insensitively.
@@ -169,7 +274,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
 		raw, err := json.Marshal(payload)
-		return string(raw), err
+		return wl, string(raw), err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -178,7 +283,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		})
 		sanitized, err := json.Marshal(precheckInput)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 		task.InputJSON = string(sanitized)
 	}
@@ -186,21 +291,21 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	if raw, ok := payload["tier"]; ok {
 		var tier, provider, model string
 		if err := json.Unmarshal(raw, &tier); err != nil || tier == "" {
-			return "", errors.New("invalid model tier")
+			return wl, "", errors.New("invalid model tier")
 		}
 		if raw, ok := payload["provider"]; ok {
 			if err := json.Unmarshal(raw, &provider); err != nil || provider == "" {
-				return "", errors.New("invalid tier provider")
+				return wl, "", errors.New("invalid tier provider")
 			}
 		}
 		if raw, ok := payload["model"]; ok {
 			if err := json.Unmarshal(raw, &model); err != nil || model == "" {
-				return "", errors.New("invalid tier model")
+				return wl, "", errors.New("invalid tier model")
 			}
 		}
 		provider, model, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
 		if err != nil {
-			return "", err
+			return wl, "", err
 		}
 		payload["provider"], _ = json.Marshal(provider)
 		payload["model"], _ = json.Marshal(model)
@@ -211,7 +316,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
-	return string(raw), err
+	return wl, string(raw), err
 }
 
 func referencesCouncil(ctx context.Context, st store.Store, payload map[string]json.RawMessage) (bool, error) {
@@ -333,4 +438,30 @@ func finalVerifierVerdict(artifactsJSON, prompt, digest string) (verdict, findin
 	default:
 		return "", ""
 	}
+}
+
+// CouncilWriterDiffName identifies the immutable Relic for one attempt.
+func CouncilWriterDiffName(taskID string) string { return "git-diff-" + taskID }
+
+// CouncilWriterDiff selects exactly one inline diff. A nil Relic with valid
+// evidence means the writer made no changes.
+func CouncilWriterDiff(a store.ConclaveAssignment, taskID string, artifacts []*scruntime.Artifact) (relic *domain.ConclaveRelic, valid bool) {
+	for _, artifact := range artifacts {
+		if artifact == nil {
+			return nil, false
+		}
+		if artifact.Name != "git-diff" {
+			continue
+		}
+		if relic != nil || artifact.URI != "" || artifact.ContentType != "text/x-diff" || !store.ValidCouncilText(artifact.Text) {
+			return nil, false
+		}
+		body := store.RedactCouncilAnswer(artifact.Text)
+		if !store.ValidCouncilText(body) {
+			return nil, false
+		}
+		relic = &domain.ConclaveRelic{ConclaveID: a.ConclaveID, AuthorRole: a.Role, Name: CouncilWriterDiffName(taskID),
+			ContentType: "text/x-diff", Body: body}
+	}
+	return relic, true
 }

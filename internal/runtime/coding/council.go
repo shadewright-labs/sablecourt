@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
@@ -462,10 +463,23 @@ func writeCouncilState(root, key string, cs *councilState) error {
 	return os.Rename(file.Name(), councilStatePath(root, key))
 }
 
-func (a *Adapter) verifyPrimaryRepo(ctx context.Context, repo string, readOnly bool) (string, gitRepo, error) {
+func (a *Adapter) verifyPrimaryRepo(ctx context.Context, repo, expectedID string, readOnly bool) (string, gitRepo, error) {
 	resolved, err := resolvedPath(repo)
 	if err != nil {
 		return "", gitRepo{}, err
+	}
+	if expectedID != "" {
+		if resolved != repo {
+			return "", gitRepo{}, errors.New("configured repository path was redirected")
+		}
+		info, err := os.Lstat(resolved)
+		if err != nil || !info.IsDir() {
+			return "", gitRepo{}, errors.New("configured repository is unavailable")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino)) != expectedID {
+			return "", gitRepo{}, errors.New("configured repository directory identity changed")
+		}
 	}
 	owner, err := sourceGit(resolved)
 	if err != nil {
@@ -557,7 +571,7 @@ func (a *Adapter) reserveTaskBase(taskID string) (string, string, error) {
 	return root, base, nil
 }
 
-func (a *Adapter) prepareLiveCheckout(ctx context.Context, repo, taskID string) (string, string, *worktreeState, func(context.Context) error, error) {
+func (a *Adapter) prepareLiveCheckout(ctx context.Context, repo, taskID, expectedID string) (string, string, *worktreeState, func(context.Context) error, error) {
 	if repo == "" {
 		return "", "", nil, nil, errors.New("worktree root, repository and task ID are required")
 	}
@@ -568,7 +582,7 @@ func (a *Adapter) prepareLiveCheckout(ctx context.Context, repo, taskID string) 
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, true)
+	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, expectedID, true)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -616,7 +630,7 @@ func (a *Adapter) prepareRefCheckout(ctx context.Context, repo, taskID string, i
 	if err != nil {
 		return "", "", nil, nil, nil, err
 	}
-	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, false)
+	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, input.checkoutSourceID, false)
 	if err != nil {
 		return "", "", nil, nil, nil, err
 	}
@@ -886,7 +900,7 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 	if err != nil {
 		return "", "", nil, nil, nil, err
 	}
-	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, false)
+	resolvedRepo, owner, err := a.verifyPrimaryRepo(setupCtx, repo, input.checkoutSourceID, false)
 	if err != nil {
 		return "", "", nil, nil, nil, err
 	}
@@ -916,6 +930,7 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 		commonDir         string
 		writerBranch      string
 		writerTip         string
+		writerDirty       bool
 		existingWriterWT  *sharedWorktree
 		existingReview    *isolatedCheckout
 	)
@@ -1074,6 +1089,7 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 		commonDir = cs.CommonDir
 		writerBranch = cs.WriterBranch
 		writerTip = cs.WriterTip
+		writerDirty = cs.WriterDirty
 		existingWriterWT = cs.WriterWorktree
 		existingReview = cs.ReviewCheckout
 		releaseCouncil()
@@ -1139,6 +1155,52 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 			wt       *sharedWorktree
 			turnBase string
 		)
+		wantTip := baseCommit
+		if writerTip != "" {
+			wantTip = writerTip
+		}
+		forceBranch := writerTip != ""
+		if !needCreateWriter {
+			head, err := validateWriterWorktree(setupCtx, commonDir, writerBranch, existingWriterWT)
+			if err != nil {
+				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
+				defer rbCancel()
+				return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
+			}
+			dirty := writerDirty || head != wantTip
+			if !dirty {
+				dirty, err = writerWorktreeDirty(setupCtx, commonDir, writerBranch, existingWriterWT)
+				if err != nil {
+					rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
+					defer rbCancel()
+					return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
+				}
+			}
+			if dirty {
+				if err := removeSharedWorktree(setupCtx, commonDir, existingWriterWT, false); err != nil {
+					rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
+					defer rbCancel()
+					return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
+				}
+				rel, err := a.lockCouncil(setupCtx, root, key)
+				if err != nil {
+					rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
+					defer rbCancel()
+					return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
+				}
+				if cur, readErr := readCouncilState(statePath); readErr == nil {
+					cur.WriterWorktree = nil
+					_ = writeCouncilState(root, key, cur)
+				}
+				rel()
+				existingWriterWT = nil
+				needCreateWriter = true
+				forceBranch = true
+			} else {
+				wt = existingWriterWT
+				turnBase = wantTip
+			}
+		}
 		if needCreateWriter {
 			if _, err := os.Lstat(writerWTDir); !errors.Is(err, os.ErrNotExist) {
 				if err == nil {
@@ -1148,19 +1210,26 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 				defer rbCancel()
 				return "", "", nil, nil, nil, errors.Join(fmt.Errorf("council writer path unavailable: %w", err), rollback(rbCtx))
 			}
-			created, err := createWriterWorktree(setupCtx, owner, writerWTDir, writerBranch, baseCommit)
+			created, err := createWriterWorktreeAt(setupCtx, owner, writerWTDir, writerBranch, wantTip, forceBranch)
 			if err != nil {
 				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
 				defer rbCancel()
 				return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
 			}
 			createdWriterWT = true
+			cleanupCreated := func(rbCtx context.Context) {
+				if writerTip == "" {
+					_ = removeWriterWorktreeAndBranch(rbCtx, commonDir, writerBranch, baseCommit, created)
+				} else {
+					_ = removeSharedWorktree(rbCtx, commonDir, created, false)
+				}
+				createdWriterWT = false
+			}
 			rel, err := a.lockCouncil(setupCtx, root, key)
 			if err != nil {
 				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
 				defer rbCancel()
-				_ = removeWriterWorktreeAndBranch(rbCtx, commonDir, writerBranch, baseCommit, created)
-				createdWriterWT = false
+				cleanupCreated(rbCtx)
 				return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
 			}
 			cur, readErr := readCouncilState(statePath)
@@ -1168,38 +1237,21 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 				rel()
 				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
 				defer rbCancel()
-				_ = removeWriterWorktreeAndBranch(rbCtx, commonDir, writerBranch, baseCommit, created)
-				createdWriterWT = false
+				cleanupCreated(rbCtx)
 				return "", "", nil, nil, nil, errors.Join(readErr, rollback(rbCtx))
 			}
 			cur.WriterWorktree = created
+			cur.WriterDirty = false
 			if err := writeCouncilState(root, key, cur); err != nil {
 				rel()
 				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
 				defer rbCancel()
-				_ = removeWriterWorktreeAndBranch(rbCtx, commonDir, writerBranch, baseCommit, created)
-				createdWriterWT = false
+				cleanupCreated(rbCtx)
 				return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
 			}
 			rel()
 			wt = created
-			turnBase = baseCommit
-		} else {
-			head, err := validateWriterWorktree(setupCtx, commonDir, writerBranch, existingWriterWT)
-			if err != nil {
-				rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
-				defer rbCancel()
-				return "", "", nil, nil, nil, errors.Join(err, rollback(rbCtx))
-			}
-			wt = existingWriterWT
-			if writerTip != "" {
-				turnBase = writerTip
-			} else {
-				turnBase = baseCommit
-			}
-			if head != "" && writerTip == head {
-				turnBase = head
-			}
+			turnBase = wantTip
 		}
 		checkoutDir = wt.Dir
 		state = &worktreeState{
@@ -1439,7 +1491,7 @@ func writerWorktreeArtifacts(ctx context.Context, taskBase, checkoutDir string, 
 		if diff != "" {
 			diff = redactDiffText(diff)
 			if len(diff) > 32*1024 {
-				diff = diff[:32*1024] + "\n...[truncated]"
+				diff = truncateUTF8Prefix(diff, 32*1024) + "\n...[truncated]"
 			}
 			artifacts = append(artifacts, scruntime.Artifact{Name: "git-diff", ContentType: "text/x-diff", Text: diff})
 		}
@@ -1887,12 +1939,25 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 	}
 
 	// Copy primary checkout's own info/exclude if present.
-	srcExclude := filepath.Join(owner.gitDir, "info", "exclude")
-	if data, _, err := readMetadata(srcExclude); err == nil {
-		if err := os.MkdirAll(filepath.Join(liveGitDir, "info"), 0o700); err != nil {
-			return err
+	srcInfoDir := filepath.Join(owner.gitDir, "info")
+	infoStat, err := os.Lstat(srcInfoDir)
+	if err == nil {
+		if !infoStat.IsDir() {
+			return errors.New("primary repository info directory is not a directory")
 		}
-		if err := os.WriteFile(filepath.Join(liveGitDir, "info", "exclude"), data, 0o600); err != nil {
+		srcExclude := filepath.Join(srcInfoDir, "exclude")
+		if _, err := os.Lstat(srcExclude); err == nil {
+			data, _, err := readMetadata(srcExclude)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(liveGitDir, "info"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(liveGitDir, "info", "exclude"), data, 0o600); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1946,15 +2011,21 @@ func createDetachedWorktree(ctx context.Context, owner gitRepo, dir, commit stri
 	return wt, nil
 }
 
-func createWriterWorktree(ctx context.Context, owner gitRepo, dir, branch, commit string) (*sharedWorktree, error) {
-	if _, err := owner.run(ctx, "branch", "--no-track", "--end-of-options", branch, commit); err != nil {
+func createWriterWorktreeAt(ctx context.Context, owner gitRepo, dir, branch, commit string, forceBranch bool) (*sharedWorktree, error) {
+	branchArgs := []string{"branch", "--no-track", "--end-of-options", branch, commit}
+	if forceBranch {
+		branchArgs = []string{"branch", "--force", "--no-track", "--end-of-options", branch, commit}
+	}
+	if _, err := owner.run(ctx, branchArgs...); err != nil {
 		return nil, err
 	}
 	common := gitRepo{beforeRun: owner.beforeRun, dir: owner.gitDir, gitDir: owner.gitDir}
 	if _, err := common.run(ctx, "worktree", "add", "--no-checkout", "--end-of-options", dir, branch); err != nil {
-		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCouncilSetupTimeout)
-		defer cancel()
-		_ = deleteBranchIfAt(rbCtx, owner.gitDir, branch, commit)
+		if !forceBranch {
+			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCouncilSetupTimeout)
+			defer cancel()
+			_ = deleteBranchIfAt(rbCtx, owner.gitDir, branch, commit)
+		}
 		return nil, err
 	}
 	wt, err := registerSharedWorktree(ctx, common, dir, commit)
@@ -1965,10 +2036,34 @@ func createWriterWorktree(ctx context.Context, owner gitRepo, dir, branch, commi
 		}
 		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCouncilSetupTimeout)
 		defer cancel()
-		_ = removeWriterWorktreeAndBranch(rbCtx, owner.gitDir, branch, commit, cleanupWT)
+		if forceBranch {
+			_ = removeSharedWorktree(rbCtx, owner.gitDir, cleanupWT, false)
+		} else {
+			_ = removeWriterWorktreeAndBranch(rbCtx, owner.gitDir, branch, commit, cleanupWT)
+		}
 		return nil, err
 	}
 	return wt, nil
+}
+
+func writerWorktreeDirty(ctx context.Context, commonDir, branch string, wt *sharedWorktree) (bool, error) {
+	s := &worktreeState{
+		Mode:         checkoutModeWriter,
+		CommonDir:    commonDir,
+		GitDir:       wt.GitDir,
+		GitFile:      wt.GitFile,
+		Registration: wt.Registration,
+		Branch:       branch,
+	}
+	checkout, err := s.checkoutGit(wt.Dir).withoutFilters(ctx)
+	if err != nil {
+		return false, err
+	}
+	status, err := checkout.run(ctx, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=all")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(status) != "", nil
 }
 
 func registerSharedWorktree(ctx context.Context, common gitRepo, dir, commit string) (*sharedWorktree, error) {
@@ -2141,6 +2236,17 @@ func deleteBranchIfAt(ctx context.Context, commonDir, branch, expectedCommit str
 		return err
 	}
 	return nil
+}
+
+func truncateUTF8Prefix(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func removeString(items []string, target string) []string {

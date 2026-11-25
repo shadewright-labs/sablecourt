@@ -27,10 +27,10 @@ import (
 const TokenPrefix = "sc_task_"
 
 type UpstreamConfig struct {
-	BaseURL         string
-	SecretName      string
-	RequireSecret   bool
-	AnthropicVer    string
+	BaseURL       string
+	SecretName    string
+	RequireSecret bool
+	AnthropicVer  string
 }
 
 type Options struct {
@@ -131,17 +131,27 @@ func MintTaskToken(ctx context.Context, st store.Store, taskID, workloadName str
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
+	now := time.Now().UTC()
+	return MintTaskTokenUntil(ctx, st, taskID, workloadName, now, now.Add(ttl))
+}
+
+// MintTaskTokenUntil generates a scoped task bearer token with an explicit expiry bound.
+func MintTaskTokenUntil(ctx context.Context, st store.Store, taskID, workloadName string, now, expiresAt time.Time) (string, error) {
+	now = now.UTC()
+	expiresAt = expiresAt.UTC()
+	if !expiresAt.After(now) {
+		return "", errors.New("task lease expiry must be in the future")
+	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("generate task token: %w", err)
 	}
 	token := TokenPrefix + hex.EncodeToString(raw[:])
-	now := time.Now().UTC()
 	lease := domain.Lease{
 		TokenSHA256:  HashToken(token),
 		TaskID:       taskID,
 		WorkloadName: workloadName,
-		ExpiresAt:    now.Add(ttl),
+		ExpiresAt:    expiresAt,
 		CreatedAt:    now,
 	}
 	if err := st.CreateLease(ctx, lease); err != nil {
@@ -214,7 +224,11 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); err != nil {
+	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); errors.Is(err, errInvalidChildBudgetCeiling) {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"invalid_child_budget_ceiling"}`)
+		writeErr(w, http.StatusForbidden, errInvalidChildBudgetCeiling.Error())
+		return
+	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "budget check failed")
 		return
 	} else if exceeded {
@@ -409,7 +423,15 @@ func (g *Gate) checkBudget(ctx context.Context, taskID, workloadName string, b d
 			return true, "daily_cost_usd", nil
 		}
 	}
-	return false, "", nil
+	task, err := g.store.GetTask(ctx, taskID)
+	if err != nil {
+		return false, "", err
+	}
+	if task.ParentTaskID == "" {
+		return false, "", nil
+	}
+	reason, err := childBudgetReason(task.BudgetCeilingJSON, taskTotals)
+	return reason != "", reason, err
 }
 
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
