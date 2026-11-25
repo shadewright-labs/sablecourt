@@ -2,7 +2,7 @@
 
 The MCP Gate (also called the Data and Action Gate) serves the tools a workload is granted and runs a small closed set of typed actions, after the policy engine has said yes. It is the only way a workload reads Court Memory or changes anything outside its own checkout.
 
-Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). Several faults are known and tracked in issue #9 (see [Not built yet](#not-built-yet)).
+Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). Several faults are known and tracked in issue #9 (see [Known gaps](#known-gaps)).
 
 ## Two routes
 
@@ -19,22 +19,7 @@ Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`,
 
 The capability string is `mcp:<tool>`, `action:<name>` or `delegate:<workload>`. The engine (`internal/policy`) applies these steps in order and the first match wins:
 
-```mermaid
-flowchart TD
-    A[Call with lease] --> B{Capability starts with policy, secret or rbac}
-    B -->|yes| X[deny]
-    B -->|no| C{Sandbox zone and action or delegate}
-    C -->|yes| X
-    C -->|no| D{Granted on the workload}
-    D -->|no| X
-    D -->|yes| E{Action with open breaker}
-    E -->|yes| X
-    E -->|no| F{Policy rules}
-    F -->|any deny| X
-    F -->|any approve| P[approve: queue an approval]
-    F -->|any allow| Y[allow: run]
-    F -->|none| X
-```
+[![One tool or action call: fixed checks, then policy rules lead to the handler, an approval in the queue, or a denial.](../diagrams/policy-decision.svg)](../diagrams/policy-decision.svg "Open full size")
 
 A rule names a workload and a capability, each exact, `*`, or a prefix ending in `*`. All matching rules are read: one `deny` wins, then `approve`, then `allow`; no match means `default_deny`. A `Policy` whose `defaultEffect` is not `deny` is rejected at load. A missing engine, an empty name or an unknown effect also deny. The reason string (`explicit_policy_deny`, `capability_not_granted_on_workload`, `sandbox_zone_forbids_mutation`, `circuit_breaker_open`, `default_deny` and others) goes into the audit row and the error the workload sees.
 
@@ -44,7 +29,7 @@ A rule names a workload and a capability, each exact, `*`, or a prefix ending in
 
 ## Circuit breaker
 
-Each action that fails records a failure for its capability; three in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see below).
+Each action that fails records a failure for its capability; three in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see [Known gaps](#known-gaps)).
 
 ## Redaction
 
@@ -54,14 +39,19 @@ Each action that fails records a failure for its capability; three in a row open
 
 The gate appends a row, category `data_action_gate`, for each denial, error and allowed call, for an unknown action and for an approval mismatch; the memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. A tool call that returns `approval_required` writes nothing in the gate itself.
 
-## Not built yet
+## Known gaps
+
+What the code does today, where it falls short of the design.
 
 - Tool calls whose effect is `approve` cannot complete: each call creates a new pending approval and there is no way to present an approved one. Only actions can be approved and re-run.
 - An approved action can be repeated for the life of the lease: the approval is not marked used and its expiry is not checked at use. Making it single-use is decided in [ADR-0014](../adr/0014-identity-and-authentication.md), Proposed.
 - The circuit breaker never opens, because the gate and the policy engine hold separate breaker objects.
 - `git.open_pr` does not validate `owner`, `repo` or `base`. There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
 - The sandbox-zone rule covers `action:` and `delegate:` only; a mutating MCP tool such as `memory.put` is open to a sandbox workload when policy allows it.
-- Upstream MCP servers (`grants.mcpServers`) are bridged with an injected secret and a 4 MiB response cap, parked by ADR-0011.
+
+## Not built yet
+
+- Parked by ADR-0011: upstream MCP servers (`grants.mcpServers`) are bridged with an injected secret and a 4 MiB response cap, but are not part of the current scope.
 
 ## In depth
 

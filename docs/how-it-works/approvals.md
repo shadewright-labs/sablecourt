@@ -2,7 +2,7 @@
 
 Some changes are too small for a pull request and too risky to allow outright. For those, policy returns `approve`: the task pauses, the exact payload is pinned by a SHA-256 digest, and a person confirms it outside the workload's reach. Code changes, policy changes and promotion from sandbox to runtime take the other path, a reviewed Git change.
 
-Status: partly built. Device pairing is switched off (issue #5) and an approval can be reused (issue #9); see [Not built yet](#not-built-yet).
+Status: partly built. Device pairing is switched off (issue #5) and an approval can be reused (issue #9); see [Known gaps](#known-gaps).
 
 ## Two paths
 
@@ -13,36 +13,9 @@ Status: partly built. Device pairing is switched off (issue #5) and an approval 
 
 ## The life of an approval
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending: policy says approve
-    pending --> approved: person confirms digest
-    pending --> denied: operator denies
-    pending --> expired: 15 minutes pass
-    approved --> [*]
-    denied --> [*]
-    expired --> [*]
-```
+[![Approval states: pending moves to approved on confirmation, to denied on denial, or to expired after 15 minutes.](../diagrams/approval-states.svg)](../diagrams/approval-states.svg "Open full size")
 
-```mermaid
-sequenceDiagram
-    participant W as Workload
-    participant G as MCP Gate
-    participant Q as Approval Queue
-    participant P as Person
-    W->>G: action call
-    G->>Q: request, payload pinned by digest
-    G-->>W: 202 approval_required, id, digest
-    Note over G: task moves to input-required
-    P->>Q: approve with digest
-    Q->>P: native dialog on the daemon host
-    P-->>Q: clicks Approve
-    Q->>Q: store approved, proof, audit row
-    Note over G: task returns to working
-    W->>G: same call with approvalId
-    G->>G: status, task, capability, digest all match
-    G-->>W: runs the action
-```
+[![An approval exchange between workload, MCP Gate, Approval Queue and person, ending with the repeated call that runs the action.](../diagrams/approval-sequence.svg)](../diagrams/approval-sequence.svg "Open full size")
 
 1. The gate canonicalizes the payload: it decodes the JSON and encodes it again with Go's encoder, so object keys are sorted and there is no extra whitespace. The SHA-256 of those bytes is the digest. The approval stores the canonical JSON, the digest, the task, the workload, the capability and an expiry 15 minutes ahead. The queue appends an `approval` audit row (`pending`) and sends a notification when a notifier is configured.
 2. The task moves from `working` to `input-required`. The reconciler returns it to `working` when every approval of that task is decided and none is pending, whether approved, denied or expired. It marks a pending approval past its expiry as `expired` on its next pass.
@@ -60,13 +33,19 @@ An operator session or token can list approvals, deny them, and ask for confirma
 
 The code can verify an ECDSA P-256 signature from an enrolled device over `sablecourt-approve:<id>:<digest>` and approve without a dialog. Enrolment is closed: `POST /api/v1/devices/pair/start` and `/pair/complete` answer 503 "device enrollment requires independent confirmation". Devices can be listed and revoked.
 
-## Not built yet
+## Known gaps
 
-- Single use: an approved approval is not marked consumed and its expiry is not checked when it is used, so the same action can run again while the lease lasts. [ADR-0014](../adr/0014-identity-and-authentication.md) decides an atomic single-use claim in its first stage; ADR-0014 is Proposed.
-- An empty `expectedSha256` is accepted on the dialog path; the dialog is then the only check. ADR-0014 decides to require it.
-- Device enrolment with a person present, and with it the signature path.
+What the code does today, where it falls short of the design.
+
+- An approved approval is not marked consumed and its expiry is not checked when it is used, so the same action can run again while the lease lasts.
+- An empty `expectedSha256` is accepted on the dialog path; the dialog is then the only check.
 - The dialog truncates long payloads, so a long `body` can hide fields such as `head` or `repo`; compare the full digest with `sablectl approval list --json`.
 - On Linux no approver exists, so an `approve` effect cannot be confirmed there.
+
+## Not built yet
+
+- Single use: [ADR-0014](../adr/0014-identity-and-authentication.md) decides an atomic single-use claim and a required digest in its first stage; it is Proposed.
+- Device enrolment with a person present, and with it the signature path (issue #5).
 
 ## In depth
 

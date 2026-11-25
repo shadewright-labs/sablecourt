@@ -2,7 +2,7 @@
 
 A task is one run of a workload. The daemon stores it, a loop called the reconciler launches and watches it, and every change of state is written as an event, so a restart can pick up where the last process stopped. This page explains how tasks start, which states they move through, and what keeps them from running twice.
 
-Status: partly built. Suspend and resume do not keep a workload alive (see [Not built yet](#not-built-yet)).
+Status: partly built. Suspend and resume do not keep a workload alive (see [Known gaps](#known-gaps)).
 
 ## How a task is created
 
@@ -28,25 +28,7 @@ A task carries an idempotency key. If none is given the task ID is used. Submitt
 | `suspended` | An operator suspended it. | Resume or cancel. |
 | `completed`, `failed`, `cancelled` | Terminal. | Nothing. A retry creates a new task. |
 
-```mermaid
-stateDiagram-v2
-    [*] --> submitted
-    submitted --> working: dispatch_claimed
-    submitted --> failed: workload or adapter missing
-    working --> input_required: approval_required
-    input_required --> working: approval_decided
-    working --> suspended: suspend
-    suspended --> working: resume
-    working --> completed: exit 0 observed
-    working --> failed: exit or loss observed
-    submitted --> cancelled: cancel
-    working --> cancelled: cancel
-    input_required --> cancelled: cancel
-    suspended --> cancelled: cancel
-    completed --> [*]
-    failed --> [*]
-    cancelled --> [*]
-```
+[![States of a task: submitted to working, working to input-required and back, to suspended and back, and to completed, failed or cancelled.](../diagrams/task-states.svg)](../diagrams/task-states.svg "Open full size")
 
 The store does not check which transitions are allowed. Each change is a compare-and-swap on the current state (`UPDATE ... WHERE state = from`), so two callers cannot both move the same task, and each change adds a row to `task_events` with a reason. `sablectl task inspect` shows those events. Failure reasons include `launch_failed`, `lost_on_restart`, `observe_error`, `runtime_unknown` and `author_checkout_unavailable`.
 
@@ -54,18 +36,7 @@ The store does not check which transitions are allowed. Each change is a compare
 
 The daemon runs a pass every 2 seconds. ADR-0002 calls the loop observe, update, derive and act; in the code it is the flow below.
 
-```mermaid
-flowchart TD
-    A[Recover tasks with no live handle] --> B[List tasks to reconcile]
-    B --> C[Observe each working or input-required task]
-    C --> D{Runtime state}
-    D -->|running| E[Record heartbeat, renew leases]
-    D -->|exited| F[Collect artifacts, set terminal state, revoke leases]
-    D -->|lost or stale| G[Fail with a reason, revoke leases]
-    E --> H[Launch submitted tasks up to the limits]
-    F --> H
-    G --> H
-```
+[![One reconciler pass: recover, observe, then heartbeat, finish or fail depending on runtime state, and launch submitted tasks.](../diagrams/reconcile-pass.svg)](../diagrams/reconcile-pass.svg "Open full size")
 
 - Observe: the adapter reports `running`, `suspended`, `completed` or `failed`. A running answer with a fresh timestamp is recorded as a heartbeat and extends the task's leases to one hour past the observation.
 - Stale: a working task with no heartbeat for more than 2 minutes, whose runtime has not exited, fails with `lost_on_restart`. Three observation errors in a row fail it with the error reason.
@@ -85,12 +56,14 @@ Each running task has a handle (process ID and OS start time, or container ident
 
 ## Child tasks and sub-budgets
 
-A task may have a parent: workflow steps after the first and retries of those steps do. A parent-bound task that calls the Model Gate must carry a budget ceiling (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`); the gate refuses its calls at or past the ceiling (PR 66, PR 86) and refuses a missing or malformed one (see [Model Gate](model-gate.md#child-budgets)). The code that creates a delegated child, `delegate:<workload>` after a policy check, exists in the reconciler but no route or tool calls it on `main`.
+A task may have a parent: workflow steps after the first and retries of those steps do. A parent-bound task that calls the Model Gate must carry a budget ceiling (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`); the gate refuses its calls at or past the ceiling (PR 66, PR 86) and refuses a missing or malformed one (see [Model Gate](model-gate.md#child-budgets)). A delegated child (`delegate:<workload>` after a policy check) has no caller yet; see [Known gaps](#known-gaps).
 
-## Not built yet
+## Known gaps
+
+What the code does today, where it falls short of the design.
 
 - Suspend and resume. `task suspend` asks the adapter for a checkpoint, then always stops the workload; the coding and Docker adapters keep nothing resumable, and `task resume` fails for coding tasks. Tracking issue #14 lists the faults; use cancel and retry instead.
-- Delegation of child tasks by an agent (see above).
+- Delegation: `ProposeChildTask` exists in the reconciler but nothing calls it, so no agent can create a child task today.
 
 ## In depth
 

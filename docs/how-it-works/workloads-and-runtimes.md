@@ -2,7 +2,7 @@
 
 A workload is something Sablecourt may launch. Its class decides which runtime adapter starts it and how that run is isolated. This page covers the three classes, the two zones, what each adapter does, and what a deterministic controller cannot do.
 
-Status: partly built. The Kubernetes adapter is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md); suspend and resume are incomplete (tracking issue #14, see [tasks](tasks.md#not-built-yet)).
+Status: partly built. The Kubernetes adapter is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md); suspend and resume are incomplete (tracking issue #14, see [tasks](tasks.md#known-gaps)).
 
 [![Inside the host, the daemon holds the MCP Gate, Model Gate and runtime adapters; a coding run sits in a macOS-only host sandbox, a long-lived agent and a controller run in containers on an internal network, the controller is refused at the Model Gate, and a Kubernetes adapter is parked.](../diagrams/runtime-isolation.svg)](../diagrams/runtime-isolation.svg "Open full size")
 

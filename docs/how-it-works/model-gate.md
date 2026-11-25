@@ -4,21 +4,7 @@ The Model Gate is an HTTP proxy under `/gate/model/` through which a workload ca
 
 Status: built. Inference that a subscription harness runs outside the gate is not counted here ([ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)).
 
-```mermaid
-sequenceDiagram
-    participant W as Workload
-    participant G as Model Gate
-    participant S as Store
-    participant P as Provider
-    W->>G: request with task lease
-    G->>S: lease, grant, budget checks
-    G->>S: reserve estimated usage
-    G->>P: forward with provider key
-    P-->>G: response or stream
-    G-->>W: same bytes, flushed as they arrive
-    G->>S: settle actual usage, release reserve
-    G->>S: audit row
-```
+[![A Model Gate call: lease check and reservation in the store, forward to the provider with the key, response passed back, usage settled and audited.](../diagrams/model-gate-sequence.svg)](../diagrams/model-gate-sequence.svg "Open full size")
 
 ## Routes
 
@@ -64,11 +50,17 @@ A request routed to `openai` or `local` may be retried once on the other of the 
 
 Reservation and settlement are one transaction (PR 86); the ceiling check for delegated tasks came with PR 66.
 
-A task with a parent, such as a workflow step after the first, must carry a ceiling (stored with the task) with `maxInputTokens`, `maxOutputTokens` and `maxCostUSD` (at least one, no unknown members, at most 4 KiB). The gate applies it on top of the workload's budget, counting only that task's own usage; a ceiling of zero refuses everything. A missing or malformed ceiling returns 403 `invalid_child_budget_ceiling`, and an exhausted one 429 with `child_input_tokens`, `child_output_tokens` or `child_cost_usd`. A ceiling cannot raise the workload's own limits. Workflow steps are created without a ceiling, so as the code stands a model call from a step after the first is refused with `invalid_child_budget_ceiling`.
+A task with a parent, such as a workflow step after the first, must carry a ceiling (stored with the task) with `maxInputTokens`, `maxOutputTokens` and `maxCostUSD` (at least one, no unknown members, at most 4 KiB). The gate applies it on top of the workload's budget, counting only that task's own usage; a ceiling of zero refuses everything. A missing or malformed ceiling returns 403 `invalid_child_budget_ceiling`, and an exhausted one 429 with `child_input_tokens`, `child_output_tokens` or `child_cost_usd`. A ceiling cannot raise the workload's own limits. Workflow steps after the first have a parent; see [Known gaps](#known-gaps) for what that means today.
 
 ## What goes into the audit chain
 
 The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a fallback, a settlement failure and each successful call (model, tokens, cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller.
+
+## Known gaps
+
+What the code does today, where it falls short of the design.
+
+- Workflow steps after the first have a parent task but are created without a budget ceiling, so a Model Gate call from such a step is refused with `invalid_child_budget_ceiling`. This follows from the code and its tests; it has not been run end to end.
 
 ## Not built yet
 

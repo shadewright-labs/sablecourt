@@ -60,7 +60,7 @@ The web UI does the same from the dashboard: each pending approval has Approve a
 | `conflict` | The approval is no longer pending. |
 | `no out-of-band approver configured` | The daemon runs without one (Citadel mode). |
 
-An approved action can be repeated by the same task until its lease ends; approving once is permission for that exact payload, not for one run. See [approvals](../how-it-works/approvals.md#not-built-yet).
+An approved action can be repeated by the same task until its lease ends; approving once is permission for that exact payload, not for one run. See [approvals](../how-it-works/approvals.md#known-gaps).
 
 ## Related
 
