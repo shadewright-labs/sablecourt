@@ -59,17 +59,25 @@ func TestCheckCouncilHarnessDocker(t *testing.T) {
 			}
 			wantFault(FaultLoginMissing)
 			// An empty credential file is not a login.
-			seed := func(content string) {
+			file := def.LoginFiles[0]
+			run := func(script string) {
 				t.Helper()
-				file := def.LoginFiles[0]
-				script := "mkdir -p " + path.Dir(file) + " && printf '%s' '" + content + "' > " + file
 				out, err := exec.CommandContext(ctx, cli, "run", "--rm", "--network", "none", "--user", "10001:10001",
 					"-v", vol+":/home/harness", "--entrypoint", "/bin/bash", def.Image, "-c", script).CombinedOutput()
 				if err != nil {
 					t.Fatalf("seed volume: %v: %s", err, out)
 				}
 			}
+			seed := func(content string) {
+				t.Helper()
+				run("rm -rf " + file + " && mkdir -p " + path.Dir(file) + " && printf '%s' '" + content + "' > " + file)
+			}
 			seed("")
+			wantFault(FaultLoginMissing)
+			// A directory or a symlink at the credential path is not a login either.
+			run("rm -rf " + file + " && mkdir -p " + file + " && touch " + file + "/entry")
+			wantFault(FaultLoginMissing)
+			run("rm -rf " + file + " && ln -s /etc/passwd " + file)
 			wantFault(FaultLoginMissing)
 			seed("fixture")
 			if err := a.CheckCouncilHarness(ctx, role); err != nil {

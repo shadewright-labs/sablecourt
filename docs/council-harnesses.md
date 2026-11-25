@@ -1,40 +1,40 @@
 # Council harness images and logins
 
-In Sanctum, a council runs each CLI harness (`claude`, `codex`, `agy`) in its own container, as ADR-0011 describes. Before a council exists, `sablecourtd` checks that every harness can start. The check never pulls an image, never reaches a provider, and never uses a login from the host.
+In Sanctum container mode, each council harness turn (`claude`, `codex`, `agy`) runs in its own container, as ADR-0011 describes. Before a council is created, `sablecourtd` checks each role's image, login volume and credential path, and stops at the first failure. Container mode applies when a Docker runtime is configured; without one, the host path with its own checks is used.
 
 ## Setup, once per harness
 
-1. Build the local images: `sablectl harness build <role>`. The role image and the proxy image are built from digest-pinned bases and stay on this machine.
-2. Log in: `sablectl harness login <role>`. The command creates the harness volume if it does not exist, with the labels Sablecourt looks for, and starts the harness login in a container with your terminal attached. The container reaches the network only through a login proxy that allows that provider's hosts. The login stays in the volume `sablecourt-harness-<role>`. Nothing is copied from the host.
+1. Build the local images: `sablectl harness build <role>`. The command builds the role image and the proxy image from the digest-pinned base in the repository Dockerfile, using the Docker engine your Docker settings select. It does not push them.
+2. Log in: `sablectl harness login <role>`. The command creates the volume `sablecourt-harness-<role>` if it does not exist, with the labels Sablecourt looks for, and starts the harness login in a container with your terminal attached. The container joins an internal network and reaches the network only through a login proxy that allows that provider's hosts on port 443. The login is stored in the volume. The command forwards the text you type to the container and does not copy any login file from the host.
 
-`sablectl harness login` talks to Docker itself. The daemon is not involved and no terminal stream crosses its API. Run it again to replace a login.
+`sablectl harness login` talks to Docker itself. The daemon is not involved and no terminal stream crosses its API. After the session it runs the credential check below and reports whether a credential file is present. Run it again to log in again.
 
 ## What the preflight checks
 
-[![A council request passes three checks for each of claude, codex and agy: the image exists, the login volume is the labelled one, and it holds a credential file. A failed check refuses the request with the command to run; when all pass, the council is created.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
+[![A council request passes three checks for each of claude, codex and agy: the image is present, the login volume is valid, and a credential file is found. A failed check refuses the request with the command to run; when all pass, the daemon runs a dispatch check and then creates the council.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
 
-For each of the three roles, in this order:
+The preflight runs for a new council request in container mode. A repeated request with the same idempotency key and the same content returns the stored council before the preflight. For each role in the order `claude`, `codex`, `agy`:
 
-1. **Image.** The role image must exist locally. If not, the request is refused with `sablectl harness build <role>`.
-2. **Volume.** The login volume must exist, use the `local` driver with no driver options, and carry the Sablecourt labels for that role. A missing volume is refused with `sablectl harness login <role>`. The daemon never creates a volume. A volume that exists without the labels is refused too, with a note to remove it by hand: Sablecourt does not trust or adopt a volume it did not create.
-3. **Login.** A short container from the pinned image runs with no network, no capabilities, a read-only root filesystem, and the volume mounted read-only. It tests only whether a credential file exists and is not empty, so it reads file names and sizes, never contents. The files are `/home/harness/.claude/.credentials.json` for `claude`, `/home/harness/.codex/auth.json` for `codex`, and `oauth_tokens.json` under `/home/harness/.gemini/` or `/home/harness/.gemini/antigravity-cli/` for `agy`. No credential file means the request is refused with `sablectl harness login <role>`.
+1. **Image.** The image for the role must exist in the local Docker engine and have the expected configuration. Docker never pulls it. If the image is not found, the request is refused with `sablectl harness build <role>`.
+2. **Volume.** The login volume is inspected and must use the `local` driver, have no driver options, and carry the Sablecourt labels for that role. A missing volume is refused with `sablectl harness login <role>`. The preflight itself never creates a volume. A volume that exists but fails these conditions is refused with a note to remove it by hand and run the login command.
+3. **Login.** A short container from the role image runs with no network, all capabilities dropped, a read-only root filesystem and the volume mounted read-only. The volume is inspected again after the container is created. The container tests whether any expected path is a regular file, not a symlink, with a size above zero. The expected paths are `/home/harness/.claude/.credentials.json` for `claude`, `/home/harness/.codex/auth.json` for `codex`, and `oauth_tokens.json` under `/home/harness/.gemini/` or `/home/harness/.gemini/antigravity-cli/` for `agy`. The check does not open the file. If no path qualifies, the request is refused with `sablectl harness login <role>`.
 
-The probe makes no call to a provider, so it cannot tell an expired login from a valid one. An expired login passes the preflight and fails at the turn with the harness's own error.
+The probe makes no call to a provider, so it cannot tell an expired or revoked login from a valid one. Such a login passes the preflight and fails at the turn. The probe container is removed afterwards, on a best-effort basis.
 
-A refusal happens before the council, its rooms or its tasks are recorded, so it leaves nothing behind. The checks use their own 45 second limit.
+A refused request writes no council, room or task record. After all three roles pass, the daemon checks that the panel workloads can be dispatched, and then creates the council. The checks run under their own 45 second limit, separate from the 10 second limit of the checkout check, and each probe container has a 20 second limit of its own.
 
 ## Errors
 
-| Case | HTTP status | Message names |
+| Case | HTTP status | Message |
 | --- | --- | --- |
-| Image missing | 412 | the role and `sablectl harness build <role>` |
-| Volume missing, or no credential file | 412 | the role and `sablectl harness login <role>` |
-| Volume without the Sablecourt labels | 409 | the volume problem and `sablectl harness login <role>` |
-| Docker or harness configuration fails | 503 | the role only, with no command |
-| Check timed out | 503 | the role only |
+| Image not found | 412 | names the role and `sablectl harness build <role>` |
+| Volume missing, or no qualifying credential path | 412 | names the role and `sablectl harness login <role>` |
+| Volume exists but fails the driver, options or label conditions | 409 | says the volume is not a local Sablecourt volume for this harness, to remove it by hand and run `sablectl harness login <role>` |
+| Docker or the harness configuration fails | 503 | names the role and says Docker or the configuration is unavailable, with no command |
+| The check ran out of time or was cancelled | 503 | names the role, says the preflight timed out or was cancelled, with no command |
 
-A backend failure gives no command because nothing is known to be missing. No message carries a credential or file contents, and Docker error text is not copied into the response.
+The messages are fixed text built from the role name. They do not include Docker error text or any file content.
 
 ## Panel workloads
 
-In container mode the three built-in panel workloads record `container` as their sandbox. The host executable and Seatbelt checks do not run, because the container is the confinement. Without a Docker runtime, `sablecourtd` keeps the host path, whose checks are unchanged.
+In container mode the three built-in panel workloads record `container` as their sandbox, and the council request path skips the host executable lookup and the Seatbelt check, because the container is the confinement. The daemon still runs the host sandbox availability check when it starts. Without a Docker runtime, the council request path keeps the host executable and Seatbelt checks unchanged.

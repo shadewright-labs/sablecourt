@@ -81,7 +81,7 @@ func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut
 		case docker.FaultVolumeMissing, docker.FaultLoginMissing:
 			err = nil
 		case docker.FaultVolumeInvalid:
-			return fmt.Errorf("volume %s exists but is not the labelled Sablecourt volume for %s: remove it by hand and run this command again", def.Volume, role)
+			return fmt.Errorf("volume %s exists but is not a local Sablecourt volume for %s (driver, options or labels differ): remove it by hand and run this command again", def.Volume, role)
 		default:
 			return fmt.Errorf("cannot check the %s harness: Docker or the harness configuration is unavailable", role)
 		}

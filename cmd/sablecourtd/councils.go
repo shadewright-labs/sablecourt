@@ -311,9 +311,10 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 			cfg.onCouncilCheckout(cancel)
 		}
 		if cfg.preflightCouncilHarness != nil {
-			// Container mode: the container is the confinement. Every image and
-			// login is checked before anything is reserved.
-			// The checkout deadline is spent by now, so admission gets its own.
+			// Container mode: the container is the confinement. Each role is
+			// checked in order, and the first failure refuses the request before
+			// anything is reserved.
+			// Admission gets its own deadline, independent of the checkout one.
 			admit, acancel := context.WithTimeout(r.Context(), 45*time.Second)
 			defer acancel()
 			ctx = admit
@@ -591,7 +592,7 @@ func councilSandbox(container bool) string {
 func councilHarnessRefusal(role string, err error) (int, string) {
 	var he *docker.HarnessError
 	if ctxErr := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled); ctxErr {
-		return http.StatusServiceUnavailable, "council harness preflight timed out: " + role
+		return http.StatusServiceUnavailable, "council harness preflight timed out or was cancelled: " + role
 	}
 	if !errors.As(err, &he) {
 		return http.StatusServiceUnavailable, "council harness preflight failed: " + role
@@ -602,7 +603,7 @@ func councilHarnessRefusal(role string, err error) (int, string) {
 	case docker.FaultVolumeMissing, docker.FaultLoginMissing:
 		return http.StatusPreconditionFailed, "council login for " + role + " is missing: run " + harnessimages.LoginCommand(role)
 	case docker.FaultVolumeInvalid:
-		return http.StatusConflict, "council login volume for " + role + " exists but is not the labelled Sablecourt volume: remove it by hand, then run " + harnessimages.LoginCommand(role)
+		return http.StatusConflict, "council login volume for " + role + " exists but is not a local Sablecourt volume for this harness (driver, options or labels differ): remove it by hand, then run " + harnessimages.LoginCommand(role)
 	default:
 		return http.StatusServiceUnavailable, "council harness runtime failed for " + role + ": Docker or the harness configuration is unavailable"
 	}

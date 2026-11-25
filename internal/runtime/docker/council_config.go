@@ -21,12 +21,12 @@ import (
 )
 
 // CouncilHarness is trusted daemon configuration for one locally built image,
-// its private login volume, and the two listeners of its pinned proxy.
+// its private login volume, and optional fixed proxy endpoints.
 type CouncilHarness struct {
 	Image, LoginVolume    string
 	ProxyURL, DataGateURL string
 	// LoginFiles are the credential files whose presence in the login volume
-	// means the user has logged in. Only the preflight reads them, by name.
+	// means the user has logged in. Only the preflight uses them, by path, and it does not open them.
 	LoginFiles []string
 }
 

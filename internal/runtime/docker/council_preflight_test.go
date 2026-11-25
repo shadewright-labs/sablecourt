@@ -17,19 +17,24 @@ import (
 
 type probeEngine struct {
 	councilEngine
-	exit           int
-	volumes        map[string]volume.Volume
-	created        []client.ContainerCreateOptions
-	removed        int
-	volCreate      []client.VolumeCreateOptions
-	createErr      error
-	unlabeled      bool
-	createWarnings []string
+	exit                   int
+	volumes                map[string]volume.Volume
+	created                []client.ContainerCreateOptions
+	removed                int
+	volCreate              []client.VolumeCreateOptions
+	createErr              error
+	unlabeled              bool
+	createWarnings         []string
+	inspects, replaceAfter int
 }
 
 func (p *probeEngine) VolumeInspect(_ context.Context, name string, _ client.VolumeInspectOptions) (client.VolumeInspectResult, error) {
 	if p.step == "volume backend" {
 		return client.VolumeInspectResult{}, errors.New("engine down")
+	}
+	p.inspects++
+	if p.replaceAfter > 0 && p.inspects > p.replaceAfter {
+		return client.VolumeInspectResult{Volume: volume.Volume{Name: name, Driver: "local"}}, nil
 	}
 	v, ok := p.volumes[name]
 	if !ok {
@@ -86,6 +91,7 @@ func TestCheckCouncilHarness(t *testing.T) {
 		{name: "login present", probe: true},
 		{name: "login missing", setup: func(_ *Adapter, p *probeEngine) { p.exit = 1 }, fault: FaultLoginMissing, probe: true},
 		{name: "probe tool fails", setup: func(_ *Adapter, p *probeEngine) { p.exit = 126 }, fault: FaultBackend, probe: true},
+		{name: "volume replaced before the probe starts", setup: func(_ *Adapter, p *probeEngine) { p.replaceAfter = 1 }, fault: FaultVolumeInvalid, probe: true},
 		{name: "probe create warns", setup: func(_ *Adapter, p *probeEngine) { p.createWarnings = []string{"unsupported option"} }, fault: FaultBackend, probe: true},
 		{name: "probe create fails", setup: func(_ *Adapter, p *probeEngine) { p.createErr = errors.New("denied") }, fault: FaultBackend, probe: true},
 		{name: "image missing", setup: func(_ *Adapter, p *probeEngine) { p.imageErr = missing{errors.New("no image")} }, fault: FaultImageMissing},

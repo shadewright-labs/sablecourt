@@ -32,7 +32,7 @@ func TestCouncilHarnessRefusal(t *testing.T) {
 		{"volume missing", &docker.HarnessError{Harness: "claude", Fault: docker.FaultVolumeMissing}, http.StatusPreconditionFailed,
 			[]string{"sablectl harness login claude"}, nil},
 		{"volume without labels", &docker.HarnessError{Harness: "claude", Fault: docker.FaultVolumeInvalid}, http.StatusConflict,
-			[]string{"not the labelled", "sablectl harness login claude"}, nil},
+			[]string{"not a local Sablecourt volume", "sablectl harness login claude"}, nil},
 		{"backend", &docker.HarnessError{Harness: "claude", Fault: docker.FaultBackend, Err: errors.New("token=sk-secret-value")}, http.StatusServiceUnavailable,
 			[]string{"runtime failed"}, []string{"sablectl", "secret"}},
 		{"unknown error", errors.New("surprise sk-secret-value"), http.StatusServiceUnavailable,
@@ -83,7 +83,7 @@ func TestCouncilOpenContainerPreflight(t *testing.T) {
 		{name: "image missing", failing: "codex", fault: docker.FaultImageMissing, status: 412, message: "sablectl harness build codex"},
 		{name: "login missing", failing: "agy", fault: docker.FaultLoginMissing, status: 412, message: "sablectl harness login agy"},
 		{name: "no volume", failing: "claude", fault: docker.FaultVolumeMissing, status: 412, message: "sablectl harness login claude"},
-		{name: "unlabelled volume", failing: "claude", fault: docker.FaultVolumeInvalid, status: 409, message: "labelled"},
+		{name: "unlabelled volume", failing: "claude", fault: docker.FaultVolumeInvalid, status: 409, message: "not a local Sablecourt volume"},
 		{name: "engine down", failing: "claude", fault: docker.FaultBackend, status: 503, message: "runtime failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
