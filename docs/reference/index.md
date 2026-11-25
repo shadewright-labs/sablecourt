@@ -1,6 +1,6 @@
 # Reference
 
-Facts to look up, kept apart from the guides. Each page is generated from the code or checked against it by a test that `go test ./...` runs, so a page that falls behind the code fails CI. `make docs` regenerates the generated parts and `make docs-check` runs the checks.
+Facts to look up, kept apart from the guides. Each page is generated from the code or checked against it by tests that `go test ./...` runs, so a page that falls behind the code fails CI. Each page says which of its parts the tests cover; the rest is written by hand. `make docs` regenerates the generated parts and `make docs-check` runs the checks.
 
 Status: built.
 
