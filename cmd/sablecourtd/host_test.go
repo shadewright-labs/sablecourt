@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,69 @@ func TestContainerGateAuthority(t *testing.T) {
 				t.Errorf("host %q path %s: got %d want %d", host, tc.path, w.Code, tc.want)
 			}
 		}
+	}
+}
+
+func TestWildcardListenRequiresGateHost(t *testing.T) {
+	for _, host := range []string{"", net.IPv4zero.String(), net.IPv6zero.String()} {
+		cfg := daemonConfig{listenAddr: net.JoinHostPort(host, "7432")}
+		if _, err := cfg.hostHandler(http.NotFoundHandler(), false); err == nil {
+			t.Errorf("accepted wildcard %q without gate host", host)
+		}
+	}
+}
+
+func TestHostGateURL(t *testing.T) {
+	for _, tc := range []struct {
+		listen, want string
+	}{
+		{"127.0.0.1:7432", "http://127.0.0.1:7432/gate/mcp"},
+		{"0.0.0.0:7432", "http://127.0.0.1:7432/gate/mcp"},
+		{":9000", "http://127.0.0.1:9000/gate/mcp"},
+		{"[::]:9000", "http://127.0.0.1:9000/gate/mcp"},
+		{"[::1]:7432", "http://[::1]:7432/gate/mcp"},
+		{"192.0.2.10:7432", "http://192.0.2.10:7432/gate/mcp"},
+		{"not an address", ""},
+	} {
+		t.Run(tc.listen, func(t *testing.T) {
+			if got := (daemonConfig{listenAddr: tc.listen, gateHost: "gate.example:1"}).hostGateURL(); got != tc.want {
+				t.Fatalf("hostGateURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHostGateURLIsAdmittedOnGateRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name, listen, gateHost string
+	}{
+		{"loopback", "127.0.0.1:7432", ""},
+		{"wildcard with gate host", "0.0.0.0:7432", "gate.example:7432"},
+		{"specific address with different gate host", "192.0.2.10:7432", "gate.example:7432"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := daemonConfig{listenAddr: tc.listen, gateHost: tc.gateHost}
+			h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(cfg.hostGateURL())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Only the gate path is admitted for a non-loopback authority; loopback keeps its normal access.
+			api := http.StatusForbidden
+			if u.Hostname() == "127.0.0.1" {
+				api = http.StatusNoContent
+			}
+			for path, want := range map[string]int{u.Path: http.StatusNoContent, "/api/v1/tasks": api} {
+				req := httptest.NewRequest(http.MethodGet, "http://"+u.Host+path, nil)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != want {
+					t.Errorf("%s %s status = %d, want %d", u.Host, path, rec.Code, want)
+				}
+			}
+		})
 	}
 }

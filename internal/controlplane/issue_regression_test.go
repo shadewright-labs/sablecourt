@@ -1253,3 +1253,38 @@ func TestLaunchFailedFactsRedactAndPreserveMissingPath(t *testing.T) {
 		})
 	}
 }
+
+func TestHostCodingTaskGetsLoopbackGate(t *testing.T) {
+	const containerGate = "http://host.docker.internal:7432/gate/mcp"
+	const loopbackGate = "http://127.0.0.1:7432/gate/mcp"
+	for _, tc := range []struct {
+		name  string
+		class domain.WorkloadClass
+		host  string
+		want  string
+	}{
+		{"host coding agent uses loopback", domain.ClassCodingAgent, loopbackGate, loopbackGate},
+		{"container workload keeps the container address", domain.ClassDeterministicController, loopbackGate, containerGate},
+		{"unset loopback falls back", domain.ClassCodingAgent, "", containerGate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, _, a, task := regressionFixture(t)
+			r.dataGateURL = containerGate
+			r.hostDataGateURL = tc.host
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = tc.class
+			if tc.class == domain.ClassCodingAgent {
+				wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
+			}
+			r.bundle.Workloads["worker"] = wl
+			r.adapters[wl.Spec.Class] = a
+			if err := launchForTest(ctx, r, task, wl, a); err != nil {
+				t.Fatal(err)
+			}
+			if a.lastSpec.DataGateURL != tc.want {
+				t.Fatalf("data gate URL = %q, want %q", a.lastSpec.DataGateURL, tc.want)
+			}
+		})
+	}
+}

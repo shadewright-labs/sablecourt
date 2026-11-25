@@ -15,7 +15,7 @@ This document describes the YAML manifest schema (`sablecourt.io/v1alpha1`), HTT
 
 ## HTTP and SSE API endpoints (`sablecourtd`)
 
-All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `CSP`), and a `2 MiB` body size limit. In both `--mode=sanctum` and `--mode=citadel`, operator routes always require `Authorization: Bearer <op_...>` (read from the `0600` `operator.token` file in the `0700` state directory) or a 30-minute `SameSite=Strict` `sablecourt_session` cookie issued by `POST /login`; `--operator-auth-required` is deprecated and ignored.
+All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `CSP`), and a `2 MiB` body size limit. In both `--mode=sanctum` and `--mode=citadel`, operator routes always require `Authorization: Bearer <op_...>` (read from the `0600` `operator.token` file in the `0700` state directory) or a 30-minute `SameSite=Strict` `sablecourt_session` cookie issued by `POST /login`; `--operator-auth-required` is deprecated and ignored. `sablectl` reads the credential from `SABLECOURT_OPERATOR_TOKEN` or, for a local daemon, from `operator.token`; there is no `--token` flag, so the secret never appears in the process table. `POST /logout` clears the session cookie and revokes every session issued before it.
 
 ### Operator API
 

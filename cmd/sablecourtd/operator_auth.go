@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
@@ -34,7 +36,10 @@ const (
 	voiceTranscribeMaxBytes = 24 << 20
 )
 
+type loginSecretsKey struct{}
+
 type operatorAuth struct {
+	keyMu     sync.RWMutex
 	hasToken  bool
 	tokenHash [sha256.Size]byte
 	signKey   [32]byte
@@ -42,8 +47,14 @@ type operatorAuth struct {
 }
 
 func newOperatorAuth(token string) *operatorAuth {
+	suffix, prefixed := strings.CutPrefix(token, "op_")
+	valid := prefixed && len(suffix) == 2*sha256.Size
+	if valid {
+		_, err := hex.DecodeString(suffix)
+		valid = err == nil
+	}
 	auth := &operatorAuth{
-		hasToken:  token != "",
+		hasToken:  valid,
 		tokenHash: sha256.Sum256([]byte(token)),
 		limiter:   newLoginLimiter(loginMaxFailures, loginFailureWindow, loginLimiterMaxClients),
 	}
@@ -52,7 +63,7 @@ func newOperatorAuth(token string) *operatorAuth {
 }
 
 func (a *operatorAuth) matches(token string) bool {
-	if !a.hasToken || token == "" || len(token) > maxBearerSize || strings.HasPrefix(token, model.TokenPrefix) {
+	if !a.hasToken || len(token) != len("op_")+2*sha256.Size || !strings.HasPrefix(token, "op_") {
 		return false
 	}
 	digest := sha256.Sum256([]byte(token))
@@ -80,7 +91,10 @@ func isCanonicalPath(p string) bool {
 }
 
 func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler, secrets secret.SecretStore) http.Handler {
-	scoped := integrations.RejectShadewrightTokenOnOtherRoutes(next, secrets)
+	routes := http.NewServeMux()
+	routes.HandleFunc("POST /logout", a.logout)
+	routes.Handle("/", next)
+	scoped := integrations.RejectShadewrightTokenOnOtherRoutes(routes, secrets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isCanonicalPath(r.URL.Path) {
 			w.Header().Set("Cache-Control", "no-store")
@@ -90,7 +104,13 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 		}
 		_, pattern := mux.Handler(r)
 		switch pattern {
-		case "GET /login", "POST /login",
+		case "POST /login":
+			if secrets != nil {
+				r = r.WithContext(context.WithValue(r.Context(), loginSecretsKey{}, secrets))
+			}
+			scoped.ServeHTTP(w, r)
+			return
+		case "GET /login",
 			"GET /healthz", "GET /.well-known/agent-card.json",
 			"GET /favicon.ico", "GET /apple-touch-icon.png", "GET /assets/",
 			"POST /api/v1/hooks/github", "POST /a2a":
@@ -107,11 +127,11 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 		if len(auth) == 1 {
 			if token, ok := strings.CutPrefix(auth[0], "Bearer "); ok {
 				if a.matches(token) {
-					next.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
+					scoped.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
 					return
 				}
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
-					!strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
+					!strings.HasPrefix(token, "op_") && !strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
 					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil &&
 						tokenDigestEqual(token, strings.TrimSpace(want)) {
 						scoped.ServeHTTP(w, r)
@@ -127,7 +147,7 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 					writeJSON(w, http.StatusForbidden, map[string]string{"error": "same-origin request required"})
 					return
 				}
-				next.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
+				scoped.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
 				return
 			}
 		}
@@ -177,14 +197,6 @@ func (a *operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "same-origin request required", http.StatusForbidden)
 		return
 	}
-	client := loginClientKey(r.RemoteAddr)
-	now := time.Now()
-	if ok, retryAfter := a.limiter.allow(client, now); !ok {
-		secs := max(int(retryAfter.Round(time.Second)/time.Second), 1)
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		http.Error(w, "too many login attempts", http.StatusTooManyRequests)
-		return
-	}
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || contentType != "application/x-www-form-urlencoded" {
 		http.Error(w, "form data required", http.StatusUnsupportedMediaType)
@@ -206,12 +218,28 @@ func (a *operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provide one operator token", http.StatusBadRequest)
 		return
 	}
-	if !a.matches(strings.TrimSpace(values.Get("token"))) {
-		a.limiter.recordFailure(client, now)
+	client := loginClientKey(r.RemoteAddr)
+	token := strings.TrimSpace(values.Get("token"))
+	if !a.matches(token) {
+		if retry := a.limiter.recordFailure(client, time.Now()); retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(max(int(retry.Round(time.Second)/time.Second), 1)))
+			http.Error(w, "too many login attempts", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "invalid operator token", http.StatusUnauthorized)
 		return
 	}
-	a.limiter.reset(client)
+	// A form credential must pass the same integration scope check as a bearer.
+	if secrets, ok := r.Context().Value(loginSecretsKey{}).(secret.SecretStore); ok {
+		authRequest := r.Clone(r.Context())
+		authRequest.Header.Set("Authorization", "Bearer "+token)
+		integrations.RejectShadewrightTokenOnOtherRoutes(http.HandlerFunc(a.issueSession), secrets).ServeHTTP(w, authRequest)
+		return
+	}
+	a.issueSession(w, r)
+}
+
+func (a *operatorAuth) issueSession(w http.ResponseWriter, r *http.Request) {
 	expires := time.Now().Add(sessionTTL)
 	http.SetCookie(w, &http.Cookie{
 		Name:     operatorCookie,
@@ -226,6 +254,23 @@ func (a *operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (a *operatorAuth) logout(w http.ResponseWriter, r *http.Request) {
+	if browserOriginScheme(r) == "" {
+		http.Error(w, "same-origin request required", http.StatusForbidden)
+		return
+	}
+	var key [32]byte
+	rand.Read(key[:])
+	a.keyMu.Lock()
+	a.signKey = key
+	a.keyMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name: operatorCookie, Path: "/", MaxAge: -1,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
 func (a *operatorAuth) validSession(host, value string, now time.Time) bool {
 	if !a.hasToken || strings.TrimSpace(host) == "" || len(value) > 20+1+sha256.Size*2 {
 		return false
@@ -238,7 +283,10 @@ func (a *operatorAuth) validSession(host, value string, now time.Time) bool {
 
 func (a *operatorAuth) sessionValue(host string, expires int64) string {
 	expiry := strconv.FormatInt(expires, 10)
-	mac := hmac.New(sha256.New, a.signKey[:])
+	a.keyMu.RLock()
+	key := a.signKey
+	a.keyMu.RUnlock()
+	mac := hmac.New(sha256.New, key[:])
 	_, _ = io.WriteString(mac, expiry+"\n"+strings.ToLower(host))
 	return expiry + "." + hex.EncodeToString(mac.Sum(nil))
 }
@@ -253,6 +301,7 @@ type loginLimiter struct {
 	limit      int
 	window     time.Duration
 	maxEntries int
+	global     loginFailureEntry
 	entries    map[string]loginFailureEntry
 }
 
@@ -265,96 +314,58 @@ func newLoginLimiter(limit int, window time.Duration, maxEntries int) *loginLimi
 	}
 }
 
-func (l *loginLimiter) allow(client string, now time.Time) (bool, time.Duration) {
+// recordFailure counts one invalid credential or returns the time until a retry.
+func (l *loginLimiter) recordFailure(client string, now time.Time) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if e, ok := l.entries[client]; ok {
-		if !now.Before(e.resetAt) {
-			delete(l.entries, client)
-			return true, 0
-		}
-		if e.failures >= l.limit {
-			return false, e.resetAt.Sub(now)
-		}
-		return true, 0
+	if !now.Before(l.global.resetAt) {
+		l.global = loginFailureEntry{resetAt: now.Add(l.window)}
 	}
-	if len(l.entries) >= l.maxEntries {
-		l.pruneLocked(now)
-		if len(l.entries) >= l.maxEntries && !l.hasEvictableLocked() {
-			return false, l.window
+	entry := l.entries[client]
+	if l.global.failures >= l.maxEntries {
+		retry := l.global.resetAt.Sub(now)
+		// A client blocked by its own window must wait for the later of the two deadlines.
+		if now.Before(entry.resetAt) && entry.failures >= l.limit {
+			retry = max(retry, entry.resetAt.Sub(now))
 		}
+		return retry
 	}
-	return true, 0
-}
-
-func (l *loginLimiter) recordFailure(client string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if e, ok := l.entries[client]; ok {
-		if !now.Before(e.resetAt) {
-			l.entries[client] = loginFailureEntry{failures: 1, resetAt: now.Add(l.window)}
-			return
+	if !now.Before(entry.resetAt) {
+		if len(l.entries) >= l.maxEntries {
+			for key, e := range l.entries {
+				if !now.Before(e.resetAt) {
+					delete(l.entries, key)
+				}
+			}
+			if len(l.entries) >= l.maxEntries {
+				return l.window
+			}
 		}
-		e.failures++
-		l.entries[client] = e
-		return
+		entry = loginFailureEntry{resetAt: now.Add(l.window)}
 	}
-	if len(l.entries) >= l.maxEntries {
-		l.pruneLocked(now)
+	if entry.failures >= l.limit {
+		return entry.resetAt.Sub(now)
 	}
-	if len(l.entries) >= l.maxEntries {
-		if victim, ok := l.oldestEvictableLocked(); ok {
-			delete(l.entries, victim)
-		} else {
-			return
-		}
-	}
-	l.entries[client] = loginFailureEntry{failures: 1, resetAt: now.Add(l.window)}
-}
-
-func (l *loginLimiter) reset(client string) {
-	l.mu.Lock()
-	delete(l.entries, client)
-	l.mu.Unlock()
-}
-
-func (l *loginLimiter) pruneLocked(now time.Time) {
-	for k, e := range l.entries {
-		if !now.Before(e.resetAt) {
-			delete(l.entries, k)
-		}
-	}
-}
-
-func (l *loginLimiter) hasEvictableLocked() bool {
-	_, ok := l.oldestEvictableLocked()
-	return ok
-}
-
-func (l *loginLimiter) oldestEvictableLocked() (string, bool) {
-	var (
-		victim string
-		oldest time.Time
-		found  bool
-	)
-	for k, e := range l.entries {
-		if e.failures >= l.limit {
-			continue
-		}
-		if !found || e.resetAt.Before(oldest) {
-			victim = k
-			oldest = e.resetAt
-			found = true
-		}
-	}
-	return victim, found
+	entry.failures++
+	l.entries[client] = entry
+	l.global.failures++
+	return 0
 }
 
 func loginClientKey(remoteAddr string) string {
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		return host
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
 	}
-	return strings.TrimSpace(remoteAddr)
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return "unknown"
+	}
+	ip = ip.WithZone("").Unmap()
+	if ip.Is6() {
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return ip.String()
 }
 
 func isWrite(method string) bool {
