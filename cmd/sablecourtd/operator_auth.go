@@ -20,6 +20,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 const (
@@ -106,7 +107,7 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 		if len(auth) == 1 {
 			if token, ok := strings.CutPrefix(auth[0], "Bearer "); ok {
 				if a.matches(token) {
-					next.ServeHTTP(w, r)
+					next.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
 					return
 				}
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
@@ -126,7 +127,7 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 					writeJSON(w, http.StatusForbidden, map[string]string{"error": "same-origin request required"})
 					return
 				}
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, r.WithContext(store.WithLearningOperator(r.Context(), "operator")))
 				return
 			}
 		}

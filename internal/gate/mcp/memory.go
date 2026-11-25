@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
+
 	"strings"
 	"time"
 
@@ -19,14 +19,14 @@ var errToolRefused = errors.New("refused")
 
 func isReservedWriteNamespace(ns string) bool {
 	lower := strings.ToLower(strings.TrimSpace(ns))
-	return strings.HasPrefix(lower, "learning:") ||
+	return store.IsLearningNamespace(ns) ||
 		strings.HasPrefix(lower, "proposed:learning:") ||
 		strings.HasPrefix(lower, "system:")
 }
 
 func isReservedReadNamespace(ns string) bool {
 	lower := strings.ToLower(strings.TrimSpace(ns))
-	return strings.HasPrefix(lower, "system:")
+	return store.IsLearningNamespace(ns) || strings.HasPrefix(lower, "system:")
 }
 
 func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, workloadName, action, outcome string, detail map[string]string) {
@@ -199,7 +199,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				})
 				return "", fmt.Errorf("%w: namespace %q is reserved and cannot be searched via memory.search", errToolRefused, redact.String(ns))
 			}
-			items, err := searchVisibleMemory(ctx, st, ns, in.Query, in.Limit)
+			items, err := store.SearchVisibleMemory(ctx, st, ns, in.Query, in.Limit, isReservedReadNamespace)
 			if err != nil {
 				return "", err
 			}
@@ -207,31 +207,4 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			return string(out), nil
 		},
 	})
-}
-
-func searchVisibleMemory(ctx context.Context, st store.Store, namespace, query string, limit int) ([]domain.MemoryEntry, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	fetchLimit := limit
-	for {
-		items, err := st.SearchMemory(ctx, namespace, query, fetchLimit)
-		if err != nil {
-			return nil, err
-		}
-		visible := make([]domain.MemoryEntry, 0, min(len(items), limit))
-		for _, item := range items {
-			if !isReservedReadNamespace(item.Namespace) {
-				visible = append(visible, item)
-				if len(visible) == limit {
-					return visible, nil
-				}
-			}
-		}
-		if len(items) < fetchLimit || fetchLimit == math.MaxInt {
-			return visible, nil
-		}
-		// The store limits all matches. Fetch a larger prefix when hidden rows fill part of it.
-		fetchLimit += min(fetchLimit, math.MaxInt-fetchLimit)
-	}
 }
