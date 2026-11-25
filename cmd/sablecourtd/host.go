@@ -96,6 +96,19 @@ func (cfg daemonConfig) containerGateHost() string {
 	return cfg.listenAddr
 }
 
+// hostGateURL is the data gate address for coding agents that run on the host, not in a
+// container. It never depends on a Docker host alias, so it works without Docker Desktop.
+func (cfg daemonConfig) hostGateURL() string {
+	host, port, err := net.SplitHostPort(cfg.listenAddr)
+	if err != nil {
+		return ""
+	}
+	if host == "" || net.ParseIP(host).IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/gate/mcp"
+}
+
 func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Handler, error) {
 	host, _, err := net.SplitHostPort(cfg.listenAddr)
 	if cfg.gateHost == "" && err == nil && (host == "" || net.ParseIP(host).IsUnspecified()) {

@@ -38,11 +38,8 @@ func (l *stateLock) Close() error {
 
 // LockStateDir acquires an exclusive non-blocking lock on the state directory for a running daemon.
 func LockStateDir(dir string) (io.Closer, error) {
-	safeDir, err := resolveSafeStateDir(dir, true)
+	safeDir, err := ensureStateDir(dir)
 	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(safeDir, 0o700); err != nil {
 		return nil, err
 	}
 	root, err := openState(safeDir)
@@ -103,11 +100,8 @@ func Read(dir string) (string, error) {
 
 // LoadOrCreate publishes a new credential only after the complete file is ready.
 func LoadOrCreate(dir string) (string, error) {
-	safeDir, err := resolveSafeStateDir(dir, true)
+	safeDir, err := ensureStateDir(dir)
 	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(safeDir, 0o700); err != nil {
 		return "", err
 	}
 	root, err := openState(safeDir)
@@ -191,21 +185,67 @@ func openState(dir string) (*os.Root, error) {
 	return root, nil
 }
 
-func resolveSafeStateDir(dir string, allowMissing bool) (string, error) {
-	clean := filepath.Clean(dir)
-	if !filepath.IsAbs(clean) {
-		return "", errors.New("operator state directory must be an absolute path")
-	}
-	rootInfo, err := os.Lstat(string(filepath.Separator))
+// ensureStateDir creates any missing part of the state directory through a handle on the
+// deepest verified ancestor. A symlink raced into a shared parent such as a sticky 1777
+// directory cannot redirect creation, because the handle refuses to leave the ancestor.
+func ensureStateDir(dir string) (string, error) {
+	ancestor, rel, err := resolveStateDir(dir, true)
 	if err != nil {
 		return "", err
 	}
+	if rel == "" {
+		return ancestor, nil
+	}
+	if err := mkdirBelow(ancestor, rel); err != nil {
+		return "", err
+	}
+	return filepath.Join(ancestor, rel), nil
+}
+
+func mkdirBelow(ancestor, rel string) error {
+	info, err := os.Lstat(ancestor)
+	if err != nil {
+		return err
+	}
+	if !safeAncestor(info) {
+		return errors.New("operator state parent directory has unsafe ownership or permissions")
+	}
+	root, err := os.OpenRoot(ancestor)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	actual, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, actual) || !safeAncestor(actual) {
+		return errors.New("operator state parent directory changed while opening it")
+	}
+	return root.MkdirAll(rel, 0o700)
+}
+
+func resolveSafeStateDir(dir string, allowMissing bool) (string, error) {
+	ancestor, rel, err := resolveStateDir(dir, allowMissing)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ancestor, rel), nil
+}
+
+// resolveStateDir returns the deepest existing verified directory and the missing suffix below it.
+func resolveStateDir(dir string, allowMissing bool) (string, string, error) {
+	clean := filepath.Clean(dir)
+	if !filepath.IsAbs(clean) {
+		return "", "", errors.New("operator state directory must be an absolute path")
+	}
+	rootInfo, err := os.Lstat(string(filepath.Separator))
+	if err != nil {
+		return "", "", err
+	}
 	if !safeAncestor(rootInfo) {
-		return "", errors.New("operator state root directory has unsafe ownership or permissions")
+		return "", "", errors.New("operator state root directory has unsafe ownership or permissions")
 	}
 	rel := strings.TrimPrefix(clean, string(filepath.Separator))
 	if rel == "" {
-		return "", errors.New("operator state directory must be owned by the current user with mode 0700")
+		return "", "", errors.New("operator state directory must be owned by the current user with mode 0700")
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	cur := string(filepath.Separator)
@@ -216,26 +256,25 @@ func resolveSafeStateDir(dir string, allowMissing bool) (string, error) {
 		info, err := os.Lstat(next)
 		if err != nil {
 			if allowMissing && errors.Is(err, os.ErrNotExist) {
-				remaining := append([]string{cur}, parts[i:]...)
-				return filepath.Join(remaining...), nil
+				return cur, filepath.Join(parts[i:]...), nil
 			}
-			return "", err
+			return "", "", err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			if isLeaf {
-				return "", errors.New("operator state directory must not be a symlink")
+				return "", "", errors.New("operator state directory must not be a symlink")
 			}
 			// Allow only root-owned OS directory symlinks (such as /var -> private/var on macOS).
 			if !ownedByRoot(info) || (os.Geteuid() == 0 && cur != string(filepath.Separator)) {
-				return "", errors.New("operator state path must not traverse a symlink")
+				return "", "", errors.New("operator state path must not traverse a symlink")
 			}
 			symlinks++
 			if symlinks > 8 {
-				return "", errors.New("operator state path traverses too many symlinks")
+				return "", "", errors.New("operator state path traverses too many symlinks")
 			}
 			target, err := os.Readlink(next)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			if !filepath.IsAbs(target) {
 				target = filepath.Join(cur, target)
@@ -251,18 +290,18 @@ func resolveSafeStateDir(dir string, allowMissing bool) (string, error) {
 			continue
 		}
 		if !info.IsDir() {
-			return "", errors.New("operator state path component is not a directory")
+			return "", "", errors.New("operator state path component is not a directory")
 		}
 		if isLeaf {
 			if info.Mode() != os.ModeDir|0o700 || !ownedByCaller(info) {
-				return "", errors.New("operator state directory must be owned by the current user with mode 0700")
+				return "", "", errors.New("operator state directory must be owned by the current user with mode 0700")
 			}
 		} else if !safeAncestor(info) {
-			return "", errors.New("operator state parent directory has unsafe ownership or permissions")
+			return "", "", errors.New("operator state parent directory has unsafe ownership or permissions")
 		}
 		cur = next
 	}
-	return cur, nil
+	return cur, "", nil
 }
 
 func safeAncestor(info os.FileInfo) bool {

@@ -151,3 +151,23 @@ func TestWildcardListenRequiresGateHost(t *testing.T) {
 		}
 	}
 }
+
+func TestHostGateURL(t *testing.T) {
+	for _, tc := range []struct {
+		listen, want string
+	}{
+		{"127.0.0.1:7432", "http://127.0.0.1:7432/gate/mcp"},
+		{"0.0.0.0:7432", "http://127.0.0.1:7432/gate/mcp"},
+		{":9000", "http://127.0.0.1:9000/gate/mcp"},
+		{"[::]:9000", "http://127.0.0.1:9000/gate/mcp"},
+		{"[::1]:7432", "http://[::1]:7432/gate/mcp"},
+		{"192.0.2.10:7432", "http://192.0.2.10:7432/gate/mcp"},
+		{"not an address", ""},
+	} {
+		t.Run(tc.listen, func(t *testing.T) {
+			if got := (daemonConfig{listenAddr: tc.listen, gateHost: "gate.example:1"}).hostGateURL(); got != tc.want {
+				t.Fatalf("hostGateURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
