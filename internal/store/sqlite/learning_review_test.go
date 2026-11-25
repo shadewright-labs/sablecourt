@@ -3,6 +3,7 @@ package sqlite
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
+
+const testLearningRemoteBase = "https://repository.invalid/"
 
 func seedTaskEvidence(t *testing.T, st *SQLiteStore, id, name string) {
 	t.Helper()
@@ -139,7 +142,7 @@ func TestScopedEligibility(t *testing.T) {
 func TestRemoteEscaping(t *testing.T) {
 	for _, suffix := range []string{"encoded%23name", "encoded%3Fquestion", "escaped%2Fslash", "percent%25sign"} {
 		t.Run(suffix, func(t *testing.T) {
-			raw := "https://repository.invalid/" + suffix
+			raw := testLearningRemoteBase + suffix
 			got, err := store.NormalizeRepoRemoteURL(raw + ".git")
 			if err != nil || got != raw {
 				t.Errorf("got %q, want %q, error %v", got, raw, err)
@@ -147,6 +150,253 @@ func TestRemoteEscaping(t *testing.T) {
 			again, err := store.NormalizeRepoRemoteURL(got)
 			if err != nil || got != again {
 				t.Fatalf("round trip %q, error %v", again, err)
+			}
+		})
+	}
+}
+
+func TestLearningRemoteRoundTrip(t *testing.T) {
+	st, _ := openLearningStore(t)
+	ctx := t.Context()
+	remotes := []string{"plugin.git", "plugin.git.git", "plugin.git.git.git", "a%3Fb.git"}
+	for _, remote := range remotes {
+		_, err := st.ProposeLearning(ctx, domain.Learning{
+			ID: remote, Statement: "Check observation", Author: "reviewer",
+			SourceKind: domain.LearningSourceTask, Scope: domain.LearningScope{RepoRemoteURL: testLearningRemoteBase + remote},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, remote := range remotes {
+		t.Run(remote, func(t *testing.T) {
+			rec, err := st.GetLearning(ctx, remote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := st.ListLearnings(ctx, store.LearningFilter{
+				Status: domain.LearningStatusProposed, RepoRemoteURL: rec.Scope.RepoRemoteURL,
+			})
+			if err != nil || len(rows) != 1 || rows[0].ID != remote {
+				t.Fatalf("lookup of %q returned %d rows, error %v", rec.Scope.RepoRemoteURL, len(rows), err)
+			}
+		})
+	}
+}
+
+func TestLearningScopeKeyLookup(t *testing.T) {
+	maxGlobs := make([]string, store.MaxLearningPathGlobs)
+	for i := range maxGlobs {
+		// Nonbreaking spaces inside a glob expand to escape sequences.
+		maxGlobs[i] = fmt.Sprintf("%02d%s*", i, strings.Repeat("\u00a0", (store.MaxLearningPathGlobBytes-3)/2))
+	}
+	for _, tc := range []struct {
+		name   string
+		scopes []domain.LearningScope
+	}{
+		{"quoted globs", []domain.LearningScope{{PathGlobs: []string{"a,b"}}, {PathGlobs: []string{`"a`, `b"`}}}},
+		{"three long globs", []domain.LearningScope{{PathGlobs: []string{
+			"a" + strings.Repeat("x", 199), "b" + strings.Repeat("x", 199), "c" + strings.Repeat("x", 199),
+		}}}},
+		{"compound scope", []domain.LearningScope{{
+			RepoRemoteURL: testLearningRemoteBase + "repo", PathGlobs: maxGlobs,
+			Cluster: strings.Repeat("c", store.MaxLearningSelectorBytes), Namespace: strings.Repeat("n", store.MaxLearningSelectorBytes),
+			WorkloadKind: strings.Repeat("w", store.MaxLearningSelectorBytes), Symptom: strings.Repeat("s", store.MaxLearningSymptomBytes),
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := openLearningStore(t)
+			ctx := t.Context()
+			var proposed []domain.Learning
+			for i, scope := range tc.scopes {
+				rec, err := st.ProposeLearning(ctx, domain.Learning{
+					ID: fmt.Sprint(i), Statement: "Check observation", Author: "reviewer",
+					SourceKind: domain.LearningSourceTask, Scope: scope,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				proposed = append(proposed, rec)
+			}
+			for _, rec := range proposed {
+				rows, err := st.ListLearnings(ctx, store.LearningFilter{
+					Status: domain.LearningStatusProposed, ScopeKey: rec.ScopeKey,
+				})
+				if err != nil || len(rows) != 1 || rows[0].ID != rec.ID {
+					t.Errorf("exact lookup of %s with %d-byte key returned %d rows, error %v", rec.ID, len(rec.ScopeKey), len(rows), err)
+				}
+			}
+		})
+	}
+}
+
+func TestLearningReacceptReplacement(t *testing.T) {
+	for _, review := range []string{"expiry", "contradiction"} {
+		t.Run(review, func(t *testing.T) {
+			st, _ := openLearningStore(t)
+			ctx := store.WithLearningOperator(t.Context(), "operator")
+			now := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+			pred := reviewProposal(t, st, domain.LearningScope{Global: true}, now)
+			replacement := domain.Learning{
+				ID: "replacement", PredecessorID: pred.ID, Scope: pred.Scope, Statement: "Check revised observation",
+				Author: pred.Author, SourceKind: pred.SourceKind, SourceID: pred.SourceID, EvidenceRef: pred.EvidenceRef,
+				CreatedAt: now,
+			}
+			first, err := st.ProposeLearning(ctx, replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement.ID = "other-replacement"
+			other, err := st.ProposeLearning(ctx, replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted, err := st.AcceptLearning(ctx, first.ID, first.VersionDigest, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reviewAt := now.Add(time.Hour)
+			switch review {
+			case "expiry":
+				reviewAt = *accepted.ExpiresAt
+				if n, err := st.ExpireLearnings(ctx, reviewAt); err != nil || n != 1 {
+					t.Fatalf("ExpireLearnings = %d, %v", n, err)
+				}
+			case "contradiction":
+				_, err := st.RecordLearningOutcome(ctx, domain.LearningOutcome{
+					LearningID: first.ID, Kind: domain.LearningOutcomeContradiction, Actor: "reviewer",
+					SourceKind: first.SourceKind, SourceID: first.SourceID, EvidenceRef: first.EvidenceRef, CreatedAt: reviewAt,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			reacceptAt := reviewAt.Add(time.Minute)
+			if _, err := st.AcceptLearning(ctx, other.ID, other.VersionDigest, reacceptAt); !errors.Is(err, store.ErrConflict) {
+				t.Errorf("accepting another replacement returned %v, want ErrConflict", err)
+			}
+			got, err := st.AcceptLearning(ctx, first.ID, first.VersionDigest, reacceptAt)
+			if err != nil || got.Status != domain.LearningStatusAccepted || got.ExpiresAt == nil ||
+				!got.ExpiresAt.Equal(reacceptAt.Add(domain.LearningReviewTTL)) {
+				t.Errorf("reaccepting replacement returned %+v, error %v", got, err)
+			}
+			history, err := st.ListLearningHistory(ctx, pred.ID)
+			if err != nil || len(history) != 2 || history[1].ToStatus != domain.LearningStatusRetired ||
+				history[1].SupersededBy != first.ID {
+				t.Fatalf("predecessor history = %+v, %v", history, err)
+			}
+		})
+	}
+}
+
+func TestLearningConfirmationTiming(t *testing.T) {
+	for _, tc := range []struct {
+		name                                    string
+		outcomeAt, priorConfirmation, confirmAt time.Duration
+		wantConflict                            bool
+	}{
+		{"before acceptance", time.Hour, 0, 5 * time.Hour, true},
+		{"previous review window", 3 * time.Hour, 4 * time.Hour, 5 * time.Hour, true},
+		{"backdated confirmation", 3 * time.Hour, 4 * time.Hour, 3 * time.Hour, true},
+		{"after acceptance", 5 * time.Hour, 0, 6 * time.Hour, false},
+		{"after renewal", 5 * time.Hour, 4 * time.Hour, 6 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := openLearningStore(t)
+			ctx := store.WithLearningOperator(t.Context(), "operator")
+			now := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+			rec := reviewProposal(t, st, domain.LearningScope{Global: true}, now)
+			out := domain.LearningOutcome{
+				LearningID: rec.ID, Kind: domain.LearningOutcomeSupporting, Actor: "reviewer",
+				SourceKind: rec.SourceKind, SourceID: rec.SourceID, EvidenceRef: rec.EvidenceRef, CreatedAt: now.Add(tc.outcomeAt),
+			}
+			var outcomeID int64
+			if tc.name == "before acceptance" {
+				if _, err := st.RecordLearningOutcome(ctx, out); !errors.Is(err, store.ErrConflict) {
+					t.Fatalf("recording while proposed returned %v, want ErrConflict", err)
+				}
+				// Exercise confirmation against a pre-existing outcome the current API rejects.
+				res, err := st.db.ExecContext(ctx, `
+					INSERT INTO learning_outcomes (learning_id, kind, source_kind, source_id, evidence_ref, actor, created_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+				`, out.LearningID, out.Kind, out.SourceKind, out.SourceID, out.EvidenceRef, out.Actor, store.FormatLearningTime(out.CreatedAt))
+				if err != nil {
+					t.Fatal(err)
+				}
+				outcomeID, err = res.LastInsertId()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			accepted, err := st.AcceptLearning(ctx, rec.ID, rec.VersionDigest, now.Add(2*time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcomeID == 0 {
+				stored, err := st.RecordLearningOutcome(ctx, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				outcomeID = stored.ID
+			}
+			if tc.priorConfirmation != 0 {
+				out.CreatedAt = now.Add(tc.priorConfirmation)
+				newer, err := st.RecordLearningOutcome(ctx, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				accepted, err = st.ConfirmLearning(ctx, rec.ID, newer.ID, out.CreatedAt)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = st.ConfirmLearning(ctx, rec.ID, outcomeID, now.Add(tc.confirmAt))
+			if (tc.wantConflict && !errors.Is(err, store.ErrConflict)) || (!tc.wantConflict && err != nil) {
+				t.Errorf("confirmation error = %v, want conflict %v", err, tc.wantConflict)
+			}
+			got, err := st.GetLearning(ctx, rec.ID)
+			wantExpiry := *accepted.ExpiresAt
+			if !tc.wantConflict {
+				wantExpiry = now.Add(tc.confirmAt).Add(domain.LearningReviewTTL)
+			}
+			if err != nil || got.ExpiresAt == nil || !got.ExpiresAt.Equal(wantExpiry) {
+				t.Errorf("expiry = %v, want %v, error %v", got.ExpiresAt, wantExpiry, err)
+			}
+		})
+	}
+}
+
+func TestLearningIncludeExpired(t *testing.T) {
+	st, _ := openLearningStore(t)
+	ctx := store.WithLearningOperator(t.Context(), "operator")
+	now := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+	rec := reviewProposal(t, st, domain.LearningScope{Global: true}, now)
+	accepted, err := st.AcceptLearning(ctx, rec.ID, rec.VersionDigest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.ProposeLearning(ctx, domain.Learning{
+		ID: "contradicted", Statement: "Check another observation", Scope: rec.Scope, Author: rec.Author,
+		SourceKind: rec.SourceKind, SourceID: rec.SourceID, EvidenceRef: rec.EvidenceRef, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AcceptLearning(ctx, other.ID, other.VersionDigest, now); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a persisted contradiction before the status changes.
+	if _, err := st.db.ExecContext(ctx, `
+		INSERT INTO learning_outcomes (learning_id, kind, source_kind, source_id, evidence_ref, actor, created_at)
+		VALUES (?, 'contradiction', 'task', ?, ?, 'reviewer', ?)
+	`, other.ID, rec.SourceID, rec.EvidenceRef, store.FormatLearningTime(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []domain.LearningStatus{domain.LearningStatusAccepted, ""} {
+		t.Run(string(status)+"_status", func(t *testing.T) {
+			rows, err := st.ListLearnings(ctx, store.LearningFilter{Status: status, IncludeExpired: true, Now: *accepted.ExpiresAt})
+			if err != nil || len(rows) != 1 || rows[0].ID != rec.ID {
+				t.Fatalf("expired lookup returned %v, error %v", rows, err)
 			}
 		})
 	}
@@ -173,7 +423,7 @@ func TestLegacyRows(t *testing.T) {
 		keys          []string
 		value, author string
 	}{
-		{"distinct keys", []string{" key", "key"}, "rule", "label"},
+		{"distinct keys", []string{" key", "key", "key "}, "rule", "label"},
 		{"label", []string{"key"}, "rule", " label "},
 		{"blank", []string{"key"}, " \t ", "label"},
 		{"credentials", []string{"key"}, "use postgres://reader:fixture-pass@db.invalid/catalog", "mysql://reader:fixture-pass@db.invalid"},
@@ -190,10 +440,9 @@ func TestLegacyRows(t *testing.T) {
 			if err != nil || len(rows) != len(tc.keys) {
 				t.Fatalf("got %d rows, want %d, error %v", len(rows), len(tc.keys), err)
 			}
+			keys := make(map[string]bool)
 			for _, row := range rows {
-				if tc.name == "distinct keys" && row.LegacyKey != " key" && row.LegacyKey != "key" {
-					t.Errorf("lost original key %q", row.LegacyKey)
-				}
+				keys[row.LegacyKey] = true
 				if tc.name == "credentials" {
 					if strings.Contains(fmt.Sprint(row), "fixture-pass") {
 						t.Fatal("connection password persisted")
@@ -203,6 +452,13 @@ func TestLegacyRows(t *testing.T) {
 				}
 				if tc.name == "blank" && !row.Scope.NeedsScopeMapping {
 					t.Error("blank row escaped quarantine")
+				}
+			}
+			if tc.name == "distinct keys" {
+				for _, key := range tc.keys {
+					if !keys[key] {
+						t.Errorf("lost original key %q", key)
+					}
 				}
 			}
 		})

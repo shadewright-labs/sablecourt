@@ -585,28 +585,36 @@ func TestLearningListByScopeUsesIndex(t *testing.T) {
 
 	// Verify EXPLAIN QUERY PLAN uses indexes on learnings, never SCAN learnings or court_memory.
 	for _, tc := range []struct {
-		name  string
-		query string
-		args  []any
+		name   string
+		filter store.LearningFilter
 	}{
 		{
-			name:  "by scope_key and status",
-			query: `EXPLAIN QUERY PLAN SELECT id FROM learnings WHERE scope_key = ? AND status = ? ORDER BY scope_specificity DESC, created_at DESC, id ASC`,
-			args:  []any{"global", "accepted"},
+			name:   "by scope_key and status",
+			filter: store.LearningFilter{ScopeKey: "global", Status: domain.LearningStatusAccepted, Now: now},
 		},
 		{
-			name:  "by repo_remote_url and status",
-			query: `EXPLAIN QUERY PLAN SELECT id FROM learnings WHERE repo_remote_url = ? AND status = ? ORDER BY scope_specificity DESC, created_at DESC, id ASC`,
-			args:  []any{repoURL, "accepted"},
+			name:   "by repo_remote_url and status",
+			filter: store.LearningFilter{RepoRemoteURL: repoURL, Status: domain.LearningStatusAccepted, Now: now},
 		},
 		{
-			name:  "by incident selectors and status",
-			query: `EXPLAIN QUERY PLAN SELECT id FROM learnings WHERE incident_cluster = ? AND incident_namespace = ? AND status = ? ORDER BY scope_specificity DESC, created_at DESC, id ASC`,
-			args:  []any{"prod-eu", "payments", "accepted"},
+			name: "by repo_remote_url and path",
+			filter: store.LearningFilter{
+				RepoRemoteURL: repoURL, Paths: []string{"internal/store/sqlite/learning.go"}, Status: domain.LearningStatusAccepted, Now: now,
+			},
+		},
+		{
+			name: "by incident selectors and status",
+			filter: store.LearningFilter{
+				IncidentCluster: "prod-eu", IncidentNamespace: "payments", Status: domain.LearningStatusAccepted, Now: now,
+			},
 		},
 	} {
 		t.Run("plan_"+tc.name, func(t *testing.T) {
-			rows, err := st.db.QueryContext(ctx, tc.query, tc.args...)
+			query, err := buildLearningListQuery(tc.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := st.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query.sql, query.args...)
 			if err != nil {
 				t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 			}
@@ -620,9 +628,15 @@ func TestLearningListByScopeUsesIndex(t *testing.T) {
 				}
 				details = append(details, detail)
 			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
 			plan := strings.Join(details, " | ")
-			if !strings.Contains(plan, "USING INDEX") && !strings.Contains(plan, "USING COVERING INDEX") {
-				t.Fatalf("expected index lookup in query plan, got: %s", plan)
+			if !slices.ContainsFunc(details, func(detail string) bool {
+				return strings.HasPrefix(detail, "SEARCH learnings USING INDEX ") ||
+					strings.HasPrefix(detail, "SEARCH learnings USING COVERING INDEX ")
+			}) {
+				t.Fatalf("expected indexed search on learnings, got: %s", plan)
 			}
 			if strings.Contains(plan, "SCAN learnings") || strings.Contains(plan, "court_memory") {
 				t.Fatalf("unexpected table scan or memory scan in plan: %s", plan)

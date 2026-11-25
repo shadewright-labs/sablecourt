@@ -59,8 +59,14 @@ const (
 	LearningTimestampLayout        = "2006-01-02T15:04:05.000000000Z"
 )
 
+// MaxLearningScopeKeyBytes allows for labels, quotes, and separators.
+// Quoting can expand a byte to four bytes.
+const MaxLearningScopeKeyBytes = len("repo:|path:|cluster:|namespace:|kind:|symptom:") +
+	4*(MaxLearningFieldBytes+MaxLearningPathGlobs*MaxLearningPathGlobBytes+3*MaxLearningSelectorBytes+MaxLearningSymptomBytes) +
+	2*5 + 3*MaxLearningPathGlobs - 1
+
 // LearningFilter selects eligible advice by default. Specify proposed or retired
-// status to review those records, or IncludeExpired to inspect recorded status.
+// status to review those records.
 type LearningFilter struct {
 	Status               domain.LearningStatus
 	ScopeKey             string
@@ -72,9 +78,10 @@ type LearningFilter struct {
 	IncidentWorkloadKind string
 	IncidentSymptom      string
 	NeedsScopeMapping    *bool
-	IncludeExpired       bool
-	Now                  time.Time
-	Limit                int
+	// IncludeExpired skips the expiry check for records still marked accepted.
+	IncludeExpired bool
+	Now            time.Time
+	Limit          int
 }
 
 type learningOperatorKey struct{}
@@ -201,7 +208,13 @@ func NormalizeRepoRemoteURL(raw string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("repository remote URL must not contain query or fragment")
 	}
-	cleanedPath := strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), ".git")
+	cleanedPath := strings.TrimSuffix(u.Path, "/")
+	escaped := strings.TrimSuffix(u.EscapedPath(), "/")
+	// Strip a lone .git suffix and preserve repeated suffixes as distinct paths.
+	if !strings.HasSuffix(cleanedPath, ".git.git") {
+		cleanedPath = strings.TrimSuffix(cleanedPath, ".git")
+		escaped = strings.TrimSuffix(escaped, ".git")
+	}
 	if cleanedPath == "" || cleanedPath == "/" {
 		return "", errors.New("repository remote URL requires a repository path")
 	}
@@ -210,7 +223,6 @@ func NormalizeRepoRemoteURL(raw string) (string, error) {
 			return "", errors.New("repository remote URL path is invalid")
 		}
 	}
-	escaped := strings.TrimSuffix(strings.TrimSuffix(u.EscapedPath(), "/"), ".git")
 	canonical := scheme + "://" + strings.ToLower(u.Host) + escaped
 	if len(canonical) > MaxLearningFieldBytes || ContainsLearningSecret(canonical) {
 		return "", errors.New("invalid canonical repository remote URL")
@@ -227,13 +239,13 @@ func NormalizePathGlob(raw string) (string, error) {
 	if strings.ContainsFunc(g, func(r rune) bool { return unicode.IsControl(r) }) || ContainsLearningSecret(g) {
 		return "", errors.New("invalid path glob")
 	}
+	g = strings.TrimPrefix(g, "./")
 	if strings.HasPrefix(g, "/") || strings.HasPrefix(g, "~") || strings.Contains(g, "\\") {
 		return "", errors.New("path glob must be repository-relative")
 	}
 	if len(g) >= 2 && g[1] == ':' && ((g[0] >= 'a' && g[0] <= 'z') || (g[0] >= 'A' && g[0] <= 'Z')) {
 		return "", errors.New("path glob must be repository-relative")
 	}
-	g = strings.TrimPrefix(g, "./")
 	if g == "" || g == "." || g == ".." {
 		return "", errors.New("invalid path glob")
 	}
@@ -431,7 +443,7 @@ func CanonicalLearningScopeKey(scope domain.LearningScope) string {
 	if len(scope.PathGlobs) > 0 {
 		encoded := make([]string, len(scope.PathGlobs))
 		for i, g := range scope.PathGlobs {
-			encoded[i] = encodePart(g)
+			encoded[i] = strconv.Quote(g)
 		}
 		parts = append(parts, "path:"+strings.Join(encoded, ","))
 	}
