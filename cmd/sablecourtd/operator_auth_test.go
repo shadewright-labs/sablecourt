@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 )
@@ -146,7 +149,7 @@ func TestOperatorLogin(t *testing.T) {
 						t.Fatal("login must set one cookie and redirect to the dashboard")
 					}
 					cookie := cookies[0]
-					if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" ||
+					if !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" ||
 						cookie.Domain != "" || cookie.MaxAge <= 0 || strings.Contains(cookie.Value, testOperatorToken) {
 						t.Fatal("invalid session cookie attributes")
 					}
@@ -411,7 +414,7 @@ func TestNonCanonicalPathsRefusedBeforeExemptions(t *testing.T) {
 }
 
 func TestVoiceBodyLimits(t *testing.T) {
-	h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, conclave.NewBroker(conclave.Options{}), nil, nil, nil,
 		handlerConfig{operatorToken: testOperatorToken})
 
 	t.Run("speak enforces 2 MiB limit", func(t *testing.T) {
@@ -435,6 +438,32 @@ func TestVoiceBodyLimits(t *testing.T) {
 			t.Fatalf("transcribe oversized status = %d, want 413 (body=%s)", w.Code, w.Body.String())
 		}
 	})
+
+	for _, tc := range []struct {
+		path  string
+		limit int
+	}{
+		{"/api/v1/voice/transcribe", voiceTranscribeMaxBytes},
+		{"/api/v1/conclaves/room/voice-decree", 2 << 20},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			if err := form.WriteField("language", strings.Repeat("a", tc.limit+1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			req := operatorRequest(http.MethodPost, tc.path, &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("oversized multipart status = %d, want 413 (body=%s)", w.Code, w.Body.String())
+			}
+		})
+	}
 }
 
 func TestLoginLimiterMemoryBound(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -69,12 +70,12 @@ func (g *Gate) currentBundle() *config.Bundle {
 
 func DefaultUpstreams() map[string]UpstreamConfig {
 	return map[string]UpstreamConfig{
-		"openai": {
+		"openai": { // #nosec G101 -- Gate.serveHTTP looks up the openai key in SecretStore by this name.
 			BaseURL:       "https://api.openai.com",
 			SecretName:    "openai_api_key",
 			RequireSecret: true,
 		},
-		"anthropic": {
+		"anthropic": { // #nosec G101 -- Gate.serveHTTP looks up the anthropic key in SecretStore by this name.
 			BaseURL:       "https://api.anthropic.com",
 			SecretName:    "anthropic_api_key",
 			RequireSecret: true,
@@ -85,7 +86,7 @@ func DefaultUpstreams() map[string]UpstreamConfig {
 			SecretName:    "gemini_api_key",
 			RequireSecret: true,
 		},
-		"local": {
+		"local": { // #nosec G101 -- Gate.serveHTTP looks up the local key in SecretStore by this name.
 			BaseURL:       "http://127.0.0.1:11434",
 			SecretName:    "local_model_api_key",
 			RequireSecret: false,
@@ -107,10 +108,7 @@ func New(opts Options) *Gate {
 		}
 		upstreams = routed
 	}
-	client := opts.Client
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Minute}
-	}
+	client := gatehttp.NewClient(opts.Client, 5*time.Minute)
 	nowFn := opts.Now
 	if nowFn == nil {
 		nowFn = func() time.Time { return time.Now().UTC() }
@@ -289,7 +287,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	copySafeRequestHeaders(upReq.Header, r.Header)
 	injectUpstreamAuth(upReq.Header, provider, upstreamKey, upCfg.AnthropicVer)
 
-	upResp, err := g.client.Do(upReq)
+	upResp, err := g.client.Do(upReq) // #nosec G704 -- joinUpstreamURL pins the configured provider host and scheme, and gatehttp.NewClient refuses redirects.
 	activeProvider := provider
 	if err != nil || isFallbackStatus(upResp.StatusCode) {
 		if fbProv, fbResp, fbErr := g.tryFallback(ctx, r, provider, upstreamPath, reqBody, workload); fbErr == nil && fbResp != nil {
@@ -403,7 +401,7 @@ func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider,
 		}
 		copySafeRequestHeaders(req.Header, r.Header)
 		injectUpstreamAuth(req.Header, cand, key, upCfg.AnthropicVer)
-		resp, err := g.client.Do(req)
+		resp, err := g.client.Do(req) // #nosec G704 -- joinUpstreamURL pins the configured fallback host and scheme, and gatehttp.NewClient refuses redirects.
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return cand, resp, nil
 		}
