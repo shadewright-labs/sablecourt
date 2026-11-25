@@ -53,7 +53,7 @@ var rules = []rule{
 	},
 	{
 		category: "bearer_header",
-		re:       regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]{8,}`),
+		re:       regexp.MustCompile(`(?i)(authorization["']?\s*:\s*["']?bearer\s+)[A-Za-z0-9._~+/=-]{8,}`),
 		replace:  "${1}[REDACTED:bearer_token]",
 	},
 	{
@@ -67,6 +67,10 @@ var rules = []rule{
 		replace:  "${1}${2}[REDACTED:secret]",
 	},
 }
+
+const privateKeyMarker = "[REDACTED:private_key]"
+
+var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
 
 type Result struct {
 	Text       string
@@ -91,6 +95,13 @@ func Text(input string) Result {
 		totalHits += len(matches)
 		seen[r.category] = struct{}{}
 		out = r.re.ReplaceAllString(out, r.replace)
+	}
+	// A key block whose END marker was cut off or never written has no match
+	// above, so withhold everything from its header on.
+	if start := privateKeyHeader.FindStringIndex(out); start != nil {
+		out = out[:start[0]] + privateKeyMarker
+		totalHits++
+		seen["private_key"] = struct{}{}
 	}
 
 	cats := make([]string, 0, len(seen))
