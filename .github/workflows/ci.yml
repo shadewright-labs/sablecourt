@@ -59,12 +59,18 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Static security analysis (gosec)
-        uses: securego/gosec@v2.30.0
-        env:
-          # The action's image can lag the Go version in go.mod; let it fetch the right toolchain.
-          GOTOOLCHAIN: auto
-        with:
-          args: -exclude=G104,G304,G204 ./...
+        run: |
+          set -euo pipefail
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          rc=0
+          "$(go env GOPATH)/bin/gosec" -exclude=G104,G304,G204 ./... 2>&1 | tee "$log" || rc=$?
+          if grep -qE "Golang errors in file:|Error building the SSA|Error running analyzer|could not import|Files[[:space:]]*:[[:space:]]*0([^0-9]|$)" "$log"; then
+            echo "gosec reported package load or analysis errors" >&2
+            exit 1
+          fi
+          exit "$rc"
 
       - name: Secret scan (gitleaks)
         env:

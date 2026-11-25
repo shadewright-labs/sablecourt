@@ -3,12 +3,16 @@ package docker
 import (
 	"context"
 	"errors"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -23,9 +27,9 @@ type fakeEngine struct {
 
 func (f *fakeEngine) NetworkInspect(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
 	if !f.networkExists {
-		return client.NetworkInspectResult{}, errors.New("not found")
+		return client.NetworkInspectResult{}, missing{errors.New("not found")}
 	}
-	return client.NetworkInspectResult{}, nil
+	return client.NetworkInspectResult{Network: network.Inspect{Network: network.Network{ID: "net-1", Name: DefaultNetworkName, Internal: true, Driver: "bridge"}}}, nil
 }
 
 func (f *fakeEngine) NetworkCreate(_ context.Context, _ string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
@@ -35,7 +39,7 @@ func (f *fakeEngine) NetworkCreate(_ context.Context, _ string, options client.N
 }
 
 func (f *fakeEngine) ImageInspect(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
-	return client.ImageInspectResult{}, nil
+	return client.ImageInspectResult{InspectResponse: image.InspectResponse{ID: "sha256:" + strings.Repeat("a", 64)}}, nil
 }
 
 func (f *fakeEngine) ImagePull(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
@@ -155,5 +159,48 @@ func TestCollectPreservesExit(t *testing.T) {
 	}
 	if e.removed {
 		t.Fatal("collection removed container before exit was recorded")
+	}
+}
+
+type logEngine struct {
+	fakeEngine
+	observed chan context.Context
+}
+
+func (e *logEngine) ContainerLogs(ctx context.Context, _ string, _ client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
+	e.observed <- ctx
+	return nil, nil
+}
+
+func TestLogCancellation(t *testing.T) {
+	for _, lifetime := range []string{"start", "daemon"} {
+		t.Run(lifetime, func(t *testing.T) {
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			start, finishStart := context.WithCancel(ctx)
+			defer finishStart()
+			e := &logEngine{observed: make(chan context.Context, 1)}
+			a := NewAdapter(e, "")
+			a.AttachHub = attach.NewHub()
+			if lifetime == "daemon" {
+				a.SetAttachHub(ctx, a.AttachHub)
+			}
+			var spec scruntime.LaunchSpec
+			spec.Workload.Spec.Runtime.Image = "fixture"
+			if _, err := a.Start(start, spec); err != nil {
+				t.Fatal(err)
+			}
+			stream := <-e.observed
+			finishStart()
+			if lifetime == "daemon" {
+				if stream.Err() != nil {
+					t.Fatal("finishing Start canceled live attach")
+				}
+				stop()
+			}
+			if stream.Err() != context.Canceled {
+				t.Fatal("container log request ignored cancellation")
+			}
+		})
 	}
 }
