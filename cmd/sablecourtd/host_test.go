@@ -142,3 +142,12 @@ func TestContainerGateAuthority(t *testing.T) {
 		}
 	}
 }
+
+func TestWildcardListenRequiresGateHost(t *testing.T) {
+	for _, host := range []string{"", net.IPv4zero.String(), net.IPv6zero.String()} {
+		cfg := daemonConfig{listenAddr: net.JoinHostPort(host, "7432")}
+		if _, err := cfg.hostHandler(http.NotFoundHandler(), false); err == nil {
+			t.Errorf("accepted wildcard %q without gate host", host)
+		}
+	}
+}

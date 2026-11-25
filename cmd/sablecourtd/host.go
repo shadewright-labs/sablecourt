@@ -95,6 +95,10 @@ func (cfg daemonConfig) containerGateHost() string {
 }
 
 func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Handler, error) {
+	host, _, err := net.SplitHostPort(cfg.listenAddr)
+	if cfg.gateHost == "" && err == nil && (host == "" || net.ParseIP(host).IsUnspecified()) {
+		return nil, fmt.Errorf("--gate-host is required for a wildcard listener")
+	}
 	gate, ok := hostAuthority(cfg.containerGateHost())
 	if !ok {
 		return nil, fmt.Errorf("gate-host requires an exact host and port")

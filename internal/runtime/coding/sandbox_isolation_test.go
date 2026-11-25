@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -198,6 +199,12 @@ printf 'isolation-verified\n'
 }
 
 func TestCheckSandbox(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		cmd := exec.CommandContext(t.Context(), seatbeltExecutable, "-p", "(version 1)(allow default)", "/usr/bin/true")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("native Seatbelt unavailable: %v: %s", err, out)
+		}
+	}
 	err := CheckSandbox(context.Background())
 	if runtime.GOOS == "darwin" {
 		if err != nil {

@@ -27,7 +27,49 @@ func CheckSandbox(ctx context.Context) error {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return checkSeatbelt(probeCtx, seatbeltProbeProfile(), "/")
+	return probeSeatbelt(probeCtx, seatbeltExecutable)
+}
+
+func probeSeatbelt(ctx context.Context, executable string) (err error) {
+	profile := seatbeltProbeProfile()
+	command := func(bin string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, executable, append([]string{"-p", profile, bin}, args...)...)
+		cmd.Dir, cmd.Env = "/", []string{"LC_ALL=C", "PATH=/usr/bin:/bin"}
+		return cmd
+	}
+	if err := command("/usr/bin/true").Run(); err != nil {
+		return fmt.Errorf("apply Seatbelt probe profile: %w", err)
+	}
+	file, err := os.CreateTemp("", "sablecourt-probe-*")
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, os.Remove(file.Name())) }()
+	_, writeErr := file.WriteString("probe\n")
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return err
+	}
+	for _, bin := range []string{"/bin/cat", "/usr/bin/tee"} {
+		cmd := command(bin, file.Name())
+		cmd.Stdin = strings.NewReader("write probe\n")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			return fmt.Errorf("Seatbelt allowed %s on the private probe file", filepath.Base(bin))
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var exit *exec.ExitError
+		prefix := filepath.Base(bin) + ": " + file.Name() + ": "
+		diagnostic := strings.TrimSpace(stderr.String())
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 ||
+			(diagnostic != prefix+"Operation not permitted" && diagnostic != prefix+"Permission denied") {
+			return fmt.Errorf("Seatbelt did not confirm a file access denial for %s: %w", filepath.Base(bin), err)
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) validateSandbox(sandbox string, readOnly bool) error {
