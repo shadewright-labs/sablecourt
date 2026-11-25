@@ -44,7 +44,7 @@ func copyDockerStreams(r io.Reader, stdout, stderr io.Writer) error {
 			if err != nil {
 				return err
 			}
-			if n != len(chunk) {
+			if n < 0 || n > len(buf) || n != len(chunk) {
 				return io.ErrShortWrite
 			}
 			left -= uint32(n)
