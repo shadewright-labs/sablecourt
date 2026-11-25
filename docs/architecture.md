@@ -80,7 +80,7 @@ flowchart TB
 | :--- | :--- | :--- |
 | Target host | Personal macOS or Ubuntu workstation | Hardened Kubernetes cluster (`deploy/k8s/overlays/citadel/`) |
 | Default bind address | `127.0.0.1:7432` | `0.0.0.0:7432` behind TLS ingress or Tailscale |
-| Operator auth | Optional on loopback (same-origin CSRF still enforced) | Fail-closed `--operator-auth-required` (`operator_bearer_token`) |
+| Operator auth | Mandatory `op_<64 hex>` bearer (`0600` `operator.token` in `0700` state directory) or 30-minute `SameSite=Strict` `sablecourt_session` cookie from `POST /login`; same-origin CSRF enforced on writes | Same mandatory `op_<64 hex>` bearer or `sablecourt_session` cookie (`--operator-auth-required` is deprecated and ignored) |
 | Database | Embedded SQLite WAL (`~/.sablecourt/sablecourt.db`) | PostgreSQL (`--postgres-dsn`) |
 | Container / sandbox | Auto-discovered Podman, Docker, OrbStack, Colima, Rancher Desktop, plus Seatbelt / Bubblewrap | Kubernetes `batch/v1 Job` and `apps/v1 Deployment` with `RuntimeClassName: gvisor`, `NetworkPolicy`, and `AutomountServiceAccountToken: false` |
 | Upstream AI routing | Direct provider keys in Keychain / `0400` file, or local Ollama/vLLM | Optional `--model-gateway-url` fronting Linux Foundation `agentgateway` |

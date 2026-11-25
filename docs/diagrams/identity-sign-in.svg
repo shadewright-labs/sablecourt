@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 492" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Local and shared sign-in</title>
+  <desc id="d">In local mode, the 0600 bootstrap token enrols a localhost passkey (or grants a headless CLI session) to authenticate local:operator. In shared mode, an external provider completes an OIDC PKCE or device flow, the OIDC callback checks issuer, audience, and nonce against a 5-minute Lax state cookie, and RoleBinding maps oidc:issuer:subject to viewer, operator, or approver while denying unmapped or overage claims with 403. Both lanes converge on the same hashed server-side session in sablecourtd. Dashed boxes and lines mark planned steps.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="492" rx="18" fill="#08060e"/>
+
+  <rect class="lane" x="24" y="24" width="776" height="148" rx="14"/>
+  <text class="lanet" x="44" y="54">LOCAL MODE</text>
+
+  <rect class="lane" x="24" y="188" width="776" height="244" rx="14"/>
+  <text class="lanet" x="44" y="218">SHARED MODE</text>
+
+  <rect class="lane" x="816" y="24" width="280" height="408" rx="14"/>
+  <text class="lanet" x="836" y="54">DAEMON SESSION</text>
+
+  <rect class="box" x="44" y="76" width="208" height="72" rx="10"/>
+  <text class="h" x="60" y="102">Bootstrap token</text>
+  <text class="s" x="60" y="123">0600 operator.token</text>
+  <text class="s" x="60" y="140">enrol or headless CLI</text>
+
+  <rect class="plan" x="312" y="76" width="208" height="72" rx="10"/>
+  <text class="h" x="328" y="102">Passkey sign-in</text>
+  <text class="s" x="328" y="123">WebAuthn on localhost</text>
+  <text class="s" x="328" y="140">user verification</text>
+
+  <rect class="plan" x="572" y="76" width="208" height="72" rx="10"/>
+  <text class="h" x="588" y="102">Local principal</text>
+  <text class="s" x="588" y="123">local:operator URN</text>
+  <text class="s" x="588" y="140">browser confirms CLI</text>
+
+  <rect class="ext" x="44" y="240" width="208" height="72" rx="10"/>
+  <text class="h" x="60" y="266">External provider</text>
+  <text class="s" x="60" y="287">Entra, Google, Okta</text>
+  <text class="s" x="60" y="304">PKCE or device code</text>
+
+  <rect class="plan" x="312" y="240" width="208" height="72" rx="10"/>
+  <text class="h" x="328" y="266">OIDC callback</text>
+  <text class="s" x="328" y="287">checks iss, aud, nonce</text>
+  <text class="s" x="328" y="304">5m Lax state cookie</text>
+
+  <rect class="plan" x="572" y="240" width="208" height="72" rx="10"/>
+  <text class="h" x="588" y="266">RoleBinding check</text>
+  <text class="s" x="588" y="287">oidc:&lt;iss&gt;:&lt;subject&gt;</text>
+  <text class="s" x="588" y="304">viewer, operator, approver</text>
+
+  <rect class="bad" x="572" y="352" width="208" height="64" rx="10"/>
+  <text class="h" x="588" y="378">Access denied</text>
+  <text class="no" x="588" y="399">403 default deny</text>
+
+  <rect class="plan" x="836" y="156" width="240" height="72" rx="10"/>
+  <text class="h" x="852" y="182">Server-side session</text>
+  <text class="s" x="852" y="203">SHA-256 of sc_sess_</text>
+  <text class="s" x="852" y="220">Strict cookie or keychain</text>
+
+  <path class="r" d="M252 112H306" marker-end="url(#m)"/>
+  <text class="lbl" x="280" y="104" text-anchor="middle">enrols</text>
+
+  <path class="r" d="M520 112H566" marker-end="url(#m)"/>
+
+  <path class="r" d="M780 112H956V150" marker-end="url(#m)"/>
+  <text class="lbl" x="884" y="104" text-anchor="middle">30m / 8h web</text>
+
+  <path class="r" d="M252 276H306" marker-end="url(#m)"/>
+  <text class="lbl" x="280" y="268" text-anchor="middle">ID token</text>
+
+  <path class="r" d="M520 276H566" marker-end="url(#m)"/>
+
+  <path class="deny" d="M676 312V346" marker-end="url(#x)"/>
+  <text class="lbl" x="688" y="334">unmapped</text>
+
+  <path class="r" d="M780 276H956V234" marker-end="url(#m)"/>
+  <text class="lbl" x="884" y="268" text-anchor="middle">interstitial, 1h</text>
+
+  <rect class="box" x="44" y="452" width="16" height="12" rx="3"/>
+  <text class="cap" x="68" y="462">built today</text>
+  <rect class="ext" x="192" y="452" width="16" height="12" rx="3"/>
+  <text class="cap" x="216" y="462">external provider</text>
+  <rect class="bad" x="384" y="452" width="16" height="12" rx="3"/>
+  <text class="cap" x="408" y="462">refused (403)</text>
+  <rect class="plan" x="556" y="452" width="16" height="12" rx="3"/>
+  <text class="cap" x="580" y="462">planned step or session</text>
+</svg>
