@@ -550,24 +550,18 @@ func (b *Broker) ResolveRoleForTask(ctx context.Context, conclaveID, workloadNam
 }
 
 func (b *Broker) resolveRoleForTask(ctx context.Context, session domain.ConclaveSession, bundle *config.Bundle, workloadName, taskID string) (string, error) {
-	tpl, ok := template(bundle, session.TemplateName)
-	if !ok || taskID == "" {
-		return "", ErrMessageDenied
-	}
-	task, err := b.store.GetTask(ctx, taskID)
-	if errors.Is(err, store.ErrNotFound) {
-		return "", ErrMessageDenied
-	}
+	a, err := b.readAssignment(ctx, session.ID, workloadName, taskID)
 	if err != nil {
 		return "", err
 	}
-	input, assigned := store.TaskConclaveAssignment(task)
-	if !assigned || task.WorkloadName != workloadName || input.ConclaveID != session.ID || !config.ValidVassalRole(input.Role) {
-		return "", ErrMessageDenied
-	}
+	return templateRole(session, bundle, workloadName, a.Role)
+}
+
+func templateRole(session domain.ConclaveSession, bundle *config.Bundle, workloadName, role string) (string, error) {
+	tpl, _ := template(bundle, session.TemplateName)
 	for _, v := range tpl.Spec.Vassals {
-		if v.Role == input.Role && v.Workload == workloadName {
-			return input.Role, nil
+		if v.Role == role && v.Workload == workloadName {
+			return role, nil
 		}
 	}
 	return "", ErrMessageDenied
@@ -622,10 +616,7 @@ func (b *Broker) RegisterMCPTools(gate *mcpgate.Gate) {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", err
 			}
-			if _, err := b.ResolveRoleForTask(ctx, in.ConclaveID, wl.Metadata.Name, taskID); err != nil {
-				return "", err
-			}
-			msgs, err := b.store.ListConclaveMessages(ctx, in.ConclaveID, in.SinceID)
+			msgs, err := b.ReadMessagesForTask(ctx, in.ConclaveID, wl.Metadata.Name, taskID, in.SinceID)
 			if err != nil {
 				return "", err
 			}
@@ -671,10 +662,7 @@ func (b *Broker) RegisterMCPTools(gate *mcpgate.Gate) {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", err
 			}
-			if _, err := b.ResolveRoleForTask(ctx, in.ConclaveID, wl.Metadata.Name, taskID); err != nil {
-				return "", err
-			}
-			relic, err := b.store.GetConclaveRelic(ctx, in.ConclaveID, in.Name)
+			relic, err := b.ReadRelicForTask(ctx, in.ConclaveID, wl.Metadata.Name, taskID, in.Name)
 			if err != nil {
 				return "", err
 			}

@@ -120,7 +120,9 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 }
 
 func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
-	if wl.Spec.Class == domain.ClassDeterministicController {
+	assignment, assigned := store.TaskConclaveAssignment(task)
+	council := assigned && assignment.Round > 0
+	if wl.Spec.Class == domain.ClassDeterministicController && !council {
 		return task.InputJSON, nil
 	}
 
@@ -129,19 +131,40 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		prompt, _ := json.Marshal(task.InputJSON)
 		payload = map[string]json.RawMessage{"prompt": prompt}
 	}
-	for key := range payload {
-		if strings.EqualFold(key, "repo_path") {
-			precheckInput := maps.Clone(payload)
-			maps.DeleteFunc(precheckInput, func(key string, _ json.RawMessage) bool {
-				return strings.EqualFold(key, "repo_path")
-			})
-			sanitized, err := json.Marshal(precheckInput)
-			if err != nil {
-				return "", err
-			}
-			task.InputJSON = string(sanitized)
-			break
+	// Only the dispatcher can create a round reservation. Its immutable input
+	// carries the already filtered packet. Other tasks receive an assembled one.
+	var markdown string
+	if council {
+		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
+		if err := json.Unmarshal(payload["context_packet"], &markdown); err != nil ||
+			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes {
+			return "", errors.New("invalid reserved council packet")
 		}
+	}
+	// Typed consumers may match field names case-insensitively.
+	rebuild := false
+	for key := range payload {
+		if strings.EqualFold(key, "context_packet") || strings.EqualFold(key, "conclaveId") {
+			delete(payload, key)
+			rebuild = true
+		}
+		if strings.EqualFold(key, "repo_path") {
+			rebuild = true
+		}
+	}
+	if assigned {
+		payload["conclaveId"], _ = json.Marshal(assignment.ConclaveID)
+	}
+	if rebuild && !council {
+		precheckInput := maps.Clone(payload)
+		maps.DeleteFunc(precheckInput, func(key string, _ json.RawMessage) bool {
+			return strings.EqualFold(key, "repo_path")
+		})
+		sanitized, err := json.Marshal(precheckInput)
+		if err != nil {
+			return "", err
+		}
+		task.InputJSON = string(sanitized)
 	}
 
 	if raw, ok := payload["tier"]; ok {
@@ -167,8 +190,10 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		payload["model"], _ = json.Marshal(model)
 	}
 
-	packet := contextpack.Assemble(ctx, r.store, task, wl)
-	payload["context_packet"], _ = json.Marshal(packet.Markdown)
+	if !council {
+		markdown = contextpack.Assemble(ctx, r.store, task, wl).Markdown
+	}
+	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
 	return string(raw), err
 }

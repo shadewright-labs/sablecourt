@@ -9,6 +9,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // CouncilSnapshot must come from one consistent read of a room and its pinned policy.
@@ -24,21 +25,8 @@ type CouncilSnapshot struct {
 	Turns                []CouncilTurn
 }
 
-type CouncilMember struct {
-	Vassal   domain.ConclaveVassal
-	Zone     domain.WorkloadZone
-	RoleCard string
-}
-
-type CouncilTurn struct {
-	Round        int
-	Role         string
-	Starts       int
-	TaskID       string
-	State        domain.TaskState
-	Answer       *domain.ConclaveMessage
-	NothingToAdd bool
-}
+type CouncilMember = store.CouncilMember
+type CouncilTurn = store.CouncilTurn
 
 type CouncilStep struct {
 	Action, Reason string
@@ -211,25 +199,24 @@ func (c CouncilSnapshot) indexTurns() (turnsByRound, int, error) {
 	return rounds, remaining, nil
 }
 
-func (c CouncilSnapshot) packet(round int, member CouncilMember, turns turnsByRound) (contextpack.Packet, error) {
-	var decrees []string
+// visible selects the same addressed Decrees and accepted turns for every workload read.
+func (c CouncilSnapshot) visible(round int, member CouncilMember, turns turnsByRound) (decrees []domain.ConclaveMessage, peers []CouncilTurn) {
 	role := member.Vassal.Role
 	for _, d := range c.Decrees {
 		if d.ToRole == "all" || d.ToRole == role {
-			decrees = append(decrees, d.Body)
+			decrees = append(decrees, d)
 		}
 	}
-	var visible []contextpack.CouncilRound
 	for n := 1; n <= round; n++ {
 		if n == round && !c.Sequential {
 			break
 		}
-		r := contextpack.CouncilRound{Number: n}
 		for _, sender := range c.Members {
 			if n == round && sender.Vassal.Role == role {
 				break
 			}
-			answer := turns[n][sender.Vassal.Role].Answer
+			turn := turns[n][sender.Vassal.Role]
+			answer := turn.Answer
 			if answer == nil || (answer.ToRole != "all" && answer.ToRole != role) {
 				continue
 			}
@@ -240,11 +227,25 @@ func (c CouncilSnapshot) packet(round int, member CouncilMember, turns turnsByRo
 			if sender.Zone == domain.ZoneSandbox && member.Zone == domain.ZoneRuntime {
 				continue
 			}
-			r.Answers = append(r.Answers, contextpack.CouncilAnswer{Role: sender.Vassal.Role, Body: answer.Body})
-		}
-		if len(r.Answers) > 0 {
-			visible = append(visible, r)
+			peers = append(peers, turn)
 		}
 	}
-	return contextpack.AssembleCouncil(member.RoleCard, c.Question, decrees, visible)
+	return decrees, peers
+}
+
+func (c CouncilSnapshot) packet(round int, member CouncilMember, turns turnsByRound) (contextpack.Packet, error) {
+	decrees, peers := c.visible(round, member, turns)
+	var instructions []string
+	for _, d := range decrees {
+		instructions = append(instructions, d.Body)
+	}
+	var rounds []contextpack.CouncilRound
+	for _, peer := range peers {
+		if len(rounds) == 0 || rounds[len(rounds)-1].Number != peer.Round {
+			rounds = append(rounds, contextpack.CouncilRound{Number: peer.Round})
+		}
+		r := &rounds[len(rounds)-1]
+		r.Answers = append(r.Answers, contextpack.CouncilAnswer{Role: peer.Role, Body: peer.Answer.Body})
+	}
+	return contextpack.AssembleCouncil(member.RoleCard, c.Question, instructions, rounds)
 }
