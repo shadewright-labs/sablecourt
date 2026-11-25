@@ -346,8 +346,8 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tasks:            rows,
 		Audit:            audit,
 		Providers:        provList,
-		ModelsByProvider: template.JS(modelsJSON),
-		DefaultsByProv:   template.JS(defaultsJSON),
+		ModelsByProvider: template.JS(modelsJSON),   // #nosec G203 -- json.Marshal encodes the model lists as JSON and escapes script delimiters.
+		DefaultsByProv:   template.JS(defaultsJSON), // #nosec G203 -- json.Marshal encodes the default models as JSON and escapes script delimiters.
 	})
 }
 
@@ -387,7 +387,7 @@ func (d *Dashboard) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: time.Now().UTC(),
 		})
 	}
-	http.Redirect(w, r, "/tasks/"+id, http.StatusSeeOther)
+	http.Redirect(w, r, "/tasks/"+url.PathEscape(id), http.StatusSeeOther)
 }
 
 func (d *Dashboard) handleCancelTask(w http.ResponseWriter, r *http.Request) {

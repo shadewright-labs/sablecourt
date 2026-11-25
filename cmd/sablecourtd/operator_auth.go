@@ -219,7 +219,7 @@ func (a *operatorAuth) login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expires,
 		MaxAge:   int(sessionTTL / time.Second),
-		Secure:   scheme == "https",
+		Secure:   true,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
