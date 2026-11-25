@@ -96,11 +96,30 @@ func (cfg daemonConfig) containerGateHost() string {
 	return cfg.listenAddr
 }
 
+// hostGateURL is the data gate address for coding agents that run on the host, not in a
+// container. It never depends on a Docker host alias, so it works without Docker Desktop.
+func (cfg daemonConfig) hostGateURL() string {
+	host, port, err := net.SplitHostPort(cfg.listenAddr)
+	if err != nil {
+		return ""
+	}
+	if host == "" || net.ParseIP(host).IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/gate/mcp"
+}
+
 func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Handler, error) {
+	host, _, err := net.SplitHostPort(cfg.listenAddr)
+	if cfg.gateHost == "" && err == nil && (host == "" || net.ParseIP(host).IsUnspecified()) {
+		return nil, fmt.Errorf("--gate-host is required for a wildcard listener")
+	}
 	gate, ok := hostAuthority(cfg.containerGateHost())
 	if !ok {
 		return nil, fmt.Errorf("gate-host requires an exact host and port")
 	}
+	// Host coding agents use their own loopback or listen-address authority for gate routes.
+	hostGate, _ := hostAuthority(strings.TrimSuffix(strings.TrimPrefix(cfg.hostGateURL(), "http://"), "/gate/mcp"))
 	regular, err := hostAllowlistMiddleware(next, cfg.listenAddr, cfg.allowedHosts, unixSocket)
 	if err != nil {
 		return nil, err
@@ -113,7 +132,7 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
 			return
 		}
-		if valid && host == gate && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
+		if valid && (host == gate || host == hostGate) && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
 			next.ServeHTTP(w, r)
 			return
 		}

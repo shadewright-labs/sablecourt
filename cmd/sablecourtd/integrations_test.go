@@ -28,7 +28,7 @@ import (
 
 const (
 	testShadewrightToken = "sw-integration-token-test"
-	testOperatorToken    = "op-bearer-token-test"
+	testOperatorToken    = "op_" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	testObserverToken    = "obs-bearer-token-test"
 )
 
