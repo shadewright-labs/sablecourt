@@ -34,12 +34,14 @@ const (
 var errWorkflowKeyReserved = errors.New("wf: keys are reserved for workflows")
 
 type Options struct {
-	Store           store.Store
-	Bundle          *config.Bundle
-	Policy          *policy.Engine
-	Adapters        map[domain.WorkloadClass]scruntime.Adapter
-	ModelGateURL    string
-	DataGateURL     string
+	Store        store.Store
+	Bundle       *config.Bundle
+	Policy       *policy.Engine
+	Adapters     map[domain.WorkloadClass]scruntime.Adapter
+	ModelGateURL string
+	DataGateURL  string
+	// HostDataGateURL is the data gate address for coding agents that run on the host.
+	HostDataGateURL string
 	StalenessWindow time.Duration
 	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
@@ -58,6 +60,7 @@ type Reconciler struct {
 	adapters        map[domain.WorkloadClass]scruntime.Adapter
 	modelGateURL    string
 	dataGateURL     string
+	hostDataGateURL string
 	stalenessWindow time.Duration
 	maxConcurrent   int
 	onTaskFailed    func(task domain.Task, reason string)
@@ -384,6 +387,7 @@ func NewReconciler(opts Options) *Reconciler {
 		adapters:          opts.Adapters,
 		modelGateURL:      opts.ModelGateURL,
 		dataGateURL:       opts.DataGateURL,
+		hostDataGateURL:   opts.HostDataGateURL,
 		stalenessWindow:   win,
 		maxConcurrent:     opts.MaxConcurrent,
 		onTaskFailed:      opts.OnTaskFailed,
@@ -1217,6 +1221,9 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		InputJSON:   inputJSON,
 		DataGateURL: r.dataGateURL,
 		TaskToken:   token,
+	}
+	if wl.Spec.Class == domain.ClassCodingAgent && r.hostDataGateURL != "" {
+		spec.DataGateURL = r.hostDataGateURL
 	}
 	// Only non-deterministic workloads with explicit Model Gate grants receive Model Gate coordinates.
 	if wl.Spec.Class != domain.ClassDeterministicController && wl.Spec.Grants.ModelGate.Allowed {

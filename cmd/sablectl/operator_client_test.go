@@ -46,7 +46,7 @@ func TestDaemonClientOperatorCredential(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("SABLECOURT_STATE_DIR", dir)
-			t.Setenv("SABLECOURT_OPERATOR_TOKEN", "")
+			t.Setenv("SABLECOURT_OPERATOR_TOKEN", tc.explicit)
 			var got []string
 			old := http.DefaultTransport
 			t.Cleanup(func() { http.DefaultTransport = old })
@@ -63,7 +63,7 @@ func TestDaemonClientOperatorCredential(t *testing.T) {
 				}
 				return resp, nil
 			})
-			client, base := newDaemonClient(time.Second, tc.baseURL, "", tc.explicit)
+			client, base := newDaemonClient(time.Second, tc.baseURL, "")
 			res, err := client.Get(base + "/api/v1/tasks")
 			if res != nil {
 				res.Body.Close()
@@ -94,7 +94,7 @@ func TestDaemonClientWithCustomTransport(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("[]"))}, nil
 	})
-	client, base := newDaemonClientWithTransport(time.Second, loopback, "", "", customRT)
+	client, base := newDaemonClientWithTransport(time.Second, loopback, "", customRT)
 	res, err := client.Get(base + "/api/v1/tasks")
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -102,5 +102,23 @@ func TestDaemonClientWithCustomTransport(t *testing.T) {
 	_ = res.Body.Close()
 	if gotAuth != "Bearer "+credential {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer "+credential)
+	}
+}
+
+func TestTokenFlagIsRejected(t *testing.T) {
+	secret := "op_" + strings.Repeat("c", 64)
+	for _, args := range [][]string{
+		{"--token", secret, "validate", "."},
+		{"--token=" + secret, "validate", "."},
+	} {
+		root := newRootCmd()
+		var out strings.Builder
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs(args)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Fatalf("%v: want unknown flag error, got %v", args[0], err)
+		}
 	}
 }
