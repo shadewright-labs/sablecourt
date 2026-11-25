@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 const seatbeltExecutable = "/usr/bin/sandbox-exec"
@@ -35,7 +37,7 @@ func (a *Adapter) validateSandbox(sandbox string, readOnly bool) error {
 	case "seatbelt":
 		if runtime.GOOS == "darwin" {
 			if _, err := exec.LookPath(seatbeltExecutable); err != nil {
-				return fmt.Errorf("Seatbelt executable unavailable: %w", err)
+				return fmt.Errorf("Seatbelt executable unavailable: %w", &scruntime.MissingBinaryError{Path: seatbeltExecutable, Err: err})
 			}
 			return nil
 		}

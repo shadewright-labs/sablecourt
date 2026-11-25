@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -1059,5 +1061,172 @@ func TestTickReplaysExistingRemediationWithoutHistory(t *testing.T) {
 	events, err := st.ListTaskEvents(ctx, task.ID)
 	if err != nil || len(events) == 0 || events[len(events)-1].Reason != "runtime_failed" {
 		t.Fatalf("pending exit after replay: %v, %v", events, err)
+	}
+}
+
+func TestCodingMissingBinaryRecordsLaunchFailedPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("coding seatbelt sandbox validation requires darwin")
+	}
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("look up git: %v", err)
+	}
+	missingConfigured := filepath.Join(t.TempDir(), "missing-claude")
+	emptyBinDir := t.TempDir()
+	for _, tc := range []struct {
+		name     string
+		pathEnv  string
+		harness  string
+		wantPath string
+	}{
+		{name: "configured path", harness: missingConfigured, wantPath: missingConfigured},
+		{name: "missing from PATH", pathEnv: emptyBinDir + string(os.PathListSeparator) + filepath.Dir(gitBin), wantPath: "claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.pathEnv != "" {
+				t.Setenv("PATH", tc.pathEnv)
+				if _, err := exec.LookPath("claude"); err == nil {
+					t.Skip("claude binary exists in git directory")
+				}
+			}
+			repoDir := t.TempDir()
+			for _, args := range [][]string{
+				{"init", "--quiet"},
+				{"config", "user.email", "sablecourt-test"},
+				{"config", "user.name", "Sablecourt Test"},
+			} {
+				if out, err := exec.Command("git", append([]string{"-C", repoDir}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v (%s)", args, err, out)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{
+				{"add", "README.md"},
+				{"commit", "-m", "init"},
+			} {
+				if out, err := exec.Command("git", append([]string{"-C", repoDir}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v (%s)", args, err, out)
+				}
+			}
+
+			r, st, _, unused := regressionFixture(t)
+			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = domain.ClassCodingAgent
+			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude", RepoPath: repoDir, Sandbox: "seatbelt"}
+			r.bundle.Workloads["worker"] = wl
+			adapter := coding.NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+			if tc.harness != "" {
+				adapter.HarnessPaths = map[string]string{"claude": tc.harness}
+			}
+			r.adapters[domain.ClassCodingAgent] = adapter
+
+			task, err := r.SubmitTask(ctx, "worker", "missing-bin", `{"prompt":"check"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.ReconcileOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if launchErr := waitForLaunches(t, r); launchErr == nil {
+				t.Fatal("expected launch failure for missing binary")
+			}
+			requireState(t, st, task.ID, domain.TaskStateFailed)
+
+			events, err := st.ListTaskEvents(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var launchEvent *domain.TaskEvent
+			for i := range events {
+				if events[i].Reason == "launch_failed" {
+					launchEvent = &events[i]
+				}
+			}
+			if launchEvent == nil {
+				t.Fatalf("missing launch_failed event: %+v", events)
+			}
+			var facts struct {
+				Reason string `json:"reason"`
+				Path   string `json:"path"`
+			}
+			if err := json.Unmarshal([]byte(launchEvent.FactJSON), &facts); err != nil {
+				t.Fatalf("unmarshal launch_failed FactJSON %q: %v", launchEvent.FactJSON, err)
+			}
+			if facts.Reason != "missing_binary" || facts.Path != tc.wantPath {
+				t.Fatalf("launch_failed facts = %+v (raw %s), want reason=missing_binary path=%q", facts, launchEvent.FactJSON, tc.wantPath)
+			}
+		})
+	}
+}
+
+type missingBinaryStartAdapter struct {
+	fakeAdapter
+	partial bool
+	err     error
+}
+
+func (a *missingBinaryStartAdapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
+	if a.partial {
+		h, _ := a.fakeAdapter.Start(ctx, spec)
+		return h, a.err
+	}
+	return scruntime.Handle{}, a.err
+}
+
+func TestLaunchFailedFactsRedactAndPreserveMissingPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		partial  bool
+		path     string
+		wantPath string
+	}{
+		{name: "missing path", path: "/opt/bin/missing-claude", wantPath: "/opt/bin/missing-claude"},
+		{name: "partial start missing path", partial: true, path: "/opt/bin/missing-codex", wantPath: "/opt/bin/missing-codex"},
+		{name: "token in path is redacted", path: "/tmp/sc_task_0123456789abcdef0123456789abcdef/claude", wantPath: "/tmp/[REDACTED:sablecourt_token]/claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, st, _, task := regressionFixture(t)
+			wl := r.bundle.Workloads["worker"]
+			a := &missingBinaryStartAdapter{
+				partial: tc.partial,
+				err:     fmt.Errorf("resolve harness: %w", &scruntime.MissingBinaryError{Path: tc.path, Err: errors.New("no such file")}),
+			}
+			err := launchForTest(ctx, r, task, wl, a)
+			if err == nil || strings.Contains(err.Error(), tc.path) {
+				t.Fatalf("launchForTest error = %v", err)
+			}
+			requireState(t, st, task.ID, domain.TaskStateFailed)
+			events, err := st.ListTaskEvents(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var launchEvent *domain.TaskEvent
+			for i := range events {
+				if events[i].Reason == "launch_failed" {
+					launchEvent = &events[i]
+				}
+			}
+			if launchEvent == nil {
+				t.Fatalf("missing launch_failed event: %+v", events)
+			}
+			var facts struct {
+				Reason string `json:"reason"`
+				Path   string `json:"path"`
+			}
+			if err := json.Unmarshal([]byte(launchEvent.FactJSON), &facts); err != nil {
+				t.Fatalf("unmarshal FactJSON %q: %v", launchEvent.FactJSON, err)
+			}
+			if facts.Reason != "missing_binary" || facts.Path != tc.wantPath {
+				t.Fatalf("facts = %+v (raw %s), want reason=missing_binary path=%q", facts, launchEvent.FactJSON, tc.wantPath)
+			}
+		})
 	}
 }

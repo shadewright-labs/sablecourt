@@ -33,6 +33,12 @@ type workerIdentity struct {
 	Start time.Time
 }
 
+type readyStatus struct {
+	workerIdentity
+	Error    string `json:",omitempty"`
+	NotExist bool   `json:",omitempty"`
+}
+
 type exitRecord struct {
 	workerIdentity
 	Code *int
@@ -102,9 +108,13 @@ func runWrapper() error {
 	defer stderr.Close()
 	p, err := startProcess(cmd, base, spec.Scratch, spec.Limit, os.Stdout, &boundedLog{file: stdout}, &boundedLog{file: stderr})
 	if err != nil {
+		_ = json.NewEncoder(ready).Encode(readyStatus{
+			Error:    redact.String(err.Error()),
+			NotExist: errors.Is(err, os.ErrNotExist),
+		})
 		return err
 	}
-	if err := json.NewEncoder(ready).Encode(id); err != nil {
+	if err := json.NewEncoder(ready).Encode(readyStatus{workerIdentity: id}); err != nil {
 		p.requestStop()
 	}
 	select {
@@ -199,10 +209,20 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 		return nil, id, err
 	}
 	_ = child.Close()
-	if err = json.NewDecoder(ready).Decode(&id); err != nil {
+	var status readyStatus
+	if err = json.NewDecoder(ready).Decode(&status); err != nil {
 		_ = wrapper.Wait()
 		return nil, id, err
 	}
+	if status.Error != "" {
+		_ = wrapper.Wait()
+		err = errors.New(status.Error)
+		if status.NotExist {
+			err = &scruntime.MissingBinaryError{Path: cmd.Path, Err: err}
+		}
+		return nil, id, err
+	}
+	id = status.workerIdentity
 	if id.PID != wrapper.Process.Pid || id.Start.IsZero() {
 		_ = wrapper.Process.Signal(syscall.SIGTERM)
 		_ = wrapper.Wait()
