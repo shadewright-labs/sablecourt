@@ -105,14 +105,11 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 	if err != nil {
 		return nil, err
 	}
-	councilGate, _ := councilproxy.GateAuthority(cfg.listenAddr)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, valid := hostAuthority(r.Host)
+		// The council virtual host is never served on a listener. The per-launch
+		// gate dispatches to councilGateHandler in process, behind the lease check.
 		if valid && strings.HasPrefix(host, councilproxy.Authority+":") {
-			if !unixSocket && host == councilGate && councilproxy.AllowsGateRequest(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
 			return
 		}
@@ -121,5 +118,24 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 			return
 		}
 		regular.ServeHTTP(w, r)
+	}), nil
+}
+
+// councilGateHandler is the in-process target of a per-launch council gate. It is
+// never mounted on a network listener: the gate has already checked the task lease
+// and bounded the request, and this handler admits only the council virtual host
+// and the council route allow-list before the daemon's gate routes.
+func (cfg daemonConfig) councilGateHandler(next http.Handler) (http.Handler, error) {
+	councilGate, err := councilproxy.GateAuthority(cfg.listenAddr)
+	if err != nil {
+		return nil, err
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, valid := hostAuthority(r.Host)
+		if !valid || host != councilGate || !councilproxy.AllowsGateRequest(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
+			return
+		}
+		next.ServeHTTP(w, r)
 	}), nil
 }

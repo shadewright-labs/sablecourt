@@ -7,8 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,12 +33,12 @@ grep -Eq '^CapEff:[[:space:]]*0+$' /proc/self/status
 grep -Eq '^NoNewPrivs:[[:space:]]*1$' /proc/self/status
 awk '$5 == "/" && $6 ~ /^ro(,|$)/ {found=1} END{exit !found}' /proc/self/mountinfo
 [[ -z ${SABLECOURT_MODEL_GATE_URL+x} ]]
-[[ -n ${SABLECOURT_TASK_TOKEN:-} ]]
+[[ -z ${SABLECOURT_TASK_TOKEN+x} && -r "$SABLECOURT_TASK_TOKEN_FILE" ]]
 [[ -n ${SABLECOURT_DATA_GATE_URL:-} ]]
 touch /scratch/probe
 
 # Reach pinned gate via proxy with scoped task lease.
-code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SABLECOURT_TASK_TOKEN}" "${SABLECOURT_DATA_GATE_URL}")
+code=$(printf 'Authorization: Bearer %s\n' "$(cat "$SABLECOURT_TASK_TOKEN_FILE")" | curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -H @- "${SABLECOURT_DATA_GATE_URL}")
 [[ "$code" == "200" ]]
 
 # Reject unauthenticated call to proxy gate.
@@ -152,33 +152,23 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	}
 	stubImageID := buildStubHarnessImage(t, cli)
 
-	// Start a loopback gate listener verifying the council proxy virtual host and Bearer token.
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	listen := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 7432).String()
+	wantAuthority, err := councilproxy.GateAuthority(listen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	wantAuthority, err := councilproxy.GateAuthority(ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{
-		ReadHeaderTimeout: 5 * time.Second,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Host != wantAuthority || !councilproxy.AllowsGateRequest(r) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer sc_task_") {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		}),
-	}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
+	gateHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != wantAuthority || !councilproxy.AllowsGateRequest(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer sc_task_") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	// Create disposable managed login volumes for all three harnesses.
 	da.CouncilHarnesses = make(map[string]docker.CouncilHarness, 3)
@@ -215,7 +205,9 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	adapter.CouncilRunner = da
 	adapter.CouncilProxy = da
 	adapter.CouncilProxyImage = proxyImageID
-	adapter.DaemonListen = ln.Addr().String()
+	adapter.DaemonListen = listen
+	adapter.CouncilGateHandler = gateHandler
+	adapter.CouncilSocketRoot = integrationSocketRoot(t)
 	adapter.CouncilLimits = scruntime.CouncilLimits{
 		NanoCPUs:    500_000_000,
 		MemoryBytes: 128 << 20,
@@ -248,17 +240,14 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 			_ = adapter.Stop(ctx, h)
 		})
 
-		deadline := time.Now().Add(30 * time.Second)
-		var obs scruntime.Observation
-		for time.Now().Before(deadline) {
-			obs, err = adapter.Observe(t.Context(), h)
-			if err != nil {
-				t.Fatalf("Observe(%s): %v", taskID, err)
-			}
-			if obs.State != scruntime.StateRunning {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
+		taskBase, err := adapter.taskBase(taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-adapter.containerProc(taskBase).done
+		obs, err := adapter.Observe(t.Context(), h)
+		if err != nil {
+			t.Fatal(err)
 		}
 		if obs.State != scruntime.StateCompleted {
 			t.Fatalf("task %s obs = %+v, want completed", taskID, obs)
@@ -365,7 +354,7 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 		if commit == "" || commit == v1 {
 			t.Fatalf("writer git-commit = %q, expected new commit advancing past %s", commit, v1)
 		}
-		if got := testGit(t, repo, "show", commit+":feature.txt"); got != "implemented in container\n" {
+		if got := testGit(t, repo, "show", commit+":feature.txt"); strings.TrimSpace(got) != "implemented in container" {
 			t.Fatalf("host git show feature.txt = %q", got)
 		}
 		if err := adapter.CleanupCouncil(t.Context(), "ccl_docker_writer"); err != nil {
@@ -376,4 +365,84 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 			t.Fatalf("council worktree directory still exists after cleanup: %v", err)
 		}
 	})
+}
+
+func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
+	if os.Getenv("SABLECOURT_TEST_AUTHENTICATED_CODEX") != "1" {
+		t.Skip("requires a local image, a logged-in Codex volume and provider access")
+	}
+	da, err := docker.NewFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = da.Client.(*client.Client).Close() })
+	def, err := harnessimages.Lookup("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	da.CouncilHarnesses = map[string]docker.CouncilHarness{"codex": {Image: def.Image, LoginVolume: def.Volume}}
+	repo := initTempGitRepo(t)
+	if err := os.Chmod(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The expected answer is available only by reading the mounted checkout.
+	challenge := rand.Text()
+	testWrite(t, repo, "challenge.txt", challenge, 0644)
+	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	a.CouncilRunner = da
+	a.CouncilProxy = da
+	a.CouncilProxyImage = harnessimages.ProxyImage()
+	a.DaemonListen = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 7432).String()
+	a.CouncilGateHandler = http.NotFoundHandler()
+	a.CouncilSocketRoot = integrationSocketRoot(t)
+	spec := scruntime.LaunchSpec{
+		TaskID: "codex-tool-" + strings.ToLower(rand.Text()), TaskToken: "sc_task_" + rand.Text(),
+		CouncilContainer: true, CouncilDeadline: time.Now().Add(3 * time.Minute),
+		Workload:  domain.Workload{Metadata: domain.ObjectMeta{Name: "codex"}, Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{Harness: "codex", RepoPath: repo}}},
+		InputJSON: `{"conclaveId":"ccl_tool","role":"codex","checkoutMode":"live","context_packet":"Use a shell tool to read challenge.txt in the checkout. Reply with its contents."}`,
+	}
+	h, err := a.Start(t.Context(), spec)
+	if isContainerHandle(h) {
+		t.Cleanup(func() {
+			if err := a.Stop(context.Background(), h); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskBase, err := a.taskBase(h.ExternalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-a.containerProc(taskBase).done
+	obs, err := a.Observe(t.Context(), h)
+	if err != nil || obs.State != scruntime.StateCompleted {
+		t.Fatalf("Codex turn state %s, error %v", obs.State, err)
+	}
+	arts, err := a.CollectArtifacts(t.Context(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, art := range arts {
+		if art.Name == "final-message" && strings.Contains(art.Text, challenge) {
+			return
+		}
+	}
+	t.Fatal("Codex did not return the contents of the challenge file")
+}
+
+func integrationSocketRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	return dir
 }

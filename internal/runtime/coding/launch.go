@@ -299,6 +299,9 @@ func resolveHarness(harness, configured string) (string, error) {
 		found, err = resolvedPath(found)
 	}
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
+			err = &scruntime.MissingBinaryError{Path: path, Err: err}
+		}
 		return "", fmt.Errorf("resolve coding harness %q at %q: %w", harness, path, err)
 	}
 	return found, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,36 +25,54 @@ import (
 )
 
 type cpFakeProxyDocker struct {
-	mu              sync.Mutex
-	proxies         map[string]councilproxy.ProxyContainer
-	networks        map[string]bool
-	removedProxies  []string
-	removedNetworks []string
+	failSessionClose bool
+	mu               sync.Mutex
+	proxies          map[string]councilproxy.ProxyContainer
+	networks         map[string]bool
+	removedProxies   []string
+	removedNetworks  []string
+	closed           chan struct{}
+	once             sync.Once
 }
 
 func newCPFakeProxyDocker() *cpFakeProxyDocker {
-	return &cpFakeProxyDocker{
+	return &cpFakeProxyDocker{closed: make(chan struct{}),
 		proxies:  make(map[string]councilproxy.ProxyContainer),
 		networks: make(map[string]bool),
 	}
 }
 
-func (f *cpFakeProxyDocker) CreateInternalNetwork(_ context.Context, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.networks[name] = true
-	return nil
+type fixtureProxySession struct {
+	d    *cpFakeProxyDocker
+	name string
 }
 
-func (f *cpFakeProxyDocker) CreateProxy(_ context.Context, spec councilproxy.ProxyContainer) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.proxies[spec.Name] = spec
-	return nil
+func (s *fixtureProxySession) Workload() councilproxy.WorkloadEndpoint {
+	u := "http://" + s.name + ":" + councilproxy.Port
+	return councilproxy.WorkloadEndpoint{Network: s.name + "-net", ProxyURL: u, DataGateURL: u + "/gate/mcp", GateMode: councilproxy.GateModeUnixSocket}
 }
-
-func (f *cpFakeProxyDocker) ConnectProxyEgress(_ context.Context, _ string) error { return nil }
-func (f *cpFakeProxyDocker) StartProxy(_ context.Context, _ string) error         { return nil }
+func (s *fixtureProxySession) Close(ctx context.Context) error {
+	if s.d.failSessionClose {
+		s.d.once.Do(func() { close(s.d.closed) })
+		return errors.New("interrupted cleanup")
+	}
+	if err := s.d.RemoveProxy(ctx, s.name); err != nil {
+		return err
+	}
+	return s.d.RemoveInternalNetwork(ctx, s.name+"-net")
+}
+func (f *cpFakeProxyDocker) ProvisionCouncilProxy(ctx context.Context, image string, cfg councilproxy.Config) (councilproxy.LaunchSession, error) {
+	name := "sablecourt-council-" + cfg.LeaseSHA256[:16]
+	if err := cfg.RecordResources(name, name+"-net"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.networks[name+"-net"] = true
+	f.proxies[name] = councilproxy.ProxyContainer{Name: name, ImageID: image, Args: []string{"-lease-sha256", cfg.LeaseSHA256}}
+	f.mu.Unlock()
+	s := &fixtureProxySession{d: f, name: name}
+	return s, nil
+}
 
 func (f *cpFakeProxyDocker) RemoveProxy(_ context.Context, name string) error {
 	f.mu.Lock()
@@ -67,6 +86,7 @@ func (f *cpFakeProxyDocker) RemoveInternalNetwork(_ context.Context, name string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.networks, name)
+	f.once.Do(func() { close(f.closed) })
 	f.removedNetworks = append(f.removedNetworks, name)
 	return nil
 }
@@ -277,7 +297,7 @@ func newCouncilContainerFixture(t *testing.T, writerRole string, duration time.D
 	adapter.CouncilRunner = runner
 	adapter.CouncilProxy = proxy
 	adapter.CouncilProxyImage = "sha256:" + strings.Repeat("d", 64)
-	adapter.DaemonListen = "127.0.0.1:7432"
+	adapter.DaemonListen = net.JoinHostPort(net.IPv6loopback.String(), "7432")
 
 	bundle := &config.Bundle{Workloads: map[string]domain.Workload{"claude": wl}}
 	pol := policy.NewEngine(nil, nil)
@@ -346,7 +366,10 @@ func TestCouncilContainerRestartWithoutDuplicateStarts(t *testing.T) {
 		Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: adapter2},
 	})
 	reconcile(t, r2)
-	requireState(t, st, task.ID, domain.TaskStateWorking)
+	requireState(t, st, task.ID, domain.TaskStateFailed)
+	if len(proxy.proxies) != 0 || len(proxy.networks) != 0 {
+		t.Fatal("restart left the disconnected proxy running")
+	}
 	if runner.starts != 1 {
 		t.Fatalf("duplicate start after restart: starts = %d, want 1", runner.starts)
 	}
@@ -413,7 +436,8 @@ func TestCouncilContainerDeadlineCancellationAndWriterCleanup(t *testing.T) {
 	requireState(t, st, task.ID, domain.TaskStateWorking)
 	tokenHash := model.HashToken(runner.launches[0].TaskToken)
 
-	// Wait past the council deadline so container cancels itself.
+	// The runner waits for its launch context to expire.
+	<-proxy.closed
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		reconcile(t, r)
@@ -424,7 +448,6 @@ func TestCouncilContainerDeadlineCancellationAndWriterCleanup(t *testing.T) {
 		if cur.State == domain.TaskStateFailed {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 	requireState(t, st, task.ID, domain.TaskStateFailed)
 	if _, err := st.GetActiveLeaseByTokenHash(ctx, tokenHash, time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
@@ -452,7 +475,7 @@ func TestCouncilContainerWriterFinalMessageAndDiffRelic(t *testing.T) {
 	}
 
 	reconcile(t, r)
-	// Poll until Observe collects artifacts and finishes task.
+	<-proxy.closed
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		reconcile(t, r)
@@ -463,7 +486,6 @@ func TestCouncilContainerWriterFinalMessageAndDiffRelic(t *testing.T) {
 		if cur.State == domain.TaskStateCompleted {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	cur, err := st.GetTask(ctx, task.ID)
 	if err != nil {
@@ -505,7 +527,7 @@ func TestCouncilContainerCrashWindowAroundStart(t *testing.T) {
 		created   bool
 		wantState domain.TaskState
 	}{
-		{"crashed_after_start_reattaches_without_duplicate", true, true, domain.TaskStateWorking},
+		{"crashed_after_start_closes_disconnected_proxy", true, true, domain.TaskStateFailed},
 		{"crashed_after_create_before_start_cleans_up", false, true, domain.TaskStateFailed},
 		{"crashed_before_create_fails_and_revokes_lease", false, false, domain.TaskStateFailed},
 	} {
@@ -618,5 +640,34 @@ func TestCouncilContainerMissingDuringObserveAndCancelRevokesLease(t *testing.T)
 	}
 	if err := r.CleanupCouncil(ctx, "ccl_1"); err != nil {
 		t.Fatalf("CleanupCouncil after cancel: %v", err)
+	}
+}
+
+func TestRecoverRecordedCouncilResultClosesProxy(t *testing.T) {
+	r, st, bundle, pol, first, runner, proxy, task, _ := newCouncilContainerFixture(t, "", time.Minute)
+	proxy.failSessionClose = true
+	runner.onRun = func(context.Context, scruntime.CouncilLaunch) (string, string, int, error) {
+		return "recorded answer", "", 0, nil
+	}
+	reconcile(t, r)
+	<-proxy.closed
+	fresh := coding.NewAdapter(first.WorktreeRoot)
+	fresh.CouncilRunner = runner
+	fresh.CouncilProxy = proxy
+	restarted := NewReconciler(Options{Store: st, Bundle: bundle, Policy: pol, Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: fresh}})
+	if err := restarted.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(proxy.proxies) != 0 || len(proxy.networks) != 0 {
+		t.Fatal("startup recovery left a proxy for a recorded exit")
+	}
+	hash := model.HashToken(runner.launches[0].TaskToken)
+	if _, err := st.GetActiveLeaseByTokenHash(t.Context(), hash, time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("lease survived startup recovery")
+	}
+	reconcile(t, restarted)
+	got, err := st.GetTask(t.Context(), task.ID)
+	if err != nil || got.State != domain.TaskStateCompleted || !strings.Contains(got.ArtifactsJSON, "recorded answer") || runner.starts != 1 {
+		t.Fatal("restart lost recorded output or repeated the turn")
 	}
 }

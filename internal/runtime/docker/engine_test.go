@@ -113,6 +113,8 @@ func TestStartResolvesLocalResources(t *testing.T) {
 				}
 			} else if err == nil || f.createdOpts.Config != nil || f.createdNetwork.Driver != "" || f.pulled {
 				t.Fatal("launched, pulled or created resources on failed inspect")
+			} else if isMissing(err) != (tc == "image missing") {
+				t.Fatalf("error %v has missing=%t, want %t", err, isMissing(err), tc == "image missing")
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,20 +17,28 @@ import (
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
+type CouncilProxyLauncher interface {
+	ProvisionCouncilProxy(context.Context, string, councilproxy.Config) (councilproxy.LaunchSession, error)
+	RemoveProxy(context.Context, string) error
+	RemoveInternalNetwork(context.Context, string) error
+}
+
 // Adapter runs local coding CLIs (claude or codex) inside dedicated Git worktrees
 // with stripped environment variables, detached process groups, and OS sandboxing.
 type Adapter struct {
-	WorktreeRoot      string // Directory for worktrees and their state.
-	DryRun            bool
-	AttachHub         *attach.Hub
-	BranchRetention   time.Duration     // Prune merged branches after this age on the next start.
-	HarnessPaths      map[string]string // Absolute executable paths supplied by the operator.
-	WallTime          time.Duration     // Zero uses the default task limit.
-	CouncilRunner     scruntime.CouncilRunner
-	CouncilProxy      councilproxy.Docker
-	CouncilProxyImage string
-	DaemonListen      string
-	CouncilLimits     scruntime.CouncilLimits
+	WorktreeRoot       string // Directory for worktrees and their state.
+	DryRun             bool
+	AttachHub          *attach.Hub
+	BranchRetention    time.Duration     // Prune merged branches after this age on the next start.
+	HarnessPaths       map[string]string // Absolute executable paths supplied by the operator.
+	WallTime           time.Duration     // Zero uses the default task limit.
+	CouncilRunner      scruntime.CouncilRunner
+	CouncilProxy       CouncilProxyLauncher
+	CouncilGateHandler http.Handler
+	CouncilSocketRoot  string
+	CouncilProxyImage  string
+	DaemonListen       string
+	CouncilLimits      scruntime.CouncilLimits
 
 	allowUnconfined bool // In-process fixture only.
 	setupTimeout    time.Duration
@@ -64,7 +73,7 @@ func (a *Adapter) StartAtCommit(ctx context.Context, spec scruntime.LaunchSpec, 
 	return a.start(ctx, spec, commit, readOnly)
 }
 
-func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit string, readOnly bool) (_ scruntime.Handle, startErr error) {
+func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit string, readOnly bool) (handle scruntime.Handle, startErr error) {
 	if spec.Workload.Spec.Coding == nil {
 		return scruntime.Handle{}, errors.New("coding config is required")
 	}
@@ -136,7 +145,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		}
 	}
 	defer func() {
-		if startErr != nil && rollback != nil {
+		if startErr != nil && !isContainerHandle(handle) && rollback != nil {
 			rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), a.councilSetupTimeout())
 			defer rbCancel()
 			startErr = errors.Join(startErr, rollback(rbCtx))
@@ -153,7 +162,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			return scruntime.Handle{}, err
 		}
 	}
-	handle := scruntime.Handle{
+	handle = scruntime.Handle{
 		AdapterName: "coding:" + cfg.Harness,
 		ExternalID:  spec.TaskID,
 		WorkDir:     dir,
@@ -205,7 +214,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 
 	process, id, err := launchWrapper(cmd, taskBase, scratch, state.TaskID, limit, a.AttachHub)
 	if err != nil {
-		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, cmd.Path, err)
+		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, sandboxTarget(cmd), err)
 	}
 	handle.PID, handle.ProcessStartTime = id.PID, id.Start
 	a.running.Store(taskBase, process)
@@ -264,7 +273,7 @@ func writeSessionMarker(worktreeDir string, spec scruntime.LaunchSpec, input lau
 }
 
 func writeSessionFile(dir, name string, data []byte) error {
-	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o444)
+	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
 	if err != nil {
 		return fmt.Errorf("create session file: %w", err)
 	}
@@ -324,7 +333,7 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	defer cancel()
 	if isContainerHandle(handle) {
 		if taskBase, err := a.taskBase(handle.ExternalID); err == nil {
-			if err := a.stopInMemoryContainer(ctx, taskBase); err != nil {
+			if err := a.stopInMemoryContainer(ctx, taskBase, handle); err != nil {
 				return err
 			}
 		}
@@ -343,7 +352,7 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 				ContainerID:   handle.ContainerID,
 				ProxyName:     handle.ProxyName,
 				NetworkName:   handle.NetworkName,
-			})
+			}, nil)
 		}
 		return err
 	}

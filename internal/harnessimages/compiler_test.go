@@ -62,6 +62,18 @@ func TestLocalProxyCompiler(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			for _, file := range []string{"docker.go", "socket.go", "limits.go"} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte("package councilproxy"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tokenDir := filepath.Join(source, "internal", "operatortoken")
+			if err := os.MkdirAll(tokenDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tokenDir, "token.go"), []byte("package operatortoken"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			scratch := t.TempDir()
 			t.Setenv("TMPDIR", scratch)
 			t.Setenv("GOFLAGS", "-invalid-flag")
@@ -95,5 +107,15 @@ func TestLocalProxyCompiler(t *testing.T) {
 				t.Fatalf("compiler left temporary state: %v, %v", left, err)
 			}
 		})
+	}
+}
+
+func TestCompileProductionProxyOffline(t *testing.T) {
+	binary, err := (LocalProxyCompiler{Source: filepath.Join("..", "..")}).Compile(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := elf.NewFile(bytes.NewReader(binary)); err != nil {
+		t.Fatal(err)
 	}
 }

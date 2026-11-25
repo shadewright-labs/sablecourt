@@ -28,7 +28,7 @@ type GitHubOptions struct {
 func GitHubHandler(opts GitHubOptions) http.Handler {
 	secretName := opts.SecretName
 	if secretName == "" {
-		secretName = "github_webhook_secret"
+		secretName = "github_webhook_secret" // #nosec G101 -- GitHubHandler passes this lookup name to Secrets.Get for the signing key.
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

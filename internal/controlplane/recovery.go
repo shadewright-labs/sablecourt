@@ -374,29 +374,35 @@ func (r *Reconciler) recoverTask(ctx context.Context, task domain.Task, bundle *
 	}
 	adapter := r.resolveRecoveryAdapter(task, rec, bundle)
 	if adapter == nil {
+		if isContainerHandle(handle) {
+			return errors.Join(errors.New("council runtime unavailable for cleanup"), r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
+		}
 		return r.failLostTask(ctx, task, `{"reason":"adapter_unavailable"}`)
 	}
 	alive, probeErr := r.canRecoverHandle(ctx, adapter, handle)
 	if probeErr != nil {
 		return errors.Join(probeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 	}
-	if !alive {
-		if isContainerHandle(handle) {
-			cleanupCtx := context.WithoutCancel(ctx)
-			if err := r.store.RevokeTaskLeases(cleanupCtx, task.ID); err != nil {
-				return err
-			}
-			callCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
-			stopErr := adapter.Stop(callCtx, handle)
-			if callCtx.Err() != nil {
-				stopErr = callCtx.Err()
-			}
-			cancel()
-			if stopErr != nil {
-				return errors.New("runtime container cleanup failed")
-			}
+	if isContainerHandle(handle) {
+		// Per-launch listeners belong to the previous daemon. Revoke the lease
+		// and remove its resources even when the final message is already durable.
+		cleanupCtx := context.WithoutCancel(ctx)
+		if err := r.store.RevokeTaskLeases(cleanupCtx, task.ID); err != nil {
+			return err
+		}
+		callCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
+		stopErr := adapter.Stop(callCtx, handle)
+		if callCtx.Err() != nil {
+			stopErr = callCtx.Err()
+		}
+		cancel()
+		if stopErr != nil {
+			return errors.New("runtime container cleanup failed")
+		}
+		if !alive {
 			return r.failLostTask(ctx, task, `{"reason":"container_not_alive"}`)
 		}
+	} else if !alive {
 		return r.failLostTask(ctx, task, `{"reason":"process_not_alive"}`)
 	}
 

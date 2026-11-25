@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -1352,7 +1353,11 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 	}()
 
 	if state.Container != nil {
-		if err := a.cleanupContainerResources(ctx, state.Container); err != nil {
+		var session councilproxy.LaunchSession
+		if proc := a.containerProc(taskBase); proc != nil {
+			session = proc.session
+		}
+		if err := a.cleanupContainerResources(ctx, state.Container, session); err != nil {
 			return err
 		}
 	}

@@ -28,11 +28,14 @@ func (c LocalProxyCompiler) Compile(ctx context.Context) (binary []byte, resultE
 		}
 	}()
 	packageDir := filepath.Join("internal", "gate", "councilproxy")
-	if err := os.MkdirAll(filepath.Join(scratch, packageDir), 0700); err != nil {
-		return nil, err
-	}
-	for _, name := range []string{"proxy.go", "proxy_main.go"} {
-		source := filepath.Join(c.Source, packageDir, name)
+	for _, name := range []string{"gate/councilproxy/proxy.go", "gate/councilproxy/proxy_main.go",
+		"gate/councilproxy/docker.go", "gate/councilproxy/socket.go", "gate/councilproxy/limits.go", "operatortoken/token.go"} {
+		rel := filepath.Join("internal", filepath.FromSlash(name))
+		source := filepath.Join(c.Source, rel)
+		dest := filepath.Join(scratch, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+			return nil, err
+		}
 		info, err := os.Lstat(source)
 		if err != nil {
 			return nil, fmt.Errorf("council proxy source %s is unavailable; integrate issue #76 or select its checkout with --source", name)
@@ -44,7 +47,7 @@ func (c LocalProxyCompiler) Compile(ctx context.Context) (binary []byte, resultE
 		if err != nil {
 			return nil, fmt.Errorf("read council proxy source %s", name)
 		}
-		if err := os.WriteFile(filepath.Join(scratch, packageDir, name), body, 0600); err != nil {
+		if err := os.WriteFile(dest, body, 0600); err != nil {
 			return nil, err
 		}
 	}

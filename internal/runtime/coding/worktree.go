@@ -322,6 +322,12 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	if err != nil {
 		return nil, err
 	}
+	// A restart can find the checkout before the proxy resource journal exists.
+	if state.Container == nil && state.Worker == nil && state.Mode != "" && state.TaskID == handle.ExternalID &&
+		handle.WorkDir == "" && handle.ContainerName == "sablecourt-council-"+state.TaskID && handle.CreateAttempt != "" && handle.ContainerID == "" {
+		a.bindConfigLock(state)
+		return state, nil
+	}
 	if state.Container != nil {
 		if !matchesContainerHandle(state.Container, handle) {
 			return nil, errors.New("coding container identity does not match handle")

@@ -14,8 +14,8 @@ Use `--source` to select another checkout containing the gate proxy implementati
 The proxy source and explicit build entry point from issue #76 must be present.
 Missing source stops the command before it calls Docker.
 
-The local Go toolchain must support Go 1.27.4. The command compiles only
-`internal/gate/councilproxy/proxy.go` and `proxy_main.go` in a temporary module,
+The local Go toolchain must support Go 1.27.4. The command compiles the proxy
+entry point, its gate and socket code, and the state directory helper in a temporary module,
 with module downloads, workspace configuration, cgo, and inherited Go flags
 disabled. It removes the temporary module after success or failure.
 
@@ -33,6 +33,11 @@ admission and launch. It returns fresh argument slices on each call.
 the embedded image definitions. Admission must resolve each tag to its local
 image ID and launch that ID, since tags can be reassigned. No login or launch
 command should pull an image.
+
+During a council turn, `SABLECOURT_DATA_GATE_URL` points to the per-turn proxy.
+A gate client reads its bearer token from the private scratch file named by
+`SABLECOURT_TASK_TOKEN_FILE`. The launcher delivers the token over attached
+stdin and disables Docker logs for the harness, socket probe, and proxy.
 
 All targets derive from the spike's digest-pinned Debian base. A dated Debian
 snapshot fixes the package index. The CLI installation steps select exact

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -205,6 +206,34 @@ func TestWakeThreadHistory(t *testing.T) {
 			msgs := loadThreadHistory("/control", "fixture")
 			if len(msgs) != 1 || strings.Contains(msgs[0].Content, "<untrusted-peer-message>") != (sender != "operator") {
 				t.Fatalf("unexpected wake history: %+v", msgs)
+			}
+		})
+	}
+}
+
+func TestGateRedirect(t *testing.T) {
+	host := httptest.NewRequest(http.MethodGet, "/", nil).Host
+	base := "https://" + host
+	for _, tc := range []struct {
+		name string
+		send func() error
+	}{
+		{"model", func() error { _, err := callModelGate(base, "lease", "gemini", "model", nil); return err }},
+		{"thread", func() error { return postThreadMessage(base+"/gate/task/messages", "lease", "agent", "reply") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests []string
+			useFakeGate(t, func(r *http.Request) (*http.Response, error) {
+				requests = append(requests, r.URL.Host)
+				if r.URL.Host != host {
+					return gateResponse(http.StatusOK, "{}"), nil
+				}
+				resp := gateResponse(http.StatusTemporaryRedirect, "")
+				resp.Header.Set("Location", "https://redirect."+host)
+				return resp, nil
+			})
+			if err := tc.send(); err == nil || len(requests) != 1 || requests[0] != host {
+				t.Fatalf("requests = %v, error = %v", requests, err)
 			}
 		})
 	}

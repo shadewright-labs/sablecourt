@@ -2,7 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"net"
+
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -112,13 +113,13 @@ func TestWireCouncilContainers(t *testing.T) {
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
 
 	// Even when host sandbox is unavailable, Sanctum registers coding adapter for container councils.
-	wireCouncilContainers(context.Background(), adapters, false, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, "127.0.0.1:7432", nil)
+	wireCouncilContainers(adapters, false, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, net.JoinHostPort(net.IPv6loopback.String(), "7432"))
 
 	ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
 	if !ok || ca == nil {
 		t.Fatalf("expected *coding.Adapter registered, got %T", adapters[domain.ClassCodingAgent])
 	}
-	if !ca.SupportsCouncilContainers() || ca.CouncilRunner != da || ca.CouncilProxy != da || ca.CouncilProxyImage != harnessimages.ProxyImage() || ca.DaemonListen != "127.0.0.1:7432" {
+	if !ca.SupportsCouncilContainers() || ca.CouncilRunner != da || ca.CouncilProxy != da || ca.CouncilProxyImage != harnessimages.ProxyImage() || ca.DaemonListen != net.JoinHostPort(net.IPv6loopback.String(), "7432") {
 		t.Fatalf("unexpected council container wiring: runner=%v proxy=%v img=%q listen=%q", ca.CouncilRunner == da, ca.CouncilProxy == da, ca.CouncilProxyImage, ca.DaemonListen)
 	}
 	for _, role := range []string{"claude", "codex", "agy"} {
@@ -134,7 +135,7 @@ func TestWireCouncilContainers(t *testing.T) {
 
 	// Citadel must not wire local council containers.
 	citadelAdapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	wireCouncilContainers(context.Background(), citadelAdapters, true, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, "127.0.0.1:7432", nil)
+	wireCouncilContainers(citadelAdapters, true, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, net.JoinHostPort(net.IPv6loopback.String(), "7432"))
 	if citadelAdapters[domain.ClassCodingAgent] != nil {
 		t.Fatal("citadel unexpectedly registered council coding adapter")
 	}

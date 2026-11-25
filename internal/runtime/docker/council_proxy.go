@@ -1,16 +1,23 @@
 package docker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
+	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 type proxyEngineAPI interface {
@@ -20,7 +27,7 @@ type proxyEngineAPI interface {
 
 type proxyExecAPI interface {
 	ExecCreate(ctx context.Context, containerID string, options client.ExecCreateOptions) (client.ExecCreateResult, error)
-	ExecStart(ctx context.Context, execID string, options client.ExecStartOptions) (client.ExecStartResult, error)
+	ExecAttach(ctx context.Context, execID string, options client.ExecAttachOptions) (client.ExecAttachResult, error)
 	ExecInspect(ctx context.Context, execID string, options client.ExecInspectOptions) (client.ExecInspectResult, error)
 }
 
@@ -28,41 +35,141 @@ var _ councilproxy.Docker = (*Adapter)(nil)
 var _ proxyEngineAPI = (*client.Client)(nil)
 var _ proxyExecAPI = (*client.Client)(nil)
 
-func (a *Adapter) CreateInternalNetwork(ctx context.Context, name string) error {
-	if !councilName.MatchString(name) {
-		return errors.New("invalid council network name")
+func (a *Adapter) ProvisionCouncilProxy(ctx context.Context, image string, cfg councilproxy.Config) (councilproxy.LaunchSession, error) {
+	s, err := councilproxy.Provision(ctx, a, image, cfg)
+	if s == nil {
+		return nil, err
 	}
-	_, err := a.Client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
-		Driver:   "bridge",
-		Internal: true,
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "sablecourt",
-			councilproxy.ResourceLabel:     name,
+	return s, err
+}
+
+func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSocketProbe) (probeErr error) {
+	engine, ok := a.Client.(councilEngineAPI)
+	if !ok {
+		return errors.New("Docker cannot verify socket probe exit")
+	}
+	id, err := a.councilImageID(ctx, spec.ImageID)
+	if err != nil {
+		return err
+	}
+	if id != spec.ImageID {
+		return errors.New("socket probe image ID mismatch")
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := a.RemoveProxy(cleanup, spec.Name); err != nil {
+			// Cleanup failure must never select the TLS fallback.
+			probeErr = fmt.Errorf("remove socket probe: %w", err)
+		}
+	}()
+	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Name: spec.Name,
+		Config: &container.Config{Image: spec.ImageID, User: spec.User, Cmd: spec.Args, Env: slices.Clone(councilBaseEnv),
+			Labels:      map[string]string{councilproxy.ResourceLabel: spec.Name},
+			Healthcheck: &container.HealthConfig{Test: []string{"NONE"}},
+		},
+		HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true,
+			CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"},
+			LogConfig: container.LogConfig{Type: "none"},
+			Mounts:    []mount.Mount{{Type: mount.TypeBind, Source: spec.HostSocketPath, Target: spec.ContainerSocketPath, ReadOnly: true}},
 		},
 	})
-	return err
+	if err == nil && (created.ID == "" || len(created.Warnings) != 0) {
+		return errors.New("unverified socket probe creation")
+	}
+	if err == nil {
+		_, err = a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{})
+	}
+	if err != nil {
+		if councilproxy.IsUnshareableSocketBindError(spec.HostSocketPath, 125, err.Error()) {
+			return councilproxy.ErrGateSocketUnsupported
+		}
+		return errors.New("Docker could not launch socket probe")
+	}
+	result := rt.CouncilResult{ContainerID: created.ID}
+	if err := a.councilExit(ctx, engine, &result); err != nil {
+		return err
+	}
+	switch result.ExitCode {
+	case 0:
+		return nil
+	case councilproxy.ProbeSocketUnsupportedExitCode:
+		return councilproxy.ErrGateSocketUnsupported
+	default:
+		return errors.New("Docker socket probe failed")
+	}
+}
+
+func (a *Adapter) CreateInternalNetwork(ctx context.Context, spec councilproxy.InternalNetworkSpec) (info councilproxy.InternalNetworkInfo, err error) {
+	name := spec.Name
+	if !councilName.MatchString(name) {
+		return info, errors.New("invalid council network name")
+	}
+	server, ok := a.Client.(interface {
+		ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error)
+	})
+	if !ok {
+		return info, errors.New("Docker engine version unavailable")
+	}
+	v, err := server.ServerVersion(ctx, client.ServerVersionOptions{})
+	if err != nil {
+		return info, err
+	}
+	created, err := a.Client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
+		Driver: "bridge", Internal: true, Options: spec.Options,
+		Labels: map[string]string{councilproxy.ResourceLabel: name},
+	})
+	if err != nil {
+		return info, err
+	}
+	n, err := a.Client.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+	if err != nil {
+		return info, err
+	}
+	if created.ID == "" || len(created.Warning) != 0 || n.Network.ID != created.ID || n.Network.Name != name || n.Network.Labels[councilproxy.ResourceLabel] != name || n.Network.ConfigOnly || n.Network.Ingress {
+		return info, errors.New("unverified council network identity")
+	}
+	info = councilproxy.InternalNetworkInfo{ID: created.ID, EngineVersion: v.Version, Driver: n.Network.Driver, Internal: n.Network.Internal, Options: n.Network.Options}
+	for _, cfg := range n.Network.IPAM.Config {
+		if cfg.Subnet.IsValid() {
+			info.Subnets = append(info.Subnets, cfg.Subnet.String())
+		}
+		if cfg.Gateway.IsValid() {
+			info.Gateways = append(info.Gateways, cfg.Gateway.String())
+		}
+	}
+	return info, nil
 }
 
 func (a *Adapter) CreateProxy(ctx context.Context, spec councilproxy.ProxyContainer) error {
 	if !councilName.MatchString(spec.Name) || !councilName.MatchString(spec.InternalNetwork) {
 		return errors.New("invalid council proxy container name or network")
 	}
-	img, err := a.localImage(ctx, spec.ImageID)
+	imageID, err := a.councilImageID(ctx, spec.ImageID)
 	if err != nil {
 		return err
 	}
-	if img.ID != spec.ImageID {
+	if imageID != spec.ImageID {
 		return errors.New("council proxy image ID mismatch")
 	}
 	netID, err := a.internalNetworkNamed(ctx, spec.InternalNetwork, false)
 	if err != nil {
 		return fmt.Errorf("inspect council proxy network: %w", err)
 	}
+	if spec.InternalNetworkID == "" || spec.InternalNetworkID != netID {
+		return errors.New("council proxy network was replaced")
+	}
 	hostCfg := &container.HostConfig{
 		NetworkMode:    container.NetworkMode(netID),
 		ReadonlyRootfs: spec.ReadOnlyRootFS,
 		LogConfig:      container.LogConfig{Type: "none"},
-		ExtraHosts:     []string{spec.HostGateway + ":host-gateway"},
+	}
+	if spec.HostGateway != "" {
+		hostCfg.ExtraHosts = []string{spec.HostGateway + ":" + spec.HostGatewayTarget}
+	}
+	if spec.GateSocketHostPath != "" {
+		hostCfg.Mounts = []mount.Mount{{Type: mount.TypeBind, Source: spec.GateSocketHostPath, Target: spec.GateSocketContainerPath, ReadOnly: true}}
 	}
 	if spec.DropAllCapabilities {
 		hostCfg.CapDrop = []string{"ALL"}
@@ -78,7 +185,8 @@ func (a *Adapter) CreateProxy(ctx context.Context, spec councilproxy.ProxyContai
 	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: spec.Name,
 		Config: &container.Config{
-			Image: img.ID,
+			Image: imageID,
+			Env:   slices.Clone(councilBaseEnv),
 			User:  spec.User,
 			Cmd:   spec.Args,
 			Labels: map[string]string{
@@ -124,63 +232,62 @@ func (a *Adapter) StartProxy(ctx context.Context, name string) error {
 	defer cancel()
 	probeURL := "http://" + net.JoinHostPort(name, councilproxy.Port) + "/gate/task/messages"
 	execAPI, hasExec := a.Client.(proxyExecAPI)
-	tick := time.NewTicker(50 * time.Millisecond)
-	defer tick.Stop()
+	if !hasExec {
+		return errors.New("Docker cannot probe council proxy readiness")
+	}
+	insp, err := a.Client.ContainerInspect(readyCtx, name, client.ContainerInspectOptions{})
+	if err != nil {
+		return err
+	}
+	if insp.Container.ID == "" || insp.Container.State == nil || !insp.Container.State.Running {
+		return errors.New("council proxy is not running")
+	}
+	id := insp.Container.ID
+	created, err := execAPI.ExecCreate(readyCtx, id, client.ExecCreateOptions{
+		User: "10001:10001", AttachStdout: true, AttachStderr: true,
+		Cmd: []string{"/usr/bin/curl", "--noproxy", "*", "--silent", "--show-error", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", probeURL},
+	})
+	if err != nil || created.ID == "" {
+		return errors.New("cannot create proxy readiness probe")
+	}
+	stream, err := execAPI.ExecAttach(readyCtx, created.ID, client.ExecAttachOptions{})
+	if err != nil || stream.Conn == nil {
+		return errors.New("cannot attach proxy readiness probe")
+	}
+	closeStream := sync.OnceFunc(stream.Close)
+	defer closeStream()
+	stopClose := context.AfterFunc(readyCtx, closeStream)
+	defer stopClose()
+	if stream.Reader == nil || !proxyReadyResponse(stream.Reader) {
+		return errors.New("missing council proxy authentication challenge")
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		insp, err := a.Client.ContainerInspect(readyCtx, name, client.ContainerInspectOptions{})
-		if err != nil {
-			return fmt.Errorf("inspect council proxy: %w", err)
+		res, err := execAPI.ExecInspect(readyCtx, created.ID, client.ExecInspectOptions{})
+		if err != nil || res.ID != created.ID || res.ContainerID != id {
+			return errors.New("unverified proxy readiness probe")
 		}
-		if insp.Container.State == nil || !insp.Container.State.Running {
-			return errors.New("council proxy exited before becoming ready")
-		}
-		if !hasExec {
-			return nil
-		}
-		if ready, supported := probeProxyHTTP(readyCtx, execAPI, insp.Container.ID, probeURL); ready || !supported {
+		if !res.Running {
+			if res.ExitCode != 0 {
+				return errors.New("council proxy readiness probe failed")
+			}
 			return nil
 		}
 		select {
 		case <-readyCtx.Done():
-			return fmt.Errorf("council proxy did not become ready: %w", readyCtx.Err())
-		case <-tick.C:
+			return readyCtx.Err()
+		case <-ticker.C:
 		}
 	}
 }
 
-func probeProxyHTTP(ctx context.Context, eng proxyExecAPI, containerID, target string) (ready bool, supported bool) {
-	created, err := eng.ExecCreate(ctx, containerID, client.ExecCreateOptions{
-		User: "10001:10001",
-		Cmd: []string{
-			"/bin/sh", "-c",
-			`code=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null); [ "$code" = "401" ]`,
-			"probe", target,
-		},
-	})
-	if err != nil || created.ID == "" {
-		return false, false
-	}
-	if _, err := eng.ExecStart(ctx, created.ID, client.ExecStartOptions{}); err != nil {
-		return false, false
-	}
-	for range 20 {
-		insp, err := eng.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
-		if err != nil {
-			return false, true
-		}
-		if !insp.Running {
-			if insp.ExitCode == 126 || insp.ExitCode == 127 {
-				return false, false
-			}
-			return insp.ExitCode == 0, true
-		}
-		select {
-		case <-ctx.Done():
-			return false, true
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
-	return false, true
+// Docker multiplexes the probe's HTTP status and diagnostics on one stream.
+func proxyReadyResponse(reader *bufio.Reader) bool {
+	limited := &io.LimitedReader{R: reader, N: 256}
+	var stdout, stderr bytes.Buffer
+	err := copyDockerStreams(limited, &stdout, &stderr)
+	return err == nil && limited.N > 0 && stdout.String() == "401" && stderr.Len() == 0
 }
 
 func (a *Adapter) RemoveProxy(ctx context.Context, name string) error {
