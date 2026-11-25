@@ -90,10 +90,18 @@ func extractRequestedOutputTokens(payload map[string]any) int64 {
 }
 
 // scaleOutputTokensByChoices multiplies the output reservation by the requested number
-// of Chat Completions choices, because the provider bills output for every choice.
+// of Chat Completions choices or Gemini candidates, because the provider bills output for every choice.
 func scaleOutputTokensByChoices(outTokens int64, payload map[string]any) int64 {
-	choices, ok := positiveJSONInt64(payload["n"])
-	if !ok || choices <= 1 {
+	choices := int64(1)
+	if n, ok := positiveJSONInt64(payload["n"]); ok {
+		choices = n
+	}
+	if genCfg, ok := payload["generationConfig"].(map[string]any); ok {
+		if c, ok := positiveJSONInt64(genCfg["candidateCount"]); ok && c > choices {
+			choices = c
+		}
+	}
+	if choices <= 1 {
 		return outTokens
 	}
 	if outTokens > maxReservedTokens/choices {
