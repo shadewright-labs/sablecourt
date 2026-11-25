@@ -186,7 +186,7 @@ type Adapter interface {
 Used for long-lived AI agents, sandbox workloads, and deterministic controllers. Built on `github.com/docker/docker/client`:
 
 - Creates a dedicated Docker bridge network with `Internal: true` (no internet egress).
-- Exposes only `sablecourtd`'s Model Gate and Data/Action Gate on the host gateway address reachable from that internal network.
+- Reaches `sablecourtd` only through the per-launch council proxy, which forwards a fixed gate route allow-list over a per-launch Unix socket or pinned TLS. The internal network has no route to the host. See the proxy to daemon hop in [ADR-0011](adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
 - Starts containers with `--cap-drop=ALL`, `no-new-privileges`, read-only root filesystem where supported by the workload image, and a single bind mount scoped to the task's working directory.
 - Long-lived agents persist state via a mounted checkpoint directory or control-plane checkpoint endpoint before `Suspend`.
 

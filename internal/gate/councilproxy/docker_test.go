@@ -307,8 +307,13 @@ func TestDockerProxyUnixSocketLifecycleAndRouteBoundary(t *testing.T) {
 
 	// Verify per-launch directory is 0700 and inside sockRoot.
 	launchDir := filepath.Dir(engine.spec.GateSocketHostPath)
-	if filepath.Dir(launchDir) != sockRoot {
-		t.Fatalf("socket dir %q not directly under %q", launchDir, sockRoot)
+	// The mount source is symlink-free, so compare against the resolved root.
+	resolvedRoot, err := filepath.EvalSymlinks(sockRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(launchDir) != resolvedRoot {
+		t.Fatalf("socket dir %q not directly under %q", launchDir, resolvedRoot)
 	}
 	dirInfo, err := os.Lstat(launchDir)
 	if err != nil {

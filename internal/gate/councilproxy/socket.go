@@ -138,7 +138,77 @@ func ensureSocketRoot(sockRoot string) (string, error) {
 		return "", err
 	}
 	_ = root.Close()
-	return clean, nil
+	// Bind and Docker mount both resolve a pathname, so every ancestor must be
+	// one that only this user or root can replace, and later steps use the
+	// resolved path so no symlink is followed again.
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	if err := verifyTrustedAncestors(resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func trustedOwner(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	uid := os.Geteuid()
+	return int64(stat.Uid) == 0 || (uid >= 0 && int64(stat.Uid) == int64(uid))
+}
+
+// verifyTrustedAncestors requires every directory above path to be owned by root
+// or the current user and not replaceable by anyone else. A directory that group
+// or others can write is accepted only when it is sticky and the entry beneath it
+// is owned by a trusted user, as with a shared temporary directory.
+func verifyTrustedAncestors(path string) error {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return errors.New("council gate path must be absolute")
+	}
+	child, err := os.Lstat(clean)
+	if err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || !trustedOwner(info) {
+			return fmt.Errorf("council gate path ancestor %q is not a directory owned by root or the current user", dir)
+		}
+		if info.Mode().Perm()&0o022 != 0 && (info.Mode()&os.ModeSticky == 0 || !trustedOwner(child)) {
+			return fmt.Errorf("council gate path ancestor %q can be replaced by another user", dir)
+		}
+		if dir == filepath.Dir(dir) {
+			return nil
+		}
+		child = info
+	}
+}
+
+// verifyGateSocketMountSource rechecks the host socket path immediately before
+// it is bind-mounted: it must be canonical, a socket, and sit under trusted ancestors.
+func verifyGateSocketMountSource(sockPath string) error {
+	resolved, err := filepath.EvalSymlinks(sockPath)
+	if err != nil {
+		return err
+	}
+	if resolved != sockPath || filepath.Clean(sockPath) != sockPath {
+		return errors.New("council gate socket mount source is not a canonical path")
+	}
+	info, err := os.Lstat(sockPath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return errors.New("council gate socket mount source is not a socket")
+	}
+	return verifyTrustedAncestors(sockPath)
 }
 
 // launchDirName reports whether name matches a per-launch directory created by
@@ -235,6 +305,11 @@ func createPrivateUnixSocket(sockRoot, prefix string) (sockPath string, ln net.L
 		_ = root.RemoveAll(subName)
 		return "", nil, nil, fmt.Errorf("listen council gate unix socket: %w", err)
 	}
+	// Closing the listener must not unlink by pathname, where a replacement
+	// could be removed instead; rooted cleanup below removes the directory.
+	if unixLn, ok := uln.(*net.UnixListener); ok {
+		unixLn.SetUnlinkOnClose(false)
+	}
 	// The parent directory is 0700 and owned by the current user, blocking other host users;
 	// the socket inode itself needs write permission so unprivileged container UID 10001 can connect
 	// when the single socket file is bind-mounted into the proxy container.
@@ -281,38 +356,8 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		return false, err
 	}
 	sentinel := hex.EncodeToString(sentinelRaw[:])
-	var accepted, verified atomic.Bool
-	// serve handles one accepted connection and reports whether it was the
-	// host's own drain marker.
-	serve := func(conn net.Conn) (drained bool) {
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		line, readErr := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
-		got := strings.TrimSpace(line)
-		if subtle.ConstantTimeCompare([]byte(got), []byte(sentinel)) == 1 {
-			return true
-		}
-		accepted.Store(true)
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return false
-		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(probeToken)) == 1 {
-			if _, writeErr := io.WriteString(conn, "ok\n"); writeErr == nil {
-				verified.Store(true)
-			}
-		}
-		return false
-	}
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil || serve(conn) {
-				return
-			}
-		}
-	}()
+	var state probeState
+	outcome, acceptDone := serveProbeListener(ln, sentinel, probeToken, &state)
 
 	probeErr := docker.ProbeGateSocket(ctx, GateSocketProbe{
 		Name:                proxyName + "-probe",
@@ -329,13 +374,11 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 	// been served, any connection the probe container made was served before it.
 	// Closing the listener first could drop a queued connection unseen and let a
 	// container that reached the host socket pass for one that could not.
+	// An accept error or a timeout is not a drain: only the sentinel having been
+	// consumed proves earlier queued connections were seen.
 	drainErr := drainProbeListener(ctx, sockPath, sentinel)
 	if drainErr == nil {
-		select {
-		case <-acceptDone:
-		case <-time.After(probeDrainTimeout):
-			drainErr = errors.New("council gate socket probe did not drain pending connections")
-		}
+		drainErr = awaitProbeDrain(outcome, probeDrainTimeout)
 	}
 	_ = ln.Close()
 	<-acceptDone
@@ -349,7 +392,7 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		return false, ctx.Err()
 	}
 	if errors.Is(probeErr, ErrGateSocketUnsupported) {
-		if accepted.Load() {
+		if state.accepted.Load() {
 			return false, errors.New("council gate socket probe accepted a host connection before reporting unsupported socket")
 		}
 		return false, nil
@@ -357,10 +400,77 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 	if probeErr != nil {
 		return false, fmt.Errorf("council gate socket probe failed: %w", probeErr)
 	}
-	if !verified.Load() {
+	if !state.verified.Load() {
 		return false, errors.New("council gate socket probe did not complete token exchange")
 	}
 	return true, nil
+}
+
+type probeState struct {
+	accepted, verified atomic.Bool
+}
+
+// probeOutcome reports how the accept loop ended: drained is true only when the
+// host's own sentinel connection was consumed; err carries an accept failure.
+type probeOutcome struct {
+	drained bool
+	err     error
+}
+
+// serveProbeListener serves probe connections on ln until the sentinel is consumed
+// or Accept fails. done closes when the loop has exited.
+func serveProbeListener(ln net.Listener, sentinel, probeToken string, state *probeState) (<-chan probeOutcome, <-chan struct{}) {
+	outcome := make(chan probeOutcome, 1)
+	done := make(chan struct{})
+	serve := func(conn net.Conn) (drained bool) {
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		line, readErr := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
+		got := strings.TrimSpace(line)
+		if subtle.ConstantTimeCompare([]byte(got), []byte(sentinel)) == 1 {
+			return true
+		}
+		state.accepted.Store(true)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return false
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(probeToken)) == 1 {
+			if _, writeErr := io.WriteString(conn, "ok\n"); writeErr == nil {
+				state.verified.Store(true)
+			}
+		}
+		return false
+	}
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				outcome <- probeOutcome{err: err}
+				return
+			}
+			if serve(conn) {
+				outcome <- probeOutcome{drained: true}
+				return
+			}
+		}
+	}()
+	return outcome, done
+}
+
+func awaitProbeDrain(outcome <-chan probeOutcome, timeout time.Duration) error {
+	select {
+	case o := <-outcome:
+		if o.err != nil {
+			return fmt.Errorf("council gate socket probe accept: %w", o.err)
+		}
+		if !o.drained {
+			return errors.New("council gate socket probe did not consume its drain marker")
+		}
+		return nil
+	case <-time.After(timeout):
+		return errors.New("council gate socket probe did not drain pending connections")
+	}
 }
 
 func drainProbeListener(ctx context.Context, sockPath, sentinel string) error {
