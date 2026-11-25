@@ -4,9 +4,9 @@ Every route that `sablecourtd` registers, grouped by the credential that reaches
 
 Status: built.
 
-The route tables are checked by `TestHTTPReferenceListsEveryRoute` in `cmd/sablecourtd`: it builds the daemon's handler with every optional part present, records each pattern registered on the router, and fails when a table here misses a route, lists one the daemon does not register, shows the wrong method, or lists a route twice. `go test ./...` runs it. The method and path are the router pattern as written in the code, with these conventions:
+The route tables are checked by `TestHTTPReferenceListsEveryRoute` in `cmd/sablecourtd`: it builds the daemon's handler with every optional part present, records each pattern registered on the router, and fails when a table here misses a route, lists one the daemon does not register, shows the wrong method, or lists a route twice. It also sends requests to every route without a credential, with the observer token and with the integration token, and fails when a route sits in the table of a credential class other than the one the handler applies. `go test ./...` runs it. The method and path are the router pattern as written in the code, with these conventions:
 
-- `ANY` marks a pattern registered without a method: the handler behind it sees every method.
+- `ANY` marks a pattern registered without a method: the router passes every method to the handler. The purpose then says which methods the handler accepts (`Methods:`). The test finds them by sending `GET`, `POST`, `PUT`, `PATCH` and `DELETE` with a valid task lease; a method not listed is answered with 405.
 - A path ending in `/` matches everything below it. `{$}` matches the path exactly, so `GET /{$}` is the root page only.
 - A `GET` pattern also answers `HEAD`, as Go's router does.
 - The Model Gate is one mount at `/gate/model/`; its rows list the provider paths it forwards, taken from the gate's own route table. Any other path below the mount is refused with 404.
@@ -231,21 +231,23 @@ Source: `cmd/sablecourtd/main.go`, `internal/gate/model/gate.go`, `internal/gate
 
 | Route | Purpose |
 | --- | --- |
-| `ANY /gate/model/openai/v1/chat/completions` | Model Gate to OpenAI. The method is forwarded unchanged. |
-| `ANY /gate/model/openai/v1/responses` | Model Gate to OpenAI. The method is forwarded unchanged. |
-| `ANY /gate/model/local/v1/chat/completions` | Model Gate to a local OpenAI-compatible endpoint. The method is forwarded unchanged. |
-| `ANY /gate/model/local/v1/responses` | Model Gate to a local OpenAI-compatible endpoint. The method is forwarded unchanged. |
-| `ANY /gate/model/anthropic/v1/messages` | Model Gate to Anthropic. The method is forwarded unchanged. |
-| `ANY /gate/model/gemini/v1beta/models/{model}:generateContent` | Model Gate to Gemini, any model name. The method is forwarded unchanged. |
-| `ANY /gate/model/gemini/v1beta/models/{model}:streamGenerateContent` | Model Gate to Gemini, any model name. The method is forwarded unchanged. |
-| `ANY /gate/mcp` | MCP over streamable HTTP, stateless. Lists only the tools granted to the workload and registered in the gate. |
-| `ANY /gate/actions/` | Typed action from the closed catalog, named by the path below the mount (for example `/gate/actions/git.open_pr`). The handler accepts `POST` only. Body `{"approvalId","payload"}`. |
+| `ANY /gate/model/openai/v1/chat/completions` | Model Gate to OpenAI. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/openai/v1/responses` | Model Gate to OpenAI. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/local/v1/chat/completions` | Model Gate to a local OpenAI-compatible endpoint. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/local/v1/responses` | Model Gate to a local OpenAI-compatible endpoint. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/anthropic/v1/messages` | Model Gate to Anthropic. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/gemini/v1beta/models/{model}:generateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/gemini/v1beta/models/{model}:streamGenerateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/mcp` | MCP over streamable HTTP, stateless. Methods: `POST`. Lists only the tools granted to the workload and registered in the gate. |
+| `ANY /gate/actions/` | Typed action from the closed catalog, named by the path below the mount (for example `/gate/actions/git.open_pr`). Methods: `POST`. Body `{"approvalId","payload"}`. |
 | `GET /gate/task/messages` | Messages of the lease's task. |
 | `POST /gate/task/messages` | Add a message to the lease's task. Body `{"role","content"}`. |
 | `POST /gate/conclave/{id}/messages` | Post a proposal as the lease's seat. |
 | `GET /gate/conclave/{id}/messages` | Read messages visible to the seat. Query `since`. |
 | `POST /gate/conclave/{id}/relics` | Store a Relic as the seat. |
 | `GET /gate/conclave/{id}/relics/{name}` | Read a Relic the seat may see. |
+
+The MCP route is served by the MCP Go SDK (v1.8.0) in stateless mode. If the daemon runs with `MCPGODEBUG=allowsessionsinstateless=1` in its environment, the SDK also answers `DELETE` with an `Mcp-Session-Id` header with 204 and does nothing; the test runs without it.
 
 ### Council gate allow-list
 
