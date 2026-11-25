@@ -53,3 +53,46 @@ Compared against `internal/runtime/coding/launch.go`, `internal/runtime/coding/s
 - mismatch: sandbox.go:seatbeltProfile omits `mach-lookup` and `file-read*` on home config directories, macOS Keychains, `/opt/homebrew`, and `$HOME/.local/share/claude`, the CLIs need macOS DNS/TLS/Keychain Mach services and read access to their config and runtime directories to authenticate and start
 - mismatch: sandbox.go:seatbeltProfile wraps `codex` in an outer `sandbox-exec` while `launch.go` leaves `codex`'s internal Seatbelt sandbox enabled (`--sandbox read-only` or default), macOS rejects nested `sandbox_apply` with `Operation not permitted` (exit 71) and breaks all `codex` tool execution
 - mismatch: coding.go:Adapter.start creates an empty `.coding-scratch-*` directory and passes it as `HOME` into `buildCommand`, the CLIs need access to their authenticated home/config directories or injected credentials rather than an uninitialized `HOME`
+
+## Separate state directories
+
+Tested on macOS (`darwin`) on 2026-11-25 against the installed binaries (`claude 2.1.332`, `codex 0.171.0`, `agy 1.5.16`) using empty state directories under `.tmp/`, `</dev/null`, and `sandbox-exec` profiles denying read and write access to `$HOME/.claude`, `$HOME/.claude.json`, `$HOME/.codex`, `$HOME/.gemini`, and `$HOME/.agents`. Planned Sablecourt state roots: `$SABLECOURT_STATE_DIR/harness/claude`, `$SABLECOURT_STATE_DIR/harness/codex`, and `$SABLECOURT_STATE_DIR/harness/agy`.
+
+### `claude`
+
+| Field | Behavior |
+| --- | --- |
+| State relocation variable | `CLAUDE_CONFIG_DIR` (absolute path, e.g. `$SABLECOURT_STATE_DIR/harness/claude`) |
+| What moves | `.claude.json` (user MCP servers and project state), `settings.json` (global settings and hooks), `CLAUDE.md`, `projects/<encoded-cwd>/memory/`, `skills/`, `agents/`, `plugins/`, `backups/`, `plans/`, and `sessions/`. None of the user's global `$HOME/.claude*` settings, hooks, MCP servers, or memory files load. |
+| Headless error without login | Exit `1`; prints `Not logged in · Please run /login` after populating `.claude.json`, `backups/`, `plugins/store/`, `projects/<encoded-cwd>/memory/`, and `sessions/` inside `CLAUDE_CONFIG_DIR`. |
+| Where the credential lives on macOS | macOS Keychain (`$HOME/Library/Keychains/login.keychain-db`), not a file inside `CLAUDE_CONFIG_DIR`. Default (unset `CLAUDE_CONFIG_DIR`) uses service `Claude Code-credentials` and account `<macos-user>`. With `CLAUDE_CONFIG_DIR` set, the service becomes `Claude Code-credentials-<sha256-8>` (first 8 hex characters of the SHA-256 of the normalized path) with account `<macos-user>`. Separate per directory: leaving real `HOME` intact did not pick up the existing `Claude Code-credentials` entry. |
+| What still leaks from the user's setup | The credential still lives in the user's `login.keychain-db`, so a confined harness using subscription OAuth still needs Keychain access. Caches remain under `$HOME/Library/Caches/claude-cli-nodejs/` when `HOME` is unchanged, the binary resolves through `$HOME/.local/share/claude/`, and system managed settings (`/Library/Application Support/ClaudeCode/managed-settings.json`) plus workspace files (`./CLAUDE.md`, `./.claude/`, `./.mcp.json`) still apply. Denying `$HOME/.claude`, `$HOME/.claude.json`, and `$HOME/.agents` in `sandbox-exec` produced the same unauthenticated exit `1` without permission errors. |
+| One-time login command | `mkdir -p "$SABLECOURT_STATE_DIR/harness/claude" && CLAUDE_CONFIG_DIR="$SABLECOURT_STATE_DIR/harness/claude" claude auth login` |
+
+### `codex`
+
+| Field | Behavior |
+| --- | --- |
+| State relocation variable | `CODEX_HOME` (absolute path, e.g. `$SABLECOURT_STATE_DIR/harness/codex`; the directory must exist beforehand or `codex` exits `1` with `Error finding codex home`) |
+| What moves | `config.toml` (global settings and MCP servers), `auth.json`, `hooks.json`, `AGENTS.md` / `AGENTS.override.md`, SQLite state (`state_5.sqlite`, `logs_2.sqlite`, `goals_1.sqlite`, `memories_1.sqlite`, `queue_1.sqlite`), `installation_id`, `skills/`, `sessions/`, `shell_snapshots/`, `tmp/`, and `.tmp/plugins/`. None of the user's global `$HOME/.codex` settings, hooks, MCP servers, or memory files load. |
+| Headless error without login | Exit `1`; populates the SQLite databases, `installation_id`, `skills/.system/`, and `.tmp/plugins/` inside `CODEX_HOME`, retries WebSocket and HTTPS 5 times each, and prints `ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses`. |
+| Where the credential lives on macOS | File `$CODEX_HOME/auth.json` by default (`cli_auth_credentials_store = "file"` is the default; `security find-generic-password -s "Codex Auth"` returned not found on a logged-in setup). If `config.toml` sets `cli_auth_credentials_store = "keyring"` (or `"auto"` when keyring is active), it uses macOS Keychain service `Codex Auth` with an account key hashed from the canonicalized `CODEX_HOME` path. Separate per directory in both modes. |
+| What still leaks from the user's setup | Nothing from `$HOME/.codex` or `$HOME/.agents`, and no macOS Keychain access is required under the default `file` store (denying `$HOME/.codex` and `$HOME/.agents` in `sandbox-exec` produced the same `401 Unauthorized` exit `1`). System-wide `/etc/codex/` (`hooks.json`, `skills/`) and workspace files (`.codex/config.toml`, `AGENTS.md`, `.env`) still apply. |
+| One-time login command | `mkdir -p "$SABLECOURT_STATE_DIR/harness/codex" && CODEX_HOME="$SABLECOURT_STATE_DIR/harness/codex" codex login` |
+
+### `agy`
+
+| Field | Behavior |
+| --- | --- |
+| State relocation variable | `HOME` (e.g. `HOME="$SABLECOURT_STATE_DIR/harness/agy"`). `agy 1.5.16` has no dedicated config-directory variable: setting `AGY_HOME`, `ANTIGRAVITY_HOME`, `GEMINI_CLI_HOME`, and `XDG_CONFIG_HOME` with real `HOME` intact and denying `$HOME/.gemini` in `sandbox-exec` failed immediately (`Failed to start: open $HOME/.gemini/antigravity-cli/installation_id: operation not permitted`, exit `1`) and left the target directory empty. |
+| What moves | `$HOME/.gemini/antigravity-cli/` (`settings.json`, hooks, `brain/`, `conversations/`, `conversation_summaries.db`, `builtin/`, `cache/`, `log/`, `installation_id`) and `$HOME/.gemini/config/` (`config.json`, `mcp_config.json`, `projects/`). None of the user's real `$HOME/.gemini` settings, hooks, MCP servers, or memory files load when `HOME` is overridden. |
+| Headless error without login | Exit `1`; populates `$HOME/.gemini/antigravity-cli/` and `$HOME/.gemini/config/`, fails silent auth, prints an OAuth URL and `Waiting for authentication (timeout 60s)...`, ignores `--print-timeout 10s` during auth, and exits `1` after 60 seconds with `Error: authentication timed out.` and `error: authentication failed or timed out`. |
+| Where the credential lives on macOS | Under real `HOME`, macOS Keychain (`$HOME/Library/Keychains/login.keychain-db`) via `zalando/go-keyring` (`/usr/bin/security`), under fixed service `gemini` and fixed account `antigravity`. That entry is shared across all `agy` and Antigravity surfaces for the macOS user and is not keyed by directory. Under a separate `HOME`, `security default-keychain` fails with `SecKeychainCopyDefault: A default keychain could not be found.`, so `agy` cannot read the user's `gemini`/`antigravity` entry; after a Keychain write failure, `agy` falls back to file-based token storage inside `$HOME/.gemini/`. |
+| What still leaks from the user's setup | With `HOME` overridden, `$HOME/.gemini` and `$HOME/.agents` are isolated (verified under `sandbox-exec`), and the user's Keychain entry is not visible. The trade-off is that overriding `HOME` also moves `HOME` for every child process `agy` spawns (Git config, SSH config, caches), and macOS can show a "Keychain Not Found" dialog when `agy` first probes the missing default keychain before falling back to file storage. The binary itself still resolves from the real `$HOME/.local/bin/agy`, and workspace-local configs still apply. |
+| One-time login command | `mkdir -p "$SABLECOURT_STATE_DIR/harness/agy" && HOME="$SABLECOURT_STATE_DIR/harness/agy" agy` (finish the OAuth flow, then run `/exit`; `agy` has no `login` subcommand) |
+
+### Verdicts
+
+- `claude`: isolation possible: partly (all config, hooks, MCP servers, and memory move into `CLAUDE_CONFIG_DIR` and the Keychain entry is hashed per directory, but on macOS the subscription token still lives in `$HOME/Library/Keychains/login.keychain-db` and caches remain under `$HOME/Library/Caches/claude-cli-nodejs/`)
+- `codex`: isolation possible: yes (`CODEX_HOME` relocates all config, hooks, MCP servers, memory, skills, and SQLite state, and the default `file` credential store keeps the subscription token in `$CODEX_HOME/auth.json` without touching `$HOME/.codex`, `$HOME/.agents`, or macOS Keychain)
+- `agy`: isolation possible: partly (`agy` has no config-directory env var, so isolation requires overriding `HOME`; that isolates `$HOME/.gemini/` and hides the shared `gemini`/`antigravity` Keychain entry, but breaks macOS default Keychain lookup, relies on file-storage fallback, and shifts `HOME` for all child processes)
