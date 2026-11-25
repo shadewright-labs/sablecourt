@@ -17,13 +17,14 @@ import (
 
 type probeEngine struct {
 	councilEngine
-	exit      int
-	volumes   map[string]volume.Volume
-	created   []client.ContainerCreateOptions
-	removed   int
-	volCreate []client.VolumeCreateOptions
-	createErr error
-	unlabeled bool
+	exit           int
+	volumes        map[string]volume.Volume
+	created        []client.ContainerCreateOptions
+	removed        int
+	volCreate      []client.VolumeCreateOptions
+	createErr      error
+	unlabeled      bool
+	createWarnings []string
 }
 
 func (p *probeEngine) VolumeInspect(_ context.Context, name string, _ client.VolumeInspectOptions) (client.VolumeInspectResult, error) {
@@ -50,7 +51,7 @@ func (p *probeEngine) ContainerCreate(_ context.Context, o client.ContainerCreat
 	if p.createErr != nil {
 		return client.ContainerCreateResult{}, p.createErr
 	}
-	return client.ContainerCreateResult{ID: "probe-id"}, nil
+	return client.ContainerCreateResult{ID: "probe-id", Warnings: p.createWarnings}, nil
 }
 func (p *probeEngine) ContainerWait(context.Context, string, client.ContainerWaitOptions) client.ContainerWaitResult {
 	r := make(chan container.WaitResponse, 1)
@@ -85,6 +86,7 @@ func TestCheckCouncilHarness(t *testing.T) {
 		{name: "login present", probe: true},
 		{name: "login missing", setup: func(_ *Adapter, p *probeEngine) { p.exit = 1 }, fault: FaultLoginMissing, probe: true},
 		{name: "probe tool fails", setup: func(_ *Adapter, p *probeEngine) { p.exit = 126 }, fault: FaultBackend, probe: true},
+		{name: "probe create warns", setup: func(_ *Adapter, p *probeEngine) { p.createWarnings = []string{"unsupported option"} }, fault: FaultBackend, probe: true},
 		{name: "probe create fails", setup: func(_ *Adapter, p *probeEngine) { p.createErr = errors.New("denied") }, fault: FaultBackend, probe: true},
 		{name: "image missing", setup: func(_ *Adapter, p *probeEngine) { p.imageErr = missing{errors.New("no image")} }, fault: FaultImageMissing},
 		{name: "image backend", setup: func(_ *Adapter, p *probeEngine) { p.imageErr = errors.New("engine down") }, fault: FaultBackend},

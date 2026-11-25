@@ -174,7 +174,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	if err != nil {
 		return false, fmt.Errorf("create login probe: %w", err)
 	}
-	if created.ID == "" || len(created.Warnings) > 0 {
+	if created.ID == "" {
 		return false, errors.New("unverified login probe creation")
 	}
 	defer func() {
@@ -182,6 +182,9 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 		defer done()
 		_, _ = a.Client.ContainerRemove(cleanup, created.ID, client.ContainerRemoveOptions{Force: true})
 	}()
+	if len(created.Warnings) > 0 {
+		return false, errors.New("Docker reported a warning applying the login probe configuration")
+	}
 	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return false, fmt.Errorf("start login probe: %w", err)
 	}

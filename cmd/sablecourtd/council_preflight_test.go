@@ -148,3 +148,19 @@ func TestCouncilPanelWorkloadsFollowMode(t *testing.T) {
 		})
 	}
 }
+
+// The checkout deadline must not cut short the checks that follow it: a slow
+// but successful harness preflight still has to reach admission.
+func TestCouncilOpenAdmissionOutlivesCheckoutDeadline(t *testing.T) {
+	repo, _, token := councilTestInputs(t)
+	body := fmt.Sprintf(`{"question":"Review this","repo":%s,"ref":"HEAD"}`, strconv.Quote(repo))
+	st := daemonTestStore(t)
+	opts := councilTestOptions(token)
+	opts.onCouncilCheckout = func(expire context.CancelFunc) { expire() }
+	opts.preflightCouncilHarness = func(ctx context.Context, _ string) error { return ctx.Err() }
+	opts.checkCouncilRuntime = func(ctx context.Context, _ store.CouncilCheckout) error { return ctx.Err() }
+	resp := councilTestRequest(councilTestHandler(st, nil, opts), http.MethodPost, "/api/v1/councils", token, body)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("POST = %d %s", resp.Code, resp.Body)
+	}
+}
