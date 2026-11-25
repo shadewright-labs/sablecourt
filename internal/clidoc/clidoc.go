@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -124,22 +125,22 @@ func cell(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// Markers delimit a generated block inside a hand-written page.
-func Markers(name string) (begin, end string) {
+// markers delimit a generated block inside a hand-written page.
+func markers(name string) (begin, end string) {
 	return "<!-- BEGIN GENERATED " + name + ": do not edit, run `make docs` -->",
 		"<!-- END GENERATED " + name + " -->"
 }
 
-// ErrMarkers reports a page without a complete pair of markers.
-var ErrMarkers = errors.New("generated block markers missing or out of order")
+// errMarkers reports a page without a complete pair of markers.
+var errMarkers = errors.New("generated block markers missing or out of order")
 
-// Replace returns page with the block called name replaced by content.
-func Replace(page []byte, name, content string) ([]byte, error) {
-	begin, end := Markers(name)
+// replace returns page with the block called name replaced by content.
+func replace(page []byte, name, content string) ([]byte, error) {
+	begin, end := markers(name)
 	i := bytes.Index(page, []byte(begin))
 	j := bytes.Index(page, []byte(end))
-	if i < 0 || j < 0 || j < i {
-		return nil, fmt.Errorf("%s: %w", name, ErrMarkers)
+	if i < 0 || j < 0 || j < i || bytes.Count(page, []byte(begin)) != 1 || bytes.Count(page, []byte(end)) != 1 {
+		return nil, fmt.Errorf("%s: %w", name, errMarkers)
 	}
 	var out bytes.Buffer
 	out.Write(page[:i+len(begin)])
@@ -150,22 +151,68 @@ func Replace(page []byte, name, content string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Sync regenerates the block called name in the file at path. With update it
-// writes the result; otherwise it returns an error when the file differs.
-func Sync(path, name, content string, update bool) error {
+// Check returns an error when the block called name in the file at path
+// differs from content. It never writes.
+func Check(path, name, content string) error {
 	page, err := os.ReadFile(path) // #nosec G304 -- a repository path chosen by the test
 	if err != nil {
 		return err
 	}
-	want, err := Replace(page, name, content)
+	want, err := replace(page, name, content)
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(page, want) {
+	if !bytes.Equal(page, want) {
+		return fmt.Errorf("%s: generated block %q is stale; run `make docs` and commit the result", path, name)
+	}
+	return nil
+}
+
+// blockExt is the extension of a rendered block file in the directory that
+// WriteBlocks reads.
+const blockExt = ".md"
+
+// SaveBlock writes content as the block called name into dir, as
+// <name>.md. Each command package saves its own file, so packages that run
+// in parallel never write the same file.
+func SaveBlock(dir, name, content string) error {
+	return os.WriteFile(filepath.Join(dir, name+blockExt), []byte(content), 0o600)
+}
+
+// WriteBlocks replaces every generated block of the page at path with the
+// file of the same name in dir and writes the page once. It is the only
+// code that writes the page. Every block of the page needs a file, and every
+// file needs a block.
+func WriteBlocks(path, dir string) error {
+	page, err := os.ReadFile(path) // #nosec G304 -- a repository path given by make docs
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	out := page
+	n := 0
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), blockExt)
+		if !ok || e.IsDir() {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, e.Name())) // #nosec G304 -- a file in the block directory
+		if err != nil {
+			return err
+		}
+		if out, err = replace(out, name, string(content)); err != nil {
+			return err
+		}
+		n++
+	}
+	if blocks := bytes.Count(page, []byte("<!-- BEGIN GENERATED ")); n != blocks {
+		return fmt.Errorf("%s has %d generated blocks, %s holds %d block files", path, blocks, dir, n)
+	}
+	if bytes.Equal(page, out) {
 		return nil
 	}
-	if update {
-		return os.WriteFile(path, want, 0o600)
-	}
-	return fmt.Errorf("%s: generated block %q is stale; run `make docs` and commit the result", path, name)
+	return os.WriteFile(path, out, 0o600)
 }
