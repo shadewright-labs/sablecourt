@@ -252,10 +252,13 @@ func TestModelGateChildBudgetConcurrentReservation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
+			admissionDone := make(chan struct{}, 2*tc.workers)
+			finishUpstream := make(chan struct{})
 			var upstreamCalls atomic.Int32
 			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				upstreamCalls.Add(1)
-				time.Sleep(40 * time.Millisecond)
+				admissionDone <- struct{}{}
+				<-finishUpstream
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(tc.upstreamResp))
 			})
@@ -292,6 +295,7 @@ func TestModelGateChildBudgetConcurrentReservation(t *testing.T) {
 					req.Header.Set("Authorization", "Bearer "+token)
 					rec := httptest.NewRecorder()
 					gate.Handler().ServeHTTP(rec, req)
+					admissionDone <- struct{}{}
 					switch rec.Code {
 					case http.StatusOK:
 						okCount.Add(1)
@@ -309,6 +313,11 @@ func TestModelGateChildBudgetConcurrentReservation(t *testing.T) {
 				}()
 			}
 			close(start)
+			// Each request reaches upstream or returns a response before any reservation can settle.
+			for range tc.workers {
+				<-admissionDone
+			}
+			close(finishUpstream)
 			wg.Wait()
 
 			if got := okCount.Load(); got != tc.wantOK {
@@ -324,6 +333,56 @@ func TestModelGateChildBudgetConcurrentReservation(t *testing.T) {
 				t.Fatalf("upstream calls = %d, want %d", got, tc.wantOK)
 			}
 		})
+	}
+}
+
+type failingSettlementStore struct {
+	store.Store
+}
+
+func (s failingSettlementStore) SettleBudgetReservation(ctx context.Context, id string, actual *domain.BudgetEntry) error {
+	if actual != nil {
+		return errors.New("settlement failed")
+	}
+	return s.Store.SettleBudgetReservation(ctx, id, nil)
+}
+
+func TestModelGateChildBudgetFailedSettlement(t *testing.T) {
+	ctx := t.Context()
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":2}}`))
+	})
+	gate, st := setupGateTest(t, nil, handlerTransport(upstream))
+	gate.store = failingSettlementStore{Store: st}
+	parent := domain.Task{
+		ID: "parent-settle", IdempotencyKey: "parent-settle",
+		WorkloadName: "ai-agent", State: domain.TaskStateWorking,
+	}
+	if err := st.CreateTask(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	child := domain.Task{
+		ID: "child-settle", ParentTaskID: parent.ID, IdempotencyKey: "child-settle",
+		WorkloadName: parent.WorkloadName, State: domain.TaskStateWorking,
+		BudgetCeilingJSON: `{"maxOutputTokens":5}`,
+	}
+	if err := st.CreateTask(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+	token, err := MintTaskToken(ctx, st, child.ID, child.WorkloadName, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := gate.Handler()
+	headers := map[string]string{"Authorization": "Bearer " + token}
+	const route = "/openai/v1/chat/completions"
+	const body = `{"model":"gpt-5","max_tokens":3}`
+	if rec := doGateRequest(h, http.MethodPost, route, body, headers); rec.Code != http.StatusOK {
+		t.Fatalf("first response = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec := doGateRequest(h, http.MethodPost, route, body, headers); rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "child_output_tokens") {
+		t.Fatalf("response after failed settlement = %d %s, want 429 child_output_tokens", rec.Code, rec.Body.String())
 	}
 }
 
