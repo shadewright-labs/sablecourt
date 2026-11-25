@@ -1,6 +1,8 @@
 package redact_test
 
 import (
+	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -54,4 +56,93 @@ func growthRatio(run func(int), small, large int) float64 {
 		s = time.Nanosecond
 	}
 	return float64(l) / float64(s)
+}
+
+// TestJSONTimeGrowsLinearly runs the JSON redactor on shapes that would cost
+// more than linear time in a scanner that sorts keys, rescans nested strings
+// or backtracks over escapes, at 256 KiB and 1 MiB.
+func TestJSONTimeGrowsLinearly(t *testing.T) {
+	wide := func(n int) string {
+		var b strings.Builder
+		b.WriteByte('{')
+		for i := 0; b.Len() < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `"k%d":"v%d","password":%d`, n-i, i, i)
+		}
+		b.WriteByte('}')
+		return b.String()
+	}
+	deep := func(n int) string {
+		unit := `{"a":[`
+		k := n / (len(unit) + 2)
+		return strings.Repeat(unit, k) + strings.Repeat("]}", k)
+	}
+	deepLimited := func(n int) string {
+		// Nesting just under the scanner's limit, repeated.
+		unit := strings.Repeat("[", 500) + `{"secret":{"x":1}}` + strings.Repeat("]", 500)
+		return "[" + strings.TrimSuffix(strings.Repeat(unit+",", n/len(unit)+1), ",") + "]"
+	}
+	escapes := func(n int) string {
+		return `{"note":"` + strings.Repeat(`\\\"`, n/4) + `"}`
+	}
+	quotes := func(n int) string {
+		return strings.Repeat(`"\`, n/2)
+	}
+	nested := func(n int) string {
+		inner := `{"x":"{\"y\":\"{\\\"password\\\":1}\"}"}`
+		return "[" + strings.TrimSuffix(strings.Repeat(inner+",", n/len(inner)+1), ",") + "]"
+	}
+	for _, tc := range []struct {
+		name string
+		gen  func(int) string
+	}{
+		{"wide object", wide},
+		{"deep nesting past the limit", deep},
+		{"deep nesting under the limit", deepLimited},
+		{"escaped quotes and backslashes in a string", escapes},
+		{"bare quotes and backslashes", quotes},
+		{"stringified JSON", nested},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			small, large := tc.gen(256*1024), tc.gen(1024*1024)
+			ratio := growthRatio(func(n int) {
+				if n == len(small) {
+					redact.JSON(small)
+				} else {
+					redact.JSON(large)
+				}
+			}, len(small), len(large))
+			if ratio > 10 {
+				t.Fatalf("4x input took %.1fx the time", ratio)
+			}
+		})
+	}
+}
+
+// TestJSONMemoryIsOutputBound checks that the JSON redactor allocates about
+// the size of its output and not a decoded copy of the document: a wide
+// object of short members and a deep one, 1 MiB each.
+func TestJSONMemoryIsOutputBound(t *testing.T) {
+	var wide strings.Builder
+	wide.WriteByte('{')
+	for i := 0; wide.Len() < 1<<20; i++ {
+		fmt.Fprintf(&wide, `"k%d":[%d,"v"],`, i, i)
+	}
+	wide.WriteString(`"password":1}`)
+	deep := strings.Repeat(`{"a":[`, 200) + `{"password":1}` + strings.Repeat(`]}`, 200)
+	deep = "[" + strings.TrimSuffix(strings.Repeat(deep+",", (1<<20)/len(deep)), ",") + "]"
+	for name, doc := range map[string]string{"wide": wide.String(), "deep": deep} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		out := redact.JSON(doc)
+		runtime.ReadMemStats(&after)
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("%s: allocated %d bytes for %d bytes of output", name, allocated, len(out))
+		if limit := uint64(4 * len(out)); allocated > limit {
+			t.Errorf("%s: allocated %d bytes for %d bytes of output (limit %d)", name, allocated, len(out), limit)
+		}
+	}
 }
