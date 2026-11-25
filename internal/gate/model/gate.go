@@ -245,9 +245,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "budget exceeded: "+reason)
 		return
 	}
-	settled := false
+	releaseReservation := true
 	defer func() {
-		if !settled {
+		if releaseReservation {
 			_ = g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, nil)
 		}
 	}()
@@ -334,6 +334,8 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+		// Keep the reservation if actual usage cannot be recorded.
+		releaseReservation = false
 		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
 		inTokens := max(usage.InputTokens, 0)
 		outTokens := max(usage.OutputTokens, 0)
@@ -352,8 +354,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			CostMicroUSD: costMicro,
 			CreatedAt:    g.now(),
 		}
-		if err := g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, &entry); err == nil {
-			settled = true
+		if err := g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, &entry); err != nil {
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
+			return
 		}
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
 			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,

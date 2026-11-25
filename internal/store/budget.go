@@ -39,8 +39,16 @@ type BudgetReservationResult struct {
 	Reason        string
 }
 
-// BudgetRowLocker acquires backend-specific locks inside a reservation transaction.
+// BudgetRowLocker locks a workload and task for budget writes on row-locking backends.
 type BudgetRowLocker func(ctx context.Context, tx *sql.Tx, taskID, workloadName string) error
+
+func beginBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker) (*sql.Tx, error) {
+	if lockRows == nil {
+		return db.BeginTx(ctx, nil)
+	}
+	// Read the totals from a fresh snapshot after acquiring the row locks.
+	return db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
 
 // ExceedsBudgetLimit reports whether used + reserve would reach or exceed maximum without int64 overflow.
 func ExceedsBudgetLimit(used, reserve, maximum int64) bool {
@@ -127,7 +135,7 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 	expiresStr := now.Add(ttl).Format(time.RFC3339Nano)
 	dayStartStr := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginBudgetTx(ctx, db, lockRows)
 	if err != nil {
 		return BudgetReservationResult{}, err
 	}
@@ -139,16 +147,18 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 		}
 	}
 
+	// SQLite acquires the database writer lock on this statement, before any reads.
 	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM budget_reservations WHERE rtrim(expires_at, 'Z') <= rtrim($1, 'Z')
-	`, nowStr); err != nil {
+		DELETE FROM budget_reservations
+		WHERE workload_name = $1 AND rtrim(expires_at, 'Z') <= rtrim($2, 'Z')
+	`, req.WorkloadName, nowStr); err != nil {
 		return BudgetReservationResult{}, err
 	}
 
 	var parentTaskID, budgetCeilingJSON string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT parent_task_id, budget_ceiling_json FROM tasks WHERE id = $1
-	`, req.TaskID).Scan(&parentTaskID, &budgetCeilingJSON); err != nil {
+		SELECT parent_task_id, budget_ceiling_json FROM tasks WHERE id = $1 AND workload_name = $2
+	`, req.TaskID, req.WorkloadName).Scan(&parentTaskID, &budgetCeilingJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return BudgetReservationResult{}, ErrNotFound
 		}
@@ -232,26 +242,50 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 
 // SettleBudgetReservationTx atomically removes a reservation and, when actual is non-nil,
 // records settled usage into budget_ledger in the same transaction.
-func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, reservationID string, actual *domain.BudgetEntry) error {
-	tx, err := db.BeginTx(ctx, nil)
+func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, reservationID string, actual *domain.BudgetEntry) error {
+	tx, err := beginBudgetTx(ctx, db, lockRows)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx, `DELETE FROM budget_reservations WHERE id = $1`, reservationID)
-	if err != nil {
-		return err
+	if lockRows != nil {
+		var taskID, workloadName string
+		err := tx.QueryRowContext(ctx, `
+			SELECT task_id, workload_name FROM budget_reservations WHERE id = $1
+		`, reservationID).Scan(&taskID, &workloadName)
+		if errors.Is(err, sql.ErrNoRows) {
+			if actual == nil {
+				return nil
+			}
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if err := lockRows(ctx, tx, taskID, workloadName); err != nil {
+			return err
+		}
 	}
-	affected, err := res.RowsAffected()
+
+	var taskID, workloadName string
+	err = tx.QueryRowContext(ctx, `
+		DELETE FROM budget_reservations WHERE id = $1 RETURNING task_id, workload_name
+	`, reservationID).Scan(&taskID, &workloadName)
+	if errors.Is(err, sql.ErrNoRows) {
+		if actual == nil {
+			return nil
+		}
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
 	if actual == nil {
 		return tx.Commit()
 	}
-	if affected == 0 {
-		return ErrNotFound
+	if actual.TaskID != taskID || actual.WorkloadName != workloadName {
+		return ErrConflict
 	}
 
 	in := max(actual.InputTokens, 0)
@@ -265,7 +299,7 @@ func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, reservationID st
 		INSERT INTO budget_ledger (
 			task_id, workload_name, provider, model, input_tokens, output_tokens, cost_microusd, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, actual.TaskID, actual.WorkloadName, actual.Provider, actual.Model,
+	`, taskID, workloadName, actual.Provider, actual.Model,
 		in, out, cost, created.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}

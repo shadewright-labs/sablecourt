@@ -434,13 +434,23 @@ func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) err
 }
 
 func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockPostgresBudgetRows(ctx, tx, entry.TaskID, entry.WorkloadName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
 			task_id, workload_name, provider, model, input_tokens, output_tokens, cost_microusd, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`, entry.TaskID, entry.WorkloadName, entry.Provider, entry.Model,
-		entry.InputTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt))
-	return err
+		entry.InputTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (store.BudgetReservationResult, error) {
@@ -448,7 +458,7 @@ func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReser
 }
 
 func (s *PostgresStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
-	return store.SettleBudgetReservationTx(ctx, s.db, reservationID, actual)
+	return store.SettleBudgetReservationTx(ctx, s.db, lockPostgresBudgetRows, reservationID, actual)
 }
 
 func lockPostgresBudgetRows(ctx context.Context, tx *sql.Tx, taskID, workloadName string) error {

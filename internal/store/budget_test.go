@@ -20,8 +20,10 @@ func TestBudgetReservationAndSettlementStore(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			var st store.Store
 			var err error
+			var dbPath string
 			if backend == "sqlite" {
-				st, err = sqlite.Open(filepath.Join(t.TempDir(), "budget.db"))
+				dbPath = filepath.Join(t.TempDir(), "budget.db")
+				st, err = sqlite.Open(dbPath)
 			} else {
 				dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
 				if dsn == "" {
@@ -39,7 +41,16 @@ func TestBudgetReservationAndSettlementStore(t *testing.T) {
 			}
 
 			t.Run("concurrent_child_reservation", func(t *testing.T) {
-				testConcurrentChildReservation(t, st)
+				second := st
+				if backend == "sqlite" {
+					other, err := sqlite.Open(dbPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = other.Close() })
+					second = other
+				}
+				testConcurrentChildReservation(t, st, second)
 			})
 			t.Run("settle_release_and_expiry", func(t *testing.T) {
 				testSettleReleaseAndExpiry(t, st)
@@ -51,7 +62,7 @@ func TestBudgetReservationAndSettlementStore(t *testing.T) {
 	}
 }
 
-func testConcurrentChildReservation(t *testing.T, st store.Store) {
+func testConcurrentChildReservation(t *testing.T, st, second store.Store) {
 	ctx := t.Context()
 	const wl = "worker-conc"
 	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: wl}); err != nil {
@@ -87,12 +98,13 @@ func testConcurrentChildReservation(t *testing.T, st store.Store) {
 	var wg sync.WaitGroup
 	now := time.Now().UTC()
 
+	stores := [2]store.Store{st, second}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			res, err := st.ReserveBudget(ctx, store.BudgetReservationRequest{
+			res, err := stores[i%len(stores)].ReserveBudget(ctx, store.BudgetReservationRequest{
 				TaskID:       child.ID,
 				WorkloadName: wl,
 				Budget:       budget,
@@ -186,6 +198,27 @@ func testSettleReleaseAndExpiry(t *testing.T, st store.Store) {
 	})
 	if err != nil || res.Exceeded {
 		t.Fatalf("initial reserve = %+v, err=%v", res, err)
+	}
+	for _, tc := range []struct {
+		name, taskID, workload string
+	}{
+		{name: "wrong task", taskID: child.ParentTaskID, workload: wl},
+		{name: "wrong workload", taskID: child.ID, workload: "other-worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := st.SettleBudgetReservation(t.Context(), res.ReservationID, &domain.BudgetEntry{
+				TaskID: tc.taskID, WorkloadName: tc.workload, InputTokens: 5,
+			})
+			if !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("settlement with a mismatched scope = %v, want ErrConflict", err)
+			}
+		})
+	}
+	blocked, err := st.ReserveBudget(ctx, store.BudgetReservationRequest{
+		TaskID: child.ID, WorkloadName: wl, Reserve: domain.BudgetTotals{InputTokens: 1}, Now: t0,
+	})
+	if err != nil || !blocked.Exceeded || blocked.Reason != "child_input_tokens" {
+		t.Fatalf("reservation after failed settlement = %+v, err=%v, want child_input_tokens exceeded", blocked, err)
 	}
 
 	// Release without committing usage.

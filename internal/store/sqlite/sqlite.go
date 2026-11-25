@@ -524,7 +524,7 @@ func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReserva
 }
 
 func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
-	return store.SettleBudgetReservationTx(ctx, s.db, reservationID, actual)
+	return store.SettleBudgetReservationTx(ctx, s.db, nil, reservationID, actual)
 }
 
 func (s *SQLiteStore) TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error) {
