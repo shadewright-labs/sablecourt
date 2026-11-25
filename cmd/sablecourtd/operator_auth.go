@@ -321,10 +321,15 @@ func (l *loginLimiter) recordFailure(client string, now time.Time) time.Duration
 	if !now.Before(l.global.resetAt) {
 		l.global = loginFailureEntry{resetAt: now.Add(l.window)}
 	}
-	if l.global.failures >= l.maxEntries {
-		return l.global.resetAt.Sub(now)
-	}
 	entry := l.entries[client]
+	if l.global.failures >= l.maxEntries {
+		retry := l.global.resetAt.Sub(now)
+		// A client blocked by its own window must wait for the later of the two deadlines.
+		if now.Before(entry.resetAt) && entry.failures >= l.limit {
+			retry = max(retry, entry.resetAt.Sub(now))
+		}
+		return retry
+	}
 	if !now.Before(entry.resetAt) {
 		if len(l.entries) >= l.maxEntries {
 			for key, e := range l.entries {

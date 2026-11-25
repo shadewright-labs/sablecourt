@@ -3,6 +3,7 @@ package coding
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,17 @@ esac
 				t.Errorf("probe left files: %v, error %v", items, err)
 			}
 		})
+	}
+}
+
+func TestConfinementProbeKeepsProfileDiagnostic(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "probe")
+	script := "#!/bin/sh\necho 'sandbox_apply: Operation not permitted' >&2\nexit 71\n"
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := probeSeatbelt(t.Context(), bin)
+	if err == nil || !strings.Contains(err.Error(), "sandbox_apply: Operation not permitted") {
+		t.Fatalf("error = %v, want it to carry the profile diagnostic", err)
 	}
 }

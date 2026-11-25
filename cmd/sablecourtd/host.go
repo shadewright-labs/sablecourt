@@ -118,6 +118,8 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 	if !ok {
 		return nil, fmt.Errorf("gate-host requires an exact host and port")
 	}
+	// Host coding agents use their own loopback or listen-address authority for gate routes.
+	hostGate, _ := hostAuthority(strings.TrimSuffix(strings.TrimPrefix(cfg.hostGateURL(), "http://"), "/gate/mcp"))
 	regular, err := hostAllowlistMiddleware(next, cfg.listenAddr, cfg.allowedHosts, unixSocket)
 	if err != nil {
 		return nil, err
@@ -130,7 +132,7 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
 			return
 		}
-		if valid && host == gate && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
+		if valid && (host == gate || host == hostGate) && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
 			next.ServeHTTP(w, r)
 			return
 		}

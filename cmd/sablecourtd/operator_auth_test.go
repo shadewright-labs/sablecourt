@@ -733,3 +733,41 @@ func TestIntegrationCollisionCannotIssueSession(t *testing.T) {
 		})
 	}
 }
+
+func TestLoginLimiterRetryAfterCoversEveryGate(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := newLoginLimiter(1, time.Minute, 2)
+	if lim.recordFailure("x", now) != 0 || lim.recordFailure("y", now.Add(10*time.Second)) != 0 {
+		t.Fatal("first failures must be counted")
+	}
+	// The global cap is full until second 60, but y stays blocked until second 70.
+	if got := lim.recordFailure("y", now.Add(20*time.Second)); got != 50*time.Second {
+		t.Fatalf("retry delay = %s, want 50s", got)
+	}
+}
+
+func TestLoginLimiterClientTableSaturation(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := newLoginLimiter(3, time.Minute, 3)
+	// Spread entries over two global windows so the table is full while the global count is not.
+	for _, step := range []struct {
+		client string
+		at     time.Duration
+	}{{"z", 0}, {"a", 20 * time.Second}, {"b", 61 * time.Second}, {"c", 62 * time.Second}} {
+		if lim.recordFailure(step.client, now.Add(step.at)) != 0 {
+			t.Fatalf("%s must be counted", step.client)
+		}
+	}
+	if lim.global.failures >= lim.maxEntries {
+		t.Fatal("test setup must leave the global cap open")
+	}
+	if len(lim.entries) != 3 {
+		t.Fatalf("table holds %d entries, want 3", len(lim.entries))
+	}
+	if lim.recordFailure("d", now.Add(63*time.Second)) == 0 {
+		t.Fatal("a full table of active entries must refuse a new client")
+	}
+	if lim.recordFailure("d", now.Add(81*time.Second)) != 0 {
+		t.Fatal("a new client must be admitted once an entry expires")
+	}
+}
