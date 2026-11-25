@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -93,23 +95,30 @@ func (f *fakeDocker) StartProxy(_ context.Context, _ string) error {
 	return f.step("start")
 }
 
-func (f *fakeDocker) RemoveProxy(ctx context.Context, _ string) error {
+func (f *fakeDocker) RemoveProxy(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := f.step("remove container"); err != nil {
 		return err
 	}
+	// An already absent resource is a no-op, but a live one is only removed by its own name.
+	if f.proxy != "" && name != f.proxy {
+		return fmt.Errorf("remove container %q, want %q", name, f.proxy)
+	}
 	f.proxy = ""
 	return nil
 }
 
-func (f *fakeDocker) RemoveInternalNetwork(ctx context.Context, _ string) error {
+func (f *fakeDocker) RemoveInternalNetwork(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := f.step("remove network"); err != nil {
 		return err
+	}
+	if f.network != "" && name != f.network {
+		return fmt.Errorf("remove network %q, want %q", name, f.network)
 	}
 	if f.proxy != "" {
 		return errors.New("network still has an attached proxy")
@@ -302,8 +311,11 @@ func TestDockerProxyUnixSocketLifecycleAndRouteBoundary(t *testing.T) {
 		t.Fatalf("socket dir %q not directly under %q", launchDir, sockRoot)
 	}
 	dirInfo, err := os.Lstat(launchDir)
-	if err != nil || dirInfo.Mode() != os.ModeDir|0o700 {
-		t.Fatalf("launch dir stat err=%v mode=%v, want 0700 dir", err, dirInfo.Mode())
+	if err != nil {
+		t.Fatalf("stat launch dir: %v", err)
+	}
+	if dirInfo.Mode() != os.ModeDir|0o700 {
+		t.Fatalf("launch dir mode=%v, want 0700 dir", dirInfo.Mode())
 	}
 
 	hostSock := engine.spec.GateSocketHostPath
@@ -386,7 +398,7 @@ func TestDockerProxyUnixSocketLifecycleAndRouteBoundary(t *testing.T) {
 
 func TestSweepStaleSockets(t *testing.T) {
 	sockRoot := shortSocketRoot(t)
-	staleDir := filepath.Join(sockRoot, "g-stale1234")
+	staleDir := filepath.Join(sockRoot, "g-0123456789abcdef")
 	if err := os.Mkdir(staleDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +408,7 @@ func TestSweepStaleSockets(t *testing.T) {
 	}
 	_ = uln.Close()
 	// Re-create a stale file in another directory to simulate ungraceful daemon exit.
-	staleDir2 := filepath.Join(sockRoot, "g-stale5678")
+	staleDir2 := filepath.Join(sockRoot, "p-fedcba9876543210")
 	if err := os.Mkdir(staleDir2, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -404,12 +416,46 @@ func TestSweepStaleSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Entries that are not launch directories must survive the sweep.
+	keep := map[string]bool{}
+	for _, name := range []string{"state.db", "g-short", "g-0123456789abcdeg", "x-0123456789abcdef", "g-0123456789abcdef0"} {
+		if err := os.WriteFile(filepath.Join(sockRoot, name), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		keep[name] = true
+	}
+	keepDir := "g-0123456789abcdee.d"
+	if err := os.Mkdir(filepath.Join(sockRoot, keepDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep[keepDir] = true
+	// A regular file named like a launch directory is not one.
+	if err := os.WriteFile(filepath.Join(sockRoot, "g-aaaaaaaaaaaaaaaa"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep["g-aaaaaaaaaaaaaaaa"] = true
+
 	if err := SweepStaleSockets(sockRoot); err != nil {
 		t.Fatalf("SweepStaleSockets failed: %v", err)
 	}
 	entries, err := os.ReadDir(sockRoot)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("expected empty socket root after sweep, err=%v entries=%v", err, entries)
+	if err != nil || len(entries) != len(keep) {
+		t.Fatalf("sweep left unexpected entries, err=%v entries=%v", err, entries)
+	}
+	for _, entry := range entries {
+		if !keep[entry.Name()] {
+			t.Fatalf("sweep kept stale launch entry %q", entry.Name())
+		}
+	}
+	for name := range keep {
+		if _, err := os.Lstat(filepath.Join(sockRoot, name)); err != nil {
+			t.Fatalf("sweep removed non-launch entry %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"state.db", "g-short", "g-0123456789abcdeg", "x-0123456789abcdef", "g-0123456789abcdef0", keepDir, "g-aaaaaaaaaaaaaaaa"} {
+		if err := os.RemoveAll(filepath.Join(sockRoot, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Missing root directory is a clean no-op at first daemon start.
@@ -466,6 +512,105 @@ func TestSocketCleanupRetainsVerifiedDirectoryHandle(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(movedRoot, subName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("original launch socket directory was not removed from verified root: %v", err)
+	}
+}
+
+func TestSessionCloseRetriesFailedSocketCleanup(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not block removal for root")
+	}
+	sockRoot := shortSocketRoot(t)
+	engine := &fakeDocker{socketReachable: true}
+	session, err := Provision(t.Context(), engine, imageID, Config{
+		Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest,
+		SocketRoot: sockRoot, GateHandler: http.NotFoundHandler(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchDir := filepath.Dir(engine.spec.GateSocketHostPath)
+	// A read-only launch directory stops the socket from being unlinked.
+	if err := os.Chmod(launchDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() { _ = os.Chmod(launchDir, 0o700) }
+	t.Cleanup(restore)
+
+	if err := session.Close(t.Context()); err == nil {
+		t.Fatal("Close returned nil although the launch directory could not be removed")
+	}
+	if session.unixGate == nil {
+		t.Fatal("Close dropped the Unix gate handle before cleanup succeeded")
+	}
+	if engine.proxy != "" || engine.network != "" {
+		t.Fatalf("Docker resources left behind: proxy=%q network=%q", engine.proxy, engine.network)
+	}
+	if err := session.Close(t.Context()); err == nil {
+		t.Fatal("second Close returned nil although the launch directory is still there")
+	}
+	restore()
+	if err := session.Close(t.Context()); err != nil {
+		t.Fatalf("retry Close failed: %v", err)
+	}
+	if _, err := os.Lstat(launchDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch directory still exists after the retry: %v", err)
+	}
+	if session.unixGate != nil {
+		t.Fatal("Unix gate handle retained after successful cleanup")
+	}
+	before := len(engine.calls)
+	if err := session.Close(t.Context()); err != nil || len(engine.calls) != before {
+		t.Fatalf("repeated Close after success: err=%v calls=%v", err, engine.calls[before:])
+	}
+}
+
+func TestTLSGateReissuesCertificateWithPinnedKey(t *testing.T) {
+	tg, err := startTLSGate(Config{
+		Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: leaseDigest,
+		GateHandler: http.NotFoundHandler(),
+	}, DefaultGateLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tg.close() })
+	spki := func(c *tls.Certificate) string {
+		sum := sha256.Sum256(c.Leaf.RawSubjectPublicKeyInfo)
+		return hex.EncodeToString(sum[:])
+	}
+	first := tg.cert.Load()
+	start := first.Leaf.NotAfter.Add(-launchCertLifetime)
+	for _, tc := range []struct {
+		name    string
+		at      time.Time
+		renewed bool
+	}{
+		{"fresh certificate is reused", start.Add(time.Minute), false},
+		{"half way through the lifetime", start.Add(launchCertLifetime / 3), false},
+		{"renewal window opens", start.Add(launchCertLifetime/2 + time.Minute), true},
+		{"well past the first expiry", start.Add(3 * launchCertLifetime), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := tg.cert.Load()
+			got, err := tg.currentCertificate(tc.at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got != before) != tc.renewed {
+				t.Fatalf("renewed=%v, want %v", got != before, tc.renewed)
+			}
+			if tc.at.After(got.Leaf.NotAfter) || tc.at.Before(got.Leaf.NotBefore) {
+				t.Fatalf("certificate not valid at %v: %v to %v", tc.at, got.Leaf.NotBefore, got.Leaf.NotAfter)
+			}
+			if spki(got) != tg.spkiSHA256 {
+				t.Fatal("reissued certificate does not match the pin given to the proxy")
+			}
+		})
+	}
+	if err := tg.close(); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := tg.currentCertificate(start.Add(4 * launchCertLifetime)); err == nil || c != nil {
+		t.Fatalf("closed gate reissued a certificate: %v %v", c, err)
 	}
 }
 
@@ -624,57 +769,90 @@ func (l *fakePipeListener) tryOffer(timeout time.Duration) (net.Conn, bool) {
 	}
 }
 
+func startFakePipeGate(t *testing.T, limits GateLimits) *fakePipeListener {
+	t.Helper()
+	rawLn := newFakePipeListener()
+	srv := NewGateServer(WrapGateHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), limits), limits)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve(LimitListener(rawLn, limits.MaxConns))
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+	return rawLn
+}
+
+func openStalledPipes(t *testing.T, rawLn *fakePipeListener, n int) []net.Conn {
+	t.Helper()
+	stalled := make([]net.Conn, 0, n)
+	t.Cleanup(func() {
+		for _, c := range stalled {
+			_ = c.Close()
+		}
+	})
+	for i := range n {
+		c, ok := rawLn.tryOffer(time.Second)
+		if !ok {
+			t.Fatalf("failed to admit connection %d below ceiling", i)
+		}
+		stalled = append(stalled, c)
+		if _, err := io.WriteString(c, "GET /gate/task/messages HTTP/1.1\r\nHost: gate\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stalled
+}
+
+func requireFreshConnectionServed(t *testing.T, rawLn *fakePipeListener) {
+	t.Helper()
+	good, ok := rawLn.tryOffer(time.Second)
+	if !ok {
+		t.Fatal("listener did not recover capacity")
+	}
+	defer good.Close()
+	if _, err := io.WriteString(good, "GET /gate/task/messages HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(good), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d, want 204", res.StatusCode)
+	}
+}
+
 func TestGateListenerLimitsWithFakeListener(t *testing.T) {
-	t.Run("admission ceiling for simultaneous incomplete headers and connections", func(t *testing.T) {
-		rawLn := newFakePipeListener()
-		const ceiling = 3
-		limits := GateLimits{
-			MaxConns:          ceiling,
-			ReadHeaderTimeout: 120 * time.Millisecond,
-			ReadTimeout:       time.Second,
-			WriteTimeout:      time.Second,
-			IdleTimeout:       time.Second,
-			MaxHeaderBytes:    4096,
-			MaxBodyBytes:      1024,
-		}
-		srv := NewGateServer(WrapGateHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNoContent)
-		}), limits), limits)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_ = srv.Serve(LimitListener(rawLn, limits.MaxConns))
-		}()
-		t.Cleanup(func() {
-			_ = srv.Close()
-			<-done
+	const ceiling = 3
+	t.Run("ceiling holds while incomplete headers stay open", func(t *testing.T) {
+		// The header timeout is far longer than the test, so the held connections cannot expire mid-check.
+		rawLn := startFakePipeGate(t, GateLimits{
+			MaxConns: ceiling, ReadHeaderTimeout: time.Minute, ReadTimeout: time.Minute,
+			WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096, MaxBodyBytes: 1024,
 		})
-
-		// Open ceiling connections and write incomplete HTTP headers on each.
-		stalled := make([]net.Conn, 0, ceiling)
-		for i := range ceiling {
-			c, ok := rawLn.tryOffer(time.Second)
-			if !ok {
-				t.Fatalf("failed to admit connection %d below ceiling", i)
-			}
-			stalled = append(stalled, c)
-			if _, err := io.WriteString(c, "GET /gate/task/messages HTTP/1.1\r\nHost: gate\r\n"); err != nil {
-				t.Fatal(err)
-			}
-		}
-		t.Cleanup(func() {
-			for _, c := range stalled {
-				_ = c.Close()
-			}
-		})
-
-		// While ceiling incomplete headers are open, connection ceiling+1 must NOT be admitted.
+		stalled := openStalledPipes(t, rawLn, ceiling)
 		if extra, ok := rawLn.tryOffer(40 * time.Millisecond); ok {
 			_ = extra.Close()
 			t.Fatal("listener admitted connection beyond simultaneous incomplete-header ceiling")
 		}
+		// Releasing one held connection frees exactly one slot.
+		_ = stalled[0].Close()
+		requireFreshConnectionServed(t, rawLn)
+	})
 
-		// Drain stalled connections as ReadHeaderTimeout closes them, then verify a fresh connection succeeds.
+	t.Run("header timeout releases stalled connections", func(t *testing.T) {
+		rawLn := startFakePipeGate(t, GateLimits{
+			MaxConns: ceiling, ReadHeaderTimeout: 120 * time.Millisecond, ReadTimeout: time.Second,
+			WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096, MaxBodyBytes: 1024,
+		})
+		stalled := openStalledPipes(t, rawLn, ceiling)
+		// Drain stalled connections until ReadHeaderTimeout makes the server close them.
 		var wg sync.WaitGroup
 		for _, c := range stalled {
 			wg.Go(func() {
@@ -683,23 +861,7 @@ func TestGateListenerLimitsWithFakeListener(t *testing.T) {
 			})
 		}
 		wg.Wait()
-
-		good, ok := rawLn.tryOffer(time.Second)
-		if !ok {
-			t.Fatal("listener did not recover capacity after incomplete headers timed out")
-		}
-		defer good.Close()
-		if _, err := io.WriteString(good, "GET /gate/task/messages HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n"); err != nil {
-			t.Fatal(err)
-		}
-		res, err := http.ReadResponse(bufio.NewReader(good), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = res.Body.Close()
-		if res.StatusCode != http.StatusNoContent {
-			t.Fatalf("status=%d, want 204", res.StatusCode)
-		}
+		requireFreshConnectionServed(t, rawLn)
 	})
 
 	t.Run("write deadline aborts stalled client", func(t *testing.T) {
@@ -928,8 +1090,12 @@ func TestWrapGateHandlerSlowBodiesAndPromptRefusal(t *testing.T) {
 			t.Fatal(err)
 		}
 		res, err := http.ReadResponse(slowReaders[i], nil)
-		if err == nil {
-			_ = res.Body.Close()
+		if err != nil {
+			t.Fatalf("slot %d: server did not end the stalled upload before the client gave up: %v", i, err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("slot %d: stalled upload status=%d, want %d", i, res.StatusCode, http.StatusBadRequest)
 		}
 		_ = c.Close()
 	}
@@ -1016,6 +1182,21 @@ func TestProbeUnixSocketModeFailsClosedOnDockerOrExchangeError(t *testing.T) {
 					return err
 				}
 				_ = conn.Close()
+				return ErrGateSocketUnsupported
+			},
+		},
+		{
+			name: "unsupported claimed after completed token exchange",
+			probe: func(_ context.Context, spec GateSocketProbe) error {
+				var token string
+				for i := 0; i+1 < len(spec.Args); i++ {
+					if spec.Args[i] == "-probe-token" {
+						token = spec.Args[i+1]
+					}
+				}
+				if err := ProbeGateSocketClient(spec.HostSocketPath, token); err != nil {
+					return err
+				}
 				return ErrGateSocketUnsupported
 			},
 		},
@@ -1169,17 +1350,28 @@ func TestHostGatewayArgsContainNoSecret(t *testing.T) {
 		"-gate-tls-port":    true,
 		"-gate-spki-sha256": true,
 	}
+	const rawLease = "sc_task_fixture"
 	for i := 0; i < len(engine.spec.Args); i += 2 {
 		flagName := engine.spec.Args[i]
 		if !allowedFlags[flagName] || i+1 >= len(engine.spec.Args) {
 			t.Fatalf("unexpected or secret-carrying flag %q in proxy argv: %v", flagName, engine.spec.Args)
 		}
+		value := engine.spec.Args[i+1]
+		if flagName == "-lease-sha256" && value != leaseDigest {
+			t.Fatalf("-lease-sha256 does not carry the fixture digest")
+		}
+		if strings.Contains(value, rawLease) {
+			t.Fatalf("raw lease appears in the value of proxy flag %q", flagName)
+		}
 	}
 	for _, entry := range session.Workload().Env() {
 		name, val, _ := strings.Cut(entry, "=")
+		if strings.Contains(entry, rawLease) {
+			t.Fatalf("raw lease appears in workload env entry %q", name)
+		}
 		upper := strings.ToUpper(name)
 		if strings.Contains(upper, "SECRET") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "KEY") || strings.Contains(val, "PRIVATE KEY") {
-			t.Fatalf("unexpected secret-like workload env entry %q", entry)
+			t.Fatalf("unexpected secret-like workload env entry %q", name)
 		}
 	}
 	if err := session.Close(t.Context()); err != nil {
@@ -1244,6 +1436,27 @@ func TestIsUnshareableSocketBindError(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "mounts denied for a sibling of the probe directory fails closed",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: Mounts denied:\nThe path " + filepath.Dir(resolved) + "-other is not shared from the host and is not known to Docker.\n",
+			want:     false,
+		},
+		{
+			name:     "mounts denied names the probe directory only in passing fails closed",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: Mounts denied:\nThe path /somewhere/else is not shared from the host and is not known to Docker. See " + filepath.Dir(resolved) + "\n",
+			want:     false,
+		},
+		{
+			name:     "mounts denied for the exact socket path",
+			path:     sockPath,
+			exitCode: 125,
+			output:   "docker: Error response from daemon: Mounts denied: The path " + resolved + " is not shared from the host and is not known to Docker.\n",
+			want:     true,
+		},
+		{
 			name:     "missing host socket fails closed",
 			path:     missingPath,
 			exitCode: 125,
@@ -1291,5 +1504,77 @@ func TestIsUnshareableSocketBindError(t *testing.T) {
 				t.Fatalf("IsUnshareableSocketBindError() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWrapGateHandlerBusyRefusalBoundsUnreadBody(t *testing.T) {
+	ln, err := net.Listen("tcp4", net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := GateLimits{
+		MaxConns: 1, ReadHeaderTimeout: time.Second, ReadTimeout: 200 * time.Millisecond,
+		WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096, MaxBodyBytes: 1024,
+	}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	// Mirror sablecourtd: the server sets ReadHeaderTimeout only.
+	srv := &http.Server{
+		ReadHeaderTimeout: time.Second,
+		Handler: WrapGateHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			entered <- struct{}{}
+			<-release
+			w.WriteHeader(http.StatusNoContent)
+		}), limits),
+	}
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		_ = srv.Serve(LimitListener(ln, 8))
+	}()
+	t.Cleanup(func() {
+		close(release)
+		_ = srv.Close()
+		<-srvDone
+	})
+
+	holder, err := net.DialTimeout("tcp4", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	if _, err := io.WriteString(holder, "GET /gate/task/messages HTTP/1.1\r\nHost: gate\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached the handler")
+	}
+
+	stalled, err := net.DialTimeout("tcp4", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stalled.Close()
+	if _, err := io.WriteString(stalled, "POST /gate/mcp HTTP/1.1\r\nHost: gate\r\nContent-Length: 64\r\n\r\n{"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stalled.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(stalled)
+	res, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("busy refusal: %v", err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", res.StatusCode, http.StatusServiceUnavailable)
+	}
+	// The server must end the connection once the read deadline passes instead of
+	// waiting for the rest of the body.
+	if _, err := io.Copy(io.Discard, br); err != nil {
+		t.Fatalf("server kept the connection open past the read deadline: %v", err)
 	}
 }

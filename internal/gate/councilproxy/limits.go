@@ -125,16 +125,19 @@ func WrapGateHandler(next http.Handler, limits GateLimits) http.Handler {
 	limits = limits.normalized()
 	sem := make(chan struct{}, limits.MaxConns)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		now := time.Now()
 		select {
 		case sem <- struct{}{}:
 			defer func() { <-sem }()
 		default:
+			// The server discards an unread body after the handler returns, so bound
+			// that read too or a stalled upload keeps its connection slot.
+			_ = rc.SetReadDeadline(now.Add(limits.ReadTimeout))
 			w.Header().Set("Connection", "close")
 			http.Error(w, "council gate busy", http.StatusServiceUnavailable)
 			return
 		}
-		rc := http.NewResponseController(w)
-		now := time.Now()
 		if err := rc.SetReadDeadline(now.Add(limits.ReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			w.Header().Set("Connection", "close")
 			http.Error(w, "council gate read deadline failed", http.StatusInternalServerError)
