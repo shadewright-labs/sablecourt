@@ -61,9 +61,26 @@ func validCouncilRole(role string) bool {
 }
 
 func validCheckoutRef(ref string) bool {
-	return ref != "" && len(ref) <= maxCheckoutRefBytes && ref == strings.TrimSpace(ref) &&
-		!strings.HasPrefix(ref, "-") && !strings.Contains(ref, "..") &&
-		!hasControlChars(ref) && !strings.ContainsAny(ref, " \t\n\r")
+	if ref == "" || len(ref) > maxCheckoutRefBytes || ref != strings.TrimSpace(ref) || hasControlChars(ref) {
+		return false
+	}
+	if isCommitID(ref) || ref == "HEAD" {
+		return true
+	}
+	if strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") ||
+		strings.HasSuffix(ref, ".") || strings.Contains(ref, "..") || strings.Contains(ref, "//") ||
+		strings.ContainsAny(ref, " \t\n\r@~^:?*[\\") {
+		return false
+	}
+	if strings.HasPrefix(ref, "refs/") && !strings.HasPrefix(ref, "refs/heads/") && !strings.HasPrefix(ref, "refs/tags/") {
+		return false
+	}
+	for _, comp := range strings.Split(ref, "/") {
+		if comp == "" || comp == "." || comp == ".." || strings.HasPrefix(comp, ".") || strings.HasSuffix(comp, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 func validConclaveID(id string) bool {
@@ -126,6 +143,8 @@ func parseLaunchInput(raw string) (launchInput, error) {
 		default:
 			return input, errors.New("invalid coding checkoutMode")
 		}
+	} else if seen["conclaveId"] && (seen["round"] || seen["attempt"] || !seen["activation"]) {
+		return input, errors.New("council task requires explicit checkoutMode")
 	}
 	if seen["checkoutRef"] {
 		if input.checkoutMode != checkoutModeRef && input.checkoutMode != checkoutModeWriter {
@@ -247,7 +266,19 @@ func (a *Adapter) buildCommand(spec scruntime.LaunchSpec, input launchInput, dir
 		bin, args = seatbeltCommand(profile, bin, args)
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.Dir, cmd.Env = dir, strippedEnv(spec, scratch, readOnly)
+	env := strippedEnv(spec, scratch, readOnly)
+	if state != nil && state.Mode == checkoutModeLive {
+		gitDir, err := resolvedPath(state.GitDir)
+		if err != nil {
+			return nil, "", err
+		}
+		workTree, err := resolvedPath(dir)
+		if err != nil {
+			return nil, "", err
+		}
+		env = append(env, "GIT_DIR="+gitDir, "GIT_WORK_TREE="+workTree)
+	}
+	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, profile, nil
 }

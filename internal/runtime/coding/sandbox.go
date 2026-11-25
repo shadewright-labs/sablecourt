@@ -160,9 +160,33 @@ func allowGit(profile *strings.Builder, work string, state *worktreeState, readO
 		if !readOnly {
 			return errors.New("live checkout mode requires read-only confinement")
 		}
-		expectedGit := filepath.Join(work, ".git")
-		if common != expectedGit || git != expectedGit || state.Branch != "" {
+		repoGit := filepath.Join(work, ".git")
+		if resolvedRepoGit, err := resolvedPath(repoGit); err != nil || resolvedRepoGit != repoGit {
+			return errors.New("coding sandbox live repository .git directory is unavailable or redirected")
+		}
+		if common != git || state.Branch != "" || pathWithin(work, git) || pathWithin(git, work) {
 			return errors.New("invalid coding sandbox live Git registration")
+		}
+		if err := checkSandboxGitPath(git); err != nil {
+			return err
+		}
+		for _, name := range []string{"objects", "refs"} {
+			if path, err := resolvedPath(filepath.Join(git, name)); err != nil || path != filepath.Join(git, name) {
+				return errors.New("coding sandbox Git storage is unavailable or redirected")
+			}
+		}
+		fmt.Fprintf(profile, "(deny file-read* file-test-existence (subpath %q))\n", repoGit)
+		allowParentMetadata(profile, git)
+		fmt.Fprintf(profile, "(allow file-read* file-test-existence (subpath %q))\n", git)
+		return nil
+	}
+	if state.Mode == checkoutModeWriter && state.ReadOnly {
+		if !readOnly || state.Branch != "" {
+			return errors.New("invalid coding sandbox reviewer Git registration")
+		}
+		expectedGit := filepath.Join(work, ".git")
+		if common != expectedGit || git != expectedGit {
+			return errors.New("invalid coding sandbox reviewer isolated Git registration")
 		}
 		if err := checkSandboxGitPath(common); err != nil {
 			return err
