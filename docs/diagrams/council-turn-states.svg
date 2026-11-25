@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 360" role="img" aria-labelledby="t d" data-diagram="states" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Council turn states</title>
-  <desc id="d">A council turn is Reserved when its task and attempt are stored. It becomes Running when the container starts and Recorded on a clean exit with a final message. A Running turn that errors, times out or is lost on restart is Failed, and a Failed turn returns to Reserved as the next attempt while starts remain.</desc>
+  <desc id="d">A council turn is Reserved when its task and attempt are stored. It becomes Running when the harness starts and Recorded on exit code 0 with a final message. A Running turn that errors, times out, is cancelled, exits cleanly without a final message or is lost on restart is Failed, and a Failed turn returns to Reserved as the next attempt while starts remain.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -39,7 +39,7 @@
   <text class="s" x="56" y="147">task and attempt stored</text>
   <rect class="key" x="320" y="100" width="200" height="64" rx="12"/>
   <text class="h" x="336" y="126">Running</text>
-  <text class="s" x="336" y="147">container started</text>
+  <text class="s" x="336" y="147">harness started</text>
   <rect class="box" x="600" y="100" width="200" height="64" rx="10"/>
   <text class="h" x="616" y="126">Recorded</text>
   <text class="s" x="616" y="147">answer and vote saved</text>
@@ -51,8 +51,8 @@
   <path class="f" d="M520 132H594" marker-end="url(#a)"/>
   <text class="lbl" x="557" y="124" text-anchor="middle">clean exit</text>
   <path class="deny" d="M420 164V234" marker-end="url(#x)"/>
-  <text class="no" x="432" y="204" text-anchor="start">error or timeout</text>
+  <text class="no" x="432" y="204" text-anchor="start">error, timeout or cancel</text>
   <path class="f" d="M320 272H140V170" marker-end="url(#a)"/>
   <text class="lbl" x="150" y="262" text-anchor="start">retry</text>
-  <text class="cap" x="40" y="340" text-anchor="start">retries stop when no start is left; a clean exit with no final message also counts as failed</text>
+  <text class="cap" x="40" y="340" text-anchor="start">retries stop when no start is left; a clean exit with no final message, or a turn lost on restart, also counts as failed</text>
 </svg>

@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1112" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-  <title id="t">One council round</title>
-  <desc id="d">One seat of one council round. sablectl sends the question and operator token to the daemon, which records the council, reserves the turn and stores only the hash of the task lease. The daemon starts a per-launch proxy and gives it the lease digest, then starts the harness container and hands it the lease and prompt on standard input. The harness reaches the daemon only through the proxy, with the lease in a bearer header; the proxy checks the route and the digest and relays to the daemon. The harness reaches its provider only through the proxy as a tunnel on port 443 to listed hosts; a connection to any other host is denied. When the harness exits, the daemon reads its output and exit code directly from the container engine, records the answer, vote and task events, waits for all three seats, repeats for round two with peer excerpts, writes the digest and closes. sablectl prints the answers and the digest. Replies are dashed, and the legend marks the provider outside Sablecourt and the refused connection.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1072" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">One council turn</title>
+  <desc id="d">One seat of one council round on the Docker path. sablectl sends the question and operator token to the daemon. In the daemon the broker reserves the turn and its task in one transaction, and the reconciler mints the task lease, storing only its SHA-256. The daemon starts a per-launch proxy with the lease digest, then has Docker start the harness container with the lease and prompt on standard input. The harness sends gate calls to the proxy as plain HTTP with the lease in a bearer header; the proxy checks the route and the digest and forwards to the daemon. The harness opens a CONNECT tunnel through the proxy to a listed provider host on port 443; any other host or port is denied. When the harness exits, the daemon gets its standard output and exit code through Docker, and the broker records the answer only for exit code 0 with a final message. After the barrier the next round starts with peer excerpts, and at close the store writes the digest Relic. sablectl prints the answers and the digest. Replies are dashed, and the legend marks the provider outside Sablecourt and the refused connection.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -31,7 +31,7 @@
     </style>
   </defs>
   
-  <rect width="1280" height="1112" rx="18" fill="#08060e"/>
+  <rect width="1280" height="1072" rx="18" fill="#08060e"/>
   <rect class="box" x="40" y="24" width="180" height="56" rx="10"/>
   <text class="h" x="130" y="58" text-anchor="middle">sablectl</text>
   <rect class="key" x="300" y="24" width="180" height="56" rx="12"/>
@@ -42,51 +42,46 @@
   <text class="h" x="910" y="58" text-anchor="middle">Proxy container</text>
   <rect class="ext" x="1060" y="24" width="180" height="56" rx="10"/>
   <text class="h" x="1150" y="58" text-anchor="middle">Provider</text>
-  <path class="life" d="M130 80V1036"/>
-  <path class="life" d="M390 80V1036"/>
-  <path class="life" d="M650 80V1036"/>
-  <path class="life" d="M910 80V1036"/>
-  <path class="life" d="M1150 80V1036"/>
+  <path class="life" d="M130 80V996"/>
+  <path class="life" d="M390 80V996"/>
+  <path class="life" d="M650 80V996"/>
+  <path class="life" d="M910 80V996"/>
+  <path class="life" d="M1150 80V996"/>
   <path class="f" d="M136 130H384" marker-end="url(#a)"/>
-  <text class="lbl" x="260" y="122" text-anchor="middle">question and token</text>
-  <rect class="box" x="260" y="150" width="260" height="52" rx="10"/>
-  <text class="h" x="390" y="172" text-anchor="middle" font-size="14">Records the council</text>
-  <text class="s" x="390" y="192" text-anchor="middle">question, ceilings, deadline</text>
-  <rect class="box" x="260" y="222" width="260" height="52" rx="10"/>
-  <text class="h" x="390" y="244" text-anchor="middle" font-size="14">Reserves the turn</text>
-  <text class="s" x="390" y="264" text-anchor="middle">lease minted, only its hash stored</text>
-  <path class="f" d="M396 320H904" marker-end="url(#a)"/>
-  <text class="lbl" x="650" y="312" text-anchor="middle">start, lease digest</text>
-  <path class="f" d="M396 372H644" marker-end="url(#a)"/>
-  <text class="lbl" x="520" y="364" text-anchor="middle">lease on stdin</text>
-  <path class="f" d="M656 436H904" marker-end="url(#a)"/>
-  <text class="lbl" x="780" y="428" text-anchor="middle">gate read, lease</text>
-  <path class="f" d="M904 488H396" marker-end="url(#a)"/>
-  <text class="lbl" x="650" y="480" text-anchor="middle">digest checked</text>
-  <path class="f" d="M656 552H904" marker-end="url(#a)"/>
-  <text class="lbl" x="780" y="544" text-anchor="middle">CONNECT provider</text>
-  <path class="f" d="M916 604H1144" marker-end="url(#a)"/>
-  <text class="lbl" x="1030" y="596" text-anchor="middle">tunnel, port 443</text>
-  <path class="deny" d="M656 668H904" marker-end="url(#x)"/>
-  <text class="lbl" x="780" y="660" text-anchor="middle">other host</text>
-  <text class="no" x="780" y="688" text-anchor="middle">denied</text>
-  <path class="r" d="M644 752H396" marker-end="url(#m)"/>
-  <text class="lbl" x="520" y="744" text-anchor="middle">stdout, exit code</text>
-  <rect class="box" x="260" y="776" width="260" height="52" rx="10"/>
-  <text class="h" x="390" y="798" text-anchor="middle" font-size="14">Records the answer</text>
-  <text class="s" x="390" y="818" text-anchor="middle">answer, vote, task events</text>
-  <rect class="box" x="260" y="844" width="260" height="52" rx="10"/>
-  <text class="h" x="390" y="866" text-anchor="middle" font-size="14">Barrier, then round two</text>
-  <text class="s" x="390" y="886" text-anchor="middle">repeat with peer excerpts</text>
-  <rect class="box" x="260" y="912" width="260" height="52" rx="10"/>
-  <text class="h" x="390" y="934" text-anchor="middle" font-size="14">Closes and writes the digest</text>
-  <text class="s" x="390" y="954" text-anchor="middle">digest Relic, audit rows</text>
-  <path class="r" d="M384 1000H136" marker-end="url(#m)"/>
-  <text class="lbl" x="260" y="992" text-anchor="middle">answers, digest</text>
-  <rect class="ext" x="60" y="1068" width="28" height="16" rx="4"/>
-  <text class="lbl" x="98" y="1081">outside Sablecourt</text>
-  <path class="deny" d="M270 1076H310" marker-end="url(#x)"/>
-  <text class="lbl" x="320" y="1081">refused</text>
-  <path class="r" d="M420 1076H460" marker-end="url(#m)"/>
-  <text class="lbl" x="470" y="1081">reply or output</text>
+  <text class="lbl" x="260" y="122" text-anchor="middle">question, operator token</text>
+  <text class="h" x="404" y="172" font-size="14">Broker reserves the turn</text>
+  <text class="s" x="404" y="192">turn and task in one transaction</text>
+  <text class="h" x="404" y="232" font-size="14">Reconciler mints the lease</text>
+  <text class="s" x="404" y="252">store keeps only its SHA-256</text>
+  <path class="f" d="M396 300H904" marker-end="url(#a)"/>
+  <text class="lbl" x="650" y="292" text-anchor="middle">start, lease digest</text>
+  <path class="f" d="M396 352H644" marker-end="url(#a)"/>
+  <text class="lbl" x="520" y="344" text-anchor="middle">lease, prompt on stdin</text>
+  <path class="f" d="M656 416H904" marker-end="url(#a)"/>
+  <text class="lbl" x="780" y="408" text-anchor="middle">plain HTTP, bearer lease</text>
+  <path class="f" d="M904 468H396" marker-end="url(#a)"/>
+  <text class="lbl" x="650" y="460" text-anchor="middle">route and digest checked</text>
+  <path class="f" d="M656 520H904" marker-end="url(#a)"/>
+  <text class="lbl" x="780" y="512" text-anchor="middle">CONNECT listed host</text>
+  <path class="f" d="M916 572H1144" marker-end="url(#a)"/>
+  <text class="lbl" x="1030" y="564" text-anchor="middle">tunnel, port 443</text>
+  <path class="deny" d="M656 636H904" marker-end="url(#x)"/>
+  <text class="lbl" x="780" y="628" text-anchor="middle">other host or port</text>
+  <text class="no" x="780" y="656" text-anchor="middle">denied</text>
+  <path class="r" d="M644 720H396" marker-end="url(#m)"/>
+  <text class="lbl" x="520" y="712" text-anchor="middle">stdout, exit code via Docker</text>
+  <text class="h" x="404" y="762" font-size="14">Broker records the answer</text>
+  <text class="s" x="404" y="782">only for exit code 0 and a final message</text>
+  <text class="h" x="404" y="827" font-size="14">Barrier, then the next round</text>
+  <text class="s" x="404" y="847">packets with peer excerpts</text>
+  <text class="h" x="404" y="892" font-size="14">Close writes the digest</text>
+  <text class="s" x="404" y="912">digest Relic in the store</text>
+  <path class="r" d="M384 960H136" marker-end="url(#m)"/>
+  <text class="lbl" x="260" y="952" text-anchor="middle">answers, digest</text>
+  <rect class="ext" x="60" y="1028" width="28" height="16" rx="4"/>
+  <text class="lbl" x="98" y="1041">outside Sablecourt</text>
+  <path class="deny" d="M270 1036H310" marker-end="url(#x)"/>
+  <text class="lbl" x="320" y="1041">refused</text>
+  <path class="r" d="M420 1036H460" marker-end="url(#m)"/>
+  <text class="lbl" x="470" y="1041">reply or output</text>
 </svg>

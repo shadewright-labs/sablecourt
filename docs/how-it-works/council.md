@@ -1,33 +1,34 @@
 # Council
 
-Status: partly built. Missing: a preflight that refuses a round when images or logins are absent, posting a harness's final message to the room (#28), knowledge of subscription windows (#36), and a recorded end-to-end run (#80). See "Not built yet".
+Status: partly built. Missing: a preflight that refuses a round when images or logins are absent (#79), posting a harness's final message to the room (#28) and knowledge of subscription windows (#36). The end-to-end smoke test (#80) is still open. See "Not built yet".
 
-A council puts one question to `claude`, `codex` and `agy` at once, lets each read the others' answers, and ends with a digest the daemon writes from the recorded answers. It is a [Conclave](conclaves.md) with a fixed three-seat panel, a scheduler that works in rounds, and hard ceilings on rounds, starts and time. Each turn is one launch of one harness, in its own [container](harness-containers.md). Nothing here is a model that decides: the daemon counts, reserves and records, and the harnesses only answer.
+A council puts one question to `claude`, `codex` and `agy` at once, lets each read the others' answers, and ends with a digest the daemon writes from the recorded answers. It is a [Conclave](conclaves.md) with a fixed three-seat panel, a scheduler that works in rounds, and ceilings on rounds, starts and time. Each turn is one launch of one harness. With a Docker engine configured, that launch runs in its own [container](harness-containers.md). The scheduler is code, not a model: it counts, reserves and records. The harnesses answer, and a writer seat, when the API names one, can also change its own worktree.
 
 ## What `sablectl council` does
 
-`sablectl council "question"` (or a prompt for the question) opens a council, prints each answer as it is recorded, then prints the digest. With no flags it uses the current directory, the live working tree, two rounds, all three harnesses in parallel and the default ceilings. The question is capped at 30 KiB and is redacted before it leaves the CLI. The CLI sends `POST /api/v1/councils` with a random `Idempotency-Key`; the same key with the same request returns the same council, and with a different request it is refused with a conflict.
+`sablectl council "question"` (or a prompt for the question) opens a council, prints each answer as it appears, then prints the digest. With no flags it uses the current directory, the live working tree, two rounds, all three harnesses in parallel and the default ceilings. The question may be at most 30 KiB, and the CLI redacts it before sending it. The CLI sends `POST /api/v1/councils` with a random `Idempotency-Key`. The same key with the same request returns the same council; the same key with a different request is refused with a conflict.
 
-The daemon refuses to open a council in Citadel mode, when `claude`, `codex` or `agy` is not found on the daemon's `PATH` (this check runs even though turns run in containers), when the repository fails the checks under "Checkouts", when the macOS Seatbelt probe fails (it also runs on every platform, so a Linux host is refused with "council checkout confinement is unavailable"), or when the panel workloads are missing, outside the sandbox zone or hold any grant. The names `claude`, `codex` and `agy` are reserved for the panel.
+The daemon refuses to open a council in Citadel mode. It also refuses when `claude`, `codex` or `agy` is not found on the daemon's `PATH` (this check runs even when turns run in containers), when the repository fails the checks under "Checkouts", or when the macOS Seatbelt probe fails. That probe runs whatever the runtime, so a host other than macOS is refused with "council checkout confinement is unavailable". Last, it refuses when the coding runtime is not registered or a panel workload is missing, outside the sandbox zone, not a Seatbelt coding workload, or holds any grant. The names `claude`, `codex` and `agy` are reserved for the panel: a manifest workload with one of those names is rejected.
 
 ## Rounds and the barrier
 
-In round one each seat answers independently. Round two starts only when all three seats have a recorded answer for round one: a missing or failed turn holds the barrier, and a retry spends from the remaining starts. With `--sequential` the seats run inside each round in the order given by `--with` (claude, codex, agy by default), and each waits for its predecessor's answer.
+In round one each seat answers independently. Round two starts only when all three seats have a recorded answer for round one: a missing or failed turn holds the barrier, and a retry spends from the remaining starts. With `--sequential` one seat runs at a time, in the order given by `--with` (claude, codex, agy by default), and each waits for the answer of the seat before it.
 
-[![One council round across the CLI, daemon, harness container, proxy and provider.](../diagrams/council-rounds.svg)](../diagrams/council-rounds.svg "Open full size")
+[![One council turn across the CLI, daemon, harness container, proxy and provider.](../diagrams/council-rounds.svg)](../diagrams/council-rounds.svg "Open full size")
 
-The diagram shows one seat of one round. The three seats of a round run side by side. The lines:
+The diagram shows one seat of one round on the Docker path. The three seats of a round run side by side. The lines:
 
 1. `sablectl` sends the question with the operator credential. The daemon stores the council: question, panel, checkout, ceilings and deadline.
-2. The daemon reserves a turn for `(council, round, role, attempt)` and creates its task in one transaction, then mints the task lease. The store keeps only the lease's SHA-256.
-3. The daemon starts a per-launch proxy and gives it the lease digest, never the lease.
-4. The daemon starts the harness container and hands it the lease and the prompt on standard input. This is the only place the lease travels in the clear; the container writes it to a private file in its memory-backed scratch directory.
-5. A gate call goes harness, proxy, daemon, with the lease in a bearer header. The proxy checks the route list and the digest; the daemon checks the lease again against the store.
-6. Inference leaves through the proxy as a tunnel to the harness's own provider hosts on port 443. Any other host is denied.
-7. When the harness exits, the daemon has its standard output and exit code. It records the answer only for a clean exit.
-8. When three answers are in, the daemon plans round two. At the end it writes the digest.
+2. The council broker reserves a turn for `(council, round, role, attempt)` and creates its task in the same transaction.
+3. The reconciler claims the task and mints a task lease that expires no later than the council deadline. The store keeps only the lease's SHA-256.
+4. The coding runtime adapter starts a per-launch proxy and gives it the lease digest, not the lease.
+5. The adapter has the Docker engine start the harness container and writes the lease and the prompt to the container's standard input over the engine's attach stream. Inside the container a startup script writes the lease to a mode-0600 file in the memory-backed scratch directory.
+6. A gate call goes from the harness to the proxy as plain HTTP inside the per-launch internal network, with the lease in a bearer header. The proxy checks the route list and compares the lease with its digest, then forwards the call to a per-launch gate in the daemon. That gate checks the route list and the digest again, and the daemon's gate routes look the lease up in the store.
+7. Provider traffic leaves through the proxy as a `CONNECT` tunnel to one of the harness's own provider hosts on port 443. The proxy refuses any other host or port.
+8. When the harness exits, the Docker adapter has its standard output from the attach stream and its exit code from the engine. The broker records an answer only when the exit code is 0 and the output holds a non-empty final message.
+9. When all three answers of a round are in, the broker plans the next round. When the council closes, the store writes the digest.
 
-What is recorded: task state changes go to `task_events`. The audit chain gets `task.submit` for each turn, `conclave.ward` when a Ward pauses the room, `conclave.run_window_reset` when a Decree resumes it and `conclave.close` when it ends. Gate calls that reach the MCP Gate append their own audit rows. Answers, votes, reservations and the digest live in the council tables, not in the chain.
+What is recorded: task state changes go to `task_events`. The audit chain gets `task.submit` for each turn, `conclave.ward` when a Ward pauses the room, `conclave.run_window_reset` when a Decree resumes it, and `conclave.close` when the operator closes or stops it (`sablectl conclave close` or Ctrl-C in the CLI). A close by the scheduler itself (`nothing_to_add`, `round_cap`, `start_cap` or the deadline) writes no audit row. Tool calls through the MCP Gate append their own audit rows. Answers, votes, reservations and the digest live in the council tables, not in the chain.
 
 The boundaries around that container, its proxy and the daemon are drawn on the [harness containers](harness-containers.md) page and repeated here.
 
@@ -35,7 +36,7 @@ The boundaries around that container, its proxy and the daemon are drawn on the 
 
 ## What a turn sees
 
-A turn gets a context packet: the question, the Decrees addressed to its role or to `all`, and redacted excerpts of earlier answers it may see. In parallel mode that is every recorded answer of earlier rounds. In sequential mode it also includes predecessors' answers in its own round. Peer text is capped at 16 KiB. When it does not fit, older rounds shrink to their first line (`[older detail omitted]`), then drop (`[older rounds omitted]`), and last the newest round is cut to equal-length excerpts (`[peer text omitted]`). The whole packet, JSON-encoded, stays under 63 KiB. Mentions never start council turns, and an answer is only visible after it is recorded. The harness may also read the same view through the gate; writes from a seat (messages and Relics) are refused, because a council has no manifest to resolve its role.
+A turn gets a context packet: the question, the Decrees addressed to its role or to `all`, and redacted copies of the earlier answers it may see, its own included. In parallel mode that is every recorded answer of earlier rounds. In sequential mode it also includes the answers of the seats before it in its own round. Peer text gets at most 16 KiB. When it does not fit, older rounds shrink to the first line of each answer (`[older detail omitted]`), then drop (`[older rounds omitted]`), and last the newest round is cut so each answer keeps at most the same number of characters (`[peer text omitted]`). The packet text is at most 32 KiB and its JSON encoding at most 63 KiB; the opening question alone must encode to at most 59 KiB. Mentions never start council turns, and a turn sees an answer only after it is recorded. While the council is active, the harness can read the same view through the gate. Writes from a seat (messages and Relics) are refused, because a council has no manifest to resolve the seat's role.
 
 ## Ceilings and how a council ends
 
@@ -43,34 +44,36 @@ A turn gets a context packet: the question, the Decrees addressed to its role or
 | --- | --- | --- | --- |
 | Rounds | 2 | at least 1 | `--rounds`, API `rounds` |
 | Starts, retries included | 6 | 1 to 6 | API `starts` |
-| Wall time from opening | 15 minutes | positive seconds | API `durationSeconds` |
+| Wall time from opening | 15 minutes | at least 1 second | API `durationSeconds` |
 
-A zero or negative value is rejected, not replaced by the default. A Decree cannot raise any of them. A council ends by one of three rules. After a round completes it closes with `nothing_to_add` when all three seats voted to stop, and with `round_cap` at the round ceiling. Separately, a round that cannot finish because every start is spent and no turn is running closes with `start_cap`.
+A zero or negative value is rejected, not replaced by the default. A Decree changes none of them. The scheduler closes a council by itself by one of three rules. After a round completes it closes with `nothing_to_add` when all three seats voted to stop, and with `round_cap` when that round is the round ceiling. A round that cannot finish because every start is spent and no turn is running closes with `start_cap`.
 
 [![How a council ends: nothing to add, round cap or start cap, otherwise the next round.](../diagrams/council-finish.svg)](../diagrams/council-finish.svg "Open full size")
 
-A seat votes to stop only when its entire trimmed final message is `NOTHING TO ADD`; silence or an empty answer never completes a turn. Ctrl-C in the CLI and the deadline end the council as `cancelled`; `sablectl conclave close` ends it as `completed`. All three cancel active turns and still write the digest. A Ward pauses the council in `input-required`: the CLI exits with an error naming the Ward, and the council waits for a Decree or its deadline.
+A seat votes to stop only when its entire trimmed final message is `NOTHING TO ADD`. An empty final message records no answer, and the seat is retried while starts remain. The deadline and Ctrl-C in the CLI end the council as `cancelled`; `sablectl conclave close` ends it as `completed`. All three cancel the turns still active and write the digest. A Ward pauses the council in `input-required`, and the council waits for a Decree or its deadline. The CLI stops at the pause and exits with an error. That error names the Ward reason when at least one seat has answered; with no answers it reports only that no seat answered.
 
 [![States of one council turn: reserved, running, recorded or failed, with retry back to reserved.](../diagrams/council-turn-states.svg)](../diagrams/council-turn-states.svg "Open full size")
 
-A failed, cancelled or answerless turn is retried as the next attempt while starts remain. After a daemon restart a turn's container is removed, its lease revoked and its task failed as lost on restart; the council then retries or closes. `sablectl task retry` refuses council tasks.
+A failed, cancelled or answerless turn is retried as the next attempt while starts remain. After a daemon restart, recovery revokes the lease of each turn that was running and removes its container, proxy and network, because the per-launch gate ended with the old daemon. If the adapter had already written the turn's result to its state file, the task then completes or fails from that result. Otherwise it fails as lost on restart, and the council retries or closes. `sablectl task retry` refuses council tasks.
 
 ## Checkouts
 
-`--live` (the default) gives a read-only view of the working tree, uncommitted changes included. `--ref <ref>` pins a branch, tag, `HEAD` or full commit to one commit and mounts a read-only checkout of it. The two flags are mutually exclusive. The API also takes `writer` (one of the three roles, never with `live`): that role gets a writable worktree on a branch `sablecourt/council-<key>`, the others a read-only review checkout, and the writer's redacted diff is stored as a Relic for peers. There is no CLI flag for the writer. The daemon refuses a repository that is not a primary checkout owned by the daemon's user, one that overlaps its state or credential directories, an ambiguous ref, and a second writer.
+`--live` (the default) mounts a read-only view of the working tree, uncommitted changes included. `--ref <ref>` pins a branch, tag, `HEAD` or full commit ID to one commit and mounts a read-only checkout of it. The two flags cannot be combined. The API also takes `writer`, one of the three roles, never with `live`; without `ref` it pins `HEAD`. That role gets a writable worktree on a branch `sablecourt/council-<key>`, the others a read-only review checkout, and the writer's redacted diff is stored as a Relic that later packets include. There is no CLI flag for the writer.
+
+The daemon refuses a repository that is not owned by the daemon's user, that has no `.git` directory of its own or is not the primary worktree, or that overlaps the daemon state directory or a credential directory under the home directory (such as `.ssh`, `.config`, `.claude`, `.codex` or `Library/Keychains`). It refuses a ref name that is both a branch and a tag on different commits. A second writer role for the same council is refused when its turn launches.
 
 ## Digest
 
-At close the daemon writes the Relic `digest`, authored by `system`: the stop reason, then each round and seat in panel order with the recorded answer or `Missing answer`, and the name and SHA-256 of any evidence Relic. It does not summarise or merge answers. The CLI prints it.
+At close the daemon writes the Relic `digest`, authored by `system`: the stop reason, then each round and seat in panel order with the recorded answer or `Missing answer`, and the name and SHA-256 of any evidence Relic of that attempt. Each seat gets an equal share of the digest's size limit, and a longer answer is cut at `[omitted]`. The digest does not summarise or merge answers. The CLI prints it.
 
 ## Not built yet
 
-- Refusing a round before it starts when a harness image or its login is missing (#79, decided in a dated working call on the issue; no ADR yet). Today a missing image or login fails at launch or in the harness. [Log in to harnesses](../how-to/log-in-harnesses.md) shows the manual steps. The decision: check for the credential files in each login volume from a short container with no network, create the volume with its label in a new `sablectl harness login <harness>`, and run that login through Docker from the CLI.
-- The harness posting its own final message to the room (#28), knowing each subscription's usage windows before it starts a round (#36), and a recorded real run (#80).
-- Model Gate accounting does not cover subscription inference ([ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)); only the ceilings above bound it.
+- Refusing a round before it starts when a harness image or its login is missing (#79). The decision is a dated comment on the issue; there is no ADR yet. Today a missing image or login volume fails the launch, and Sablecourt does not detect a volume that holds no valid login. [Log in to harnesses](../how-to/log-in-harnesses.md) shows the manual steps. The decision: check for the credential files in each login volume from a short container with no network, create the volume with its label in a new `sablectl harness login <harness>`, and run that login through Docker from the CLI.
+- The harness posting its own final message to the room (#28), and knowing each subscription's usage windows before a round starts (#36).
+- Model Gate accounting does not cover subscription inference ([ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)). The council ceilings bound the number of turns and the council's wall time. Each turn also has its own wall time, at most the time left before the deadline, and the proxy allows a harness at most 16 tunnels at once, each at most 15 minutes. None of these counts tokens or cost.
 
 ## In depth
 
-- [ADR-0013](../adr/0013-bounded-council-rounds.md) and [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). The code departs from ADR-0013 on one point: the CLI and daemon still require the three binaries on the host.
-- `cmd/sablectl/council.go`, `cmd/sablecourtd/councils.go`, `internal/conclave/rounds.go`, `internal/conclave/council_driver.go`, `internal/conclave/council_results.go`, `internal/contextpack/council.go`, `internal/store/council.go`.
+- [ADR-0013](../adr/0013-bounded-council-rounds.md) and [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
+- `cmd/sablectl/council.go`, `cmd/sablecourtd/councils.go`, `internal/conclave/rounds.go`, `internal/conclave/council_driver.go`, `internal/conclave/council_results.go`, `internal/contextpack/council.go`, `internal/store/council.go`, `internal/controlplane/recovery.go`.
 - Next: [harness containers](harness-containers.md), [run a council](../how-to/run-a-council.md).
