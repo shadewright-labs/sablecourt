@@ -43,9 +43,11 @@ type Store interface {
 	// belongs to the task and capability and pins the payload digest. Expiry is
 	// checked against req.Now called after the row is locked. A row past its
 	// expiry is marked expired and ErrExpired is returned; any other mismatch
-	// or a row that is not approved returns ErrConflict. Any other error means
-	// the transaction rolled back and the approval was not used. A consumed row
-	// never becomes usable again.
+	// or a row that is not approved returns ErrConflict. ErrAuditRequired
+	// means nothing was read. ErrCommitUnknown means the COMMIT was sent and
+	// its outcome is not known: the caller re-reads the approval. Any other
+	// error means the transaction rolled back and the approval was not used.
+	// A consumed row never becomes usable again.
 	ConsumeApproval(ctx context.Context, req ConsumeRequest) error
 
 	CreateLease(ctx context.Context, lease domain.Lease) error
@@ -95,6 +97,11 @@ type Store interface {
 // ErrAuditRequired is returned by ConsumeApproval for a request without a
 // complete audit record; nothing is read or changed.
 var ErrAuditRequired = errors.New("approval use needs an audit record")
+
+// ErrCommitUnknown is returned by ConsumeApproval when the COMMIT was sent but
+// its outcome is not known (the connection failed before the server answered).
+// The approval may or may not be consumed; the caller re-reads it.
+var ErrCommitUnknown = errors.New("approval use: commit outcome unknown")
 
 // ConsumeRequest is one use of an approved approval.
 type ConsumeRequest struct {

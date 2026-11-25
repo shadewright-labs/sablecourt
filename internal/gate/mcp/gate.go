@@ -429,9 +429,11 @@ func (g *Gate) ActionHandler() http.Handler {
 					reason = "approval_mismatch_or_unapproved"
 				}
 				if reason == "" {
-					// The transaction rolled back: nothing was consumed or recorded.
-					auditAction("error", map[string]any{"reason": "approval_use_failed", "approval_id": req.ApprovalID})
-					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "recording the approval use failed; the approval was not used and the action did not run"})
+					// The action does not run. What the caller is told about the
+					// approval depends on what the store knows.
+					msg, state := g.approvalUseFailure(ctx, req.ApprovalID, err)
+					auditAction("error", map[string]any{"reason": "approval_use_failed", "approval_id": req.ApprovalID, "approval_state": state})
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": msg})
 					return
 				}
 				auditAction("denied", map[string]any{"reason": reason, "approval_id": req.ApprovalID})
@@ -472,6 +474,26 @@ func (g *Gate) ActionHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(red.Text))
 	})
+}
+
+// approvalUseFailure says only what is known after ConsumeApproval failed with
+// an error that is not a refusal. A rollback the store reported leaves the
+// approval unused. When the commit outcome is unknown the approval is read
+// again: consumed means it was used, approved means it was not, and anything
+// else (including a failed read) is reported as unknown.
+func (g *Gate) approvalUseFailure(ctx context.Context, id string, err error) (msg, state string) {
+	if !errors.Is(err, store.ErrCommitUnknown) {
+		return "recording the approval use failed and was rolled back; the approval was not used and the action did not run", "unused"
+	}
+	apr, rerr := g.store.GetApproval(context.WithoutCancel(ctx), id)
+	switch {
+	case rerr != nil:
+	case apr.Status == domain.ApprovalConsumed:
+		return "the store did not confirm the approval use, and a re-read shows the approval was used; the action did not run, request a new approval", "consumed"
+	case apr.Status == domain.ApprovalApproved:
+		return "the store did not confirm the approval use; a re-read shows the approval still approved and the action did not run", "approved"
+	}
+	return "the approval use outcome is unknown, check the approval's status; the action did not run", "unknown"
 }
 
 func (g *Gate) authenticate(w http.ResponseWriter, r *http.Request) (authContext, bool) {

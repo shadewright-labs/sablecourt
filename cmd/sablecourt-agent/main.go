@@ -43,6 +43,10 @@ type toolCallDirective struct {
 	MCPTool string         `json:"mcp_tool,omitempty"`
 	Action  string         `json:"action,omitempty"`
 	Args    map[string]any `json:"args,omitempty"`
+	// ApprovalID repeats an action the gate answered with 202
+	// approval_required, once the approval is granted. The gate runs it only
+	// for the same task, action and payload the approval covers.
+	ApprovalID string `json:"approval_id,omitempty"`
 }
 
 // sablecourt-agent executes multi-turn LLM reasoning exclusively through Sablecourt's
@@ -365,7 +369,11 @@ func executeDirective(ctx context.Context, sess *mcp.ClientSession, gateRoot, to
 		return strings.Join(parts, "\n")
 	}
 	if dir.Action != "" && gateRoot != "" {
-		raw, _ := json.Marshal(map[string]any{"payload": dir.Args})
+		body := map[string]any{"payload": dir.Args}
+		if dir.ApprovalID != "" {
+			body["approvalId"] = dir.ApprovalID
+		}
+		raw, _ := json.Marshal(body)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gateRoot+"/gate/actions/"+dir.Action, bytes.NewReader(raw)) // #nosec G704 -- executeDirective appends the action after a fixed path on the injected data gate.
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")

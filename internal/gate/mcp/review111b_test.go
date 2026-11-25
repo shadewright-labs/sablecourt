@@ -2,9 +2,12 @@ package mcpgate
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // High 1: the repository pin is taken once at start. A reload re-reads the
@@ -45,5 +48,51 @@ func TestReloadNeverRepinsTheRepository(t *testing.T) {
 	}
 	if rec := tg.post("ops-agent", "git.open_pr", `{"payload":`+validOpenPR+`}`); rec.Code != http.StatusOK {
 		t.Fatalf("pinned origin restored: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// lostCommitStore stands for a PostgreSQL COMMIT whose acknowledgement is lost:
+// the consumption may or may not have committed, and the store says so.
+type lostCommitStore struct {
+	store.Store
+	commit bool
+}
+
+func (s lostCommitStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequest) error {
+	if s.commit {
+		if err := s.Store.ConsumeApproval(ctx, req); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: connection reset", store.ErrCommitUnknown)
+}
+
+// Medium 5: when the store cannot tell whether the consumption committed, the
+// gate does not promise the approval was unused. It re-reads the approval and
+// says what it found.
+func TestUnknownCommitOutcomeIsNotReportedAsUnused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		commit bool
+		want   string
+	}{
+		{"committed", true, "was used"},
+		{"not committed", false, "still approved"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commit := tc.commit
+			tg := setupTypedGate(t, typedGateOptions{effect: "approve", wrapStore: func(inner store.Store) store.Store {
+				return lostCommitStore{Store: inner, commit: commit}
+			}})
+			id := requestAndApprove(t, tg, "git.open_pr", validOpenPR)
+			rec := tg.post("ops-agent", "git.open_pr", `{"approvalId":"`+id+`","payload":`+validOpenPR+`}`)
+			body := rec.Body.String()
+			if rec.Code != http.StatusServiceUnavailable || strings.Contains(body, "was not used") || !strings.Contains(body, tc.want) {
+				t.Fatalf("want 503 saying %q and not promising an unused approval, got %d: %s", tc.want, rec.Code, body)
+			}
+			if n := len(tg.pr.calls()); n != 0 {
+				t.Fatalf("action ran %d times", n)
+			}
+		})
 	}
 }

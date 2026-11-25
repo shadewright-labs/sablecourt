@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -457,9 +458,21 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, req store.ConsumeRe
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return commitOutcome(err)
 	}
 	return outcome
+}
+
+// commitOutcome sorts a failed COMMIT. An error the server sent (a PgError)
+// means it rolled the transaction back. Any other error (a broken connection,
+// a cancelled context) leaves the outcome unknown: the server may have
+// committed before the answer was lost.
+func commitOutcome(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", store.ErrCommitUnknown, err)
 }
 
 func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) error {
