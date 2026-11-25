@@ -32,9 +32,18 @@ type persistedHandle struct {
 	ExternalID       string               `json:"external_id"`
 	WorkDir          string               `json:"work_dir,omitempty"`
 	Branch           string               `json:"branch,omitempty"`
-	PID              int                  `json:"pid"`
+	PID              int                  `json:"pid,omitempty"`
 	ProcessStartTime string               `json:"process_start_time,omitempty"`
 	LogPath          string               `json:"log_path,omitempty"`
+	ContainerName    string               `json:"container_name,omitempty"`
+	CreateAttempt    string               `json:"create_attempt,omitempty"`
+	ContainerID      string               `json:"container_id,omitempty"`
+	ProxyName        string               `json:"proxy_name,omitempty"`
+	NetworkName      string               `json:"network_name,omitempty"`
+}
+
+func isContainerHandle(h scruntime.Handle) bool {
+	return h.ContainerName != "" || h.ContainerID != ""
 }
 
 // Recover inspects active tasks after daemon startup, reattaches handles whose
@@ -155,22 +164,36 @@ func (r *Reconciler) claimRecovery(ctx context.Context, id string) error {
 }
 
 func (r *Reconciler) saveHandle(ctx context.Context, taskID string, class domain.WorkloadClass, handle scruntime.Handle) error {
-	if handle.PID <= 0 {
-		return nil
-	}
-	if handle.ProcessStartTime.IsZero() {
-		return errors.New("runtime handle has no launch-time process identity")
+	container := isContainerHandle(handle)
+	if container {
+		if handle.ContainerID == "" && (handle.ContainerName == "" || handle.CreateAttempt == "") {
+			return errors.New("runtime handle has no durable container identity")
+		}
+	} else {
+		if handle.PID <= 0 {
+			return nil
+		}
+		if handle.ProcessStartTime.IsZero() {
+			return errors.New("runtime handle has no launch-time process identity")
+		}
 	}
 	rec := persistedHandle{
-		TaskID:           taskID,
-		WorkloadClass:    class,
-		AdapterName:      handle.AdapterName,
-		ExternalID:       handle.ExternalID,
-		WorkDir:          handle.WorkDir,
-		Branch:           handle.Branch,
-		PID:              handle.PID,
-		LogPath:          handle.LogPath,
-		ProcessStartTime: handle.ProcessStartTime.UTC().Format(time.RFC3339Nano),
+		TaskID:        taskID,
+		WorkloadClass: class,
+		AdapterName:   handle.AdapterName,
+		ExternalID:    handle.ExternalID,
+		WorkDir:       handle.WorkDir,
+		Branch:        handle.Branch,
+		PID:           handle.PID,
+		LogPath:       handle.LogPath,
+		ContainerName: handle.ContainerName,
+		CreateAttempt: handle.CreateAttempt,
+		ContainerID:   handle.ContainerID,
+		ProxyName:     handle.ProxyName,
+		NetworkName:   handle.NetworkName,
+	}
+	if !handle.ProcessStartTime.IsZero() {
+		rec.ProcessStartTime = handle.ProcessStartTime.UTC().Format(time.RFC3339Nano)
 	}
 	raw, err := json.Marshal(rec)
 	if err != nil {
@@ -220,20 +243,33 @@ func (r *Reconciler) loadPersistedHandle(ctx context.Context, taskID string) (*p
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, scruntime.Handle{}, false, nil
 	}
-	if rec.TaskID != taskID || rec.WorkloadClass == "" || rec.AdapterName == "" || rec.ExternalID == "" || rec.PID <= 0 || rec.ProcessStartTime == "" {
+	if rec.TaskID != taskID || rec.WorkloadClass == "" || rec.AdapterName == "" || rec.ExternalID == "" {
+		return nil, scruntime.Handle{}, false, nil
+	}
+	container := rec.ContainerName != "" || rec.ContainerID != ""
+	if container {
+		if rec.ContainerID == "" && (rec.ContainerName == "" || rec.CreateAttempt == "") {
+			return nil, scruntime.Handle{}, false, nil
+		}
+	} else if rec.PID <= 0 || rec.ProcessStartTime == "" {
 		return nil, scruntime.Handle{}, false, nil
 	}
 	if (rec.WorkloadClass == domain.ClassCodingAgent || strings.HasPrefix(rec.AdapterName, "coding:")) && rec.ExternalID != taskID {
 		return nil, scruntime.Handle{}, false, nil
 	}
-	for _, field := range []string{rec.AdapterName, rec.ExternalID, rec.WorkDir, rec.Branch, rec.LogPath} {
+	for _, field := range []string{rec.AdapterName, rec.ExternalID, rec.WorkDir, rec.Branch, rec.LogPath, rec.ContainerName, rec.CreateAttempt, rec.ContainerID, rec.ProxyName, rec.NetworkName} {
 		if strings.ContainsRune(field, 0) {
 			return nil, scruntime.Handle{}, false, nil
 		}
 	}
-	startTime, err := time.Parse(time.RFC3339Nano, rec.ProcessStartTime)
-	if err != nil || startTime.IsZero() {
-		return nil, scruntime.Handle{}, false, nil
+	var startTime time.Time
+	if rec.ProcessStartTime != "" {
+		var err error
+		startTime, err = time.Parse(time.RFC3339Nano, rec.ProcessStartTime)
+		if err != nil || startTime.IsZero() {
+			return nil, scruntime.Handle{}, false, nil
+		}
+		startTime = startTime.UTC()
 	}
 	handle := scruntime.Handle{
 		AdapterName:      rec.AdapterName,
@@ -241,8 +277,13 @@ func (r *Reconciler) loadPersistedHandle(ctx context.Context, taskID string) (*p
 		WorkDir:          rec.WorkDir,
 		Branch:           rec.Branch,
 		PID:              rec.PID,
-		ProcessStartTime: startTime.UTC(),
+		ProcessStartTime: startTime,
 		LogPath:          rec.LogPath,
+		ContainerName:    rec.ContainerName,
+		CreateAttempt:    rec.CreateAttempt,
+		ContainerID:      rec.ContainerID,
+		ProxyName:        rec.ProxyName,
+		NetworkName:      rec.NetworkName,
 	}
 	return &rec, handle, true, nil
 }
@@ -340,6 +381,22 @@ func (r *Reconciler) recoverTask(ctx context.Context, task domain.Task, bundle *
 		return errors.Join(probeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 	}
 	if !alive {
+		if isContainerHandle(handle) {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := r.store.RevokeTaskLeases(cleanupCtx, task.ID); err != nil {
+				return err
+			}
+			callCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
+			stopErr := adapter.Stop(callCtx, handle)
+			if callCtx.Err() != nil {
+				stopErr = callCtx.Err()
+			}
+			cancel()
+			if stopErr != nil {
+				return errors.New("runtime container cleanup failed")
+			}
+			return r.failLostTask(ctx, task, `{"reason":"container_not_alive"}`)
+		}
 		return r.failLostTask(ctx, task, `{"reason":"process_not_alive"}`)
 	}
 

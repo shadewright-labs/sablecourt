@@ -31,6 +31,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
@@ -190,6 +191,42 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
 }
 
+func wireCouncilContainers(ctx context.Context, adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string, logger *slog.Logger) {
+	if isCitadel || dockerAdapter == nil {
+		return
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := dockerAdapter.Ping(pingCtx)
+	cancel()
+	if err != nil {
+		if logger != nil {
+			logger.Warn("council container runtime unavailable: Docker engine unreachable", "error", err)
+		}
+		return
+	}
+	harnesses := make(map[string]docker.CouncilHarness, len(councilPanel))
+	for _, role := range councilPanel {
+		def, lookupErr := harnessimages.Lookup(role)
+		if lookupErr != nil {
+			continue
+		}
+		harnesses[role] = docker.CouncilHarness{
+			Image:       def.Image,
+			LoginVolume: def.Volume,
+		}
+	}
+	dockerAdapter.CouncilHarnesses = harnesses
+	codingAdapter, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
+	if !ok || codingAdapter == nil {
+		codingAdapter = newCodingAdapter(hub, dbPath, retention)
+		adapters[domain.ClassCodingAgent] = codingAdapter
+	}
+	codingAdapter.CouncilRunner = dockerAdapter
+	codingAdapter.CouncilProxy = dockerAdapter
+	codingAdapter.CouncilProxyImage = harnessimages.ProxyImage()
+	codingAdapter.DaemonListen = listenAddr
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -274,6 +311,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
+	var dockerAdapter *docker.Adapter
+	if cfg.runtimeBackend != "k8s" {
+		if da, err := docker.NewFromEnv(); err == nil {
+			da.AttachHub = attachHub
+			dockerAdapter = da
+			adapters[domain.ClassLongLivedAgent] = da
+			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
+			wireCouncilContainers(ctx, adapters, isCitadel, da, attachHub, dbPath, cfg.branchRetention, listenAddr, logger)
+		} else {
+			logger.Warn("docker runtime unavailable", "error", err)
+		}
+	}
 
 	var (
 		bundleMu sync.RWMutex
@@ -393,8 +442,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
-	switch cfg.runtimeBackend {
-	case "k8s":
+	if cfg.runtimeBackend == "k8s" {
 		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
 			k8sAdapter.SetAttachHub(attachHub)
 			adapters[domain.ClassLongLivedAgent] = k8sAdapter
@@ -403,15 +451,8 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		} else {
 			logger.Warn("kubernetes runtime unavailable", "error", err)
 		}
-	default:
-		if dockerAdapter, err := docker.NewFromEnv(); err == nil {
-			dockerAdapter.AttachHub = attachHub
-			adapters[domain.ClassLongLivedAgent] = dockerAdapter
-			adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
-		} else {
-			logger.Warn("docker runtime unavailable", "error", err)
-		}
 	}
+	_ = dockerAdapter
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:         st,

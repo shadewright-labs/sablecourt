@@ -26,7 +26,7 @@ admission and launch. It returns fresh argument slices on each call.
 | --- | --- | --- | --- |
 | claude | 2.1.332 | sablecourt-harness-claude | claude auth login |
 | codex | 0.172.0 | sablecourt-harness-codex | codex login --device-auth |
-| agy | 1.5.16 | sablecourt-harness-agy | agy |
+| agy | 1.5.17 | sablecourt-harness-agy | agy |
 
 `StateDir` is the volume mount destination and `User` is the non-root identity.
 `ProxyImage` publishes the matching proxy image tag. Tags include a digest of

@@ -47,6 +47,11 @@ type WorkloadEndpoint struct {
 	proxyName                      string
 }
 
+// ProxyName returns the generated container name of the pinned proxy.
+func (w WorkloadEndpoint) ProxyName() string {
+	return w.proxyName
+}
+
 // Env supplies proxy settings for a workload that joins Network alone and
 // starts with a clean environment.
 func (w WorkloadEndpoint) Env() []string {

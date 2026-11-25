@@ -8,14 +8,17 @@ import (
 )
 
 type LaunchSpec struct {
-	TaskID         string
-	Workload       domain.Workload
-	WorkDir        string
-	InputJSON      string
-	ModelGateURL   string
-	DataGateURL    string
-	TaskToken      string
-	ModelGateToken string
+	TaskID           string
+	Workload         domain.Workload
+	WorkDir          string
+	InputJSON        string
+	ModelGateURL     string
+	DataGateURL      string
+	TaskToken        string
+	ModelGateToken   string
+	CouncilContainer bool
+	CouncilDeadline  time.Time
+	CreateAttempt    string
 }
 
 type Handle struct {
@@ -26,6 +29,11 @@ type Handle struct {
 	PID              int
 	ProcessStartTime time.Time
 	LogPath          string
+	ContainerName    string
+	CreateAttempt    string
+	ContainerID      string
+	ProxyName        string
+	NetworkName      string
 }
 
 type ObservedState string
@@ -89,12 +97,25 @@ type CouncilLimits struct {
 	WallTime    time.Duration
 }
 
+// CouncilIdentity binds a council container to its durable name and create attempt.
+type CouncilIdentity struct {
+	ContainerName string
+	CreateAttempt string
+	ContainerID   string
+}
+
 type CouncilLaunch struct {
 	TaskID, Workload  string
 	Harness, Model    string
 	Checkout          CouncilCheckout
 	Limits            CouncilLimits
 	Prompt, TaskToken string
+	Network           string
+	ProxyURL          string
+	DataGateURL       string
+	CreateAttempt     string
+	OnCreated         func(context.Context, CouncilIdentity) error
+	OnStarted         func(context.Context, CouncilIdentity) error
 }
 
 // CouncilResult identifies the exact container for evidence and cleanup retries.
@@ -106,10 +127,31 @@ type CouncilResult struct {
 	Stdout, Stderr               string
 }
 
+// CouncilInspection reports verified Docker container state for recovery and polling.
+type CouncilInspection struct {
+	Exists      bool
+	Running     bool
+	Exited      bool
+	ExitCode    int
+	FinishedAt  time.Time
+	ContainerID string
+}
+
 type CouncilRecorder func(context.Context, CouncilResult) error
 
 // CouncilRunner runs to completion inside the coding adapter's process lifecycle.
 // The recorder persists the result before the container is removed.
 type CouncilRunner interface {
 	RunCouncil(context.Context, CouncilLaunch, CouncilRecorder) (CouncilResult, error)
+}
+
+// CouncilInspector verifies and removes council containers across daemon restarts.
+type CouncilInspector interface {
+	InspectCouncil(context.Context, CouncilIdentity) (CouncilInspection, error)
+	CleanupCouncil(context.Context, CouncilResult) error
+}
+
+// LocalImageResolver resolves a local image reference to its immutable sha256 ID without pulling.
+type LocalImageResolver interface {
+	ResolveLocalImage(context.Context, string) (string, error)
 }

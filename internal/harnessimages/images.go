@@ -49,7 +49,7 @@ func Lookup(role string) (Definition, error) {
 	case "codex":
 		d.Version, d.LoginArgv = "0.172.0", []string{"codex", "login", "--device-auth"}
 	case "agy":
-		d.Version, d.LoginArgv = "1.5.16", []string{"agy"}
+		d.Version, d.LoginArgv = "1.5.17", []string{"agy"}
 	default:
 		return Definition{}, fmt.Errorf("unknown harness role (choose claude, codex, or agy)")
 	}
