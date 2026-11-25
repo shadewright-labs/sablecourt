@@ -7,6 +7,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 )
 
 // hostAllowlistMiddleware checks the HTTP authority before auth, routing, or redirects.
@@ -103,8 +105,18 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 	if err != nil {
 		return nil, err
 	}
+	councilGate, _ := councilproxy.GateAuthority(cfg.listenAddr)
+	limitedCouncilGate := councilproxy.WrapGateHandler(next, councilproxy.DefaultGateLimits())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, valid := hostAuthority(r.Host)
+		if valid && strings.HasPrefix(host, councilproxy.Authority+":") {
+			if !unixSocket && host == councilGate && councilproxy.AllowsGateRequest(r) {
+				limitedCouncilGate.ServeHTTP(w, r)
+				return
+			}
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
+			return
+		}
 		if valid && host == gate && strings.HasPrefix(path.Clean(r.URL.Path), "/gate/") && strings.HasPrefix(r.URL.EscapedPath(), "/gate/") {
 			next.ServeHTTP(w, r)
 			return
