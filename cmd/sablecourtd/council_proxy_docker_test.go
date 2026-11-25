@@ -68,7 +68,12 @@ func TestCouncilProxyDocker(t *testing.T) {
 	ln := proxyTestListener(t)
 	daemonAddr := ln.Addr().String()
 	daemon := daemonConfig{listenAddr: daemonAddr}
-	h, err := daemon.hostHandler(newHandler(st, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil), false)
+	mux := newHandler(st, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	h, err := daemon.hostHandler(mux, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateHandler, err := daemon.councilGateHandler(mux)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +98,7 @@ func TestCouncilProxyDocker(t *testing.T) {
 		t.Helper()
 		s, err := councilproxy.Provision(ctx, d, image, councilproxy.Config{
 			Harness: "claude", DaemonListen: daemonAddr, LeaseSHA256: model.HashToken(token),
-			SocketRoot: sockRoot, GateHandler: h,
+			SocketRoot: sockRoot, GateHandler: gateHandler,
 		})
 		if s != nil {
 			t.Cleanup(func() {
