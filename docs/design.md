@@ -186,7 +186,7 @@ type Adapter interface {
 Used for long-lived AI agents, sandbox workloads, and deterministic controllers. Built on `github.com/docker/docker/client`:
 
 - Creates a dedicated Docker bridge network with `Internal: true` (no internet egress).
-- Today this runtime still gives workloads a direct HTTP gate URL. The per-launch council proxy (a fixed gate route allow-list over a per-launch Unix socket or pinned TLS, with no route from the internal network to the host) is built separately in `internal/gate/councilproxy` and is not yet wired into this runtime or the daemon launcher (issue 78). See the proxy to daemon hop in [ADR-0011](adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
+- Council turns launched in containers reach the gate only through the per-launch council proxy in `internal/gate/councilproxy` (a fixed gate route allow-list over a per-launch Unix socket or pinned TLS, with no route from the internal network to the host). The coding adapter provisions the proxy and checks its readiness before it starts the harness, and it fails the launch if either step fails. The harness receives only the proxy endpoint, and its lease is read from private scratch. Stop, retry, and daemon restart remove the container, the proxy, and the network. See the proxy to daemon hop in [ADR-0011](adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
 - Starts containers with `--cap-drop=ALL`, `no-new-privileges`, read-only root filesystem where supported by the workload image, and a single bind mount scoped to the task's working directory.
 - Long-lived agents persist state via a mounted checkpoint directory or control-plane checkpoint endpoint before `Suspend`.
 

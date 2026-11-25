@@ -71,7 +71,7 @@ On macOS, the outer Seatbelt profile causes the `codex` inner sandbox to fail wi
 
 Status of this amendment: Proposed.
 
-This records how a council harness reaches the daemon gate now that the per-launch proxy is in the tree. If accepted, it closes the first open check above (choose between the pinned gate proxy and the per-workload Unix socket): both are built, and a launch probe picks one. Wiring the proxy into the production launcher is tracked in issue 78 and is not part of this amendment. [council proxy](../../internal/gate/councilproxy), [daemon host routing](../../cmd/sablecourtd/host.go).
+This records how a council harness reaches the daemon gate now that the per-launch proxy is in the tree. If accepted, it closes the first open check above (choose between the pinned gate proxy and the per-workload Unix socket): both are built, and a launch probe picks one. The production launcher in the coding adapter uses the proxy (issue 78) and starts the harness only after the proxy is provisioned and verified ready; this amendment does not change that wiring. [council proxy](../../internal/gate/councilproxy), [daemon host routing](../../cmd/sablecourtd/host.go).
 
 Each launch gets its own internal network and its own proxy container. The harness joins only the internal network. The proxy is the only other member of that network and the only container with egress. The network is created with the isolated bridge gateway mode for IPv4 and IPv6, which needs Docker Engine 28.0 or newer. The daemon reads the network back and refuses to publish an endpoint unless the engine applied that mode and assigned no gateway.
 
