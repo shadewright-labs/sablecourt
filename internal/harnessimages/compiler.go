@@ -47,7 +47,7 @@ func (c LocalProxyCompiler) Compile(ctx context.Context) (binary []byte, resultE
 		if err != nil {
 			return nil, fmt.Errorf("read council proxy source %s", name)
 		}
-		if err := os.WriteFile(dest, body, 0600); err != nil {
+		if err := os.WriteFile(dest, body, 0600); err != nil { // #nosec G703 -- dest joins the private scratch directory with a fixed allow-list of relative source names, never user input.
 			return nil, err
 		}
 	}
