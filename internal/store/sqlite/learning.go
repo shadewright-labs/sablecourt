@@ -191,31 +191,42 @@ func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest str
 			return domain.Learning{}, err
 		}
 		if pred.Status == domain.LearningStatusRetired {
-			return domain.Learning{}, fmt.Errorf("%w: predecessor %s is already retired", store.ErrConflict, pred.ID)
-		}
-		supersededReason := truncateUTF8("superseded by "+rec.ID, store.MaxLearningFieldBytes)
-		res, err := tx.ExecContext(ctx, `
-			UPDATE learnings
-			SET status = 'retired', review_reason = ?, updated_at = ?
-			WHERE id = ? AND status <> 'retired'
-		`, supersededReason, nowStr, pred.ID)
-		if err != nil {
-			return domain.Learning{}, err
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return domain.Learning{}, store.ErrConflict
-		}
-		if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
-			LearningID:   pred.ID,
-			FromStatus:   pred.Status,
-			ToStatus:     domain.LearningStatusRetired,
-			EventKind:    "retired",
-			Actor:        operator,
-			Reason:       supersededReason,
-			SupersededBy: rec.ID,
-			CreatedAt:    now,
-		}); err != nil {
-			return domain.Learning{}, err
+			var superseded bool
+			err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS (SELECT 1 FROM learning_history
+					WHERE learning_id = ? AND event_kind = 'retired' AND superseded_by = ?)
+			`, pred.ID, rec.ID).Scan(&superseded)
+			if err != nil {
+				return domain.Learning{}, err
+			}
+			if !superseded {
+				return domain.Learning{}, fmt.Errorf("%w: predecessor %s is already retired", store.ErrConflict, pred.ID)
+			}
+		} else {
+			supersededReason := truncateUTF8("superseded by "+rec.ID, store.MaxLearningFieldBytes)
+			res, err := tx.ExecContext(ctx, `
+				UPDATE learnings
+				SET status = 'retired', review_reason = ?, updated_at = ?
+				WHERE id = ? AND status <> 'retired'
+			`, supersededReason, nowStr, pred.ID)
+			if err != nil {
+				return domain.Learning{}, err
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				return domain.Learning{}, store.ErrConflict
+			}
+			if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+				LearningID:   pred.ID,
+				FromStatus:   pred.Status,
+				ToStatus:     domain.LearningStatusRetired,
+				EventKind:    "retired",
+				Actor:        operator,
+				Reason:       supersededReason,
+				SupersededBy: rec.ID,
+				CreatedAt:    now,
+			}); err != nil {
+				return domain.Learning{}, err
+			}
 		}
 	}
 
@@ -321,6 +332,9 @@ func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID 
 	nowStr := store.FormatLearningTime(now)
 	if createdAt > nowStr || rec.LastConfirmedAt == nil || now.Before(*rec.LastConfirmedAt) {
 		return domain.Learning{}, fmt.Errorf("%w: outcome or last confirmation is in the future", store.ErrConflict)
+	}
+	if createdAt < store.FormatLearningTime(*rec.LastConfirmedAt) {
+		return domain.Learning{}, fmt.Errorf("%w: outcome predates the current review window", store.ErrConflict)
 	}
 	if err := subsequentLearningOutcome(ctx, tx, id, createdAt); err != nil {
 		return domain.Learning{}, err
@@ -723,11 +737,46 @@ func (s *SQLiteStore) ExpireLearnings(ctx context.Context, now time.Time) (int, 
 }
 
 func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFilter) ([]domain.Learning, error) {
+	query, err := buildLearningListQuery(filter)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, query.sql, query.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Learning
+	for rows.Next() {
+		rec, err := scanLearningRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if query.matchPaths && !store.MatchesLearningPaths(rec.Scope.PathGlobs, filter.Paths) {
+			continue
+		}
+		out = append(out, rec)
+		if len(out) == query.limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
+type learningListQuery struct {
+	sql        string
+	args       []any
+	matchPaths bool
+	limit      int
+}
+
+func buildLearningListQuery(filter store.LearningFilter) (learningListQuery, error) {
 	if filter.Status != "" && !store.ValidLearningStatus(filter.Status) {
-		return nil, errors.New("invalid learning status filter")
+		return learningListQuery{}, errors.New("invalid learning status filter")
 	}
 	if filter.Limit < 0 {
-		return nil, errors.New("invalid learning list limit")
+		return learningListQuery{}, errors.New("invalid learning list limit")
 	}
 	limit := filter.Limit
 	if limit == 0 {
@@ -736,17 +785,12 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 	if limit > store.MaxLearningListLimit {
 		limit = store.MaxLearningListLimit
 	}
-	now := filter.Now.UTC()
-	if filter.Now.IsZero() {
-		now = time.Now().UTC()
-	}
-
 	var conds []string
 	var args []any
 
 	if filter.ScopeKey != "" {
-		if !store.ValidLearningText(filter.ScopeKey, store.MaxLearningFieldBytes) {
-			return nil, errors.New("invalid scope key filter")
+		if !store.ValidLearningText(filter.ScopeKey, store.MaxLearningScopeKeyBytes) {
+			return learningListQuery{}, errors.New("invalid scope key filter")
 		}
 		conds = append(conds, "scope_key = ?")
 		args = append(args, filter.ScopeKey)
@@ -754,14 +798,13 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 	if filter.GlobalOnly {
 		conds = append(conds, "scope_global = 1")
 	}
-	// Pending, retired, and explicitly expired records are available for review.
-	match := !filter.IncludeExpired && (filter.Status == "" || filter.Status == domain.LearningStatusAccepted)
+	match := filter.Status == "" || filter.Status == domain.LearningStatusAccepted
 	repo := strings.TrimSpace(filter.RepoRemoteURL)
 	if repo != "" {
 		var err error
 		repo, err = store.NormalizeRepoRemoteURL(repo)
 		if err != nil {
-			return nil, err
+			return learningListQuery{}, err
 		}
 	}
 	for _, sel := range []struct {
@@ -776,7 +819,7 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 	} {
 		v := strings.TrimSpace(sel.value)
 		if v != "" && !store.ValidLearningID(v, sel.max) {
-			return nil, errors.New("invalid learning selector")
+			return learningListQuery{}, errors.New("invalid learning selector")
 		}
 		if match {
 			conds = append(conds, sel.column+" IN ('', ?)")
@@ -804,12 +847,15 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 		args = append(args, string(filter.Status))
 	}
 	if match {
-		conds = append(conds, `needs_scope_mapping = 0 AND expires_at > ? AND NOT EXISTS (
+		if !filter.IncludeExpired {
+			conds = append(conds, "expires_at > ?")
+			args = append(args, store.FormatLearningTime(filter.Now))
+		}
+		conds = append(conds, `needs_scope_mapping = 0 AND NOT EXISTS (
 			SELECT 1 FROM learning_outcomes o WHERE o.learning_id = learnings.id
 			AND o.kind = 'contradiction' AND o.evidence_ref <> ''
 			AND o.created_at >= COALESCE(learnings.last_confirmed_at, learnings.created_at)
 		)`)
-		args = append(args, store.FormatLearningTime(now))
 	}
 
 	query := selectLearningColumns + " FROM learnings"
@@ -817,32 +863,13 @@ func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFi
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 	query += " ORDER BY scope_specificity DESC, id ASC"
-	if !match || len(filter.Paths) == 0 {
+	matchPaths := match && len(filter.Paths) > 0
+	if !matchPaths {
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []domain.Learning
-	for rows.Next() {
-		rec, err := scanLearningRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		if match && !store.MatchesLearningPaths(rec.Scope.PathGlobs, filter.Paths) {
-			continue
-		}
-		out = append(out, rec)
-		if len(out) == limit {
-			break
-		}
-	}
-	return out, rows.Err()
+	return learningListQuery{sql: query, args: args, matchPaths: matchPaths, limit: limit}, nil
 }
 
 func (s *SQLiteStore) ListLearningHistory(ctx context.Context, learningID string) ([]domain.LearningHistory, error) {
