@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 380" role="img" aria-labelledby="t d" data-diagram="timeline" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Identity rollout stages</title>
-  <desc id="d">Four planned stages spaced evenly by delivery milestone along the rollout order axis. Stage 0 closes logout, loopback lockout, provider-sync environment leaks, single-use approvals, and authentication audit rows. Stage 1 adds passkeys, hashed server-side sessions, verified principals, and rotating integration keys. Stage 2 adds 0400 file leases, per-launch proxy sockets, and daemon CA mutual TLS. Stage 3 adds external OIDC providers, RoleBinding roles, TrustPolicy federation, TokenReview, and signed audit heads, with sign-in able to start right after Stage 1.</desc>
+  <desc id="d">Four planned stages spaced evenly by delivery milestone along the rollout order axis. Stage 0 adds browser-only logout cookie clearing, closes loopback login lockout and provider-sync environment leaks, enforces single-use approvals, and writes authentication audit rows. Stage 1 consumes operator.token on first passkey enrolment, adds hashed revocable server-side sessions, requires fresh passkey or paired-device approval proof, and ships rotating integration key slots. Stage 2 delivers 0400 file leases through the trusted gate proxy with copied-lease channel binding and mutual TLS from a keychain-backed daemon CA. Stage 3 adds server-side single-use OIDC transactions, RoleBinding roles, administrator-pinned TokenReview, single-use allowlisted break-glass sessions, and signed audit heads, with sign-in able to start right after Stage 1.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -38,7 +38,7 @@
   <text class="pn" x="44" y="54">STAGE 0</text>
   <rect class="plan" x="44" y="64" width="240" height="72" rx="10"/>
   <text class="h" x="60" y="90">Immediate auth fixes</text>
-  <text class="s" x="60" y="111">closes logout, 429, env leak</text>
+  <text class="s" x="60" y="111">browser logout, 429, env fix</text>
   <text class="s" x="60" y="128">single-use approvals, auth log</text>
   <path class="r" d="M164 136V192"/>
   <circle cx="164" cy="200" r="8" fill="#2dd4bf"/>
@@ -48,14 +48,14 @@
   <text class="pn" x="304" y="254">STAGE 1</text>
   <rect class="plan" x="304" y="264" width="240" height="72" rx="10"/>
   <text class="h" x="320" y="290">Passkeys and sessions</text>
-  <text class="s" x="320" y="311">closes static op_ form login</text>
-  <text class="s" x="320" y="328">verified principals, key slots</text>
+  <text class="s" x="320" y="311">consumes op_, hashed sessions</text>
+  <text class="s" x="320" y="328">fresh approval proof, key slots</text>
 
   <text class="pn" x="564" y="54">STAGE 2</text>
   <rect class="plan" x="564" y="64" width="240" height="72" rx="10"/>
   <text class="h" x="580" y="90">Channel-bound leases</text>
-  <text class="s" x="580" y="111">closes env token and proxy gap</text>
-  <text class="s" x="580" y="128">0400 file lease, daemon CA mTLS</text>
+  <text class="s" x="580" y="111">trusted proxy, copied-lease ban</text>
+  <text class="s" x="580" y="128">0400 lease, keychain CA mTLS</text>
   <path class="r" d="M684 136V194"/>
   <circle cx="684" cy="200" r="6" fill="#8a8594"/>
 
@@ -64,8 +64,8 @@
   <text class="pn" x="824" y="254">STAGE 3</text>
   <rect class="plan" x="824" y="264" width="240" height="72" rx="10"/>
   <text class="h" x="840" y="290">External IdP and roles</text>
-  <text class="s" x="840" y="311">closes shared static tokens</text>
-  <text class="s" x="840" y="328">OIDC, TokenReview, signed heads</text>
+  <text class="s" x="840" y="311">server OIDC tx, pinned K8s CA</text>
+  <text class="s" x="840" y="328">one-use break-glass, audit heads</text>
 
   <path class="r" d="M544 300H818" marker-end="url(#m)"/>
   <text class="lbl" x="684" y="292" text-anchor="middle">sign-in can start</text>

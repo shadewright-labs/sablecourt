@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 492" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Local and shared sign-in</title>
-  <desc id="d">In local mode, the 0600 bootstrap token enrols a localhost passkey (or grants a headless CLI session) to authenticate local:operator. In shared mode, an external provider completes an OIDC PKCE or device flow, the OIDC callback checks issuer, audience, and nonce against a 5-minute Lax state cookie, and RoleBinding maps oidc:issuer:subject to viewer, operator, or approver while denying unmapped or overage claims with 403. Both lanes converge on the same hashed server-side session in sablecourtd. Dashed boxes and lines mark planned steps.</desc>
+  <desc id="d">In local mode, the 0600 bootstrap token is consumed on first passkey enrolment; passkey sign-in with WebAuthn user verification over loopback HTTP or dedicated-host local TLS authenticates local:operator, and interactive CLI login uses a CLI verifier and browser host and code comparison (while headless CLI hosts use a separate configured credential). In shared mode, an external provider returns an authorization code and issuer, the OIDC callback consumes a one-use server-side transaction to check RFC 9207 iss before code exchange and then verifies signature, audience, nonce, and exact tenant match, and RoleBinding (or a 7-day single-use Google invitation pinning sub) maps oidc:issuer:subject to viewer, operator, or approver while denying unmapped or overage claims with 403. Both lanes converge on the same hashed server-side session in sablecourtd. Dashed boxes and lines mark planned steps.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -44,17 +44,17 @@
   <rect class="box" x="44" y="76" width="208" height="72" rx="10"/>
   <text class="h" x="60" y="102">Bootstrap token</text>
   <text class="s" x="60" y="123">0600 operator.token</text>
-  <text class="s" x="60" y="140">enrol or headless CLI</text>
+  <text class="s" x="60" y="140">consumed on first enrol</text>
 
   <rect class="plan" x="312" y="76" width="208" height="72" rx="10"/>
   <text class="h" x="328" y="102">Passkey sign-in</text>
-  <text class="s" x="328" y="123">WebAuthn on localhost</text>
-  <text class="s" x="328" y="140">user verification</text>
+  <text class="s" x="328" y="123">loopback or local TLS</text>
+  <text class="s" x="328" y="140">WebAuthn user check</text>
 
   <rect class="plan" x="572" y="76" width="208" height="72" rx="10"/>
   <text class="h" x="588" y="102">Local principal</text>
   <text class="s" x="588" y="123">local:operator URN</text>
-  <text class="s" x="588" y="140">browser confirms CLI</text>
+  <text class="s" x="588" y="140">CLI verifier and code</text>
 
   <rect class="ext" x="44" y="240" width="208" height="72" rx="10"/>
   <text class="h" x="60" y="266">External provider</text>
@@ -63,8 +63,8 @@
 
   <rect class="plan" x="312" y="240" width="208" height="72" rx="10"/>
   <text class="h" x="328" y="266">OIDC callback</text>
-  <text class="s" x="328" y="287">checks iss, aud, nonce</text>
-  <text class="s" x="328" y="304">5m Lax state cookie</text>
+  <text class="s" x="328" y="287">RFC 9207 iss, aud, tid</text>
+  <text class="s" x="328" y="304">one-use server-side tx</text>
 
   <rect class="plan" x="572" y="240" width="208" height="72" rx="10"/>
   <text class="h" x="588" y="266">RoleBinding check</text>
@@ -81,7 +81,7 @@
   <text class="s" x="852" y="220">Strict cookie or keychain</text>
 
   <path class="r" d="M252 112H306" marker-end="url(#m)"/>
-  <text class="lbl" x="280" y="104" text-anchor="middle">enrols</text>
+  <text class="lbl" x="280" y="104" text-anchor="middle">enrols once</text>
 
   <path class="r" d="M520 112H566" marker-end="url(#m)"/>
 
@@ -89,7 +89,7 @@
   <text class="lbl" x="884" y="104" text-anchor="middle">30m / 8h web</text>
 
   <path class="r" d="M252 276H306" marker-end="url(#m)"/>
-  <text class="lbl" x="280" y="268" text-anchor="middle">ID token</text>
+  <text class="lbl" x="280" y="268" text-anchor="middle">code and iss</text>
 
   <path class="r" d="M520 276H566" marker-end="url(#m)"/>
 
