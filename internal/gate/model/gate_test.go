@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -308,5 +309,52 @@ func TestModelGateEnforcesBudgetAndLeaseRevocation(t *testing.T) {
 	})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after revocation, got %d", rec.Code)
+	}
+}
+
+func TestUpstreamRedirect(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fallback=%t", fallback), func(t *testing.T) {
+			primary := httptest.NewRequest(http.MethodGet, "/", nil).Host
+			secondary := "fallback." + primary
+			outside := "redirect." + primary
+			var requests []string
+			client := handlerTransport(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.URL.Host)
+				if fallback && r.URL.Host == primary {
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				if r.URL.Host == outside {
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				w.Header().Set("Location", "https://"+outside)
+				w.WriteHeader(http.StatusTemporaryRedirect)
+			}))
+			gate, st := setupGateTest(t, map[string]UpstreamConfig{
+				"openai": {BaseURL: "https://" + primary},
+				"local":  {BaseURL: "https://" + secondary},
+			}, client)
+			want := []string{primary}
+			if fallback {
+				wl := gate.bundle.Workloads["ai-agent"]
+				wl.Spec.Grants.ModelGate.Providers = []string{"openai", "local"}
+				gate.bundle.Workloads["ai-agent"] = wl
+				want = append(want, secondary)
+			}
+			ctx := t.Context()
+			if err := st.CreateTask(ctx, domain.Task{ID: "task", WorkloadName: "ai-agent", State: domain.TaskStateWorking}); err != nil {
+				t.Fatal(err)
+			}
+			token, err := MintTaskToken(ctx, st, "task", "ai-agent", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := doGateRequest(gate.Handler(), http.MethodPost, "/openai/v1/chat/completions", "{}", map[string]string{"Authorization": "Bearer " + token})
+			if !slices.Equal(requests, want) || rec.Code < 400 {
+				t.Fatalf("requests = %v, status = %d", requests, rec.Code)
+			}
+		})
 	}
 }

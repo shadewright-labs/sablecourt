@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
 )
 
 const maxAgentTurns = 4
@@ -119,9 +121,8 @@ func main() {
 		history = append([]chatMessage{{Role: "user", Content: in.ContextPacket}}, history...)
 	}
 
-	cli := &http.Client{Timeout: 90 * time.Second}
 	for turn := 0; turn < maxAgentTurns; turn++ {
-		reply, err := callModelGate(cli, modelGate, token, provider, model, history)
+		reply, err := callModelGate(modelGate, token, provider, model, history)
 		if err != nil {
 			if gateRoot != "" {
 				_ = postThreadMessage(gateRoot+"/gate/task/messages", token, "agent", fmt.Sprintf("Model Gate call (%s/%s) failed: %v", provider, model, err))
@@ -159,12 +160,12 @@ func loadThreadHistory(gateRoot, token string) []chatMessage {
 	if gateRoot == "" {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/task/messages", nil)
+	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/task/messages", nil) // #nosec G704 -- main builds the thread URL from the injected data gate and a fixed path.
 	if err != nil {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := gatehttp.NewClient(nil, 10*time.Second).Do(req) // #nosec G704 -- main builds the thread URL from the injected data gate and a fixed path and gatehttp.NewClient refuses redirects.
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -195,12 +196,12 @@ func loadThreadHistory(gateRoot, token string) []chatMessage {
 }
 
 func loadConclaveHistory(gateRoot, conclaveID, token string) []chatMessage {
-	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/conclave/"+conclaveID+"/messages", nil)
+	req, err := http.NewRequest(http.MethodGet, gateRoot+"/gate/conclave/"+conclaveID+"/messages", nil) // #nosec G704 -- loadConclaveHistory appends the conclave ID after a fixed path on the injected data gate.
 	if err != nil {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := gatehttp.NewClient(nil, 10*time.Second).Do(req) // #nosec G704 -- loadConclaveHistory appends the conclave ID after a fixed path on the injected data gate and gatehttp.NewClient refuses redirects.
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -240,13 +241,13 @@ func postConclaveMessage(endpoint, token, to, kind, body string) error {
 		"kind": kind,
 		"body": body,
 	})
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(raw)) // #nosec G704 -- main appends the conclave path to the injected data gate.
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := gatehttp.NewClient(nil, 10*time.Second).Do(req) // #nosec G704 -- main appends the conclave path to the injected data gate and gatehttp.NewClient refuses redirects.
 	if err != nil {
 		return err
 	}
@@ -285,10 +286,8 @@ func (a authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func connectMCP(ctx context.Context, mcpURL, token string) (*mcp.ClientSession, []string, error) {
 	cli := mcp.NewClient(&mcp.Implementation{Name: "sablecourt-agent", Version: "0.1.0"}, nil)
-	httpCli := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: authTransport{base: http.DefaultTransport, token: token},
-	}
+	httpCli := gatehttp.NewClient(nil, 15*time.Second)
+	httpCli.Transport = authTransport{base: http.DefaultTransport, token: token}
 	sess, err := cli.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:   mcpURL,
 		HTTPClient: httpCli,
@@ -367,10 +366,10 @@ func executeDirective(ctx context.Context, sess *mcp.ClientSession, gateRoot, to
 	}
 	if dir.Action != "" && gateRoot != "" {
 		raw, _ := json.Marshal(map[string]any{"payload": dir.Args})
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gateRoot+"/gate/actions/"+dir.Action, bytes.NewReader(raw))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gateRoot+"/gate/actions/"+dir.Action, bytes.NewReader(raw)) // #nosec G704 -- executeDirective appends the action after a fixed path on the injected data gate.
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		resp, err := gatehttp.NewClient(nil, 15*time.Second).Do(req) // #nosec G704 -- executeDirective appends the action after a fixed path on the injected data gate and gatehttp.NewClient refuses redirects.
 		if err != nil {
 			return "error: " + err.Error()
 		}
@@ -394,7 +393,7 @@ func defaultModelFor(provider string) string {
 	}
 }
 
-func callModelGate(cli *http.Client, baseURL, token, provider, model string, history []chatMessage) (string, error) {
+func callModelGate(baseURL, token, provider, model string, history []chatMessage) (string, error) {
 	var endpoint string
 	var body []byte
 	var err error
@@ -434,14 +433,14 @@ func callModelGate(cli *http.Client, baseURL, token, provider, model string, his
 		return "", err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body)) // #nosec G704 -- callModelGate selects a provider path under the model gate URL that runDaemon supplies at launch.
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := cli.Do(req)
+	resp, err := gatehttp.NewClient(nil, 90*time.Second).Do(req) // #nosec G704 -- callModelGate confines the initial host to the launch configuration and gatehttp.NewClient refuses redirects.
 	if err != nil {
 		return "", err
 	}
@@ -500,13 +499,13 @@ func postThreadMessage(url, token, role, content string) error {
 		return fmt.Errorf("thread role %q is not permitted", role)
 	}
 	raw, _ := json.Marshal(map[string]string{"role": role, "content": content})
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw)) // #nosec G704 -- main appends the fixed task messages path to the data gate URL supplied by runDaemon.
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := gatehttp.NewClient(nil, 10*time.Second).Do(req) // #nosec G704 -- main appends the thread path to the injected data gate and gatehttp.NewClient refuses redirects.
 	if err != nil {
 		return err
 	}

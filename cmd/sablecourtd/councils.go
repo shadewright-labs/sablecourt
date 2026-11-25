@@ -450,7 +450,7 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 		store.RedactCouncilAnswer(source) != source {
 		return checkout, errors.New("council repo is unavailable")
 	}
-	euid := uint32(os.Geteuid())
+	euid := uint32(os.Geteuid()) // #nosec G115 -- os.Geteuid returns the kernel uid_t used by ownedDirectoryIdentity to compare directory UIDs.
 	sourceInfo, err := os.Lstat(source)
 	if err != nil || !sourceInfo.IsDir() {
 		return checkout, errors.New("council repo is unavailable")

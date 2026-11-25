@@ -397,7 +397,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	switch cfg.runtimeBackend {
 	case "k8s":
 		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
-			k8sAdapter.SetAttachHub(attachHub)
+			k8sAdapter.SetAttachHub(ctx, attachHub)
 			adapters[domain.ClassLongLivedAgent] = k8sAdapter
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
 			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
@@ -406,7 +406,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	default:
 		if dockerAdapter, err := docker.NewFromEnv(); err == nil {
-			dockerAdapter.AttachHub = attachHub
+			dockerAdapter.SetAttachHub(ctx, attachHub)
 			adapters[domain.ClassLongLivedAgent] = dockerAdapter
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
 		} else {
@@ -1430,7 +1430,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		branch := "sablecourt/promote-" + name
-		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch)
+		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
 		if out, err := cmd.CombinedOutput(); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
@@ -1522,7 +1522,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 					lastID = msgs[len(msgs)-1].ID
 				}
 				fp := fmt.Sprintf("%s:%d:%d:%d", sess.State, len(msgs), lastID, len(relics))
-				_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp)
+				_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp) // #nosec G705 -- Broker.Close restricts requested states to lifecycle constants. newHandler streams that state and integer counters as text/event-stream.
 				flusher.Flush()
 				return true
 			}
@@ -1794,7 +1794,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(voiceTranscribeMaxBytes); err != nil {
+		if err := r.ParseMultipartForm(voiceTranscribeMaxBytes); err != nil { // #nosec G120 -- newHandler caps transcribe at 24 MiB and guardOperatorRequest caps voice-decree at 2 MiB with MaxBytesReader.
 			return nil, "", "", fmt.Errorf("parse multipart audio: %w", err)
 		}
 		f, hdr, err := r.FormFile("file")
