@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -258,10 +259,14 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 }
 
 func checkWrappedTarget(target, dir string) error {
-	if _, err := os.Stat(target); err != nil {
+	info, err := os.Stat(target)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
 		return nil
 	}
 	interp, ok := shebangInterpreter(target)
@@ -297,6 +302,12 @@ func shebangInterpreter(path string) (string, bool) {
 		line = line[:end]
 	} else if n == len(buf) {
 		return "", false
+	}
+	if runtime.GOOS == "darwin" {
+		// The Darwin kernel ends the interpreter line at '#' as well as at a newline.
+		if end := bytes.IndexByte(line, '#'); end >= 0 {
+			line = line[:end]
+		}
 	}
 	trimmed := strings.TrimLeft(string(line), " \t")
 	if trimmed == "" {

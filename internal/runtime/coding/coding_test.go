@@ -473,6 +473,9 @@ func TestCheckWrappedTarget(t *testing.T) {
 		{name: "missing interpreter with whitespace and args", content: "#!  \t" + filepath.Join(dir, "no-such-interp") + "\t--flag\n", wantMissing: true},
 		{name: "non-executable existing interpreter", content: "#!" + nonExecInterp + "\n"},
 		{name: "empty shebang", content: "#!   \n"},
+		{name: "comment after interpreter", content: "#!" + shell + "#comment\n", wantMissing: runtime.GOOS != "darwin"},
+		{name: "comment after missing interpreter", content: "#!" + filepath.Join(dir, "no-such-interp") + "#comment\n", wantMissing: true},
+		{name: "comment only shebang", content: "#!#comment\n"},
 		{name: "oversized shebang", content: "#!" + strings.Repeat("a", 520) + "\n"},
 		{name: "binary without shebang", content: "\xcf\xfa\xed\xfe\x00\x00"},
 		{name: "empty file", content: ""},
@@ -496,6 +499,28 @@ func TestCheckWrappedTarget(t *testing.T) {
 				t.Fatalf("checkWrappedTarget = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestCheckWrappedTargetSkipsNonRegularFile(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "harness")
+	if err := syscall.Mkfifo(fifo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- checkWrappedTarget(fifo, t.TempDir()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("checkWrappedTarget = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Unblock the stuck open so the goroutine can finish.
+		if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+			_ = w.Close()
+		}
+		<-done
+		t.Fatal("checkWrappedTarget blocked opening a FIFO")
 	}
 }
 
