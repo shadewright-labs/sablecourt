@@ -33,6 +33,8 @@ const (
 	ContainerGateSocket            = "/gate.sock"
 	ProbeSocketUnsupportedExitCode = 42
 	launchCertLifetime             = 2 * time.Hour
+	launchCertRenewBefore          = launchCertLifetime / 2
+	probeDrainTimeout              = 5 * time.Second
 )
 
 // ErrGateSocketUnsupported indicates that a bind-mounted host Unix socket cannot be connected from a container.
@@ -139,7 +141,26 @@ func ensureSocketRoot(sockRoot string) (string, error) {
 	return clean, nil
 }
 
+// launchDirName reports whether name matches a per-launch directory created by
+// createPrivateUnixSocket: a "g-" or "p-" prefix and 16 lowercase hex digits.
+func launchDirName(name string) bool {
+	rest, ok := strings.CutPrefix(name, "g-")
+	if !ok {
+		rest, ok = strings.CutPrefix(name, "p-")
+	}
+	if !ok || len(rest) != 16 {
+		return false
+	}
+	for _, c := range rest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // SweepStaleSockets removes leftover per-launch socket directories from prior daemon runs.
+// The caller must hold the state directory lock so a live daemon is never swept.
 func SweepStaleSockets(sockRoot string) error {
 	clean := filepath.Clean(sockRoot)
 	if !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
@@ -163,6 +184,11 @@ func SweepStaleSockets(sockRoot string) error {
 		return readErr
 	}
 	for _, entry := range entries {
+		// Only directories shaped like per-launch socket directories are stale
+		// launches; any other entry in the socket root is left alone.
+		if !entry.IsDir() || !launchDirName(entry.Name()) {
+			continue
+		}
 		if err := root.RemoveAll(entry.Name()); err != nil {
 			return fmt.Errorf("remove stale council gate socket entry %q: %w", entry.Name(), err)
 		}
@@ -218,14 +244,22 @@ func createPrivateUnixSocket(sockRoot, prefix string) (sockPath string, ln net.L
 		return "", nil, nil, err
 	}
 	closeRootOnErr = false
-	var once sync.Once
-	var cleanErr error
+	var cleanupMu sync.Mutex
+	cleaned := false
+	// cleanup is retryable: the verified root handle stays open until the launch
+	// directory is gone, so a failed removal can be repeated by a later call.
 	cleanup = func() error {
-		once.Do(func() {
-			_ = uln.Close()
-			cleanErr = errors.Join(root.RemoveAll(subName), root.Close())
-		})
-		return cleanErr
+		cleanupMu.Lock()
+		defer cleanupMu.Unlock()
+		if cleaned {
+			return nil
+		}
+		_ = uln.Close()
+		if err := root.RemoveAll(subName); err != nil {
+			return err
+		}
+		cleaned = true
+		return root.Close()
 	}
 	return sockPath, uln, cleanup, nil
 }
@@ -242,25 +276,40 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		return false, err
 	}
 	probeToken := hex.EncodeToString(tokenRaw[:])
+	var sentinelRaw [16]byte
+	if _, err := rand.Read(sentinelRaw[:]); err != nil {
+		return false, err
+	}
+	sentinel := hex.EncodeToString(sentinelRaw[:])
 	var accepted, verified atomic.Bool
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		conn, acceptErr := ln.Accept()
-		if acceptErr != nil {
-			return
-		}
-		accepted.Store(true)
+	// serve handles one accepted connection and reports whether it was the
+	// host's own drain marker.
+	serve := func(conn net.Conn) (drained bool) {
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 		line, readErr := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return
-		}
 		got := strings.TrimSpace(line)
+		if subtle.ConstantTimeCompare([]byte(got), []byte(sentinel)) == 1 {
+			return true
+		}
+		accepted.Store(true)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return false
+		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(probeToken)) == 1 {
 			if _, writeErr := io.WriteString(conn, "ok\n"); writeErr == nil {
 				verified.Store(true)
+			}
+		}
+		return false
+	}
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil || serve(conn) {
+				return
 			}
 		}
 	}()
@@ -276,10 +325,25 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		NoNewPrivileges:     true,
 		Args:                []string{"-probe-gate-socket", ContainerGateSocket, "-probe-token", probeToken},
 	})
+	// Connections queue in order, so once the host's own marker connection has
+	// been served, any connection the probe container made was served before it.
+	// Closing the listener first could drop a queued connection unseen and let a
+	// container that reached the host socket pass for one that could not.
+	drainErr := drainProbeListener(ctx, sockPath, sentinel)
+	if drainErr == nil {
+		select {
+		case <-acceptDone:
+		case <-time.After(probeDrainTimeout):
+			drainErr = errors.New("council gate socket probe did not drain pending connections")
+		}
+	}
 	_ = ln.Close()
 	<-acceptDone
 	if cleanErr := cleanup(); cleanErr != nil {
 		return false, cleanErr
+	}
+	if drainErr != nil {
+		return false, drainErr
 	}
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -297,6 +361,21 @@ func probeUnixSocketMode(ctx context.Context, docker Docker, imageID, proxyName,
 		return false, errors.New("council gate socket probe did not complete token exchange")
 	}
 	return true, nil
+}
+
+func drainProbeListener(ctx context.Context, sockPath, sentinel string) error {
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(context.WithoutCancel(ctx), "unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("council gate socket probe drain: %w", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(conn, sentinel+"\n"); err != nil {
+		return fmt.Errorf("council gate socket probe drain: %w", err)
+	}
+	return nil
 }
 
 func isSocketNotShareable(err error) bool {
@@ -340,14 +419,22 @@ func IsUnshareableSocketBindError(hostSocketPath string, exitCode int, output st
 			}
 		}
 	}
-	if strings.Contains(output, "Mounts denied:") && strings.Contains(output, "not shared from the host") {
-		for _, cand := range candidates {
-			if strings.Contains(output, cand) {
-				return true
+	if strings.Contains(output, "Mounts denied:") {
+		for _, line := range strings.Split(output, "\n") {
+			_, rest, ok := strings.Cut(line, "The path ")
+			if !ok {
+				continue
 			}
-			dir := filepath.Dir(cand)
-			if dir != string(filepath.Separator) && dir != "." && strings.Contains(output, dir) {
-				return true
+			denied, _, ok := strings.Cut(rest, " is not shared from the host")
+			if !ok {
+				continue
+			}
+			denied = filepath.Clean(strings.TrimSpace(denied))
+			for _, cand := range candidates {
+				dir := filepath.Dir(cand)
+				if denied == cand || (dir != string(filepath.Separator) && dir != "." && denied == dir) {
+					return true
+				}
 			}
 		}
 	}
@@ -501,6 +588,8 @@ type tlsGate struct {
 	addr       string
 	port       string
 	spkiSHA256 string
+	key        *ecdsa.PrivateKey
+	renewMu    sync.Mutex
 	cert       atomic.Pointer[tls.Certificate]
 	tlsConfig  *tls.Config
 	server     *http.Server
@@ -508,15 +597,21 @@ type tlsGate struct {
 	closeOnce  sync.Once
 }
 
-func newLaunchCertificate(now time.Time, validity time.Duration) (tls.Certificate, string, error) {
+func newLaunchKey() (*ecdsa.PrivateKey, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, "", fmt.Errorf("generate council gate P-256 key: %w", err)
+		return nil, fmt.Errorf("generate council gate P-256 key: %w", err)
 	}
+	return priv, nil
+}
+
+// signLaunchCertificate issues a certificate for priv. Reissuing with the same
+// key keeps the SPKI digest that the proxy received at launch.
+func signLaunchCertificate(priv *ecdsa.PrivateKey, now time.Time, validity time.Duration) (tls.Certificate, error) {
 	serialMax := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialMax)
 	if err != nil {
-		return tls.Certificate{}, "", fmt.Errorf("generate council gate certificate serial: %w", err)
+		return tls.Certificate{}, fmt.Errorf("generate council gate certificate serial: %w", err)
 	}
 	serial.Add(serial, big.NewInt(1))
 
@@ -531,18 +626,30 @@ func newLaunchCertificate(now time.Time, validity time.Duration) (tls.Certificat
 	}
 	derCert, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return tls.Certificate{}, "", fmt.Errorf("create council gate certificate: %w", err)
+		return tls.Certificate{}, fmt.Errorf("create council gate certificate: %w", err)
 	}
 	leaf, err := x509.ParseCertificate(derCert)
 	if err != nil {
-		return tls.Certificate{}, "", fmt.Errorf("parse council gate certificate: %w", err)
+		return tls.Certificate{}, fmt.Errorf("parse council gate certificate: %w", err)
 	}
-	spkiSum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
 	return tls.Certificate{
 		Certificate: [][]byte{derCert},
 		PrivateKey:  priv,
 		Leaf:        leaf,
-	}, hex.EncodeToString(spkiSum[:]), nil
+	}, nil
+}
+
+func newLaunchCertificate(now time.Time, validity time.Duration) (tls.Certificate, string, error) {
+	priv, err := newLaunchKey()
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	cert, err := signLaunchCertificate(priv, now, validity)
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	spkiSum := sha256.Sum256(cert.Leaf.RawSubjectPublicKeyInfo)
+	return cert, hex.EncodeToString(spkiSum[:]), nil
 }
 
 func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
@@ -563,10 +670,16 @@ func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
 	}
 	limits = limits.normalized()
 
-	cert, spkiHex, err := newLaunchCertificate(time.Now(), launchCertLifetime)
+	key, err := newLaunchKey()
 	if err != nil {
 		return nil, err
 	}
+	cert, err := signLaunchCertificate(key, time.Now(), launchCertLifetime)
+	if err != nil {
+		return nil, err
+	}
+	spkiSum := sha256.Sum256(cert.Leaf.RawSubjectPublicKeyInfo)
+	spkiHex := hex.EncodeToString(spkiSum[:])
 	rawLn, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
 	if err != nil {
 		return nil, fmt.Errorf("listen council gate TLS loopback: %w", err)
@@ -582,6 +695,7 @@ func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
 		addr:       addr,
 		port:       port,
 		spkiSHA256: spkiHex,
+		key:        key,
 	}
 	g.cert.Store(&cert)
 	tlsCfg := &tls.Config{
@@ -589,11 +703,7 @@ func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
 		MaxVersion:             tls.VersionTLS13,
 		SessionTicketsDisabled: true,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			c := g.cert.Load()
-			if c == nil {
-				return nil, errors.New("council gate TLS launch closed")
-			}
-			return c, nil
+			return g.currentCertificate(time.Now())
 		},
 	}
 	handler := gateRouteHandler(gate, digest, WrapGateHandler(sanitizeGateHandler(cfg.GateHandler), limits))
@@ -612,12 +722,43 @@ func startTLSGate(cfg Config, limits GateLimits) (*tlsGate, error) {
 	return g, nil
 }
 
+// currentCertificate returns the launch certificate, reissuing it with the same
+// key once half its lifetime has passed. Leases outlive a single certificate, so
+// gate requests must keep working after the first one expires, and the unchanged
+// key keeps the SPKI pin the proxy was started with valid.
+func (g *tlsGate) currentCertificate(now time.Time) (*tls.Certificate, error) {
+	c := g.cert.Load()
+	if c == nil {
+		return nil, errors.New("council gate TLS launch closed")
+	}
+	if now.Before(c.Leaf.NotAfter.Add(-launchCertRenewBefore)) {
+		return c, nil
+	}
+	g.renewMu.Lock()
+	defer g.renewMu.Unlock()
+	c = g.cert.Load()
+	if c == nil {
+		return nil, errors.New("council gate TLS launch closed")
+	}
+	if now.Before(c.Leaf.NotAfter.Add(-launchCertRenewBefore)) {
+		return c, nil
+	}
+	fresh, err := signLaunchCertificate(g.key, now, launchCertLifetime)
+	if err != nil {
+		return nil, err
+	}
+	g.cert.Store(&fresh)
+	return &fresh, nil
+}
+
 func (g *tlsGate) close() error {
 	if g == nil {
 		return nil
 	}
 	g.closeOnce.Do(func() {
+		g.renewMu.Lock()
 		g.cert.Store(nil)
+		g.renewMu.Unlock()
 		_ = g.server.Close()
 		<-g.done
 	})

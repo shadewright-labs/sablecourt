@@ -253,8 +253,10 @@ func (s *Session) Close(ctx context.Context) error {
 	s.evidence = LaunchEvidence{}
 	var gateErr error
 	if s.unixGate != nil {
-		gateErr = s.unixGate.close()
-		s.unixGate = nil
+		// Keep the handle when cleanup fails so a later Close retries the removal.
+		if gateErr = s.unixGate.close(); gateErr == nil {
+			s.unixGate = nil
+		}
 	}
 	if s.tlsGate != nil {
 		gateErr = errors.Join(gateErr, s.tlsGate.close())

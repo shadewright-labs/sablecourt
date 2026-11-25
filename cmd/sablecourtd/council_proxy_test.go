@@ -59,10 +59,10 @@ func TestCouncilProxyAuthority(t *testing.T) {
 func TestCouncilProxyRequiresLoopbackDaemon(t *testing.T) {
 	for _, tc := range []struct {
 		name, host string
-		allowed    bool
+		want       int
 	}{
-		{"loopback", net.IPv6loopback.String(), true},
-		{"unspecified", net.IPv6unspecified.String(), false},
+		{"loopback", net.IPv6loopback.String(), http.StatusNoContent},
+		{"unspecified", net.IPv6unspecified.String(), http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := daemonConfig{listenAddr: net.JoinHostPort(tc.host, "7432")}
@@ -76,8 +76,8 @@ func TestCouncilProxyRequiresLoopbackDaemon(t *testing.T) {
 			r.Host = net.JoinHostPort("sablecourt-council-gate", "7432")
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			if (w.Code == http.StatusNoContent) != tc.allowed {
-				t.Fatalf("unexpected status %d", w.Code)
+			if w.Code != tc.want {
+				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}
 		})
 	}
@@ -94,7 +94,7 @@ func TestInitDaemonStateSweepsStaleCouncilGateSockets(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
 
 	gatesDir := councilproxy.SocketRoot(stateDir)
-	staleLaunch := filepath.Join(gatesDir, "g-stale1234")
+	staleLaunch := filepath.Join(gatesDir, "g-0123456789abcdef")
 	if err := os.MkdirAll(staleLaunch, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestInitDaemonStateSweepsStaleCouncilGateSockets(t *testing.T) {
 	}
 
 	// While the first daemon holds the lock, a second initDaemonState must fail before sweeping.
-	liveLaunch := filepath.Join(gatesDir, "g-live5678")
+	liveLaunch := filepath.Join(gatesDir, "g-fedcba9876543210")
 	if err := os.MkdirAll(liveLaunch, 0o700); err != nil {
 		_ = lock.Close()
 		t.Fatal(err)
@@ -143,6 +143,52 @@ func TestInitDaemonStateSweepsStaleCouncilGateSockets(t *testing.T) {
 	}
 	if _, _, err := initDaemonState(stateDir); err == nil {
 		t.Fatal("initDaemonState accepted unsafe 0755 gates directory")
+	}
+}
+
+func TestInitDaemonStateKeepsFilesThatAreNotLaunchDirectories(t *testing.T) {
+	stateDir, err := os.MkdirTemp("/tmp", "sc-keep-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	gatesDir := councilproxy.SocketRoot(stateDir)
+	if err := os.Mkdir(gatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(gatesDir, "g-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An operator pointed --db at a file under the socket root.
+	dbFile := filepath.Join(gatesDir, "sablecourt.db")
+	if err := os.WriteFile(dbFile, []byte("task state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, lock, err := initDaemonState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	if data, err := os.ReadFile(dbFile); err != nil || string(data) != "task state" {
+		t.Fatalf("startup sweep damaged the database file: %q %v", data, err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale launch directory survived the sweep: %v", err)
+	}
+}
+
+func TestDaemonServerReleasesIdleConnections(t *testing.T) {
+	srv := newDaemonServer(http.NotFoundHandler())
+	if srv.IdleTimeout <= 0 || srv.ReadHeaderTimeout <= 0 {
+		t.Fatalf("idle=%v header=%v, want both finite", srv.IdleTimeout, srv.ReadHeaderTimeout)
+	}
+	// A write timeout would cut event streams that are still active.
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("write timeout %v would cut active streams", srv.WriteTimeout)
 	}
 }
 
@@ -189,24 +235,31 @@ func TestSecondDaemonFailsBeforeSweepingLiveSockets(t *testing.T) {
 
 	healthURL := "http://" + addr1 + "/healthz"
 	client := &http.Client{Timeout: 500 * time.Millisecond}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for healthy := false; !healthy; {
 		res, err := client.Get(healthURL)
 		if err == nil {
 			_ = res.Body.Close()
-			if res.StatusCode == http.StatusOK {
-				break
-			}
+			healthy = res.StatusCode == http.StatusOK
 		}
-		if time.Now().After(deadline) {
+		if healthy {
+			break
+		}
+		select {
+		case err := <-done1:
+			t.Fatalf("first daemon exited before it became healthy: %v", err)
+		case <-timeout.C:
 			t.Fatal("first daemon did not become healthy in time")
+		case <-tick.C:
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 
 	// Simulate an active per-launch socket owned by the running first daemon.
 	gatesDir := councilproxy.SocketRoot(stateDir)
-	liveDir := filepath.Join(gatesDir, "g-live1234")
+	liveDir := filepath.Join(gatesDir, "g-00112233445566aa")
 	if err := os.MkdirAll(liveDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

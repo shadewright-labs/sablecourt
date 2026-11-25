@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -109,6 +110,10 @@ func TestCouncilProxyDocker(t *testing.T) {
 	}
 	validSession, endpoint := start(valid)
 	_, expiredEndpoint := start(expired)
+	expiredProxyURL, err := url.Parse(expiredEndpoint.ProxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proxyURL, err := url.Parse(endpoint.ProxyURL)
 	if err != nil {
 		t.Fatal(err)
@@ -167,30 +172,37 @@ func TestCouncilProxyDocker(t *testing.T) {
 		t.Fatalf("wildcard egress control from bridge peer returned %q", got)
 	}
 
-	runHarnessProbe := func(token, target, proxy string, ep councilproxy.WorkloadEndpoint) string {
+	// runHarnessProbe uses the caller's t so a Docker failure ends only that subtest.
+	// With dial set the probe opens a TCP connection and reports whether it connected.
+	runHarnessProbe := func(t *testing.T, token, target, proxy string, ep councilproxy.WorkloadEndpoint, dial bool) string {
 		t.Helper()
-		return d.must(t, token, "run", "--rm", "-i", "--pull=never",
+		args := []string{"run", "--rm", "-i", "--pull=never",
 			"--user", "10001:10001", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-			"--network", ep.Network, "--add-host", councilproxy.DockerHostGateway+":host-gateway",
-			"--entrypoint", "/probe", image, target, proxy)
+			"--network", ep.Network, "--add-host", councilproxy.DockerHostGateway + ":host-gateway",
+			"--entrypoint", "/probe", image, target, proxy}
+		if dial {
+			args = append(args, "dial")
+		}
+		return d.must(t, token, args...)
 	}
 
 	for _, tc := range []struct {
 		name, token, resource, forward, want string
 		endpoint                             councilproxy.WorkloadEndpoint
+		dial                                 bool
 	}{
-		{"valid lease", valid, "/gate/task/messages", "", "200\n", endpoint},
-		{"missing lease", "", "/gate/task/messages", "", "401\n", endpoint},
-		{"wrong task's active lease", wrong, "/gate/task/messages", "", "401\n", endpoint},
-		{"expired lease", expired, "/gate/task/messages", "", "401\n", expiredEndpoint},
-		{"operator route", valid, "/api/v1/tasks", "", "403\n", endpoint},
-		{"arbitrary host port through proxy", "", hostURL, "proxy", "403\n", endpoint},
-		{"wildcard host port through proxy", "", wildcardHostURL, "proxy", "403\n", endpoint},
-		{"direct egress to a bridge peer", "", peerURL, "", "unreachable\n", endpoint},
-		{"direct egress to gate", valid, "http://" + net.JoinHostPort(councilproxy.DockerHostGateway, gatePort) + "/gate/task/messages", "", "unreachable\n", endpoint},
-		{"direct egress to arbitrary host port", "", hostURL, "", "unreachable\n", endpoint},
-		{"direct egress to wildcard host port", "", wildcardHostURL, "", "unreachable\n", endpoint},
-		{"direct internal gateway to wildcard host port", "", internalGatewayWildcardURL, "", "unreachable\n", endpoint},
+		{"valid lease", valid, "/gate/task/messages", "", "200\n", endpoint, false},
+		{"missing lease", "", "/gate/task/messages", "", "401\n", endpoint, false},
+		{"wrong task's active lease", wrong, "/gate/task/messages", "", "401\n", endpoint, false},
+		{"expired lease", expired, "/gate/task/messages", "", "401\n", expiredEndpoint, false},
+		{"operator route", valid, "/api/v1/tasks", "", "403\n", endpoint, false},
+		{"arbitrary host port through proxy", "", hostURL, "proxy", "403\n", endpoint, false},
+		{"wildcard host port through proxy", "", wildcardHostURL, "proxy", "403\n", endpoint, false},
+		{"direct egress to a bridge peer", "", peerURL, "", "unreachable\n", endpoint, true},
+		{"direct egress to gate", valid, "http://" + net.JoinHostPort(councilproxy.DockerHostGateway, gatePort) + "/gate/task/messages", "", "unreachable\n", endpoint, true},
+		{"direct egress to arbitrary host port", "", hostURL, "", "unreachable\n", endpoint, true},
+		{"direct egress to wildcard host port", "", wildcardHostURL, "", "unreachable\n", endpoint, true},
+		{"direct internal gateway to wildcard host port", "", internalGatewayWildcardURL, "", "unreachable\n", endpoint, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := tc.resource
@@ -201,26 +213,36 @@ func TestCouncilProxyDocker(t *testing.T) {
 			if tc.forward != "" {
 				proxy = tc.endpoint.ProxyURL
 			}
-			got := runHarnessProbe(tc.token, target, proxy, tc.endpoint)
+			got := runHarnessProbe(t, tc.token, target, proxy, tc.endpoint, tc.dial)
 			if !strings.HasPrefix(got, tc.want) || (tc.want == "200\n" && !strings.Contains(got, "assigned response")) {
 				t.Fatalf("probe returned %q, want prefix %q", got, tc.want)
 			}
 		})
 	}
 	inspectRaw := d.must(t, "", "inspect", proxyURL.Hostname())
-	logsRaw := d.must(t, "", "logs", proxyURL.Hostname())
-	workloadEnv := strings.Join(endpoint.Env(), "\n")
-	for label, data := range map[string]string{
-		"docker inspect": inspectRaw,
-		"docker logs":    logsRaw,
-		"workload env":   workloadEnv,
-	} {
+	workloadEnv := strings.Join(append(endpoint.Env(), expiredEndpoint.Env()...), "\n")
+	// scanForLeaks checks both proxy containers, the valid-lease one and the expired-lease one.
+	scanForLeaks := func(t *testing.T) {
+		t.Helper()
+		for _, proxyHost := range []string{proxyURL.Hostname(), expiredProxyURL.Hostname()} {
+			for label, data := range map[string]string{
+				"docker inspect": d.must(t, "", "inspect", proxyHost),
+				"docker logs":    d.must(t, "", "logs", proxyHost),
+			} {
+				for _, secretMaterial := range []string{valid, wrong, expired, "PRIVATE KEY", "-gate-secret", "-gate-launch-id", "op_"} {
+					if strings.Contains(data, secretMaterial) {
+						t.Fatalf("secret material %q appeared in %s of %s", secretMaterial, label, proxyHost)
+					}
+				}
+			}
+		}
 		for _, secretMaterial := range []string{valid, wrong, expired, "PRIVATE KEY", "-gate-secret", "-gate-launch-id", "op_"} {
-			if strings.Contains(data, secretMaterial) {
-				t.Fatalf("secret material %q appeared in %s", secretMaterial, label)
+			if strings.Contains(workloadEnv, secretMaterial) {
+				t.Fatalf("secret material %q appeared in workload env", secretMaterial)
 			}
 		}
 	}
+	scanForLeaks(t)
 	proxyArgs, proxyEnv := decodeInspectArgsAndEnv(t, inspectRaw)
 	allowedProxyFlags := map[string]bool{
 		"-harness":          true,
@@ -268,10 +290,11 @@ func TestCouncilProxyDocker(t *testing.T) {
 		var leakedCredentials atomic.Int32
 
 		// 1. Plain TCP listener taking over the port receives zero credentials.
-		plainLn, err := net.Listen("tcp4", replaceAddr)
+		plainRaw, err := net.Listen("tcp4", replaceAddr)
 		if err != nil {
 			t.Fatalf("bind plain substituted listener at %s: %v", replaceAddr, err)
 		}
+		plainLn := &acceptCountingListener{Listener: plainRaw}
 		plainDone := make(chan struct{})
 		go func() {
 			defer close(plainDone)
@@ -288,7 +311,7 @@ func TestCouncilProxyDocker(t *testing.T) {
 				_ = c.Close()
 			}
 		}()
-		gotPlain := runHarnessProbe(valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint)
+		gotPlain := runHarnessProbe(t, valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint, false)
 		_ = plainLn.Close()
 		<-plainDone
 		if !strings.HasPrefix(gotPlain, "502\n") {
@@ -297,10 +320,11 @@ func TestCouncilProxyDocker(t *testing.T) {
 
 		// 2. Unverified TLS 1.3 listener with a fresh P-256 certificate taking over the port receives zero credentials.
 		subCert := newTestSelfSignedP256Cert(t)
-		subLn, err := net.Listen("tcp4", replaceAddr)
+		subRaw, err := net.Listen("tcp4", replaceAddr)
 		if err != nil {
 			t.Fatalf("bind TLS substituted listener at %s: %v", replaceAddr, err)
 		}
+		subLn := &acceptCountingListener{Listener: subRaw}
 		subSrv := &http.Server{
 			ReadHeaderTimeout: time.Second,
 			ErrorLog:          log.New(io.Discard, "", 0),
@@ -326,14 +350,43 @@ func TestCouncilProxyDocker(t *testing.T) {
 			<-subDone
 		})
 
-		gotTLS := runHarnessProbe(valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint)
+		gotTLS := runHarnessProbe(t, valid, endpoint.ProxyURL+"/gate/task/messages", "", endpoint, false)
 		if !strings.HasPrefix(gotTLS, "502\n") {
 			t.Fatalf("surviving proxy against substituted TLS listener returned %q, want 502", gotTLS)
 		}
 		if leakedCredentials.Load() != 0 {
 			t.Fatalf("substituted listeners received %d credential-bearing requests, want 0", leakedCredentials.Load())
 		}
+		// In host-gateway mode the proxy must actually have dialed each replacement and refused it;
+		// in unix-socket mode it must never have fallen back to TCP.
+		for name, accepts := range map[string]int32{"plain": plainLn.accepts.Load(), "TLS": subLn.accepts.Load()} {
+			switch ev.GateMode {
+			case councilproxy.GateModeHostGateway:
+				if accepts == 0 {
+					t.Fatalf("proxy never reached the %s replacement listener, so its rejection was not exercised", name)
+				}
+			case councilproxy.GateModeUnixSocket:
+				if accepts != 0 {
+					t.Fatalf("proxy fell back to TCP: %s replacement listener accepted %d connections", name, accepts)
+				}
+			}
+		}
+		// The failed upstream attempts themselves must not have logged a lease either.
+		scanForLeaks(t)
 	})
+}
+
+type acceptCountingListener struct {
+	net.Listener
+	accepts atomic.Int32
+}
+
+func (l *acceptCountingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepts.Add(1)
+	}
+	return c, err
 }
 
 func decodeInspectArgsAndEnv(t *testing.T, raw string) (args []string, env []string) {
@@ -464,10 +517,41 @@ func localProxyDocker(t *testing.T) proxyDockerCLI {
 		configDir:         t.TempDir(),
 		keepProxyOnRemove: new(atomic.Bool),
 	}
-	if _, err := d.run(t.Context(), "", "version", "--format", "{{.Server.Version}}"); err != nil {
+	versions, err := d.run(t.Context(), "", "version", "--format", "{{.Client.Version}} {{.Server.Version}}")
+	if err != nil {
 		t.Skip("Docker unavailable: local engine did not answer")
 	}
+	// Isolated bridge gateways and "network connect --gw-priority" both arrived in Docker 28.
+	for i, version := range strings.Fields(versions) {
+		if major, ok := dockerMajorVersion(version); !ok || major < 28 {
+			t.Skipf("Docker unavailable: %s version %q lacks isolated gateway and gw-priority support (needs 28 or newer)", []string{"CLI", "engine"}[min(i, 1)], version)
+		}
+	}
 	return d
+}
+
+func dockerMajorVersion(version string) (int, bool) {
+	digits, _, _ := strings.Cut(strings.TrimSpace(version), ".")
+	major, err := strconv.Atoi(digits)
+	return major, err == nil
+}
+
+func TestDockerMajorVersion(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		major int
+		ok    bool
+	}{
+		{"27.5.1", 27, true},
+		{"28.0.0", 28, true},
+		{"29.9.3-ce", 29, true},
+		{"", 0, false},
+		{"unknown", 0, false},
+	} {
+		if major, ok := dockerMajorVersion(tc.in); major != tc.major || ok != tc.ok {
+			t.Errorf("dockerMajorVersion(%q) = %d, %v, want %d, %v", tc.in, major, ok, tc.major, tc.ok)
+		}
+	}
 }
 
 func (d proxyDockerCLI) run(ctx context.Context, input string, args ...string) (string, error) {
@@ -766,6 +850,20 @@ func main() {
 		if server.ListenAndServe() != nil {
 			os.Exit(1)
 		}
+		return
+	}
+	if len(os.Args) == 4 && os.Args[3] == "dial" {
+		target, err := url.Parse(os.Args[1])
+		if err != nil {
+			os.Exit(1)
+		}
+		conn, err := net.DialTimeout("tcp", target.Host, 2*time.Second)
+		if err != nil {
+			fmt.Printf("unreachable\n%v\n", err)
+			return
+		}
+		conn.Close()
+		fmt.Println("connected")
 		return
 	}
 	token, err := io.ReadAll(io.LimitReader(os.Stdin, 512))

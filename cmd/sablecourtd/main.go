@@ -576,10 +576,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	srv := newDaemonServer(mux)
 	tcpLn, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", listenAddr, err)
@@ -600,7 +597,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 		_ = os.Chmod(socketPath, 0o600)
 		defer os.Remove(socketPath)
-		unixSrv = &http.Server{Handler: unixMux, ReadHeaderTimeout: 5 * time.Second}
+		unixSrv = newDaemonServer(unixMux)
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
 			_ = unixSrv.Serve(councilproxy.LimitListener(uln, 256))
@@ -626,6 +623,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// daemonIdleTimeout releases a capped listener slot held by an idle keep-alive
+// connection. It does not cut a response that is still streaming.
+const daemonIdleTimeout = 60 * time.Second
+
+func newDaemonServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       daemonIdleTimeout,
 	}
 }
 

@@ -458,7 +458,7 @@ func TestSubstitutedUpstreamReceivesZeroCredentials(t *testing.T) {
 		ErrorLog:          log.New(io.Discard, "", 0),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
-			if r.Header.Get("Authorization") != "" || strings.Contains(string(body), token) {
+			if r.Header.Get("Authorization") != "" || strings.Contains(string(body), token) || strings.Contains(string(body), postBodyMarker) {
 				credentialLeaks.Add(1)
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -483,7 +483,7 @@ func TestSubstitutedUpstreamReceivesZeroCredentials(t *testing.T) {
 		target := "/gate/task/messages"
 		if method == http.MethodPost {
 			target = "/gate/mcp"
-			body = strings.NewReader(`{"secret_context":"do-not-forward"}`)
+			body = strings.NewReader(`{"secret_context":"` + postBodyMarker + `"}`)
 		}
 		req := httptest.NewRequest(method, target, body)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -497,6 +497,8 @@ func TestSubstitutedUpstreamReceivesZeroCredentials(t *testing.T) {
 		t.Fatalf("substituted listener received %d credential-bearing requests, want 0", credentialLeaks.Load())
 	}
 }
+
+const postBodyMarker = "do-not-forward"
 
 func TestLiveRelayAndUnverifiedSecondConnectionReceiveZeroCredentials(t *testing.T) {
 	const token = "sc_task_live_relay_check"
@@ -610,11 +612,12 @@ func TestLiveRelayAndUnverifiedSecondConnectionReceiveZeroCredentials(t *testing
 		t.Cleanup(func() { _ = tg2.close() })
 		pin2 := decodeSPKIPin(t, tg2.spkiSHA256)
 
-		var dialCount atomic.Int32
+		var dialCount, mitmDials atomic.Int32
 		redialTransport := newTLSGateTransport(pin2, func(ctx context.Context, network, _ string) (net.Conn, error) {
 			target := tg2.addr
 			if dialCount.Add(1) > 1 {
 				target = mitmAddr
+				mitmDials.Add(1)
 			}
 			return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, target)
 		})
@@ -643,6 +646,9 @@ func TestLiveRelayAndUnverifiedSecondConnectionReceiveZeroCredentials(t *testing
 		req2.Header.Set("Authorization", "Bearer "+token)
 		rec2 := httptest.NewRecorder()
 		h2.ServeHTTP(rec2, req2)
+		if mitmDials.Load() != 1 {
+			t.Fatalf("second request dialed the unverified peer %d times, want 1", mitmDials.Load())
+		}
 		if rec2.Code != http.StatusBadGateway || relayLeaks.Load() != 0 {
 			t.Fatalf("unverified second connection status=%d leaks=%d, want 502 and 0 leaks", rec2.Code, relayLeaks.Load())
 		}
