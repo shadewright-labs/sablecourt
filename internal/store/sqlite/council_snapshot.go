@@ -61,7 +61,7 @@ func readCouncilSnapshot(ctx context.Context, tx *sql.Tx, id string) (store.Coun
 		return snap, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT a.round,a.role,a.attempt,a.task_id,t.state,a.answer_id,a.nothing_to_add
+		SELECT a.round,a.role,a.attempt,a.task_id,t.state,a.answer_id,a.nothing_to_add,a.policy_routed
 		FROM council_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.council_id=?
 	`, id)
 	if err != nil {
@@ -72,10 +72,12 @@ func readCouncilSnapshot(ctx context.Context, tx *sql.Tx, id string) (store.Coun
 	for i, m := range p.Members {
 		seats[m.Vassal.Role] = i
 	}
+	policyRouted := map[string]bool{}
 	for rows.Next() {
+		var routed bool
 		var a store.CouncilAttempt
 		var answer sql.NullInt64
-		if err := rows.Scan(&a.Round, &a.Role, &a.Number, &a.TaskID, &a.State, &answer, &a.NothingToAdd); err != nil {
+		if err := rows.Scan(&a.Round, &a.Role, &a.Number, &a.TaskID, &a.State, &answer, &a.NothingToAdd, &routed); err != nil {
 			return snap, err
 		}
 		if _, ok := seats[a.Role]; !ok {
@@ -87,6 +89,7 @@ func readCouncilSnapshot(ctx context.Context, tx *sql.Tx, id string) (store.Coun
 				return snap, errors.New("invalid council answer provenance")
 			}
 		}
+		policyRouted[a.TaskID] = routed
 		a.Relics = relics[a.TaskID]
 		snap.Attempts = append(snap.Attempts, a)
 	}
@@ -100,6 +103,13 @@ func readCouncilSnapshot(ctx context.Context, tx *sql.Tx, id string) (store.Coun
 	for i, a := range snap.Attempts {
 		if i+1 < len(snap.Attempts) && snap.Attempts[i+1].Round == a.Round && snap.Attempts[i+1].Role == a.Role {
 			continue
+		}
+		// A daemon final is shared according to CanMessage and zones in the round
+		// packet. Keep the addressed message intact in the attempt history.
+		if a.Answer != nil && policyRouted[a.TaskID] {
+			answer := *a.Answer
+			answer.ToRole = "all"
+			a.Answer = &answer
 		}
 		snap.Turns = append(snap.Turns, store.CouncilTurn{Round: a.Round, Role: a.Role, Starts: a.Number, TaskID: a.TaskID, State: a.State, Answer: a.Answer, NothingToAdd: a.NothingToAdd})
 	}
