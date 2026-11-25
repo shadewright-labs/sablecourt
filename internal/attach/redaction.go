@@ -135,7 +135,6 @@ const (
 	secretQuotedValue
 	bearerColon
 	bearerWord
-	bearerSpace
 	bearerValue
 )
 
@@ -145,7 +144,9 @@ const (
 	noCredential credentialKind = ""
 	secret       credentialKind = "secret"
 	bearer       credentialKind = "bearer_token"
-	openAI       credentialKind = "openai_key"
+	// authorization is an Authorization value under any other scheme.
+	authorization credentialKind = "authorization"
+	openAI        credentialKind = "openai_key"
 )
 
 var credentialPrefixes = []struct {
@@ -172,15 +173,23 @@ var (
 )
 
 type textRedactor struct {
-	fragment   []byte
-	kind       credentialKind
+	fragment []byte
+	kind     credentialKind
+	// value holds the credential as written; norm holds it with ANSI
+	// sequences dropped and unicode escapes decoded, which is what the
+	// rules match.
 	value      []byte
+	norm       []byte
 	overflow   bool
 	prevWord   bool
 	label      [32]byte
 	labelLen   int
 	assignment assignmentState
-	bearerPos  int
+	// bearerPos counts the scheme bytes after "Authorization:"; isBearer
+	// tracks whether they still spell "bearer".
+	bearerPos int
+	isBearer  bool
+	authKind  credentialKind
 	// quote is the quote that opened a secret value, so the value runs to
 	// its closing quote (JSON strings may hold spaces); escaped tracks a
 	// backslash inside it.
@@ -194,39 +203,49 @@ func (r *textRedactor) write(out *strings.Builder, raw []byte) {
 		r.fragment = nil
 	}
 	for len(raw) != 0 {
+		n, b, ansi, more := unitAt(raw)
+		if more {
+			r.fragment = bytes.Clone(raw)
+			return
+		}
+		unit := raw[:n]
 		if r.kind != noCredential {
-			n := 0
-			for n < len(raw) && r.valueByte(raw[n]) {
-				b := raw[n]
-				if r.quote == 0 && (r.kind == secret || r.kind == bearer) && r.assignmentAt(b) == secret {
+			if ansi {
+				// A terminal shows a token broken by an ANSI sequence whole.
+				r.keepValue(unit, nil)
+				raw = raw[n:]
+				continue
+			}
+			if r.valueByte(b) {
+				if r.quote == 0 && (r.kind == secret || r.kind == bearer || r.kind == authorization) && r.assignmentAt(b) == secret {
 					// A nested assignment can extend past the bearer value.
 					r.kind = secret
 				}
 				r.observe(b)
-				n++
-			}
-			keep := min(n, maxPendingBytes-len(r.value))
-			r.value = append(r.value, raw[:keep]...)
-			r.overflow = r.overflow || keep < n
-			raw = raw[n:]
-			if len(raw) == 0 {
-				return
+				r.keepValue(unit, []byte{b})
+				raw = raw[n:]
+				continue
 			}
 			r.emitValue(out, false)
 		}
-		b := raw[0]
+		if ansi {
+			out.Write(unit)
+			raw = raw[n:]
+			continue
+		}
 		if kind := r.assignmentAt(b); kind != noCredential {
 			r.kind = kind
 			r.labelLen = 0
 			continue
 		}
 		if !r.prevWord {
+			look, atEnd := normLookahead(raw)
 			for _, entry := range credentialPrefixes {
-				if bytes.HasPrefix(raw, []byte(entry.prefix)) {
+				if bytes.HasPrefix(look, []byte(entry.prefix)) {
 					r.kind = entry.kind
 					break
 				}
-				if bytes.HasPrefix([]byte(entry.prefix), raw) {
+				if atEnd && bytes.HasPrefix([]byte(entry.prefix), look) {
 					r.fragment = bytes.Clone(raw)
 					return
 				}
@@ -235,10 +254,114 @@ func (r *textRedactor) write(out *strings.Builder, raw []byte) {
 				continue
 			}
 		}
-		out.WriteByte(b)
+		out.Write(unit)
 		r.observe(b)
-		raw = raw[1:]
+		raw = raw[n:]
 	}
+}
+
+// keepValue appends a unit of the current credential, up to the pending
+// limit.
+func (r *textRedactor) keepValue(unit, norm []byte) {
+	if len(r.value)+len(unit) > maxPendingBytes {
+		r.overflow = true
+		return
+	}
+	r.value = append(r.value, unit...)
+	r.norm = append(r.norm, norm...)
+}
+
+const (
+	// maxANSI bounds a CSI sequence; a longer one is passed on as text.
+	maxANSI = 32
+	// maxLookahead bounds the bytes read to match a credential prefix.
+	maxLookahead = 256
+)
+
+// unitAt reads one unit of terminal output: an ANSI CSI sequence (ansi), a
+// JSON unicode escape for a token character (b is the character), or a
+// single byte. more means the input ends inside a unit that may still
+// complete.
+func unitAt(raw []byte) (n int, b byte, ansi, more bool) {
+	switch raw[0] {
+	case 0x1b:
+		if len(raw) == 1 {
+			return 0, 0, false, true
+		}
+		if raw[1] != '[' {
+			return 1, raw[0], false, false
+		}
+		for i := 2; i < len(raw) && i < maxANSI; i++ {
+			switch c := raw[i]; {
+			case c >= 0x40 && c <= 0x7e:
+				return i + 1, 0, true, false
+			case c < 0x20 || c > 0x3f:
+				return 1, raw[0], false, false
+			}
+		}
+		if len(raw) < maxANSI {
+			return 0, 0, false, true
+		}
+		return 1, raw[0], false, false
+	case '\\':
+		if len(raw) < 6 {
+			if len(raw) == 1 || raw[1] == 'u' && allHex(raw[2:]) {
+				return 0, 0, false, true
+			}
+			return 1, raw[0], false, false
+		}
+		if raw[1] == 'u' && allHex(raw[2:6]) {
+			r := hexValue(raw[2:6])
+			if r < utf8.RuneSelf && (wordByte(byte(r)) || r == '-') {
+				return 6, byte(r), false, false
+			}
+		}
+		return 1, raw[0], false, false
+	}
+	return 1, raw[0], false, false
+}
+
+func allHex(p []byte) bool {
+	for _, c := range p {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func hexValue(p []byte) rune {
+	var r rune
+	for _, c := range p {
+		switch {
+		case c <= '9':
+			r = r<<4 | rune(c-'0')
+		case c >= 'a':
+			r = r<<4 | rune(c-'a'+10)
+		default:
+			r = r<<4 | rune(c-'A'+10)
+		}
+	}
+	return r
+}
+
+// normLookahead returns the start of raw as the rules see it, long enough to
+// match any credential prefix, and whether it reached the end of raw (so more
+// input could still complete a prefix).
+func normLookahead(raw []byte) ([]byte, bool) {
+	var look []byte
+	i := 0
+	for i < len(raw) && i < maxLookahead && len(look) < 16 {
+		n, b, ansi, more := unitAt(raw[i:])
+		if more {
+			return look, true
+		}
+		if !ansi {
+			look = append(look, b)
+		}
+		i += n
+	}
+	return look, i == len(raw)
 }
 
 func (r *textRedactor) finish(out *strings.Builder) {
@@ -250,24 +373,32 @@ func (r *textRedactor) finish(out *strings.Builder) {
 
 func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 	kind := r.kind
-	if kind == openAI && bytes.HasPrefix(r.value, []byte("sk-ant-")) {
+	if kind == openAI && bytes.HasPrefix(r.norm, []byte("sk-ant-")) {
 		kind = "anthropic_key"
 	}
-	value := string(r.value)
+	raw, norm := string(r.value), string(r.norm)
+	value := raw
 	switch {
 	case r.overflow, kind == secret && r.quote != 0:
 		value = ""
 	case kind == secret:
-		if utf8.RuneCount(r.value) >= 6 || eof {
+		if utf8.RuneCountInString(norm) >= 6 || eof {
 			value = ""
 		}
-	case kind == bearer:
-		if len(r.value) >= 8 || eof {
+	case kind == bearer || kind == authorization:
+		if len(norm) >= 8 || eof {
 			value = ""
 		}
 	default:
-		value = redact.String(value)
-		if eof && value == string(r.value) {
+		clean := redact.String(norm)
+		switch {
+		case clean == norm:
+			if eof {
+				value = ""
+			}
+		case norm == raw:
+			value = clean
+		default:
 			value = ""
 		}
 	}
@@ -278,6 +409,7 @@ func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 	}
 	r.kind = noCredential
 	r.value = r.value[:0]
+	r.norm = r.norm[:0]
 	r.overflow = false
 	r.quote = 0
 	r.escaped = false
@@ -337,7 +469,8 @@ func redactSpace(b byte) bool {
 func (r *textRedactor) assignmentAt(b byte) credentialKind {
 	space := redactSpace(b)
 	// A closing quote after the label covers JSON keys such as "password".
-	if r.labelLen != 0 && (space || b == ':' || b == '=' || quoteByte(b)) {
+	// An Authorization scheme word such as ApiKey is not a label of its own.
+	if r.labelLen != 0 && r.assignment != bearerWord && (space || b == ':' || b == '=' || quoteByte(b)) {
 		label := r.label[:r.labelLen]
 		switch {
 		case secretLabel.Match(label):
@@ -385,23 +518,25 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 		if b == ':' {
 			r.assignment = bearerWord
 			r.bearerPos = 0
+			r.isBearer = true
 			return noCredential
 		}
 	case bearerWord:
+		// The scheme: Bearer, or any other word (Basic, Token, ...).
 		if (space || quoteByte(b)) && r.bearerPos == 0 {
 			return noCredential
 		}
-		const word = "bearer"
-		if b|0x20 == word[r.bearerPos] {
-			r.bearerPos++
-			if r.bearerPos == len(word) {
-				r.assignment = bearerSpace
+		if space {
+			r.assignment = bearerValue
+			r.authKind = authorization
+			if r.isBearer && r.bearerPos == len("bearer") {
+				r.authKind = bearer
 			}
 			return noCredential
 		}
-	case bearerSpace:
-		if space {
-			r.assignment = bearerValue
+		if (wordByte(b) || b == '-') && r.bearerPos < len(r.label) {
+			r.isBearer = r.isBearer && r.bearerPos < len("bearer") && b|0x20 == "bearer"[r.bearerPos]
+			r.bearerPos++
 			return noCredential
 		}
 	case bearerValue:
@@ -410,7 +545,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 		}
 		r.assignment = noAssignment
 		if credentialByte(bearer, b) {
-			return bearer
+			return r.authKind
 		}
 	}
 	r.assignment = noAssignment

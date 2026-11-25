@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -16,11 +17,6 @@ type rule struct {
 const sensitiveField = `[a-z0-9_-]*(?:api[_-]?key|secret|password|passwd|access[_-]?token|operator[_-]?token)`
 
 var rules = []rule{
-	{
-		category: "private_key",
-		re:       regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`),
-		replace:  "[REDACTED:private_key]",
-	},
 	{
 		category: "sablecourt_token",
 		re:       regexp.MustCompile(`\bsc_task_[0-9a-fA-F]{16,}\b|\bop_[0-9a-fA-F]{64}\b`),
@@ -57,6 +53,15 @@ var rules = []rule{
 		replace:  "${1}[REDACTED:bearer_token]",
 	},
 	{
+		// Any other scheme: the upstream MCP gate sends whatever prefix a
+		// server is configured with (Basic, Token, ApiKey, ...). The value
+		// class excludes "[" so a Bearer value already redacted above is not
+		// matched again.
+		category: "authorization_header",
+		re:       regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?[A-Za-z][A-Za-z0-9_-]*\s+)[A-Za-z0-9._~+/=-]{8,}`),
+		replace:  "${1}[REDACTED:authorization]",
+	},
+	{
 		category: "generic_secret_kv",
 		re:       regexp.MustCompile(`(?i)("` + sensitiveField + `"\s*:\s*")(?:[^"\\]|\\.)*(")`),
 		replace:  "${1}[REDACTED:secret]${2}",
@@ -70,7 +75,7 @@ var rules = []rule{
 
 const privateKeyMarker = "[REDACTED:private_key]"
 
-var privateKeyHeader = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+var privateKeyHeader = regexp.MustCompile(`-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----`)
 
 type Result struct {
 	Text       string
@@ -83,9 +88,13 @@ func Text(input string) Result {
 	if input == "" {
 		return Result{}
 	}
-	out := input
-	totalHits := 0
 	seen := make(map[string]struct{})
+	// Key blocks go first: an assignment rule could otherwise consume the
+	// start of a header and leave the key body behind.
+	out, totalHits := redactKeyBlocks(input)
+	if totalHits > 0 {
+		seen["private_key"] = struct{}{}
+	}
 
 	for _, r := range rules {
 		matches := r.re.FindAllStringIndex(out, -1)
@@ -95,13 +104,6 @@ func Text(input string) Result {
 		totalHits += len(matches)
 		seen[r.category] = struct{}{}
 		out = r.re.ReplaceAllString(out, r.replace)
-	}
-	// A key block whose END marker was cut off or never written has no match
-	// above, so withhold everything from its header on.
-	if start := privateKeyHeader.FindStringIndex(out); start != nil {
-		out = out[:start[0]] + privateKeyMarker
-		totalHits++
-		seen["private_key"] = struct{}{}
 	}
 
 	cats := make([]string, 0, len(seen))
@@ -114,6 +116,39 @@ func Text(input string) Result {
 		Text:       out,
 		Hits:       totalHits,
 		Categories: cats,
+	}
+}
+
+// redactKeyBlocks replaces each private key block with a marker. A block ends
+// only at the footer with its own label; a header without one, because the
+// footer was cut off, never written or carries another label, withholds
+// everything from the header on and the marker records how many bytes.
+func redactKeyBlocks(input string) (string, int) {
+	if !strings.Contains(input, "-----BEGIN ") {
+		return input, 0
+	}
+	var b strings.Builder
+	hits := 0
+	for offset := 0; ; {
+		loc := privateKeyHeader.FindStringSubmatchIndex(input[offset:])
+		if loc == nil {
+			if hits == 0 {
+				return input, 0
+			}
+			b.WriteString(input[offset:])
+			return b.String(), hits
+		}
+		start, end := offset+loc[0], offset+loc[1]
+		footer := "-----END " + input[offset+loc[2]:offset+loc[3]] + "-----"
+		b.WriteString(input[offset:start])
+		hits++
+		i := strings.Index(input[end:], footer)
+		if i < 0 {
+			fmt.Fprintf(&b, "[REDACTED:private_key; %d bytes withheld]", len(input)-start)
+			return b.String(), hits
+		}
+		b.WriteString(privateKeyMarker)
+		offset = end + i + len(footer)
 	}
 }
 

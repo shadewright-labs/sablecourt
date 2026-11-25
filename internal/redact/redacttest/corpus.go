@@ -113,6 +113,22 @@ func Corpus() []Case {
 		Case{"bearer/header_line", "curl -H 'authorization: bearer " + bearer + "' x\n", []string{bearer}},
 	)
 
+	// Other Authorization schemes: the upstream MCP gate sends any configured
+	// prefix, and the model gate reads x-api-key and x-goog-api-key headers.
+	basic := body(15, 32, alnum)
+	token := body(16, 40, alnum)
+	apiKey := body(17, 40, alnum)
+	goog := body(18, 39, alnum)
+	cases = append(cases,
+		Case{"authorization/basic", "Authorization: Basic " + basic + "==\n", []string{basic}},
+		Case{"authorization/token_json", `{"headers":{"Authorization":"Token ` + token + `"}}` + "\n", []string{token}},
+		Case{"authorization/custom_scheme_line", "curl -H 'Authorization: ApiKey " + token + "' x\n", []string{token}},
+		Case{"authorization/proxy", "Proxy-Authorization: Basic " + basic + "\n", []string{basic}},
+		Case{"authorization/text_json", `log {"Authorization":"Basic ` + basic + `"} end` + "\n", []string{basic}},
+		Case{"x_api_key/header", "x-api-key: " + apiKey + "\n", []string{apiKey}},
+		Case{"x_goog_api_key/header", "x-goog-api-key: " + goog + "\n", []string{goog}},
+	)
+
 	pem := body(13, 64, alnum)
 	block := "-----BEGIN RSA PRIVATE KEY-----\n" + pem + "\n-----END RSA PRIVATE KEY-----"
 	escaped := strings.ReplaceAll(block, "\n", `\n`)
@@ -129,4 +145,36 @@ func Corpus() []Case {
 func UnterminatedKey(prefix int) (string, string) {
 	pem := body(14, 1600, alnum)
 	return strings.Repeat("p", prefix) + "\n-----BEGIN OPENSSH PRIVATE KEY-----\n" + pem, pem
+}
+
+// KeyCases returns private key blocks built to end redaction early: a header
+// that opens an assignment value, and footers whose label differs from the
+// header's.
+func KeyCases() []Case {
+	pem := body(19, 400, alnum)
+	pem2 := body(20, 400, alnum)
+	return []Case{
+		{"key header as assignment value", "password=-----BEGIN RSA PRIVATE KEY-----\n" + pem + "\n", []string{pem}},
+		{"key header after api_key label", "api_key: -----BEGIN OPENSSH PRIVATE KEY-----\n" + pem + "\n", []string{pem}},
+		{"mismatched footer then own footer", "-----BEGIN RSA PRIVATE KEY-----\n" + pem + "\n-----END EC PRIVATE KEY-----\n" + pem2 + "\n-----END RSA PRIVATE KEY-----\nafter\n", []string{pem, pem2}},
+		{"mismatched footer only", "-----BEGIN RSA PRIVATE KEY-----\n" + pem + "\n-----END EC PRIVATE KEY-----\n" + pem2 + "\n", []string{pem, pem2}},
+	}
+}
+
+// StreamCases returns terminal output where a credential is broken up by an
+// ANSI sequence or written with JSON unicode escapes, as a terminal or a JSON
+// reader would show it whole.
+func StreamCases() []Case {
+	a := body(21, 24, alnum)
+	b := body(22, 24, alnum)
+	c := body(23, 30, alnum)
+	pw := body(24, 24, alnum)
+	return []Case{
+		{"ansi inside anthropic key", "key sk-ant-api03-" + a + "\x1b[1m" + b + "\x1b[0m done\n", []string{a, b}},
+		{"ansi inside github token", "token ghp_" + a + "\x1b[38;5;196m" + b + " done\n", []string{a, b}},
+		{"escaped prefix", `{"note":"\u0073k-ant-api03-` + c + `"}` + "\n", []string{c}},
+		{"escaped prefix letters", `{"note":"\u0067\u0068p_` + c + `"}` + "\n", []string{c}},
+		{"escaped label", `{"pass\u0077ord":"` + pw + `"}` + "\n", []string{pw}},
+		{"ansi inside label", "pass\x1b[0mword=" + pw + "\n", []string{pw}},
+	}
 }

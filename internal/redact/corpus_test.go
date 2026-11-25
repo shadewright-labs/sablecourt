@@ -2,6 +2,7 @@ package redact_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,7 +28,8 @@ func TestStringWithholdsUnterminatedPrivateKey(t *testing.T) {
 		if frag, ok := redacttest.Leak(res.Text, []string{body}); ok {
 			t.Fatalf("prefix %d: key fragment %q survived: %d bytes out", prefix, frag, len(res.Text))
 		}
-		if !strings.Contains(res.Text, "[REDACTED:private_key]") || res.Hits == 0 {
+		withheld := len(text) - prefix - 1 // the newline before the header is kept
+		if !strings.HasSuffix(res.Text, fmt.Sprintf("[REDACTED:private_key; %d bytes withheld]", withheld)) || res.Hits == 0 {
 			t.Fatalf("prefix %d: no private key marker or hit: hits=%d", prefix, res.Hits)
 		}
 		if !strings.HasPrefix(res.Text, strings.Repeat("p", prefix)) {
@@ -75,4 +77,19 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func TestTextWithholdsKeyBlocksBuiltToEndEarly(t *testing.T) {
+	for _, tc := range redacttest.KeyCases() {
+		t.Run(tc.Name, func(t *testing.T) {
+			for name, out := range map[string]string{
+				"text":         redact.String(tc.Text),
+				"json wrapped": redact.JSON(mustJSON(t, map[string]string{"log": tc.Text})),
+			} {
+				if frag, ok := redacttest.Leak(out, tc.Secrets); ok {
+					t.Fatalf("%s: key fragment %q survived: %q", name, frag, out)
+				}
+			}
+		})
+	}
 }
