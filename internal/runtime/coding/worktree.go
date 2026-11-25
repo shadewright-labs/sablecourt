@@ -589,7 +589,7 @@ func worktreeArtifacts(ctx context.Context, dir string, state *worktreeState, st
 	if diff != "" {
 		diff = redact.String(diff)
 		if len(diff) > 32*1024 {
-			diff = diff[:32*1024] + "\n...[truncated]"
+			diff = truncateUTF8Prefix(diff, 32*1024) + "\n...[truncated]"
 		}
 		artifacts = append(artifacts, scruntime.Artifact{Name: "git-diff", ContentType: "text/x-diff", Text: diff})
 	}

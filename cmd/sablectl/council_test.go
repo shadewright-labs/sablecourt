@@ -66,9 +66,20 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 			args:      []string{"council", strings.Repeat("x", (30<<10)+1), "--repo", validRepo},
 		},
 		{
+			name:      "oversized_stdin_with_cr_suffix",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "--repo", validRepo},
+			stdin:     strings.Repeat("x", 30<<10) + "\rkeep this suffix\n",
+		},
+		{
 			name:      "escaped_question_over_launch_budget",
 			harnesses: []string{"claude", "codex", "agy"},
 			args:      []string{"council", strings.Repeat("<", 12<<10), "--repo", validRepo},
+		},
+		{
+			name:      "escaped_question_exceeds_round2_budget",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", strings.Repeat("<", 10240), "--repo", validRepo},
 		},
 		{
 			name:      "partial_panel_two",
@@ -1060,5 +1071,31 @@ func TestCouncilClientSendsIdempotencyKey(t *testing.T) {
 	}
 	if strings.TrimSpace(gotKey) == "" {
 		t.Fatal("expected sablectl council to send a non-empty Idempotency-Key header")
+	}
+}
+
+func TestCouncilStdinMaxQuestionPreserved(t *testing.T) {
+	exact := strings.Repeat("x", maxCouncilQuestionBytes)
+	for _, tc := range []struct {
+		name  string
+		stdin string
+	}{
+		{name: "exact_eof", stdin: exact},
+		{name: "exact_lf", stdin: exact + "\n"},
+		{name: "exact_crlf", stdin: exact + "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line, err := readLineContext(context.Background(), strings.NewReader(tc.stdin), maxCouncilQuestionBytes)
+			if err != nil {
+				t.Fatalf("readLineContext(%s) err = %v", tc.name, err)
+			}
+			got, err := validateCouncilQuestion(line)
+			if err != nil {
+				t.Fatalf("validateCouncilQuestion(%s) err = %v", tc.name, err)
+			}
+			if got != exact {
+				t.Fatalf("got len=%d, want %d", len(got), len(exact))
+			}
+		})
 	}
 }

@@ -27,7 +27,7 @@ import (
 const (
 	defaultCouncilRounds         = 2
 	maxCouncilQuestionBytes      = 30 << 10
-	maxCouncilEncodedPacketBytes = 63 << 10
+	maxCouncilEncodedPacketBytes = contextpack.MaxCouncilOpeningEncodedPacketBytes
 	defaultCouncilPollEvery      = 500 * time.Millisecond
 )
 
@@ -375,17 +375,23 @@ func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, 
 		return "", err
 	}
 	type result struct {
-		line string
-		err  error
+		line      string
+		exhausted bool
+		err       error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		limited := io.LimitReader(r, maxBytes+1)
-		line, err := bufio.NewReader(limited).ReadString('\n')
-		ch <- result{line: line, err: err}
+		// Allow up to maxBytes plus a CRLF terminator plus one sentinel byte so
+		// hitting the reader limit before '\n' is detected before trimming.
+		lr := &io.LimitedReader{R: r, N: maxBytes + 3}
+		line, err := bufio.NewReader(lr).ReadString('\n')
+		ch <- result{line: line, exhausted: errors.Is(err, io.EOF) && lr.N == 0, err: err}
 	}()
 	select {
 	case res := <-ch:
+		if res.exhausted {
+			return "", fmt.Errorf("question exceeds %d KiB", maxBytes>>10)
+		}
 		if res.err != nil && !errors.Is(res.err, io.EOF) {
 			return "", res.err
 		}
@@ -567,7 +573,11 @@ func validateCouncilQuestion(raw string) (string, error) {
 	if strings.ContainsRune(raw, '\x00') {
 		return "", errors.New("question contains invalid NUL byte")
 	}
-	trimmedLine := strings.TrimRight(raw, "\r\n")
+	trimmedLine := raw
+	if strings.HasSuffix(trimmedLine, "\n") {
+		trimmedLine = strings.TrimSuffix(trimmedLine, "\n")
+		trimmedLine = strings.TrimSuffix(trimmedLine, "\r")
+	}
 	if len(trimmedLine) > maxCouncilQuestionBytes {
 		return "", errors.New("question exceeds 30 KiB")
 	}

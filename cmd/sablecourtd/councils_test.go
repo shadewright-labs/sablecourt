@@ -49,6 +49,7 @@ func TestCouncilOpenRefusals(t *testing.T) {
 		{name: "NUL question", body: strings.Replace(valid, "Review this", `Review\u0000this`, 1), want: 400, message: "question"},
 		{name: "question over packet budget", body: strings.Replace(valid, "Review this", strings.Repeat("q", 32<<10), 1), want: 400, message: "question"},
 		{name: "escaped question over launch budget", body: strings.Replace(valid, "Review this", strings.Repeat("<", 12<<10), 1), want: 400, message: "question"},
+		{name: "escaped question exceeds round2 budget", body: strings.Replace(valid, "Review this", strings.Repeat("<", 10240), 1), want: 400, message: "question"},
 		{name: "body too big", body: valid + strings.Repeat(" ", 1<<20), want: 413, message: "too large"},
 		{name: "zero rounds", body: valid + `,"rounds":0`, want: 400, message: "rounds"},
 		{name: "negative rounds", body: valid + `,"rounds":-1`, want: 400, message: "rounds"},
@@ -401,8 +402,9 @@ func TestCouncilDetailAfterSixStarts(t *testing.T) {
 	pairs := make(map[string]bool)
 	for _, msg := range detail.Messages {
 		launch, ok := launches[msg.TaskID]
-		if !ok || msg.FromRole != launch.role || msg.Round != launch.round || !strings.Contains(digest.Body, msg.Body) {
-			t.Errorf("answer lacks stored attribution or digest evidence: %+v", msg)
+		wantBody := fmt.Sprintf("Review from %s in round %d.", launch.role, launch.round)
+		if !ok || msg.FromRole != launch.role || msg.Round != launch.round || msg.Body != wantBody || !strings.Contains(digest.Body, wantBody) {
+			t.Errorf("answer lacks expected body, attribution, or digest evidence: %+v (want %q)", msg, wantBody)
 		}
 		pairs[fmt.Sprintf("%d/%s", msg.Round, msg.FromRole)] = true
 		if _, err := st.GetActiveLeaseByTokenHash(ctx, launch.tokenHash, time.Now()); !errors.Is(err, store.ErrNotFound) {
@@ -490,7 +492,10 @@ func councilTestInputs(t *testing.T) (repo, bin, token string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+filepath.Dir(git))
+	if err := os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 	token, err = operatortoken.LoadOrCreate(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatal(err)
@@ -501,7 +506,13 @@ func councilTestInputs(t *testing.T) (repo, bin, token string) {
 func councilTestGit(t *testing.T, repo string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo, "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "user.name=Fixture"}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=")
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GIT_") {
+			env = append(env, entry)
+		}
+	}
+	cmd.Env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v (%s)", args[0], err, out)
@@ -585,6 +596,29 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	badBundle.Workloads["claude"] = wl
 	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
 		t.Fatal("expected Model Gate grant on council panel workload to fail runtime check")
+	}
+
+	// Relative RepoPath matching absolute checkout.Source must be accepted.
+	relParent := t.TempDir()
+	relRepo := filepath.Join(relParent, "project")
+	if err := os.Mkdir(relRepo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonRelRepo, err := filepath.EvalSymlinks(relRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(relParent)
+	relBundle := &config.Bundle{Workloads: maps.Clone(bundle.Workloads)}
+	for _, role := range councilPanel {
+		w := relBundle.Workloads[role]
+		cfg := *w.Spec.Coding
+		cfg.RepoPath = "project"
+		w.Spec.Coding = &cfg
+		relBundle.Workloads[role] = w
+	}
+	if err := councilRuntimeChecker(func() *config.Bundle { return relBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: canonRelRepo}); err != nil {
+		t.Fatalf("expected relative RepoPath matching absolute checkout.Source to pass: %v", err)
 	}
 }
 

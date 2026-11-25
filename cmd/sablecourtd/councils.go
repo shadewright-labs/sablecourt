@@ -32,8 +32,8 @@ const (
 	maxCouncilOpenBody = 1 << 20
 	// The packet also carries framing and review excerpts.
 	maxCouncilQuestion = 30 << 10
-	// Leave room for the assignment and checkout fields in the adapter's 64 KiB launch input.
-	maxEncodedOpeningPacket = 63 << 10
+	// Reserve encoded headroom for peer excerpts in later rounds inside the 64 KiB launch input.
+	maxEncodedOpeningPacket = contextpack.MaxCouncilOpeningEncodedPacketBytes
 )
 
 var councilPanel = [...]string{"claude", "codex", "agy"}
@@ -605,16 +605,30 @@ func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.
 				len(wl.Spec.Grants.DelegateTo) > 0 {
 				return errors.New("council panel workload unavailable: " + role)
 			}
-			if wl.Spec.Coding.RepoPath != "" && checkout.Source != "" {
-				ra, errA := filepath.EvalSymlinks(checkout.Source)
-				rb, errB := filepath.EvalSymlinks(wl.Spec.Coding.RepoPath)
-				if checkout.Source != wl.Spec.Coding.RepoPath && (errA != nil || errB != nil || ra != rb) {
-					return errors.New("council panel workload repo mismatch: " + role)
-				}
+			if wl.Spec.Coding.RepoPath != "" && checkout.Source != "" &&
+				!sameCheckoutSource(checkout.Source, wl.Spec.Coding.RepoPath) {
+				return errors.New("council panel workload repo mismatch: " + role)
 			}
 		}
 		return nil
 	}
+}
+
+func sameCheckoutSource(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(absA)
+	rb, errB := filepath.EvalSymlinks(absB)
+	return errA == nil && errB == nil && ra == rb
 }
 
 func councilCommitID(id string) bool {

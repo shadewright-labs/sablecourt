@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
@@ -1865,7 +1866,7 @@ func TestLiveModeWithoutGitInfoExclude(t *testing.T) {
 	testGit(t, repo, "init", "--template=", "-q")
 	testWrite(t, repo, "README.md", "base\n", 0o600)
 	testGit(t, repo, "add", "README.md")
-	testGit(t, repo, "commit", "-qm", "init")
+	testGit(t, repo, "-c", "user.name=Sablecourt Test", "-c", "user.email=sablecourt-test", "-c", "commit.gpgsign=false", "commit", "-qm", "init")
 	if _, err := os.Lstat(filepath.Join(repo, ".git", "info", "exclude")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected no .git/info/exclude with --template=, got err=%v", err)
 	}
@@ -2037,6 +2038,64 @@ echo "clean-retry-ok"
 				if art.Name == "git-diff" {
 					t.Fatalf("no-op retry published leftover diff:\n%s", art.Text)
 				}
+			}
+		})
+	}
+}
+
+func TestWriterDiffTruncationPreservesValidUTF8(t *testing.T) {
+	ctx := context.Background()
+	for _, pad := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("pad_%d", pad), func(t *testing.T) {
+			repo := initTempGitRepo(t)
+			base := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+			// Build a >32 KiB file of 3-byte UTF-8 runes shifted by pad bytes so at least
+			// one case places the 32 KiB cut inside a multibyte rune.
+			content := strings.Repeat("a", pad) + strings.Repeat("世", 12000) + "\n"
+			testWrite(t, repo, "utf8.txt", content, 0o600)
+			testGit(t, repo, "add", "utf8.txt")
+			testGit(t, repo, "commit", "-qm", "utf8 diff")
+			tip := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+
+			taskBase := filepath.Join(t.TempDir(), "task-utf8")
+			state := &worktreeState{
+				TaskID:    "task-utf8",
+				Mode:      checkoutModeWriter,
+				CommonDir: filepath.Join(repo, ".git"),
+				GitDir:    filepath.Join(repo, ".git"),
+				Base:      base,
+				Tip:       tip,
+			}
+
+			arts, err := writerWorktreeArtifacts(ctx, taskBase, repo, state, "M  utf8.txt\n")
+			if err != nil {
+				t.Fatalf("writerWorktreeArtifacts: %v", err)
+			}
+			var gotWriterDiff string
+			for _, art := range arts {
+				if art.Name == "git-diff" {
+					gotWriterDiff = art.Text
+				}
+			}
+			if gotWriterDiff == "" || !strings.HasSuffix(gotWriterDiff, "\n...[truncated]") {
+				t.Fatalf("expected truncated writer git-diff, got len=%d", len(gotWriterDiff))
+			}
+			if !utf8.ValidString(gotWriterDiff) {
+				t.Fatalf("truncated writer git-diff is invalid UTF-8 (pad=%d)", pad)
+			}
+
+			wArts, err := worktreeArtifacts(ctx, taskBase, state, "M  utf8.txt\n")
+			if err != nil {
+				t.Fatalf("worktreeArtifacts: %v", err)
+			}
+			var gotWorktreeDiff string
+			for _, art := range wArts {
+				if art.Name == "git-diff" {
+					gotWorktreeDiff = art.Text
+				}
+			}
+			if gotWorktreeDiff == "" || !utf8.ValidString(gotWorktreeDiff) {
+				t.Fatalf("truncated worktree git-diff is invalid UTF-8 (pad=%d)", pad)
 			}
 		})
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
@@ -1490,7 +1491,7 @@ func writerWorktreeArtifacts(ctx context.Context, taskBase, checkoutDir string, 
 		if diff != "" {
 			diff = redactDiffText(diff)
 			if len(diff) > 32*1024 {
-				diff = diff[:32*1024] + "\n...[truncated]"
+				diff = truncateUTF8Prefix(diff, 32*1024) + "\n...[truncated]"
 			}
 			artifacts = append(artifacts, scruntime.Artifact{Name: "git-diff", ContentType: "text/x-diff", Text: diff})
 		}
@@ -2235,6 +2236,17 @@ func deleteBranchIfAt(ctx context.Context, commonDir, branch, expectedCommit str
 		return err
 	}
 	return nil
+}
+
+func truncateUTF8Prefix(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func removeString(items []string, target string) []string {

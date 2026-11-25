@@ -127,8 +127,16 @@ func sameCheckoutSource(a, b string) bool {
 	if a == b {
 		return true
 	}
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(absA)
+	rb, errB := filepath.EvalSymlinks(absB)
 	return errA == nil && errB == nil && ra == rb
 }
 
