@@ -1094,7 +1094,7 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 						return true, err
 					}
 					decided = true
-				case domain.ApprovalApproved, domain.ApprovalDenied, domain.ApprovalExpired:
+				case domain.ApprovalApproved, domain.ApprovalConsumed, domain.ApprovalDenied, domain.ApprovalExpired:
 					decided = true
 				default:
 					return true, nil
