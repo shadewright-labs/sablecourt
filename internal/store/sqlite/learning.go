@@ -1,0 +1,1216 @@
+package sqlite
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
+)
+
+var _ store.LearningStore = (*SQLiteStore)(nil)
+
+func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (domain.Learning, error) {
+	if !store.ValidLearningID(in.ID, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning id")
+	}
+	if in.Status != "" && in.Status != domain.LearningStatusProposed {
+		return domain.Learning{}, errors.New("new learnings must start in proposed status")
+	}
+	if !store.ValidLearningSourceKind(in.SourceKind, false) {
+		return domain.Learning{}, errors.New("invalid learning source kind")
+	}
+	if !store.ValidLearningID(in.Author, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("authenticated author is required")
+	}
+	if in.SourceID != "" && !store.ValidLearningID(in.SourceID, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning source id")
+	}
+	if in.PredecessorID != "" {
+		if in.PredecessorID == in.ID || !store.ValidLearningID(in.PredecessorID, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid learning predecessor id")
+		}
+	}
+	if !store.ValidLearningText(in.Statement, store.MaxLearningStatementBytes) {
+		return domain.Learning{}, errors.New("invalid learning statement")
+	}
+	statement := strings.TrimSpace(store.RedactLearningText(in.Statement))
+	if !store.ValidLearningText(statement, store.MaxLearningStatementBytes) {
+		return domain.Learning{}, errors.New("invalid redacted learning statement")
+	}
+
+	evidenceRef := ""
+	if strings.TrimSpace(in.EvidenceRef) != "" {
+		if !store.ValidLearningText(in.EvidenceRef, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid learning evidence reference")
+		}
+		evidenceRef = strings.TrimSpace(store.RedactLearningText(in.EvidenceRef))
+		if !store.ValidLearningText(evidenceRef, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid redacted learning evidence reference")
+		}
+	}
+
+	reviewReason := ""
+	if strings.TrimSpace(in.ReviewReason) != "" {
+		if !store.ValidLearningText(in.ReviewReason, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid learning review reason")
+		}
+		reviewReason = strings.TrimSpace(store.RedactLearningText(in.ReviewReason))
+		if !store.ValidLearningText(reviewReason, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid redacted learning review reason")
+		}
+	}
+
+	scope, scopeKind, scopeKey, specificity, err := store.NormalizeLearningScope(in.Scope, false)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+
+	createdAt := in.CreatedAt.UTC()
+	if in.CreatedAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+
+	rec := domain.Learning{
+		ID:                 in.ID,
+		Statement:          statement,
+		Scope:              scope,
+		ScopeKind:          scopeKind,
+		ScopeKey:           scopeKey,
+		ScopeSpecificity:   specificity,
+		SourceKind:         in.SourceKind,
+		SourceID:           in.SourceID,
+		EvidenceRef:        evidenceRef,
+		ProvenanceVerified: in.SourceID != "" && evidenceRef != "",
+		Author:             in.Author,
+		PredecessorID:      in.PredecessorID,
+		Status:             domain.LearningStatusProposed,
+		ReviewReason:       reviewReason,
+		CreatedAt:          createdAt,
+		UpdatedAt:          createdAt,
+	}
+	digest, err := store.ComputeLearningVersionDigest(rec)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	rec.VersionDigest = digest
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	defer tx.Rollback()
+
+	if rec.PredecessorID != "" {
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM learnings WHERE id = ?`, rec.PredecessorID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Learning{}, fmt.Errorf("%w: predecessor %s", store.ErrNotFound, rec.PredecessorID)
+		}
+		if err != nil {
+			return domain.Learning{}, err
+		}
+	}
+
+	if err := insertLearningTx(ctx, tx, rec, "proposed", rec.Author, rec.ReviewReason); err != nil {
+		return domain.Learning{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Learning{}, err
+	}
+	return rec, nil
+}
+
+func (s *SQLiteStore) GetLearning(ctx context.Context, id string) (domain.Learning, error) {
+	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning id")
+	}
+	return getLearningRow(ctx, s.db, id)
+}
+
+func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest, operator string, now time.Time) (domain.Learning, error) {
+	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning id")
+	}
+	if !store.ValidLearningID(expectedDigest, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("expected learning digest is required")
+	}
+	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("authenticated operator is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	defer tx.Rollback()
+
+	rec, err := getLearningRow(ctx, tx, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if rec.VersionDigest != expectedDigest {
+		return domain.Learning{}, fmt.Errorf("%w: learning digest mismatch", store.ErrConflict)
+	}
+	if rec.Status != domain.LearningStatusProposed {
+		return domain.Learning{}, fmt.Errorf("%w: learning is %s", store.ErrConflict, rec.Status)
+	}
+	if rec.Scope.NeedsScopeMapping {
+		return domain.Learning{}, fmt.Errorf("%w: learning scope requires operator mapping before acceptance", store.ErrConflict)
+	}
+
+	nowStr := store.FormatLearningTime(now)
+	expiresAt := now.Add(domain.LearningReviewTTL)
+	expiresStr := store.FormatLearningTime(expiresAt)
+
+	if rec.PredecessorID != "" {
+		pred, err := getLearningRow(ctx, tx, rec.PredecessorID)
+		if err != nil {
+			return domain.Learning{}, err
+		}
+		if pred.Status == domain.LearningStatusRetired {
+			return domain.Learning{}, fmt.Errorf("%w: predecessor %s is already retired", store.ErrConflict, pred.ID)
+		}
+		supersededReason := truncateUTF8("superseded by "+rec.ID, store.MaxLearningFieldBytes)
+		res, err := tx.ExecContext(ctx, `
+			UPDATE learnings
+			SET status = 'retired', review_reason = ?, updated_at = ?
+			WHERE id = ? AND status <> 'retired'
+		`, supersededReason, nowStr, pred.ID)
+		if err != nil {
+			return domain.Learning{}, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return domain.Learning{}, store.ErrConflict
+		}
+		if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+			LearningID:   pred.ID,
+			FromStatus:   pred.Status,
+			ToStatus:     domain.LearningStatusRetired,
+			EventKind:    "retired",
+			Actor:        operator,
+			Reason:       supersededReason,
+			SupersededBy: rec.ID,
+			CreatedAt:    now,
+		}); err != nil {
+			return domain.Learning{}, err
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE learnings
+		SET status = 'accepted',
+		    accepted_by = ?,
+		    review_reason = '',
+		    last_confirmed_at = ?,
+		    expires_at = ?,
+		    updated_at = ?
+		WHERE id = ? AND status = 'proposed' AND version_digest = ?
+	`, operator, nowStr, expiresStr, nowStr, rec.ID, expectedDigest)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return domain.Learning{}, store.ErrConflict
+	}
+
+	if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+		LearningID:    rec.ID,
+		FromStatus:    domain.LearningStatusProposed,
+		ToStatus:      domain.LearningStatusAccepted,
+		EventKind:     "accepted",
+		Actor:         operator,
+		EvidenceRef:   rec.EvidenceRef,
+		PredecessorID: rec.PredecessorID,
+		ExpiresAt:     &expiresAt,
+		CreatedAt:     now,
+	}); err != nil {
+		return domain.Learning{}, err
+	}
+
+	updated, err := getLearningRow(ctx, tx, rec.ID)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Learning{}, err
+	}
+	return updated, nil
+}
+
+func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID int64, operator string, now time.Time) (domain.Learning, error) {
+	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning id")
+	}
+	if outcomeID <= 0 {
+		return domain.Learning{}, errors.New("supporting outcome id is required")
+	}
+	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("authenticated operator is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	defer tx.Rollback()
+
+	rec, err := getLearningRow(ctx, tx, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if !rec.IsEligible(now) {
+		return domain.Learning{}, fmt.Errorf("%w: learning is not eligible for confirmation", store.ErrConflict)
+	}
+	contradicted, err := hasUnaddressedContradictionTx(ctx, tx, rec)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if contradicted {
+		return domain.Learning{}, fmt.Errorf("%w: learning has an unaddressed contradiction", store.ErrConflict)
+	}
+
+	var outcomeKind, evidenceRef, confirmedBy string
+	err = tx.QueryRowContext(ctx, `
+		SELECT kind, evidence_ref, confirmed_by
+		FROM learning_outcomes
+		WHERE id = ? AND learning_id = ?
+	`, outcomeID, id).Scan(&outcomeKind, &evidenceRef, &confirmedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Learning{}, store.ErrNotFound
+	}
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if domain.LearningOutcomeKind(outcomeKind) != domain.LearningOutcomeSupporting || strings.TrimSpace(evidenceRef) == "" {
+		return domain.Learning{}, fmt.Errorf("%w: confirmation requires supporting outcome with evidence", store.ErrConflict)
+	}
+	if confirmedBy != "" {
+		return domain.Learning{}, fmt.Errorf("%w: outcome already confirmed", store.ErrConflict)
+	}
+
+	nowStr := store.FormatLearningTime(now)
+	expiresAt := now.Add(domain.LearningReviewTTL)
+	expiresStr := store.FormatLearningTime(expiresAt)
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE learning_outcomes
+		SET confirmed_by = ?, confirmed_at = ?
+		WHERE id = ? AND learning_id = ? AND confirmed_by = ''
+	`, operator, nowStr, outcomeID, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return domain.Learning{}, store.ErrConflict
+	}
+
+	res, err = tx.ExecContext(ctx, `
+		UPDATE learnings
+		SET last_confirmed_at = ?, expires_at = ?, updated_at = ?
+		WHERE id = ? AND status = 'accepted'
+	`, nowStr, expiresStr, nowStr, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return domain.Learning{}, store.ErrConflict
+	}
+
+	if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+		LearningID:  id,
+		FromStatus:  domain.LearningStatusAccepted,
+		ToStatus:    domain.LearningStatusAccepted,
+		EventKind:   "confirmed",
+		Actor:       operator,
+		Reason:      fmt.Sprintf("confirmed outcome %d", outcomeID),
+		EvidenceRef: evidenceRef,
+		ExpiresAt:   &expiresAt,
+		CreatedAt:   now,
+	}); err != nil {
+		return domain.Learning{}, err
+	}
+
+	updated, err := getLearningRow(ctx, tx, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Learning{}, err
+	}
+	return updated, nil
+}
+
+func (s *SQLiteStore) RetireLearning(ctx context.Context, id, operator, reason string, now time.Time) (domain.Learning, error) {
+	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("invalid learning id")
+	}
+	if !store.ValidLearningID(operator, store.MaxLearningFieldBytes) {
+		return domain.Learning{}, errors.New("authenticated operator is required")
+	}
+	cleanReason := ""
+	if strings.TrimSpace(reason) != "" {
+		if !store.ValidLearningText(reason, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid retirement reason")
+		}
+		cleanReason = strings.TrimSpace(store.RedactLearningText(reason))
+		if !store.ValidLearningText(cleanReason, store.MaxLearningFieldBytes) {
+			return domain.Learning{}, errors.New("invalid redacted retirement reason")
+		}
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	defer tx.Rollback()
+
+	rec, err := getLearningRow(ctx, tx, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if rec.Status == domain.LearningStatusRetired {
+		return domain.Learning{}, fmt.Errorf("%w: learning is already retired", store.ErrConflict)
+	}
+
+	nowStr := store.FormatLearningTime(now)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE learnings
+		SET status = 'retired', review_reason = ?, updated_at = ?
+		WHERE id = ? AND status <> 'retired'
+	`, cleanReason, nowStr, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return domain.Learning{}, store.ErrConflict
+	}
+
+	if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+		LearningID: id,
+		FromStatus: rec.Status,
+		ToStatus:   domain.LearningStatusRetired,
+		EventKind:  "retired",
+		Actor:      operator,
+		Reason:     cleanReason,
+		CreatedAt:  now,
+	}); err != nil {
+		return domain.Learning{}, err
+	}
+
+	updated, err := getLearningRow(ctx, tx, id)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Learning{}, err
+	}
+	return updated, nil
+}
+
+func (s *SQLiteStore) RecordLearningInjection(ctx context.Context, learningID, packetID, taskID string, at time.Time) (bool, error) {
+	if !store.ValidLearningID(learningID, store.MaxLearningFieldBytes) {
+		return false, errors.New("invalid learning id")
+	}
+	if !store.ValidLearningID(packetID, store.MaxLearningFieldBytes) {
+		return false, errors.New("invalid packet id")
+	}
+	if taskID != "" && !store.ValidLearningID(taskID, store.MaxLearningFieldBytes) {
+		return false, errors.New("invalid task id")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	} else {
+		at = at.UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var alreadyRecorded int
+	err = tx.QueryRowContext(ctx, `
+		SELECT 1 FROM learning_injections WHERE learning_id = ? AND packet_id = ?
+	`, learningID, packetID).Scan(&alreadyRecorded)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+
+	rec, err := getLearningRow(ctx, tx, learningID)
+	if err != nil {
+		return false, err
+	}
+	if !rec.IsEligible(at) {
+		return false, fmt.Errorf("%w: learning is not eligible for injection", store.ErrConflict)
+	}
+	contradicted, err := hasUnaddressedContradictionTx(ctx, tx, rec)
+	if err != nil {
+		return false, err
+	}
+	if contradicted {
+		return false, fmt.Errorf("%w: learning has an unaddressed contradiction", store.ErrConflict)
+	}
+
+	atStr := store.FormatLearningTime(at)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO learning_injections (learning_id, packet_id, task_id, injected_at)
+		VALUES (?, ?, ?, ?)
+	`, learningID, packetID, taskID, atStr); err != nil {
+		return false, err
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE learnings
+		SET injection_count = injection_count + 1, updated_at = ?
+		WHERE id = ?
+	`, atStr, learningID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, store.ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.LearningOutcome) (domain.LearningOutcome, error) {
+	if !store.ValidLearningID(in.LearningID, store.MaxLearningFieldBytes) {
+		return domain.LearningOutcome{}, errors.New("invalid learning id")
+	}
+	if !store.ValidLearningOutcomeKind(in.Kind) {
+		return domain.LearningOutcome{}, errors.New("invalid learning outcome kind")
+	}
+	if !store.ValidLearningSourceKind(in.SourceKind, false) {
+		return domain.LearningOutcome{}, errors.New("invalid learning outcome source kind")
+	}
+	if !store.ValidLearningID(in.Actor, store.MaxLearningFieldBytes) {
+		return domain.LearningOutcome{}, errors.New("authenticated actor is required")
+	}
+	if in.SourceID != "" && !store.ValidLearningID(in.SourceID, store.MaxLearningFieldBytes) {
+		return domain.LearningOutcome{}, errors.New("invalid outcome source id")
+	}
+
+	evidenceRef := ""
+	if strings.TrimSpace(in.EvidenceRef) != "" {
+		if !store.ValidLearningText(in.EvidenceRef, store.MaxLearningFieldBytes) {
+			return domain.LearningOutcome{}, errors.New("invalid outcome evidence reference")
+		}
+		evidenceRef = strings.TrimSpace(store.RedactLearningText(in.EvidenceRef))
+		if !store.ValidLearningText(evidenceRef, store.MaxLearningFieldBytes) {
+			return domain.LearningOutcome{}, errors.New("invalid redacted outcome evidence reference")
+		}
+	}
+	if in.Kind == domain.LearningOutcomeContradiction && evidenceRef == "" {
+		return domain.LearningOutcome{}, errors.New("contradiction outcome requires an evidence reference")
+	}
+
+	summary := ""
+	if strings.TrimSpace(in.Summary) != "" {
+		if !store.ValidLearningText(in.Summary, store.MaxLearningOutcomeSummaryBytes) {
+			return domain.LearningOutcome{}, errors.New("invalid outcome summary")
+		}
+		summary = strings.TrimSpace(store.RedactLearningText(in.Summary))
+		if !store.ValidLearningText(summary, store.MaxLearningOutcomeSummaryBytes) {
+			return domain.LearningOutcome{}, errors.New("invalid redacted outcome summary")
+		}
+	}
+
+	createdAt := in.CreatedAt.UTC()
+	if in.CreatedAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	createdStr := store.FormatLearningTime(createdAt)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.LearningOutcome{}, err
+	}
+	defer tx.Rollback()
+
+	rec, err := getLearningRow(ctx, tx, in.LearningID)
+	if err != nil {
+		return domain.LearningOutcome{}, err
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO learning_outcomes (
+			learning_id, kind, source_kind, source_id, evidence_ref, summary, actor, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, in.LearningID, string(in.Kind), string(in.SourceKind), in.SourceID, evidenceRef, summary, in.Actor, createdStr)
+	if err != nil {
+		return domain.LearningOutcome{}, err
+	}
+	outcomeID, err := res.LastInsertId()
+	if err != nil {
+		return domain.LearningOutcome{}, err
+	}
+
+	if in.Kind == domain.LearningOutcomeContradiction && rec.Status == domain.LearningStatusAccepted {
+		reason := "contradiction"
+		if summary != "" {
+			reason = "contradiction: " + truncateUTF8(summary, store.MaxLearningFieldBytes-len("contradiction: "))
+		}
+		upd, err := tx.ExecContext(ctx, `
+			UPDATE learnings
+			SET status = 'proposed', review_reason = ?, updated_at = ?
+			WHERE id = ? AND status = 'accepted'
+		`, reason, createdStr, rec.ID)
+		if err != nil {
+			return domain.LearningOutcome{}, err
+		}
+		if n, _ := upd.RowsAffected(); n != 1 {
+			return domain.LearningOutcome{}, store.ErrConflict
+		}
+		if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+			LearningID:  rec.ID,
+			FromStatus:  domain.LearningStatusAccepted,
+			ToStatus:    domain.LearningStatusProposed,
+			EventKind:   "contradicted",
+			Actor:       in.Actor,
+			Reason:      reason,
+			EvidenceRef: evidenceRef,
+			CreatedAt:   createdAt,
+		}); err != nil {
+			return domain.LearningOutcome{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return domain.LearningOutcome{}, err
+	}
+	return domain.LearningOutcome{
+		ID:          outcomeID,
+		LearningID:  in.LearningID,
+		Kind:        in.Kind,
+		SourceKind:  in.SourceKind,
+		SourceID:    in.SourceID,
+		EvidenceRef: evidenceRef,
+		Summary:     summary,
+		Actor:       in.Actor,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
+func (s *SQLiteStore) ExpireLearnings(ctx context.Context, now time.Time) (int, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	nowStr := store.FormatLearningTime(now)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM learnings
+		WHERE status = 'accepted' AND expires_at IS NOT NULL AND expires_at <= ?
+		ORDER BY id ASC
+	`, nowStr)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	_ = rows.Close()
+
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE learnings
+			SET status = 'proposed', review_reason = 'expired', updated_at = ?
+			WHERE id = ? AND status = 'accepted'
+		`, nowStr, id); err != nil {
+			return 0, err
+		}
+		if err := appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+			LearningID: id,
+			FromStatus: domain.LearningStatusAccepted,
+			ToStatus:   domain.LearningStatusProposed,
+			EventKind:  "expired",
+			Actor:      "system",
+			Reason:     "expired",
+			CreatedAt:  now,
+		}); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
+func (s *SQLiteStore) ListLearnings(ctx context.Context, filter store.LearningFilter) ([]domain.Learning, error) {
+	if filter.Status != "" && !store.ValidLearningStatus(filter.Status) {
+		return nil, errors.New("invalid learning status filter")
+	}
+	if filter.Limit < 0 {
+		return nil, errors.New("invalid learning list limit")
+	}
+	limit := filter.Limit
+	if limit == 0 {
+		limit = store.DefaultLearningListLimit
+	}
+	if limit > store.MaxLearningListLimit {
+		limit = store.MaxLearningListLimit
+	}
+	now := filter.Now.UTC()
+	if filter.Now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var conds []string
+	var args []any
+
+	if filter.ScopeKey != "" {
+		if !store.ValidLearningText(filter.ScopeKey, store.MaxLearningFieldBytes) {
+			return nil, errors.New("invalid scope key filter")
+		}
+		conds = append(conds, "scope_key = ?")
+		args = append(args, filter.ScopeKey)
+	}
+	if filter.GlobalOnly {
+		conds = append(conds, "scope_global = 1")
+	}
+	if strings.TrimSpace(filter.RepoRemoteURL) != "" {
+		repo, err := store.NormalizeRepoRemoteURL(filter.RepoRemoteURL)
+		if err != nil {
+			return nil, err
+		}
+		conds = append(conds, "repo_remote_url = ?")
+		args = append(args, repo)
+	}
+	if strings.TrimSpace(filter.IncidentCluster) != "" {
+		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentCluster), store.MaxLearningSelectorBytes) {
+			return nil, errors.New("invalid incident cluster filter")
+		}
+		conds = append(conds, "incident_cluster = ?")
+		args = append(args, strings.TrimSpace(filter.IncidentCluster))
+	}
+	if strings.TrimSpace(filter.IncidentNamespace) != "" {
+		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentNamespace), store.MaxLearningSelectorBytes) {
+			return nil, errors.New("invalid incident namespace filter")
+		}
+		conds = append(conds, "incident_namespace = ?")
+		args = append(args, strings.TrimSpace(filter.IncidentNamespace))
+	}
+	if strings.TrimSpace(filter.IncidentWorkloadKind) != "" {
+		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentWorkloadKind), store.MaxLearningSelectorBytes) {
+			return nil, errors.New("invalid incident workload kind filter")
+		}
+		conds = append(conds, "incident_workload_kind = ?")
+		args = append(args, strings.TrimSpace(filter.IncidentWorkloadKind))
+	}
+	if strings.TrimSpace(filter.IncidentSymptom) != "" {
+		if !store.ValidLearningID(strings.TrimSpace(filter.IncidentSymptom), store.MaxLearningSymptomBytes) {
+			return nil, errors.New("invalid incident symptom filter")
+		}
+		conds = append(conds, "incident_symptom = ?")
+		args = append(args, strings.TrimSpace(filter.IncidentSymptom))
+	}
+	if filter.NeedsScopeMapping != nil {
+		if *filter.NeedsScopeMapping {
+			conds = append(conds, "needs_scope_mapping = 1")
+		} else {
+			conds = append(conds, "needs_scope_mapping = 0")
+		}
+	}
+	if filter.Status != "" {
+		conds = append(conds, "status = ?")
+		args = append(args, string(filter.Status))
+		if filter.Status == domain.LearningStatusAccepted && !filter.IncludeExpired {
+			conds = append(conds, "needs_scope_mapping = 0")
+			conds = append(conds, "expires_at IS NOT NULL AND expires_at > ?")
+			args = append(args, store.FormatLearningTime(now))
+			conds = append(conds, `NOT EXISTS (
+				SELECT 1 FROM learning_outcomes o
+				WHERE o.learning_id = learnings.id
+				  AND o.kind = 'contradiction'
+				  AND o.evidence_ref <> ''
+				  AND o.created_at >= COALESCE(learnings.last_confirmed_at, learnings.created_at)
+			)`)
+		}
+	}
+
+	query := selectLearningColumns + " FROM learnings"
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += " ORDER BY scope_specificity DESC, created_at DESC, id ASC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Learning
+	for rows.Next() {
+		rec, err := scanLearningRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Status == domain.LearningStatusAccepted && !filter.IncludeExpired && !rec.IsEligible(now) {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ListLearningHistory(ctx context.Context, learningID string) ([]domain.LearningHistory, error) {
+	if !store.ValidLearningID(learningID, store.MaxLearningFieldBytes) {
+		return nil, errors.New("invalid learning id")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, learning_id, from_status, to_status, event_kind, actor,
+		       reason, evidence_ref, predecessor_id, superseded_by, expires_at, created_at
+		FROM learning_history
+		WHERE learning_id = ?
+		ORDER BY id ASC
+	`, learningID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.LearningHistory
+	for rows.Next() {
+		var h domain.LearningHistory
+		var fromSt, toSt, expiresStr, createdStr string
+		if err := rows.Scan(
+			&h.ID, &h.LearningID, &fromSt, &toSt, &h.EventKind, &h.Actor,
+			&h.Reason, &h.EvidenceRef, &h.PredecessorID, &h.SupersededBy, &expiresStr, &createdStr,
+		); err != nil {
+			return nil, err
+		}
+		h.FromStatus = domain.LearningStatus(fromSt)
+		h.ToStatus = domain.LearningStatus(toSt)
+		if expiresStr != "" {
+			t, err := store.ParseLearningTime(expiresStr)
+			if err != nil {
+				return nil, err
+			}
+			h.ExpiresAt = &t
+		}
+		h.CreatedAt, err = store.ParseLearningTime(createdStr)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ListLearningOutcomes(ctx context.Context, learningID string) ([]domain.LearningOutcome, error) {
+	if !store.ValidLearningID(learningID, store.MaxLearningFieldBytes) {
+		return nil, errors.New("invalid learning id")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, learning_id, kind, source_kind, source_id, evidence_ref,
+		       summary, actor, confirmed_by, confirmed_at, created_at
+		FROM learning_outcomes
+		WHERE learning_id = ?
+		ORDER BY id ASC
+	`, learningID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.LearningOutcome
+	for rows.Next() {
+		var o domain.LearningOutcome
+		var kind, sourceKind, confirmedAtStr, createdStr string
+		if err := rows.Scan(
+			&o.ID, &o.LearningID, &kind, &sourceKind, &o.SourceID, &o.EvidenceRef,
+			&o.Summary, &o.Actor, &o.ConfirmedBy, &confirmedAtStr, &createdStr,
+		); err != nil {
+			return nil, err
+		}
+		o.Kind = domain.LearningOutcomeKind(kind)
+		o.SourceKind = domain.LearningSourceKind(sourceKind)
+		if confirmedAtStr != "" {
+			t, err := store.ParseLearningTime(confirmedAtStr)
+			if err != nil {
+				return nil, err
+			}
+			o.ConfirmedAt = &t
+		}
+		o.CreatedAt, err = store.ParseLearningTime(createdStr)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+const selectLearningColumns = `
+	SELECT id, version_digest, statement, scope_kind, scope_key, scope_specificity,
+	       scope_json, source_kind, source_id, evidence_ref, provenance_verified,
+	       author, predecessor_id, status, accepted_by, review_reason,
+	       legacy_namespace, legacy_key, legacy_author, legacy_updated_at,
+	       created_at, last_confirmed_at, expires_at, updated_at, injection_count`
+
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func getLearningRow(ctx context.Context, q rowQuerier, id string) (domain.Learning, error) {
+	row := q.QueryRowContext(ctx, selectLearningColumns+" FROM learnings WHERE id = ?", id)
+	rec, err := scanLearningRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Learning{}, store.ErrNotFound
+	}
+	return rec, err
+}
+
+func scanLearningRow(row interface{ Scan(...any) error }) (domain.Learning, error) {
+	var rec domain.Learning
+	var scopeJSON, sourceKind, status string
+	var provenanceVerified int
+	var predecessorID, lastConfirmedStr, expiresStr sql.NullString
+	var createdStr, updatedStr string
+
+	err := row.Scan(
+		&rec.ID, &rec.VersionDigest, &rec.Statement, &rec.ScopeKind, &rec.ScopeKey, &rec.ScopeSpecificity,
+		&scopeJSON, &sourceKind, &rec.SourceID, &rec.EvidenceRef, &provenanceVerified,
+		&rec.Author, &predecessorID, &status, &rec.AcceptedBy, &rec.ReviewReason,
+		&rec.LegacyNamespace, &rec.LegacyKey, &rec.LegacyAuthor, &rec.LegacyUpdatedAt,
+		&createdStr, &lastConfirmedStr, &expiresStr, &updatedStr, &rec.InjectionCount,
+	)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if err := json.Unmarshal([]byte(scopeJSON), &rec.Scope); err != nil {
+		return domain.Learning{}, err
+	}
+	rec.SourceKind = domain.LearningSourceKind(sourceKind)
+	rec.Status = domain.LearningStatus(status)
+	rec.ProvenanceVerified = provenanceVerified == 1
+	if predecessorID.Valid {
+		rec.PredecessorID = predecessorID.String
+	}
+	rec.CreatedAt, err = store.ParseLearningTime(createdStr)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	rec.UpdatedAt, err = store.ParseLearningTime(updatedStr)
+	if err != nil {
+		return domain.Learning{}, err
+	}
+	if lastConfirmedStr.Valid && lastConfirmedStr.String != "" {
+		t, err := store.ParseLearningTime(lastConfirmedStr.String)
+		if err != nil {
+			return domain.Learning{}, err
+		}
+		rec.LastConfirmedAt = &t
+	}
+	if expiresStr.Valid && expiresStr.String != "" {
+		t, err := store.ParseLearningTime(expiresStr.String)
+		if err != nil {
+			return domain.Learning{}, err
+		}
+		rec.ExpiresAt = &t
+	}
+	return rec, nil
+}
+
+func insertLearningTx(ctx context.Context, tx *sql.Tx, rec domain.Learning, eventKind, actor, reason string) error {
+	scopeBytes, err := json.Marshal(rec.Scope)
+	if err != nil {
+		return err
+	}
+	globs := rec.Scope.PathGlobs
+	if globs == nil {
+		globs = []string{}
+	}
+	globsBytes, err := json.Marshal(globs)
+	if err != nil {
+		return err
+	}
+	var pred sql.NullString
+	if rec.PredecessorID != "" {
+		pred = sql.NullString{String: rec.PredecessorID, Valid: true}
+	}
+	createdStr := store.FormatLearningTime(rec.CreatedAt)
+	updatedStr := store.FormatLearningTime(rec.UpdatedAt)
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO learnings (
+			id, version_digest, statement, scope_kind, scope_key, scope_specificity,
+			scope_global, repo_remote_url, path_globs_json,
+			incident_cluster, incident_namespace, incident_workload_kind, incident_symptom,
+			needs_scope_mapping, scope_json,
+			source_kind, source_id, evidence_ref, provenance_verified,
+			author, predecessor_id, status, accepted_by, review_reason,
+			legacy_namespace, legacy_key, legacy_author, legacy_updated_at,
+			created_at, updated_at, injection_count
+		) VALUES (
+			?, ?, ?, ?, ?, ?,
+			?, ?, ?,
+			?, ?, ?, ?,
+			?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?
+		)
+	`,
+		rec.ID, rec.VersionDigest, rec.Statement, rec.ScopeKind, rec.ScopeKey, rec.ScopeSpecificity,
+		boolToInt(rec.Scope.Global), rec.Scope.RepoRemoteURL, string(globsBytes),
+		rec.Scope.Cluster, rec.Scope.Namespace, rec.Scope.WorkloadKind, rec.Scope.Symptom,
+		boolToInt(rec.Scope.NeedsScopeMapping), string(scopeBytes),
+		string(rec.SourceKind), rec.SourceID, rec.EvidenceRef, boolToInt(rec.ProvenanceVerified),
+		rec.Author, pred, string(rec.Status), rec.AcceptedBy, rec.ReviewReason,
+		rec.LegacyNamespace, rec.LegacyKey, rec.LegacyAuthor, rec.LegacyUpdatedAt,
+		createdStr, updatedStr, rec.InjectionCount,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("%w: %v", store.ErrConflict, err)
+		}
+		return err
+	}
+
+	return appendLearningHistoryTx(ctx, tx, domain.LearningHistory{
+		LearningID:    rec.ID,
+		FromStatus:    "",
+		ToStatus:      rec.Status,
+		EventKind:     eventKind,
+		Actor:         actor,
+		Reason:        reason,
+		EvidenceRef:   rec.EvidenceRef,
+		PredecessorID: rec.PredecessorID,
+		CreatedAt:     rec.CreatedAt,
+	})
+}
+
+func appendLearningHistoryTx(ctx context.Context, tx *sql.Tx, h domain.LearningHistory) error {
+	expiresStr := ""
+	if h.ExpiresAt != nil {
+		expiresStr = store.FormatLearningTime(*h.ExpiresAt)
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO learning_history (
+			learning_id, from_status, to_status, event_kind, actor,
+			reason, evidence_ref, predecessor_id, superseded_by, expires_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		h.LearningID, string(h.FromStatus), string(h.ToStatus), h.EventKind, h.Actor,
+		h.Reason, h.EvidenceRef, h.PredecessorID, h.SupersededBy, expiresStr, store.FormatLearningTime(h.CreatedAt),
+	)
+	return err
+}
+
+// migrateLegacyLearningsTx imports pre-existing court_memory learning:* rows once as
+// unverified proposals per ADR-0012, preserving original metadata and queuing ambiguous
+// repository or path scopes for operator mapping.
+func migrateLegacyLearningsTx(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT namespace, key, value, author, updated_at
+		FROM court_memory
+		WHERE LOWER(TRIM(namespace)) LIKE 'learning:%'
+		ORDER BY namespace ASC, key ASC
+	`)
+	if err != nil {
+		return err
+	}
+	type legacyRow struct {
+		namespace, key, value, author, updatedAt string
+	}
+	var legacy []legacyRow
+	for rows.Next() {
+		var r legacyRow
+		if err := rows.Scan(&r.namespace, &r.key, &r.value, &r.author, &r.updatedAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		legacy = append(legacy, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	migratedAt := time.Now().UTC()
+	seenOrigin := map[string]struct{}{}
+	for _, r := range legacy {
+		stmt := strings.TrimSpace(store.RedactLearningText(r.value))
+		stmt = strings.ReplaceAll(stmt, "\x00", "")
+		if !utf8.ValidString(stmt) {
+			stmt = strings.ToValidUTF8(stmt, "")
+		}
+		stmt = strings.TrimSpace(truncateUTF8(stmt, store.MaxLearningStatementBytes))
+		if stmt == "" {
+			continue
+		}
+
+		origNS := strings.TrimSpace(r.namespace)
+		origKey := strings.TrimSpace(r.key)
+		cleanNS := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(origNS, "\x00", "")), store.MaxLearningFieldBytes))
+		cleanKey := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(origKey, "\x00", "")), store.MaxLearningFieldBytes))
+		cleanAuthor := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(r.author, "\x00", "")), store.MaxLearningFieldBytes))
+		cleanUpdatedAt := strings.TrimSpace(truncateUTF8(store.RedactLearningText(strings.ReplaceAll(r.updatedAt, "\x00", "")), store.MaxLearningFieldBytes))
+
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s|%d:%s", len(origNS), origNS, len(origKey), origKey)))
+		id := "legacy-" + hex.EncodeToString(sum[:16])
+
+		originKey := cleanNS + "\x00" + cleanKey
+		if cleanNS != "" && cleanKey != "" {
+			if _, exists := seenOrigin[originKey]; exists {
+				suffix := "#" + hex.EncodeToString(sum[:4])
+				cleanKey = truncateUTF8(cleanKey, store.MaxLearningFieldBytes-len(suffix)) + suffix
+			}
+			seenOrigin[cleanNS+"\x00"+cleanKey] = struct{}{}
+		}
+
+		var scopeIn domain.LearningScope
+		reason := "migrated_legacy_scope_mapping_required"
+		if strings.EqualFold(origNS, "learning:global") {
+			scopeIn = domain.LearningScope{
+				Global:          true,
+				LegacyNamespace: cleanNS,
+			}
+			reason = "migrated_legacy_learning"
+		} else {
+			scopeIn = domain.LearningScope{
+				LegacyNamespace:   cleanNS,
+				NeedsScopeMapping: true,
+			}
+		}
+
+		scope, scopeKind, scopeKey, specificity, err := store.NormalizeLearningScope(scopeIn, true)
+		if err != nil {
+			return err
+		}
+
+		createdAt := migratedAt
+		if parsed, err := store.ParseLearningTime(r.updatedAt); err == nil {
+			createdAt = parsed
+		}
+
+		rec := domain.Learning{
+			ID:                 id,
+			Statement:          stmt,
+			Scope:              scope,
+			ScopeKind:          scopeKind,
+			ScopeKey:           scopeKey,
+			ScopeSpecificity:   specificity,
+			SourceKind:         domain.LearningSourceLegacy,
+			ProvenanceVerified: false,
+			Author:             "legacy-migration",
+			Status:             domain.LearningStatusProposed,
+			ReviewReason:       reason,
+			LegacyNamespace:    cleanNS,
+			LegacyKey:          cleanKey,
+			LegacyAuthor:       cleanAuthor,
+			LegacyUpdatedAt:    cleanUpdatedAt,
+			CreatedAt:          createdAt,
+			UpdatedAt:          migratedAt,
+		}
+		digest, err := store.ComputeLearningVersionDigest(rec)
+		if err != nil {
+			return err
+		}
+		rec.VersionDigest = digest
+
+		if err := insertLearningTx(ctx, tx, rec, "migrated", "system", reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasUnaddressedContradictionTx(ctx context.Context, tx *sql.Tx, rec domain.Learning) (bool, error) {
+	since := rec.CreatedAt
+	if rec.LastConfirmedAt != nil {
+		since = *rec.LastConfirmedAt
+	}
+	var exists int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM learning_outcomes
+		WHERE learning_id = ?
+		  AND kind = 'contradiction'
+		  AND evidence_ref <> ''
+		  AND created_at >= ?
+		LIMIT 1
+	`, rec.ID, store.FormatLearningTime(since)).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+	n := maxBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
