@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 548" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Model Gate call</title>
+  <desc id="d">Sequence of a Model Gate call among a workload, the Model Gate, the store and the provider. The workload sends a request with its lease. The gate checks the lease and reserves cost in the store. If a check fails the gate refuses the call with 401, 403 or 429. Otherwise it forwards the request with the provider key, receives the response or stream, passes the same bytes back as they arrive, and settles the usage and writes an audit row in the store.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="548" rx="18" fill="#08060e"/>
+  <rect class="box" x="60" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="150" y="58" text-anchor="middle">Workload</text>
+  <rect class="key" x="320" y="24" width="180" height="56" rx="12"/>
+  <text class="h" x="410" y="58" text-anchor="middle">Model Gate</text>
+  <rect class="box" x="580" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="670" y="58" text-anchor="middle">Store</text>
+  <rect class="ext" x="840" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="930" y="58" text-anchor="middle">Provider</text>
+  <path class="life" d="M150 80V520"/>
+  <path class="life" d="M410 80V520"/>
+  <path class="life" d="M670 80V520"/>
+  <path class="life" d="M930 80V520"/>
+  <path class="f" d="M150 132H404" marker-end="url(#a)"/>
+  <text class="lbl" x="277" y="124" text-anchor="middle">request with lease</text>
+  <path class="f" d="M410 192H664" marker-end="url(#a)"/>
+  <text class="lbl" x="537" y="184" text-anchor="middle">lease, reserve</text>
+  <path class="deny" d="M404 252H156" marker-end="url(#x)"/>
+  <text class="no" x="280" y="244" text-anchor="middle">refused: 401, 403, 429</text>
+  <path class="f" d="M410 312H924" marker-end="url(#a)"/>
+  <text class="lbl" x="667" y="304" text-anchor="middle">forward, key added</text>
+  <path class="r" d="M924 372H416" marker-end="url(#m)"/>
+  <text class="lbl" x="667" y="364" text-anchor="middle">response or stream</text>
+  <path class="r" d="M404 432H156" marker-end="url(#m)"/>
+  <text class="lbl" x="280" y="424" text-anchor="middle">same bytes, flushed</text>
+  <path class="f" d="M410 492H664" marker-end="url(#a)"/>
+  <text class="lbl" x="537" y="484" text-anchor="middle">settle, audit row</text>
+</svg>
