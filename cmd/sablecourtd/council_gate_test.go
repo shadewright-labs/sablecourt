@@ -294,14 +294,16 @@ func TestCouncilReadSessionChecks(t *testing.T) {
 		{name: "invalid deadline", change: func(s *store.CouncilSnapshot) { s.Deadline = s.Session.CreatedAt }, want: http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			clock, _, broker, h, token := visibilityReadFixture(t, func(s *store.CouncilSnapshot) error {
+			clock, st, _, h, token := visibilityReadFixture(t, func(s *store.CouncilSnapshot) error {
 				if tc.change != nil {
 					tc.change(s)
 				}
 				return nil
 			})
 			if tc.state != "" {
-				if err := broker.Close(t.Context(), "panel", tc.state); err != nil {
+				// Exercise the room visibility check with a still-valid lease, as
+				// after a crash between committing close and cancelling workers.
+				if _, err := st.CloseCouncil(t.Context(), "panel", tc.state, "owner_stop"); err != nil {
 					t.Fatal(err)
 				}
 			}
