@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 660" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Incident and verification calls</title>
-  <desc id="d">Shadewright holds two roles on the left lifeline: the analyzer and the verifier. The analyzer posts an incident with the integration token. The daemon opens the room, stores the redacted evidence Relic and writes an audit row, then starts the always-on Vassal with a prompt that names the Relic, and replies 201 with the room and the Relic. The Vassal reads the Relic and posts findings. Later the verifier posts a report with the same token. The daemon stores the report Relic, tells the operator and replies 201 recorded. Two calls are not built yet, inside a dashed frame: the analyzer reading incident status and the analyzer reading learnings.</desc>
+  <desc id="d">Shadewright posts an incident with the integration token. The daemon opens the room, stores the redacted evidence Relic and writes an audit row, then starts the always-on Vassals with a prompt that names the Relic, posts the opening report, wakes the on-mention Vassals and replies 201 with the room and the Relic. A Vassal may read the Relic from its context packet and post findings. Later Shadewright posts a verification report with the same token. The daemon stores the report Relic, posts a message to the operator role (no notification is sent, no Vassal is woken) and replies 201 recorded. Two calls are not built yet, inside a dashed frame: reading incident status and reading learnings.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -43,24 +43,24 @@
   <path class="life" d="M970 80V640"/>
 
   <path class="f" d="M150 132H554" marker-end="url(#a)"/>
-  <text class="lbl" x="352" y="124" text-anchor="middle">analyzer: POST incident, bearer token</text>
+  <text class="lbl" x="352" y="124" text-anchor="middle">POST incident, bearer token</text>
   <text class="cap" x="572" y="156">open room, store Relic, audit</text>
   <path class="f" d="M560 192H964" marker-end="url(#a)"/>
-  <text class="lbl" x="762" y="184" text-anchor="middle">start Vassal, prompt names Relic</text>
+  <text class="lbl" x="762" y="184" text-anchor="middle">start always-on Vassals, prompt names Relic</text>
   <path class="r" d="M554 252H156" marker-end="url(#m)"/>
   <text class="lbl" x="355" y="244" text-anchor="middle">201 with room and Relic</text>
   <path class="f" d="M970 312H566" marker-end="url(#a)"/>
-  <text class="lbl" x="768" y="304" text-anchor="middle">read Relic, post findings</text>
+  <text class="lbl" x="768" y="304" text-anchor="middle">Vassal may read Relic, may post findings</text>
   <path class="f" d="M150 372H554" marker-end="url(#a)"/>
-  <text class="lbl" x="352" y="364" text-anchor="middle">verifier: POST report, same token</text>
-  <text class="cap" x="572" y="396">store report Relic, tell operator</text>
+  <text class="lbl" x="352" y="364" text-anchor="middle">POST report, same token</text>
+  <text class="cap" x="572" y="396">store report Relic, post to operator</text>
   <path class="r" d="M554 432H156" marker-end="url(#m)"/>
   <text class="lbl" x="355" y="424" text-anchor="middle">201 recorded</text>
 
   <rect class="frame" x="40" y="476" width="1040" height="152" rx="12"/>
   <text class="idt" x="56" y="500">NOT BUILT YET</text>
   <path class="r" d="M150 548H554" marker-end="url(#m)"/>
-  <text class="lbl" x="352" y="540" text-anchor="middle">analyzer: GET incident status</text>
+  <text class="lbl" x="352" y="540" text-anchor="middle">GET incident status</text>
   <path class="r" d="M150 608H554" marker-end="url(#m)"/>
-  <text class="lbl" x="352" y="600" text-anchor="middle">analyzer: GET learnings</text>
+  <text class="lbl" x="352" y="600" text-anchor="middle">GET learnings</text>
 </svg>
