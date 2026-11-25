@@ -30,7 +30,18 @@ The session marker tells [Nightloom](../glossary.md#session-marker) that Sableco
 
 ## Docker adapter and controllers
 
-The adapter needs a local image that the engine can resolve to a `sha256:` ID; it never pulls. The container joins the internal bridge network `sablecourt-internal`, which Docker creates without a route to the outside, drops all capabilities, sets `no-new-privileges`, and uses a read-only root filesystem only when the manifest says `readOnlyRootfs: true`. No CPU, memory or process limits are set for these containers. The environment has the session variable, task and workload names, `SABLECOURT_INPUT_JSON`, the data gate URL and the task token, and the Model Gate URL when the workload holds a grant. The gate address handed to a container defaults to `host.docker.internal:<port>`, and the daemon routes requests to that name as gate requests only for `/gate/` paths.
+The adapter needs a local image that the engine can resolve to a `sha256:` ID; it never pulls. The container joins the internal bridge network `sablecourt-internal`, which Docker creates without a route to the outside, drops all capabilities, sets `no-new-privileges`, and uses a read-only root filesystem only when the manifest says `readOnlyRootfs: true`. No CPU, memory or process limits are set for these containers. The environment has the session variable, task and workload names, the data gate URL and the task token, and the Model Gate URL when the workload holds a grant. The gate address handed to a container defaults to `host.docker.internal:<port>`, and the daemon routes requests to that name as gate requests only for `/gate/` paths.
+
+Task input never goes into the container configuration, which Docker stores and returns on inspect. The contract is the same for both classes on this adapter (`long-lived-agent` and `deterministic-controller`), since a manifest declares only an image:
+
+- A task with input gets `SABLECOURT_INPUT_STDIN=1` in its environment and the input on stdin, ended by a NUL byte. Without live attach the adapter then closes stdin, so the process also sees end of file. With live attach stdin stays open for the person who takes over, so a reader must stop at the NUL and not wait for end of file.
+- The adapter writes the input right after the container starts. The write ends with the launch deadline (the 30 second start limit) or after 10 seconds, whichever comes first. If the process has not taken the input by then, or closed stdin first, the adapter stops and removes the container under a 30 second deadline of its own and the task fails with reason `input_not_delivered`. The cause is not recorded, because adapter errors can carry launch input.
+- A process that never reads stdin still starts when the input fits in the buffers between the daemon and the process; the input then stays unread.
+- An image that reads its input only from `SABLECOURT_INPUT_JSON` gets no input from this adapter. The built-in `sablecourt-agent` reads stdin when `SABLECOURT_INPUT_STDIN=1` (at most 4 MiB, and it refuses input without the NUL) and falls back to `SABLECOURT_INPUT_JSON` otherwise.
+- Input that contains a NUL byte is refused at launch, and a container whose stdin cannot be attached is removed before it starts.
+- What the workload itself prints, including any input it echoes, reaches Docker's log store as written; Sablecourt redacts it only when it reads the logs.
+
+The Kubernetes adapter still passes input in `SABLECOURT_INPUT_JSON`.
 
 The controller adapter refuses to start a workload that is not a `deterministic-controller`, or that holds a Model Gate grant, or whose launch carries a Model Gate URL or token. The Model Gate refuses the same workloads again at request time, so a controller cannot obtain model access by either route. It talks to the daemon only through its lease and the grants in its manifest.
 

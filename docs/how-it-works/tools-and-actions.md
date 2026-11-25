@@ -33,7 +33,9 @@ Each action that fails records a failure for its capability; three in a row open
 
 ## Redaction
 
-`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, `Authorization` values under any scheme (Bearer, Basic, Token or any other word), and secret-looking `key: value` pairs, in linear time. Private key blocks are matched first and end only at the footer with their own label; a header without one withholds everything after it, and the marker says how many bytes (`[REDACTED:private_key; N bytes withheld]`). The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+
+Every task row and task message passes the redactor in the store method that inserts it (`CreateTask` and `AppendTaskMessage` in both stores), so a caller cannot store raw input; a test fails if an insert into those tables appears anywhere else. Task input is redacted as JSON: the document is scanned token by token, keys keep their order and duplicates are each redacted, every value beneath a secret-named key (compared after unescaping, ignoring case) is replaced whatever its nesting, and a string that holds JSON is redacted as JSON up to four levels deep. Input that does not parse, or nests deeper than 512 levels, is redacted as text and replaced by `[REDACTED:unverifiable]` when unescaping it still shows a secret or a secret-named field with a non-string value.
 
 ## Audit rows
 

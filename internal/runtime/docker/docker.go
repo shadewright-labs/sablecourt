@@ -313,9 +313,12 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		return handle, fmt.Errorf("start container %s: %w", created.ID, err)
 	}
 	if input != "" {
-		if err := deliverInput(stdinCloser, input, a.AttachHub == nil); err != nil {
+		if err := deliverInput(ctx, stdinCloser, input, a.AttachHub == nil); err != nil {
 			_ = stdinCloser.Close()
-			return handle, errors.Join(fmt.Errorf("deliver task input to container %s: %w", created.ID, err), a.Stop(context.WithoutCancel(ctx), handle))
+			// Cleanup outlives a cancelled launch but keeps a deadline of its own.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			return handle, errors.Join(fmt.Errorf("container %s: %w", created.ID, err), a.Stop(cleanupCtx, handle))
 		}
 		if a.AttachHub == nil {
 			stdinCloser = nil
@@ -337,22 +340,34 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	return handle, nil
 }
 
-const inputWriteTimeout = 30 * time.Second
+const (
+	// inputWriteTimeout bounds the input write when the launch context has
+	// no earlier deadline.
+	inputWriteTimeout = 10 * time.Second
+	cleanupTimeout    = 30 * time.Second
+)
 
 // deliverInput writes the task input and a NUL to the container's stdin. A
-// process that never reads cannot hold the launch past inputWriteTimeout.
-func deliverInput(conn io.WriteCloser, input string, closeAfter bool) error {
-	timer := time.AfterFunc(inputWriteTimeout, func() { _ = conn.Close() })
-	defer timer.Stop()
-	if _, err := io.WriteString(conn, input+"\x00"); err != nil {
-		return err
+// process that does not read it before the launch context ends, or within
+// inputWriteTimeout, fails the launch with an InputDeliveryError.
+func deliverInput(ctx context.Context, conn io.WriteCloser, input string, closeAfter bool) error {
+	ctx, cancel := context.WithTimeout(ctx, inputWriteTimeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	_, err := io.WriteString(conn, input+"\x00")
+	if !stop() {
+		// The deadline closed the connection, whatever the write returned.
+		return &scruntime.InputDeliveryError{Err: fmt.Errorf("the process did not read its input before the launch deadline: %w", ctx.Err())}
+	}
+	if err != nil {
+		return &scruntime.InputDeliveryError{Err: err}
 	}
 	if !closeAfter {
 		return nil
 	}
 	if cw, ok := conn.(client.CloseWriter); ok {
 		if err := cw.CloseWrite(); err != nil {
-			return err
+			return &scruntime.InputDeliveryError{Err: err}
 		}
 	}
 	return conn.Close()

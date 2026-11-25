@@ -941,7 +941,11 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		if partialFacts == "" {
 			partialFacts = `{}`
 		}
-		return false, r.failTask(ctx, task, "launch_failed", partialFacts)
+		reason := "launch_failed"
+		if partialFacts == inputNotDeliveredFacts {
+			reason = "input_not_delivered"
+		}
+		return false, r.failTask(ctx, task, reason, partialFacts)
 	}
 	if !hasHandle || adapter == nil {
 		return false, r.failLostTask(ctx, task, `{"reason":"handle_missing"}`)
@@ -1123,7 +1127,16 @@ func (r *Reconciler) claimLaunch(taskID string) bool {
 	return true
 }
 
+// inputNotDeliveredFacts records a launch that failed because the workload
+// did not take its task input.
+const inputNotDeliveredFacts = `{"reason":"input_not_delivered"}`
+
 func launchFailureFacts(err error) string {
+	var notDelivered *scruntime.InputDeliveryError
+	if errors.As(err, &notDelivered) {
+		// The cause is not recorded: adapter errors can carry launch input.
+		return inputNotDeliveredFacts
+	}
 	var missing *scruntime.MissingBinaryError
 	if errors.As(err, &missing) && missing.Path != "" {
 		raw, marshalErr := json.Marshal(struct {
@@ -1150,6 +1163,9 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			reason := "launch_failed"
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
 				reason = "author_checkout_unavailable"
+			}
+			if launchFacts == inputNotDeliveredFacts {
+				reason = "input_not_delivered"
 			}
 			cleanupErr := r.failTask(cleanupCtx, task, reason, launchFacts)
 			if startFailed && cleanupErr != nil {

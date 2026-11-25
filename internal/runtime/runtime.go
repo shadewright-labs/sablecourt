@@ -172,3 +172,16 @@ type CouncilInspector interface {
 type LocalImageResolver interface {
 	ResolveLocalImage(context.Context, string) (string, error)
 }
+
+// InputDeliveryError reports that a runtime could not hand the task input to
+// the workload process: the process did not read it before the launch
+// deadline, or closed its input first.
+type InputDeliveryError struct {
+	Err error
+}
+
+func (e *InputDeliveryError) Error() string {
+	return "task input not delivered: " + e.Err.Error()
+}
+
+func (e *InputDeliveryError) Unwrap() error { return e.Err }

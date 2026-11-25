@@ -3,9 +3,12 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/client"
 
@@ -107,5 +110,82 @@ func TestTaskInputDeliveryFailsClosed(t *testing.T) {
 	}
 	if nul.conn.body.Len() != 0 {
 		t.Fatal("input with a NUL byte reached stdin")
+	}
+}
+
+// stuckConn is the stdin of a process that never reads: writes block until
+// the connection is closed.
+type stuckConn struct {
+	net.Conn
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *stuckConn) Write([]byte) (int, error) { <-c.closed; return 0, net.ErrClosed }
+func (c *stuckConn) CloseWrite() error         { return nil }
+func (c *stuckConn) Close() error              { c.once.Do(func() { close(c.closed) }); return nil }
+
+type stuckEngine struct {
+	fakeEngine
+	conn            *stuckConn
+	mu              sync.Mutex
+	cleanupDeadline []bool
+}
+
+func (f *stuckEngine) ContainerAttach(context.Context, string, client.ContainerAttachOptions) (client.ContainerAttachResult, error) {
+	return client.ContainerAttachResult{HijackedResponse: client.HijackedResponse{Conn: f.conn}}, nil
+}
+
+func (f *stuckEngine) record(ctx context.Context) {
+	_, ok := ctx.Deadline()
+	f.mu.Lock()
+	f.cleanupDeadline = append(f.cleanupDeadline, ok)
+	f.mu.Unlock()
+}
+
+func (f *stuckEngine) ContainerStop(ctx context.Context, _ string, _ client.ContainerStopOptions) (client.ContainerStopResult, error) {
+	f.record(ctx)
+	return client.ContainerStopResult{}, nil
+}
+
+func (f *stuckEngine) ContainerRemove(ctx context.Context, _ string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+	f.record(ctx)
+	return client.ContainerRemoveResult{}, nil
+}
+
+// TestTaskInputNotReadFailsWithinTheLaunchDeadline starts an image whose
+// process never reads stdin. Start must give up when the launch context
+// ends, report the input as not delivered, and clean up under a deadline.
+func TestTaskInputNotReadFailsWithinTheLaunchDeadline(t *testing.T) {
+	eng := &stuckEngine{conn: &stuckConn{closed: make(chan struct{})}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	began := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewAdapter(eng, DefaultNetworkName).Start(ctx, inputSpec(`{"prompt":"x"}`))
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		eng.conn.Close()
+		err = <-done
+		t.Fatalf("Start ignored the launch deadline: returned after %s with %v", time.Since(began).Round(time.Second), err)
+	}
+	var notDelivered *scruntime.InputDeliveryError
+	if !errors.As(err, &notDelivered) {
+		t.Fatalf("Start error = %v, want an input delivery error", err)
+	}
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if len(eng.cleanupDeadline) == 0 {
+		t.Fatal("container not cleaned up")
+	}
+	for i, ok := range eng.cleanupDeadline {
+		if !ok {
+			t.Fatalf("cleanup call %d ran without a deadline", i)
+		}
 	}
 }
