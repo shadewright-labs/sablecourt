@@ -62,27 +62,31 @@ func cleanupNative(t *testing.T, fn func(context.Context) error) {
 	})
 }
 
+const defaultCouncilBaseImage = "debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e"
+
 func nativeFixtureImage(t *testing.T, cli *client.Client) string {
 	t.Helper()
-	refs := []string{"sablecourt-spike-base:local", "debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e"}
-	if ref := os.Getenv("SABLECOURT_TEST_COUNCIL_BASE_IMAGE"); ref != "" {
-		refs = []string{ref}
+	ref := defaultCouncilBaseImage
+	if envRef := os.Getenv("SABLECOURT_TEST_COUNCIL_BASE_IMAGE"); envRef != "" {
+		ref = envRef
 	}
-	var id string
-	for _, ref := range refs {
-		image, err := cli.ImageInspect(t.Context(), ref)
-		if isMissing(err) {
-			continue
+	image, err := cli.ImageInspect(t.Context(), ref)
+	if isMissing(err) {
+		pullCtx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		resp, pullErr := cli.ImagePull(pullCtx, ref, client.ImagePullOptions{})
+		if pullErr != nil {
+			t.Fatalf("pull council test base image %q: %v", ref, pullErr)
 		}
-		if err != nil {
-			t.Fatal(err)
+		if waitErr := resp.Wait(pullCtx); waitErr != nil {
+			t.Fatalf("wait for council test base image %q pull: %v", ref, waitErr)
 		}
-		id = image.ID
-		break
+		image, err = cli.ImageInspect(t.Context(), ref)
 	}
-	if id == "" {
-		t.Fatal("native test needs a local Debian harness base with Bash and GNU timeout; set SABLECOURT_TEST_COUNCIL_BASE_IMAGE")
+	if err != nil {
+		t.Fatalf("inspect council test base image %q: %v", ref, err)
 	}
+	id := image.ID
 	// Install a test CLI in a disposable local image. The staging container never starts.
 	stage, err := cli.ContainerCreate(t.Context(), client.ContainerCreateOptions{Config: &container.Config{Image: id, Cmd: []string{"/bin/true"}}, HostConfig: &container.HostConfig{NetworkMode: "none"}})
 	if err != nil {
