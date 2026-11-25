@@ -313,7 +313,7 @@ func parseRelicUploadForm(r *http.Request) (string, string, string, error) {
 	var name, contentType, content string
 	switch mediaType {
 	case "multipart/form-data":
-		if err := r.ParseMultipartForm(maxRelicFormBytes); err != nil {
+		if err := r.ParseMultipartForm(maxRelicFormBytes); err != nil { // #nosec G120 -- handleConclaveUploadRelic caps the entire body with http.MaxBytesReader before calling this parser.
 			return "", "", "", err
 		}
 		if r.MultipartForm != nil {

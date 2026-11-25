@@ -41,10 +41,11 @@ type Adapter struct {
 	namespace        string
 	runtimeClassName string
 	attachHub        *attach.Hub
+	attachCtx        context.Context
 }
 
-func (a *Adapter) SetAttachHub(hub *attach.Hub) {
-	a.attachHub = hub
+func (a *Adapter) SetAttachHub(ctx context.Context, hub *attach.Hub) {
+	a.attachCtx, a.attachHub = ctx, hub
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
@@ -153,6 +154,11 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		podSpec.RuntimeClassName = &rc
 	}
 
+	logCtx := ctx
+	if a.attachCtx != nil {
+		logCtx = a.attachCtx
+	}
+
 	// Persistent Deployment mode for long-lived agents/controllers when runtime.type == "k8s-deployment".
 	if spec.Workload.Spec.Runtime.Type == "k8s-deployment" || (spec.Workload.Spec.Runtime.Type == "deployment" && spec.Workload.Spec.Class != domain.ClassCodingAgent) {
 		podSpec.RestartPolicy = corev1.RestartPolicyAlways
@@ -185,7 +191,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		}
 		if a.attachHub != nil {
 			a.attachHub.Register(spec.TaskID, nil)
-			go a.streamPodLogsBySelector(spec.TaskID, "sablecourt.io/deployment="+created.Name)
+			go a.streamPodLogsBySelector(logCtx, spec.TaskID, "sablecourt.io/deployment="+created.Name)
 		}
 		return scruntime.Handle{
 			AdapterName: "k8s",
@@ -226,7 +232,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}
 	if a.attachHub != nil {
 		a.attachHub.Register(spec.TaskID, nil)
-		go a.streamPodLogs(spec.TaskID, created.Name)
+		go a.streamPodLogsBySelector(logCtx, spec.TaskID, "job-name="+created.Name)
 	}
 	return scruntime.Handle{
 		AdapterName: "k8s",
@@ -234,13 +240,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}, nil
 }
 
-func (a *Adapter) streamPodLogs(taskID, jobName string) {
-	a.streamPodLogsBySelector(taskID, "job-name="+jobName)
-}
-
-func (a *Adapter) streamPodLogsBySelector(taskID, selector string) {
+func (a *Adapter) streamPodLogsBySelector(parent context.Context, taskID, selector string) {
 	defer a.attachHub.Close(taskID)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 
 	var podName string
