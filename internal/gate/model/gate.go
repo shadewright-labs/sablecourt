@@ -20,6 +20,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -69,12 +70,12 @@ func (g *Gate) currentBundle() *config.Bundle {
 
 func DefaultUpstreams() map[string]UpstreamConfig {
 	return map[string]UpstreamConfig{
-		"openai": {
+		"openai": { // #nosec G101 -- Gate.serveHTTP looks up the openai key in SecretStore by this name.
 			BaseURL:       "https://api.openai.com",
 			SecretName:    "openai_api_key",
 			RequireSecret: true,
 		},
-		"anthropic": {
+		"anthropic": { // #nosec G101 -- Gate.serveHTTP looks up the anthropic key in SecretStore by this name.
 			BaseURL:       "https://api.anthropic.com",
 			SecretName:    "anthropic_api_key",
 			RequireSecret: true,
@@ -85,7 +86,7 @@ func DefaultUpstreams() map[string]UpstreamConfig {
 			SecretName:    "gemini_api_key",
 			RequireSecret: true,
 		},
-		"local": {
+		"local": { // #nosec G101 -- Gate.serveHTTP looks up the local key in SecretStore by this name.
 			BaseURL:       "http://127.0.0.1:11434",
 			SecretName:    "local_model_api_key",
 			RequireSecret: false,
@@ -107,10 +108,7 @@ func New(opts Options) *Gate {
 		}
 		upstreams = routed
 	}
-	client := opts.Client
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Minute}
-	}
+	client := gatehttp.NewClient(opts.Client, 5*time.Minute)
 	nowFn := opts.Now
 	if nowFn == nil {
 		nowFn = func() time.Time { return time.Now().UTC() }
@@ -224,7 +222,18 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); errors.Is(err, errInvalidChildBudgetCeiling) {
+	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
+	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing, g.fallbackProviders(provider, workload)...)
+
+	// Take a fresh timestamp: the body read above is not bounded by time, and the
+	// reservation lifetime must start when the reservation is inserted.
+	reservationID, exceeded, reason, err := g.reserveBudget(ctx, lease.TaskID, lease.WorkloadName, budget, reserve, g.now())
+	if errors.Is(err, errInvalidChildBudgetCeiling) {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"invalid_child_budget_ceiling"}`)
 		writeErr(w, http.StatusForbidden, errInvalidChildBudgetCeiling.Error())
 		return
@@ -236,6 +245,14 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "budget exceeded: "+reason)
 		return
 	}
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			if err := g.settleReservation(ctx, reservationID, nil); err != nil {
+				g.audit(context.WithoutCancel(ctx), lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"budget_release_failed"}`)
+			}
+		}
+	}()
 
 	upCfg, ok := g.upstreams[provider]
 	if !ok {
@@ -260,13 +277,6 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
-
 	targetURL, err := joinUpstreamURL(upCfg.BaseURL, upstreamPath, r.URL.RawQuery)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "invalid upstream URL")
@@ -281,7 +291,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	copySafeRequestHeaders(upReq.Header, r.Header)
 	injectUpstreamAuth(upReq.Header, provider, upstreamKey, upCfg.AnthropicVer)
 
-	upResp, err := g.client.Do(upReq)
+	upResp, err := g.client.Do(upReq) // #nosec G704 -- joinUpstreamURL pins the configured provider host and scheme, and gatehttp.NewClient refuses redirects.
 	activeProvider := provider
 	if err != nil || isFallbackStatus(upResp.StatusCode) {
 		if fbProv, fbResp, fbErr := g.tryFallback(ctx, r, provider, upstreamPath, reqBody, workload); fbErr == nil && fbResp != nil {
@@ -326,25 +336,41 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+		// Keep the reservation if actual usage cannot be recorded.
+		releaseReservation = false
 		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
+		inTokens := max(usage.InputTokens, 0)
+		outTokens := max(usage.OutputTokens, 0)
+		if inTokens == 0 && outTokens == 0 {
+			// The response carried no usage (for example a stream without a usage
+			// event). Charge the reserved estimate so the call is never free.
+			inTokens = reserve.InputTokens
+			outTokens = reserve.OutputTokens
+		}
 		modelName := usage.Model
 		if modelName == "" {
 			modelName = reqModel
 		}
-		costMicro := EstimateMicroUSD(activeProvider, modelName, usage.InputTokens, usage.OutputTokens, g.pricing)
-		_ = g.store.RecordBudgetUsage(ctx, domain.BudgetEntry{
+		// Price with the admitted request model, the identity the reservation was
+		// sized for, so a reported model name cannot settle above the reserve.
+		costMicro := max(EstimateMicroUSD(activeProvider, reqModel, inTokens, outTokens, g.pricing), 0)
+		entry := domain.BudgetEntry{
 			TaskID:       lease.TaskID,
 			WorkloadName: lease.WorkloadName,
 			Provider:     activeProvider,
 			Model:        modelName,
-			InputTokens:  usage.InputTokens,
-			OutputTokens: usage.OutputTokens,
+			InputTokens:  inTokens,
+			OutputTokens: outTokens,
 			CostMicroUSD: costMicro,
 			CreatedAt:    g.now(),
-		})
+		}
+		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
+			return
+		}
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
 			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, usage.InputTokens, usage.OutputTokens, costMicro))
+				modelName, inTokens, outTokens, costMicro))
 	}
 }
 
@@ -352,18 +378,34 @@ func isFallbackStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 }
 
+// fallbackProviders returns the wire-compatible fallback providers granted to wl
+// and configured in g.upstreams for a request originally routed to primary.
+func (g *Gate) fallbackProviders(primary string, wl domain.Workload) []string {
+	if primary != "openai" && primary != "local" {
+		return nil
+	}
+	var out []string
+	for _, cand := range wl.Spec.Grants.ModelGate.Providers {
+		if cand == primary || (cand != "openai" && cand != "local") {
+			continue
+		}
+		if _, ok := g.upstreams[cand]; !ok {
+			continue
+		}
+		if !slices.Contains(out, cand) {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
 func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider, upstreamPath string, reqBody []byte, wl domain.Workload) (string, *http.Response, error) {
-	if failedProvider != "openai" && failedProvider != "local" {
+	cands := g.fallbackProviders(failedProvider, wl)
+	if len(cands) == 0 {
 		return "", nil, errors.New("no wire-compatible fallback")
 	}
-	for _, cand := range wl.Spec.Grants.ModelGate.Providers {
-		if cand == failedProvider || (cand != "openai" && cand != "local") {
-			continue
-		}
-		upCfg, ok := g.upstreams[cand]
-		if !ok {
-			continue
-		}
+	for _, cand := range cands {
+		upCfg := g.upstreams[cand]
 		var key string
 		if upCfg.SecretName != "" && g.secrets != nil {
 			k, err := g.secrets.Get(ctx, upCfg.SecretName)
@@ -387,7 +429,7 @@ func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider,
 		}
 		copySafeRequestHeaders(req.Header, r.Header)
 		injectUpstreamAuth(req.Header, cand, key, upCfg.AnthropicVer)
-		resp, err := g.client.Do(req)
+		resp, err := g.client.Do(req) // #nosec G704 -- joinUpstreamURL pins the configured fallback host and scheme, and gatehttp.NewClient refuses redirects.
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return cand, resp, nil
 		}
@@ -398,40 +440,48 @@ func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider,
 	return "", nil, errors.New("fallback unavailable")
 }
 
-func (g *Gate) checkBudget(ctx context.Context, taskID, workloadName string, b domain.Budget, now time.Time) (bool, string, error) {
-	taskTotals, err := g.store.TaskBudgetTotals(ctx, taskID)
+func (g *Gate) reserveBudget(ctx context.Context, taskID, workloadName string, b domain.Budget, reserve domain.BudgetTotals, now time.Time) (string, bool, string, error) {
+	if _, err := g.store.GetTask(ctx, taskID); err != nil {
+		return "", false, "", err
+	}
+	res, err := g.store.ReserveBudget(ctx, store.BudgetReservationRequest{
+		TaskID:       taskID,
+		WorkloadName: workloadName,
+		Budget:       b,
+		Reserve:      reserve,
+		Now:          now,
+	})
 	if err != nil {
-		return false, "", err
+		return "", false, "", err
 	}
-	if b.Spec.PerTask.MaxInputTokens > 0 && taskTotals.InputTokens >= b.Spec.PerTask.MaxInputTokens {
-		return true, "per_task_input_tokens", nil
-	}
-	if b.Spec.PerTask.MaxOutputTokens > 0 && taskTotals.OutputTokens >= b.Spec.PerTask.MaxOutputTokens {
-		return true, "per_task_output_tokens", nil
-	}
-	if b.Spec.PerTask.MaxCostUSD > 0 && taskTotals.CostMicroUSD >= int64(b.Spec.PerTask.MaxCostUSD*1_000_000) {
-		return true, "per_task_cost_usd", nil
-	}
+	return res.ReservationID, res.Exceeded, res.Reason, nil
+}
 
-	if b.Spec.Daily.MaxCostUSD > 0 {
-		dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		dailyTotals, err := g.store.WorkloadDailyBudgetTotals(ctx, workloadName, dayStart)
-		if err != nil {
-			return false, "", err
+const (
+	// settleReservationAttempts bounds the immediate retries of a failed settlement.
+	settleReservationAttempts = 3
+	// settleReservationTimeout bounds detached reservation settlement and release
+	// so a held lock or exhausted pool cannot block a request goroutine indefinitely.
+	settleReservationTimeout = 10 * time.Second
+)
+
+// settleReservation settles or, when actual is nil, releases a reservation. A failed
+// transaction rolls back and leaves the reservation in place, so retrying is safe.
+// A missing or mismatched reservation is final and is returned without retry.
+func (g *Gate) settleReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleReservationTimeout)
+	defer cancel()
+	var err error
+	for range settleReservationAttempts {
+		err = g.store.SettleBudgetReservation(ctx, reservationID, actual)
+		if err == nil || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+			return err
 		}
-		if dailyTotals.CostMicroUSD >= int64(b.Spec.Daily.MaxCostUSD*1_000_000) {
-			return true, "daily_cost_usd", nil
+		if ctx.Err() != nil {
+			return err
 		}
 	}
-	task, err := g.store.GetTask(ctx, taskID)
-	if err != nil {
-		return false, "", err
-	}
-	if task.ParentTaskID == "" {
-		return false, "", nil
-	}
-	reason, err := childBudgetReason(task.BudgetCeilingJSON, taskTotals)
-	return reason != "", reason, err
+	return err
 }
 
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {

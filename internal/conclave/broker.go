@@ -386,13 +386,11 @@ func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession,
 		CreatedAt:  b.now(),
 	})
 	if b.notifier != nil {
-		go func() {
-			_ = b.notifier.Send(context.Background(), notify.Event{
-				Type: "conclave.ward_paused", Title: "Conclave Ward tripped: " + redact.String(session.Title),
-				Detail: fmt.Sprintf("Conclave %s paused (%s).", session.ID, reason),
-				Path:   "/conclaves/" + session.ID,
-			})
-		}()
+		_ = b.notifier.Send(ctx, notify.Event{
+			Type: "conclave.ward_paused", Title: "Conclave Ward tripped: " + redact.String(session.Title),
+			Detail: fmt.Sprintf("Conclave %s paused (%s).", session.ID, reason),
+			Path:   "/conclaves/" + session.ID,
+		})
 	}
 }
 

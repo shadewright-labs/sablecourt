@@ -32,11 +32,12 @@ type containerIdentity struct {
 }
 
 type containerProcess struct {
-	mu      sync.Mutex
-	done    chan struct{}
-	cancel  context.CancelFunc
-	stopped bool
-	session *councilproxy.Session
+	identity containerIdentity
+	mu       sync.Mutex
+	done     chan struct{}
+	cancel   context.CancelFunc
+	stopped  bool
+	session  councilproxy.LaunchSession
 }
 
 func isContainerHandle(h scruntime.Handle) bool {
@@ -44,25 +45,19 @@ func isContainerHandle(h scruntime.Handle) bool {
 }
 
 func matchesContainerHandle(c *containerIdentity, h scruntime.Handle) bool {
-	if c == nil || !isContainerHandle(h) {
+	if c == nil {
 		return false
 	}
-	if h.ContainerName != "" && c.ContainerName != "" && h.ContainerName != c.ContainerName {
+	if h.ContainerID != "" && h.ContainerID != c.ContainerID {
 		return false
 	}
-	if h.CreateAttempt != "" && c.CreateAttempt != "" && h.CreateAttempt != c.CreateAttempt {
+	if h.ContainerName != "" && h.ContainerName != c.ContainerName {
 		return false
 	}
-	if h.ContainerID != "" && c.ContainerID != "" && h.ContainerID != c.ContainerID {
+	if h.CreateAttempt != "" && h.CreateAttempt != c.CreateAttempt {
 		return false
 	}
-	if h.ContainerName == "" && h.ContainerID == "" {
-		return false
-	}
-	if h.ContainerID == "" && (h.ContainerName == "" || h.CreateAttempt == "") {
-		return false
-	}
-	return true
+	return h.ContainerID != "" || (h.ContainerName != "" && h.CreateAttempt != "")
 }
 
 func (a *Adapter) containerProc(taskBase string) *containerProcess {
@@ -172,7 +167,7 @@ func (a *Adapter) startCouncilContainer(
 	state *worktreeState,
 	readOnly bool,
 	commitJournal func() error,
-) (_ scruntime.Handle, startErr error) {
+) (scruntime.Handle, error) {
 	cfg := spec.Workload.Spec.Coding
 	kind, err := councilCheckoutKind(input.checkoutMode, readOnly)
 	if err != nil {
@@ -186,52 +181,79 @@ func (a *Adapter) startCouncilContainer(
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("resolve council proxy image: %w", err)
 	}
-	session, err := councilproxy.Provision(ctx, a.CouncilProxy, proxyImageID, councilproxy.Config{
-		Harness:      cfg.Harness,
-		DaemonListen: a.DaemonListen,
-		LeaseSHA256:  leaseSHA256Hex(spec.TaskToken),
-	})
-	if err != nil {
-		if session != nil {
-			_ = session.Close(context.Background())
-		}
-		return scruntime.Handle{}, fmt.Errorf("provision council proxy: %w", err)
-	}
-	defer func() {
-		if startErr != nil && session != nil {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			startErr = errors.Join(startErr, session.Close(closeCtx))
-		}
-	}()
-
-	endpoint := session.Workload()
 	attempt := spec.CreateAttempt
 	if attempt == "" {
 		attempt = rand.Text()
 	}
-	containerName := "sablecourt-council-" + spec.TaskID
-	ident := &containerIdentity{
-		ContainerName: containerName,
+	handle := scruntime.Handle{
+		AdapterName:   "coding:" + cfg.Harness,
+		ExternalID:    spec.TaskID,
+		WorkDir:       dir,
+		Branch:        state.Branch,
+		LogPath:       taskBase + ".log",
+		ContainerName: "sablecourt-council-" + spec.TaskID,
 		CreateAttempt: attempt,
-		ProxyName:     endpoint.ProxyName(),
-		NetworkName:   endpoint.Network,
 	}
-	state.Container = ident
-	if err := writeWorktreeState(taskBase, state); err != nil {
-		return scruntime.Handle{}, err
+	deadline := time.Now().Add(limits.WallTime)
+	if !spec.CouncilDeadline.IsZero() && spec.CouncilDeadline.Before(deadline) {
+		deadline = spec.CouncilDeadline
+	}
+	setupCtx, cancelSetup := context.WithDeadline(ctx, deadline)
+	defer cancelSetup()
+	session, err := a.CouncilProxy.ProvisionCouncilProxy(setupCtx, proxyImageID, councilproxy.Config{
+		Harness: cfg.Harness, DaemonListen: a.DaemonListen, LeaseSHA256: leaseSHA256Hex(spec.TaskToken),
+		GateHandler: a.CouncilGateHandler, SocketRoot: a.CouncilSocketRoot,
+		RecordResources: func(proxy, network string) error {
+			handle.ProxyName, handle.NetworkName = proxy, network
+			state.Container = &containerIdentity{ContainerName: handle.ContainerName, CreateAttempt: attempt, ProxyName: proxy, NetworkName: network}
+			if err := writeWorktreeState(taskBase, state); err != nil {
+				return err
+			}
+			if commitJournal != nil {
+				return commitJournal()
+			}
+			return nil
+		},
+	})
+	proc := &containerProcess{identity: containerIdentity{ContainerName: handle.ContainerName, CreateAttempt: attempt}, done: make(chan struct{}), session: session}
+	if session == nil && err == nil {
+		err = errors.New("missing council proxy session")
+	}
+	if err != nil {
+		if session != nil {
+			close(proc.done)
+			a.containers.Store(taskBase, proc)
+			return handle, fmt.Errorf("provision council proxy: %w", err)
+		}
+		// The socket probe can fail before Provision creates a session.
+		if handle.ProxyName != "" {
+			setupCleanup, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancelCleanup()
+			if cleanupErr := a.cleanupContainerResources(setupCleanup, state.Container, nil); cleanupErr != nil {
+				return handle, errors.Join(err, cleanupErr)
+			}
+		}
+		return scruntime.Handle{}, fmt.Errorf("provision council proxy: %w", err)
+	}
+	endpoint := session.Workload()
+	if (endpoint.GateMode != councilproxy.GateModeUnixSocket && endpoint.GateMode != councilproxy.GateModeHostGateway) ||
+		state.Container == nil || endpoint.Network != handle.NetworkName || endpoint.Network == "" ||
+		endpoint.ProxyURL != "http://"+handle.ProxyName+":"+councilproxy.Port || endpoint.DataGateURL != endpoint.ProxyURL+"/gate/mcp" {
+		close(proc.done)
+		a.containers.Store(taskBase, proc)
+		return handle, errors.New("council proxy returned an unverified endpoint")
 	}
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), limits.WallTime)
-	proc := &containerProcess{
-		done:    make(chan struct{}),
-		cancel:  runCancel,
-		session: session,
+	limits.WallTime = time.Until(deadline)
+	if err := setupCtx.Err(); err != nil {
+		close(proc.done)
+		a.containers.Store(taskBase, proc)
+		return handle, err
 	}
-	startedCh := make(chan scruntime.CouncilIdentity, 1)
-	var startMu sync.Mutex
-	startReturned := false
-
+	runCtx, runCancel := context.WithDeadline(context.Background(), deadline)
+	proc.cancel = runCancel
+	startedCh := make(chan scruntime.CouncilIdentity)
+	handedOff := make(chan struct{})
 	launch := scruntime.CouncilLaunch{
 		TaskID:        spec.TaskID,
 		Workload:      spec.Workload.Metadata.Name,
@@ -242,15 +264,11 @@ func (a *Adapter) startCouncilContainer(
 		Prompt:        input.prompt,
 		TaskToken:     spec.TaskToken,
 		Network:       endpoint.Network,
+		NetworkID:     endpoint.NetworkID,
 		ProxyURL:      endpoint.ProxyURL,
 		DataGateURL:   endpoint.DataGateURL,
 		CreateAttempt: attempt,
 		OnCreated: func(_ context.Context, id scruntime.CouncilIdentity) error {
-			startMu.Lock()
-			defer startMu.Unlock()
-			if startReturned {
-				return nil
-			}
 			state.Container.ContainerID = id.ContainerID
 			state.Container.ContainerName = id.ContainerName
 			state.Container.CreateAttempt = id.CreateAttempt
@@ -259,14 +277,15 @@ func (a *Adapter) startCouncilContainer(
 		OnStarted: func(_ context.Context, id scruntime.CouncilIdentity) error {
 			select {
 			case startedCh <- id:
-			default:
+				<-handedOff
+			case <-runCtx.Done():
+				return runCtx.Err()
 			}
 			return nil
 		},
 	}
 
 	var runErr error
-	var runErrMu sync.Mutex
 	recorded := false
 	recorder := func(recCtx context.Context, res scruntime.CouncilResult) error {
 		release, err := a.lockTask(recCtx, spec.TaskID, false)
@@ -282,7 +301,7 @@ func (a *Adapter) startCouncilContainer(
 			cur.Container = &containerIdentity{
 				ContainerName: res.ContainerName,
 				CreateAttempt: res.CreateAttempt,
-				ProxyName:     endpoint.ProxyName(),
+				ProxyName:     handle.ProxyName,
 				NetworkName:   endpoint.Network,
 			}
 		}
@@ -304,63 +323,34 @@ func (a *Adapter) startCouncilContainer(
 		defer close(proc.done)
 		defer runCancel()
 		res, err := a.CouncilRunner.RunCouncil(runCtx, launch, recorder)
-		runErrMu.Lock()
 		runErr = err
-		runErrMu.Unlock()
-
-		// Only persist post-run fallback state if Start has returned (otherwise Start rolls back).
-		startMu.Lock()
-		handOff := startReturned
-		startMu.Unlock()
-		if handOff && !recorded {
-			a.recordContainerFailure(taskBase, spec.TaskID, proc, res, err, runCtx.Err())
+		select {
+		case <-handedOff:
+			if !recorded {
+				a.recordContainerFailure(taskBase, spec.TaskID, proc, res, err, runCtx.Err())
+			}
+		default:
 		}
-		if handOff && session != nil {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = session.Close(closeCtx)
-			cancel()
-		}
+		// Stop and Observe retry Close if Docker or socket removal fails here.
+		_ = session.Close(context.Background())
 	}()
-
+	a.containers.Store(taskBase, proc)
 	select {
 	case id := <-startedCh:
-		startMu.Lock()
-		startReturned = true
-		if id.ContainerID != "" {
-			state.Container.ContainerID = id.ContainerID
-		}
-		startMu.Unlock()
-		a.containers.Store(taskBase, proc)
-		if commitJournal != nil {
-			_ = commitJournal()
-		}
-		return scruntime.Handle{
-			AdapterName:   "coding:" + cfg.Harness,
-			ExternalID:    spec.TaskID,
-			WorkDir:       dir,
-			Branch:        state.Branch,
-			LogPath:       taskBase + ".log",
-			ContainerName: id.ContainerName,
-			CreateAttempt: id.CreateAttempt,
-			ContainerID:   id.ContainerID,
-			ProxyName:     endpoint.ProxyName(),
-			NetworkName:   endpoint.Network,
-		}, nil
+		handle.ContainerID = id.ContainerID
+		proc.mu.Lock()
+		proc.identity.ContainerID = id.ContainerID
+		proc.mu.Unlock()
+		close(handedOff)
+		return handle, nil
 	case <-proc.done:
-		runErrMu.Lock()
-		err := runErr
-		runErrMu.Unlock()
-		if err == nil {
-			err = errors.New("council container exited before start confirmation")
+		if runErr == nil {
+			runErr = errors.New("council container exited before start confirmation")
 		}
-		return scruntime.Handle{}, fmt.Errorf("start council container %q: %w", cfg.Harness, err)
+		return handle, fmt.Errorf("start council container: %w", runErr)
 	case <-ctx.Done():
 		runCancel()
-		select {
-		case <-proc.done:
-		case <-time.After(5 * time.Second):
-		}
-		return scruntime.Handle{}, ctx.Err()
+		return handle, ctx.Err()
 	}
 }
 
@@ -467,15 +457,21 @@ func (a *Adapter) observeOrphanContainer(ctx context.Context, handle scruntime.H
 	return obs, scruntime.ErrProcessNotFound
 }
 
-func (a *Adapter) stopInMemoryContainer(ctx context.Context, taskBase string) error {
+func (a *Adapter) stopInMemoryContainer(ctx context.Context, taskBase string, h scruntime.Handle) error {
 	proc := a.containerProc(taskBase)
 	if proc == nil {
 		return nil
 	}
 	proc.mu.Lock()
+	if !matchesContainerHandle(&proc.identity, h) {
+		proc.mu.Unlock()
+		return errors.New("council stop identity mismatch")
+	}
 	proc.stopped = true
 	proc.mu.Unlock()
-	proc.cancel()
+	if proc.cancel != nil {
+		proc.cancel()
+	}
 	select {
 	case <-proc.done:
 		return nil
@@ -570,9 +566,6 @@ func (a *Adapter) stopCouncilContainer(ctx context.Context, taskBase string, han
 			c.ContainerID = handle.ContainerID
 		}
 	}
-	if err := a.cleanupContainerResources(ctx, c); err != nil {
-		return err
-	}
 	if state.Result == nil {
 		state.Result = &processResult{ExitCode: -1, Message: "coding task was stopped"}
 		if err := writeWorktreeState(taskBase, state); err != nil {
@@ -582,33 +575,37 @@ func (a *Adapter) stopCouncilContainer(ctx context.Context, taskBase string, han
 	return a.finishTask(ctx, taskBase, state)
 }
 
-func (a *Adapter) cleanupContainerResources(ctx context.Context, c *containerIdentity) error {
+func (a *Adapter) cleanupContainerResources(ctx context.Context, c *containerIdentity, session councilproxy.LaunchSession) error {
 	if c == nil {
 		return nil
 	}
-	var errs []error
-	if inspector, ok := a.CouncilRunner.(scruntime.CouncilInspector); ok && (c.ContainerID != "" || (c.ContainerName != "" && c.CreateAttempt != "")) {
-		if err := inspector.CleanupCouncil(ctx, scruntime.CouncilResult{
-			ContainerName: c.ContainerName,
-			CreateAttempt: c.CreateAttempt,
-			ContainerID:   c.ContainerID,
-		}); err != nil {
-			errs = append(errs, err)
-		}
+	inspector, ok := a.CouncilRunner.(scruntime.CouncilInspector)
+	if !ok {
+		return errors.New("council container cleanup unavailable")
 	}
-	if a.CouncilProxy != nil {
-		if c.ProxyName != "" {
-			if err := a.CouncilProxy.RemoveProxy(ctx, c.ProxyName); err != nil {
-				errs = append(errs, err)
+	harnessErr := inspector.CleanupCouncil(ctx, scruntime.CouncilResult{
+		ContainerName: c.ContainerName, CreateAttempt: c.CreateAttempt, ContainerID: c.ContainerID,
+	})
+	if session != nil {
+		return errors.Join(harnessErr, session.Close(ctx))
+	}
+	if harnessErr != nil {
+		return harnessErr
+	}
+	if c.ProxyName == "" && c.NetworkName == "" {
+		return nil
+	}
+	if a.CouncilProxy == nil {
+		return errors.New("council proxy cleanup unavailable")
+	}
+	if c.ProxyName != "" {
+		for _, name := range []string{c.ProxyName + "-probe", c.ProxyName} {
+			if err := a.CouncilProxy.RemoveProxy(ctx, name); err != nil {
+				return err
 			}
 		}
-		if c.NetworkName != "" {
-			if err := a.CouncilProxy.RemoveInternalNetwork(ctx, c.NetworkName); err != nil {
-				errs = append(errs, err)
-			}
-		}
 	}
-	return errors.Join(errs...)
+	return a.CouncilProxy.RemoveInternalNetwork(ctx, c.NetworkName)
 }
 
 func (a *Adapter) probeContainer(ctx context.Context, handle scruntime.Handle, exit bool) (bool, error) {
@@ -647,22 +644,12 @@ func (a *Adapter) probeContainer(ctx context.Context, handle scruntime.Handle, e
 		}
 	}
 	if exit {
-		if state != nil && state.Result != nil {
-			return true, nil
-		}
-		inspector, ok := a.CouncilRunner.(scruntime.CouncilInspector)
-		if !ok {
-			return false, nil
-		}
-		var cid *containerIdentity
-		if state != nil {
-			cid = state.Container
-		}
-		insp, err := inspector.InspectCouncil(ctx, containerIdentityFor(cid, handle))
-		if err != nil {
-			return false, err
-		}
-		return insp.Exists && insp.Exited, nil
+		return state != nil && state.Result != nil, nil
+	}
+	// A daemon restart loses the private gate listener. A surviving harness
+	// cannot resume the turn even if Docker still reports it running.
+	if a.containerProc(taskBase) == nil {
+		return false, nil
 	}
 	if state != nil && !state.FinishedAt.IsZero() {
 		return false, nil

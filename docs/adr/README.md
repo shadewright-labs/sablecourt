@@ -21,3 +21,4 @@ Every decision that fixes a runtime boundary, protocol contract, security invari
 | [ADR-0011](0011-sanctum-scope-trust-and-cli-harnesses.md) | Sanctum scope, trust, and CLI harnesses | Accepted | 2026-11-24 |
 | [ADR-0012](0012-learning-evidence-and-expiry.md) | Learning evidence, scope, and expiry | Accepted | 2026-11-24 |
 | [ADR-0013](0013-bounded-council-rounds.md) | Bounded council rounds in Conclaves | Accepted | 2026-11-24 |
+| [ADR-0014](0014-identity-and-authentication.md) | Identity and authentication | Proposed | 2026-11-25 |

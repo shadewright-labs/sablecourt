@@ -29,6 +29,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
@@ -191,17 +192,8 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
 }
 
-func wireCouncilContainers(ctx context.Context, adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string, logger *slog.Logger) {
+func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string) {
 	if isCitadel || dockerAdapter == nil {
-		return
-	}
-	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	err := dockerAdapter.Ping(pingCtx)
-	cancel()
-	if err != nil {
-		if logger != nil {
-			logger.Warn("council container runtime unavailable: Docker engine unreachable", "error", err)
-		}
 		return
 	}
 	harnesses := make(map[string]docker.CouncilHarness, len(councilPanel))
@@ -259,10 +251,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
 	}
-	operatorToken, err := operatortoken.LoadOrCreate(dir)
+	operatorToken, stateLock, err := initDaemonState(dir)
 	if err != nil {
-		return fmt.Errorf("initialize operator credential: %w", err)
+		return err
 	}
+	defer stateLock.Close()
 	logger := telemetry.NewLogger()
 
 	var gitSyncer *config.GitSyncer
@@ -311,16 +304,16 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
-	var dockerAdapter *docker.Adapter
 	if cfg.runtimeBackend != "k8s" {
 		if da, err := docker.NewFromEnv(); err == nil {
-			da.AttachHub = attachHub
-			dockerAdapter = da
+			da.SetAttachHub(ctx, attachHub)
 			adapters[domain.ClassLongLivedAgent] = da
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
-			wireCouncilContainers(ctx, adapters, isCitadel, da, attachHub, dbPath, cfg.branchRetention, listenAddr, logger)
+			if da.CouncilRuntimeConfigured() {
+				wireCouncilContainers(adapters, isCitadel, da, attachHub, dbPath, cfg.branchRetention, listenAddr)
+			}
 		} else {
-			logger.Warn("docker runtime unavailable", "error", err)
+			return fmt.Errorf("configure Docker runtime: %w", err)
 		}
 	}
 
@@ -444,7 +437,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 	if cfg.runtimeBackend == "k8s" {
 		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
-			k8sAdapter.SetAttachHub(attachHub)
+			k8sAdapter.SetAttachHub(ctx, attachHub)
 			adapters[domain.ClassLongLivedAgent] = k8sAdapter
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
 			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
@@ -452,7 +445,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			logger.Warn("kubernetes runtime unavailable", "error", err)
 		}
 	}
-	_ = dockerAdapter
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
 		Store:         st,
@@ -487,15 +479,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	})
 	conclaveBroker.RegisterMCPTools(dataActionGate)
 
-	if err := reconcileDaemonPass(ctx, reconciler.Recover, conclaveBroker); err != nil {
-		logger.Warn("startup reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
-	}
 	scheduler := controlplane.NewScheduler(reconciler)
-	if err := scheduler.Reload(ctx, bundle); err != nil {
-		return err
-	}
-	defer scheduler.Stop()
-
 	reloadFn := func() error {
 		b, pol, err := loadAndSync()
 		if err != nil {
@@ -514,6 +498,62 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 		return nil
 	}
+
+	provReg := providers.NewRegistry(providers.Options{
+		Store:   st,
+		Secrets: secretStore,
+	})
+
+	dash, err := ui.NewDashboard(ui.Options{
+		Store:         st,
+		Approvals:     approvalQueue,
+		Reconciler:    reconciler,
+		Scheduler:     scheduler,
+		Conclave:      conclaveBroker,
+		Providers:     provReg,
+		GetBundle:     getBundle,
+		Reload:        reloadFn,
+		ManifestsPath: manifestsPath,
+	})
+	if err != nil {
+		return fmt.Errorf("init web ui: %w", err)
+	}
+
+	privateDirs := []string{dir}
+	if dbPath != "" {
+		if absDB, err := filepath.Abs(dbPath); err == nil {
+			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
+		}
+	}
+	if secretFile != "" {
+		if absSecret, err := filepath.Abs(secretFile); err == nil {
+			privateDirs = append(privateDirs, absSecret)
+		}
+	}
+
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
+		handlerConfig{
+			incidentTemplate:    cfg.incidentTemplate,
+			operatorToken:       operatorToken,
+			councilsDisabled:    isCitadel,
+			councilPrivateDirs:  privateDirs,
+			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
+		})
+	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca.SupportsCouncilContainers() {
+		ca.CouncilGateHandler, err = cfg.councilGateHandler(mux)
+		if err != nil {
+			return err
+		}
+		ca.CouncilSocketRoot = councilproxy.SocketRoot(dir)
+	}
+
+	if err := reconcileDaemonPass(ctx, reconciler.Recover, conclaveBroker); err != nil {
+		logger.Warn("startup reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
+	}
+	if err := scheduler.Reload(ctx, bundle); err != nil {
+		return err
+	}
+	defer scheduler.Stop()
 
 	if gitSyncer != nil {
 		interval := cfg.manifestsGitInterval
@@ -567,46 +607,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}()
 
-	provReg := providers.NewRegistry(providers.Options{
-		Store:   st,
-		Secrets: secretStore,
-	})
-
-	dash, err := ui.NewDashboard(ui.Options{
-		Store:         st,
-		Approvals:     approvalQueue,
-		Reconciler:    reconciler,
-		Scheduler:     scheduler,
-		Conclave:      conclaveBroker,
-		Providers:     provReg,
-		GetBundle:     getBundle,
-		Reload:        reloadFn,
-		ManifestsPath: manifestsPath,
-	})
-	if err != nil {
-		return fmt.Errorf("init web ui: %w", err)
-	}
-
-	privateDirs := []string{dir}
-	if dbPath != "" {
-		if absDB, err := filepath.Abs(dbPath); err == nil {
-			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
-		}
-	}
-	if secretFile != "" {
-		if absSecret, err := filepath.Abs(secretFile); err == nil {
-			privateDirs = append(privateDirs, absSecret)
-		}
-	}
-
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
-		handlerConfig{
-			incidentTemplate:    cfg.incidentTemplate,
-			operatorToken:       operatorToken,
-			councilsDisabled:    isCitadel,
-			councilPrivateDirs:  privateDirs,
-			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
-		})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
@@ -615,35 +615,38 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	srv := newDaemonServer(mux)
+	tcpLn, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen %q: %w", listenAddr, err)
 	}
+	limitedTCPLn := councilproxy.LimitListener(tcpLn, 256)
 
 	var unixSrv *http.Server
 	if socketPath != "" {
 		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			_ = limitedTCPLn.Close()
 			return fmt.Errorf("mkdir socket dir: %w", err)
 		}
 		_ = os.Remove(socketPath)
 		uln, err := net.Listen("unix", socketPath)
 		if err != nil {
+			_ = limitedTCPLn.Close()
 			return fmt.Errorf("listen unix socket %q: %w", socketPath, err)
 		}
 		_ = os.Chmod(socketPath, 0o600)
 		defer os.Remove(socketPath)
-		unixSrv = &http.Server{Handler: unixMux, ReadHeaderTimeout: 5 * time.Second}
+		unixSrv = newDaemonServer(unixMux)
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
-			_ = unixSrv.Serve(uln)
+			_ = unixSrv.Serve(councilproxy.LimitListener(uln, 256))
 		}()
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("sablecourtd listening", "addr", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(limitedTCPLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 		close(errCh)
@@ -660,6 +663,43 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// daemonIdleTimeout releases a capped listener slot held by an idle keep-alive
+// connection. It does not cut a response that is still streaming.
+const daemonIdleTimeout = 60 * time.Second
+
+// daemonReadTimeout bounds reading a whole request, including the body that
+// net/http drains after a handler rejects a request without reading it, so an
+// unauthenticated stalled upload cannot hold a capped listener slot. It is a
+// variable so tests can shorten it. No write timeout is set, so streaming
+// responses are not cut.
+var daemonReadTimeout = 60 * time.Second
+
+func newDaemonServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       daemonReadTimeout,
+		IdleTimeout:       daemonIdleTimeout,
+	}
+}
+
+func initDaemonState(dir string) (string, io.Closer, error) {
+	stateLock, err := operatortoken.LockStateDir(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("lock operator state directory: %w", err)
+	}
+	operatorToken, err := operatortoken.LoadOrCreate(dir)
+	if err != nil {
+		_ = stateLock.Close()
+		return "", nil, fmt.Errorf("initialize operator credential: %w", err)
+	}
+	if err := councilproxy.SweepStaleSockets(councilproxy.SocketRoot(dir)); err != nil {
+		_ = stateLock.Close()
+		return "", nil, fmt.Errorf("sweep stale council gate sockets: %w", err)
+	}
+	return operatorToken, stateLock, nil
 }
 
 func shortDigest(s string) string {
@@ -1453,7 +1493,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		branch := "sablecourt/promote-" + name
-		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch)
+		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
 		if out, err := cmd.CombinedOutput(); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
@@ -1545,7 +1585,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 					lastID = msgs[len(msgs)-1].ID
 				}
 				fp := fmt.Sprintf("%s:%d:%d:%d", sess.State, len(msgs), lastID, len(relics))
-				_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp)
+				_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", fp) // #nosec G705 -- Broker.Close restricts requested states to lifecycle constants. newHandler streams that state and integer counters as text/event-stream.
 				flusher.Flush()
 				return true
 			}
@@ -1817,7 +1857,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(voiceTranscribeMaxBytes); err != nil {
+		if err := r.ParseMultipartForm(voiceTranscribeMaxBytes); err != nil { // #nosec G120 -- newHandler caps transcribe at 24 MiB and guardOperatorRequest caps voice-decree at 2 MiB with MaxBytesReader.
 			return nil, "", "", fmt.Errorf("parse multipart audio: %w", err)
 		}
 		f, hdr, err := r.FormFile("file")
