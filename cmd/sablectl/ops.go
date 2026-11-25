@@ -43,7 +43,7 @@ func buildOpsCommands() (*cobra.Command, *cobra.Command) {
 			switch goruntime.GOOS {
 			case "darwin":
 				plistDir := filepath.Join(home, "Library", "LaunchAgents")
-				if err := os.MkdirAll(plistDir, 0o755); err != nil {
+				if err := os.MkdirAll(plistDir, 0o700); err != nil {
 					return err
 				}
 				plistPath := filepath.Join(plistDir, "io.shadewright.sablecourtd.plist")
@@ -79,7 +79,7 @@ func buildOpsCommands() (*cobra.Command, *cobra.Command) {
 
 			case "linux":
 				unitDir := filepath.Join(home, ".config", "systemd", "user")
-				if err := os.MkdirAll(unitDir, 0o755); err != nil {
+				if err := os.MkdirAll(unitDir, 0o700); err != nil {
 					return err
 				}
 				unitPath := filepath.Join(unitDir, "sablecourtd.service")
