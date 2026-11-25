@@ -13,7 +13,7 @@ func buildHarnessCmd(docker harnessimages.Docker) *cobra.Command {
 
 func buildHarnessCmdWithCompiler(docker harnessimages.Docker, compiler harnessimages.ProxyCompiler) *cobra.Command {
 	var source string
-	harness := &cobra.Command{Use: "harness", Short: "Build local council harness images"}
+	harness := &cobra.Command{Use: "harness", Short: "Build local council harness images and log in to them"}
 	build := &cobra.Command{
 		Use:       "build <role>",
 		Short:     "Build a pinned harness image and its proxy locally",
@@ -39,6 +39,6 @@ func buildHarnessCmdWithCompiler(docker harnessimages.Docker, compiler harnessim
 		},
 	}
 	build.Flags().StringVar(&source, "source", ".", "Sablecourt source checkout containing the council proxy")
-	harness.AddCommand(build)
+	harness.AddCommand(build, loginHarnessCmd())
 	return harness
 }
