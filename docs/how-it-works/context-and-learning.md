@@ -47,7 +47,7 @@ An entry appears in the packet as `[namespace / key] text`. The daemon no longer
 
 The Conclave page has a "Save as learning" button next to each message. It writes a proposal as a Court Memory entry under `proposed:learning:...` with the redacted rule and its source message, and an audit row `learning.propose`. Nothing acts on these proposals, and they never reach a packet.
 
-Migration 0012 imports each existing `learning:*` row once into the learning table as a `proposed` record with legacy provenance. Only `learning:global` keeps a scope. Every other scope is marked as needing an operator mapping, and a malformed row gets a placeholder statement. The original rows stay in Court Memory and keep matching.
+Migration 0012 imports each existing `learning:*` row once into the learning table as a `proposed` record with legacy provenance. Only `learning:global` keeps a scope. Every other scope is marked as needing an operator mapping. A row with an invalid timestamp, author, key, namespace or value is marked malformed and also needs a mapping, whatever its scope; its statement is replaced by a placeholder only when the statement text itself is invalid. The original rows stay in Court Memory and keep matching.
 
 ## The learning record of ADR-0012
 
@@ -61,7 +61,7 @@ Every line is dashed because the store enforces the transitions but no route, pa
 - Acceptance takes the expected digest and an operator in the request context. It needs evidence that resolves to a real artifact (sources `task`, `agent` and `verifier`) or Relic (sources `council`, `incident` and `shadewright`) of the source, so a record with source `operator` or `legacy` cannot be accepted yet. It also refuses a record whose scope still needs mapping. It starts a 90-day clock. Accepting a replacement retires its predecessor in the same transaction.
 - A supporting outcome that the operator confirms restarts the clock. A contradiction with an evidence reference, or the 90 days, returns the record to `proposed` and the record is withheld from then on. An injection or an inconclusive outcome leaves the clock alone.
 - Every transition is appended to a history table. The learning, history, outcome and injection tables refuse deletes.
-- Scopes combine a global flag, a repository remote URL, up to 16 path globs and incident selectors (cluster, namespace, workload kind, symptom).
+- A scope is either global or a combination of narrower selectors: a repository remote URL, up to 16 path globs and incident selectors (cluster, namespace, workload kind, symptom). Global cannot be combined with any of them.
 
 ## Not built yet
 
