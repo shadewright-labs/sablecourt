@@ -152,21 +152,56 @@ func TestProviderProxyBoundary(t *testing.T) {
 
 func TestProxyConfiguration(t *testing.T) {
 	for _, tc := range []struct {
-		name, harness, listen, digest string
-		ok                            bool
+		name, harness, listen, gatePort, digest string
+		ok                                      bool
 	}{
-		{"login", "agy", loopbackAddress(), "", true},
-		{"unknown harness", "other", loopbackAddress(), "", false},
-		{"dial override", "agy", net.JoinHostPort("unlisted", "7432"), "", false},
-		{"unspecified address", "agy", net.JoinHostPort(net.IPv6unspecified.String(), "7432"), "", false},
-		{"invalid port", "agy", net.JoinHostPort(net.IPv6loopback.String(), "0"), "", false},
-		{"raw lease", "agy", loopbackAddress(), "sc_task_fixture", false},
+		{"login", "agy", loopbackAddress(), "", "", true},
+		{"gate port override", "agy", loopbackAddress(), "17432", "", true},
+		{"unknown harness", "other", loopbackAddress(), "", "", false},
+		{"dial override", "agy", net.JoinHostPort("unlisted", "7432"), "", "", false},
+		{"unspecified address", "agy", net.JoinHostPort(net.IPv6unspecified.String(), "7432"), "", "", false},
+		{"invalid port", "agy", net.JoinHostPort(net.IPv6loopback.String(), "0"), "", "", false},
+		{"invalid gate port zero", "agy", loopbackAddress(), "0", "", false},
+		{"invalid gate port range", "agy", loopbackAddress(), "65536", "", false},
+		{"invalid gate port leading zero", "agy", loopbackAddress(), "07432", "", false},
+		{"invalid gate port non-numeric", "agy", loopbackAddress(), "abc", "", false},
+		{"raw lease", "agy", loopbackAddress(), "", "sc_task_fixture", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := New(Config{Harness: tc.harness, DaemonListen: tc.listen, LeaseSHA256: tc.digest})
+			_, err := New(Config{Harness: tc.harness, DaemonListen: tc.listen, GatePort: tc.gatePort, LeaseSHA256: tc.digest})
 			if (err == nil) != tc.ok {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestGatePortPreservesPinnedAuthority(t *testing.T) {
+	const token = "sc_task_fixture"
+	cfg := Config{
+		Harness:      "claude",
+		DaemonListen: loopbackAddress(),
+		GatePort:     "17432",
+		LeaseSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(token))),
+	}
+	called := false
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		called = true
+		if r.URL.Host != net.JoinHostPort(DockerHostGateway, "17432") ||
+			r.Host != net.JoinHostPort(Authority, "7432") {
+			t.Fatalf("unexpected upstream host=%q authority=%q", r.URL.Host, r.Host)
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Header: http.Header{}, Body: http.NoBody}, nil
+	})
+	h, err := newProxy(cfg, rt, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/gate/task/messages", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent || !called {
+		t.Fatalf("status %d called %v", w.Code, called)
 	}
 }

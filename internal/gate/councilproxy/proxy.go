@@ -28,10 +28,18 @@ const (
 )
 
 // Config comes from the daemon at launch. An empty digest permits provider login only.
+// GatePort optionally overrides the host-gateway upstream port when a local bridge
+// forwards to the loopback daemon; the Host authority still comes from DaemonListen.
 type Config struct {
 	Harness      string
 	DaemonListen string
+	GatePort     string
 	LeaseSHA256  string
+}
+
+func validPort(port string) bool {
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n != 0 && strconv.FormatUint(n, 10) == port
 }
 
 // GateAuthority identifies the workload-only virtual host on the loopback daemon.
@@ -41,8 +49,7 @@ func GateAuthority(listen string) (string, error) {
 		return "", errors.New("council gate requires a loopback listen address and port")
 	}
 	ip, err := netip.ParseAddr(host)
-	n, portErr := strconv.ParseUint(port, 10, 16)
-	if err != nil || !ip.IsLoopback() || portErr != nil || n == 0 || strconv.FormatUint(n, 10) != port {
+	if err != nil || !ip.IsLoopback() || !validPort(port) {
 		return "", errors.New("council gate requires a loopback listen address and port")
 	}
 	return net.JoinHostPort(Authority, port), nil
@@ -92,26 +99,18 @@ var providerHosts = map[string][]string{
 type lookupIP func(context.Context, string, string) ([]netip.Addr, error)
 type dialContext func(context.Context, string, string) (net.Conn, error)
 
-// New constructs the gate and HTTPS CONNECT proxy without consulting environment proxy settings.
-func New(cfg Config) (http.Handler, error) {
+func newGateTransport() *http.Transport {
 	dialer := &net.Dialer{Timeout: dialTimeout}
-	return newProxy(cfg, &http.Transport{
+	return &http.Transport{
 		DialContext:           dialer.DialContext,
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		MaxIdleConns:          8,
-	}, net.DefaultResolver.LookupNetIP, dialer.DialContext)
+	}
 }
 
-func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dialContext) (http.Handler, error) {
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-	gate, _ := GateAuthority(cfg.DaemonListen)
-	_, port, _ := net.SplitHostPort(gate)
-	digest, _ := hex.DecodeString(cfg.LeaseSHA256)
-	upstream := &url.URL{Scheme: "http", Host: net.JoinHostPort(DockerHostGateway, port)}
-	reverse := &httputil.ReverseProxy{
+func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTripper) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(upstream)
@@ -130,6 +129,42 @@ func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dia
 			http.Error(w, "council gate unavailable", http.StatusBadGateway)
 		},
 	}
+}
+
+func validLeaseHeader(r *http.Request, digest []byte) bool {
+	if len(digest) != sha256.Size {
+		return false
+	}
+	auth := r.Header.Values("Authorization")
+	if len(auth) != 1 || len(auth[0]) > 512 {
+		return false
+	}
+	token, ok := strings.CutPrefix(auth[0], "Bearer ")
+	if !ok {
+		return false
+	}
+	got := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(got[:], digest) == 1
+}
+
+// New constructs the gate and HTTPS CONNECT proxy without consulting environment proxy settings.
+func New(cfg Config) (http.Handler, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return newProxy(cfg, newGateTransport(), net.DefaultResolver.LookupNetIP, dialer.DialContext)
+}
+
+func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dialContext) (http.Handler, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	gate, _ := GateAuthority(cfg.DaemonListen)
+	_, port, _ := net.SplitHostPort(gate)
+	if cfg.GatePort != "" {
+		port = cfg.GatePort
+	}
+	digest, _ := hex.DecodeString(cfg.LeaseSHA256)
+	upstream := &url.URL{Scheme: "http", Host: net.JoinHostPort(DockerHostGateway, port)}
+	reverse := newGateReverseProxy(upstream, gate, transport)
 	hosts := providerHosts[cfg.Harness]
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
@@ -140,14 +175,9 @@ func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dia
 			http.Error(w, "council route refused", http.StatusForbidden)
 			return
 		}
-		auth := r.Header.Values("Authorization")
-		if len(auth) == 1 && len(auth[0]) <= 512 {
-			token, ok := strings.CutPrefix(auth[0], "Bearer ")
-			got := sha256.Sum256([]byte(token))
-			if ok && subtle.ConstantTimeCompare(got[:], digest) == 1 {
-				reverse.ServeHTTP(w, r)
-				return
-			}
+		if validLeaseHeader(r, digest) {
+			reverse.ServeHTTP(w, r)
+			return
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "task lease required", http.StatusUnauthorized)
@@ -160,6 +190,9 @@ func (cfg Config) validate() error {
 	}
 	if _, err := GateAuthority(cfg.DaemonListen); err != nil {
 		return err
+	}
+	if cfg.GatePort != "" && !validPort(cfg.GatePort) {
+		return errors.New("invalid council gate port")
 	}
 	if digest, err := hex.DecodeString(cfg.LeaseSHA256); err != nil || (cfg.LeaseSHA256 != "" && len(digest) != sha256.Size) {
 		return errors.New("invalid council task lease digest")

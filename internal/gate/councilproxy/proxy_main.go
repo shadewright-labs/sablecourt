@@ -18,6 +18,7 @@ func main() {
 	var listenName string
 	flag.StringVar(&cfg.Harness, "harness", "", "council harness")
 	flag.StringVar(&cfg.DaemonListen, "daemon-listen", "", "daemon loopback address")
+	flag.StringVar(&cfg.GatePort, "gate-port", "", "optional host-gateway port for the council gate")
 	flag.StringVar(&cfg.LeaseSHA256, "lease-sha256", "", "expected task lease SHA-256 digest")
 	flag.StringVar(&listenName, "listen-name", "", "proxy name on the private network")
 	flag.Parse()
