@@ -1,35 +1,35 @@
 # Context and learning
 
-Before a task starts, the daemon builds a short, redacted Markdown packet with the task intent, any failure handoff, standing rules and a read-only look at the repository, and passes it to the workload. Learnings are the standing rules: advice the operator wants every later run to follow. This page covers the packet, what is stored today, what the record of ADR-0012 adds, the verifier step and model tiers.
+Before a task starts, the daemon builds a redacted Markdown packet with the task intent, any failure handoff, matching standing rules and, for a workload with a repository, a read-only look at it, and puts it in the launch input of the workload. Learnings are the standing rules: advice that later packets carry when its scope matches. This page covers the packet, what is stored today, what the record of ADR-0012 adds, the verifier step and model tiers.
 
-Status: partly built. The packet, the verifier step, the failure handoff and the tiers are built. The learning record exists in the SQLite store, but nothing proposes, accepts, matches or injects through it yet, and no route, page or command reaches it.
+Status: partly built. The packet, the verifier step, the failure handoff and the tiers are built. The learning record exists in the SQLite store, but apart from the migration that imports old entries, nothing proposes, accepts, matches or injects through it yet, and no route, page or command reaches it (issues #43 and #46).
 
 ## What goes into a packet
 
-The flow below shows how a task gets its packet: a deterministic controller gets none, a council turn gets the scheduler's packet, and every other task gets the required part plus optional parts trimmed to 32 KiB.
+The flow below shows how a task gets its packet: a deterministic controller outside a council gets none, a council turn gets the packet reserved for it, and every other task gets the required part plus optional parts, which are dropped whole, oldest first, while the packet is over 32 KiB.
 
-[![Packet assembly: a deterministic controller gets no packet, a council turn gets the scheduler's packet, and any other task gets the required part and optional parts, with the oldest optional entry dropped until the packet is 32 KiB or less.](../diagrams/context-packet.svg)](../diagrams/context-packet.svg "Open full size")
+[![Packet assembly: a deterministic controller outside a council gets no packet, a council turn gets the packet reserved for it, and any other task gets the required part and optional parts, with the oldest optional entry dropped while the packet is over 32 KiB.](../diagrams/context-packet.svg)](../diagrams/context-packet.svg "Open full size")
 
-`internal/contextpack` assembles the packet each time a task launches. A `context_packet` field sent by a caller is deleted and rebuilt, and so is a `repo_path` field: the repository is the `coding.repoPath` of the workload. The parts, in order:
+`internal/contextpack` assembles the packet each time a task launches, apart from the two cases above. A `context_packet` field sent by a caller is deleted and the packet is rebuilt. A `repo_path` field sent by a caller is ignored by the assembler: the repository is the `coding.repoPath` of the workload. The original input is not erased, though. It stays in the task history, and Docker and Kubernetes workloads still receive it in their launch input. The built-in agent sends the task history to the Model Gate along with the rebuilt packet, and the Gate forwards the request body to the provider unchanged. So the caller's original input, including a `context_packet` or `repo_path` that was replaced, can still reach a model provider. The parts, in order:
 
 1. The role card of the workload, if it has one.
-2. A header with the task, workload, workflow step, role and Conclave.
-3. The intent: the `prompt` and `input` of the task.
+2. A header with the task and workload, and the workflow step, role and Conclave when the task has them.
+3. The intent: the `prompt` and `input` of the task, or the raw input when both are empty.
 4. For a Vassal woken by a peer's mention, that message, wrapped as untrusted peer data. The prompt is then replaced by a fixed sentence.
 5. The failure handoff, when the task is a retry with one.
-6. Scoped learnings (up to 20), the last 5 operator Decrees and decisions of the room, the last 4 Relics (each cut at 2048 bytes, wrapped as untrusted data) and the pre-check.
+6. Scoped learnings (up to 20), the last 5 Decrees and decisions that the operator posted in the room, the last 4 Relics of the room in name order (each cut at 2048 bytes, wrapped as untrusted data) and the pre-check. Decrees, decisions and Relics appear only for a task that belongs to a Conclave.
 
-Parts 1 to 5 are required and never cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole and the size is checked again, the pre-check going last, and the packet ends with a marker that older context was omitted. A packet can therefore exceed 32 KiB if the required part does. The whole packet and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
+Parts 1 to 5 are required and are not cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole and the size is checked again, the pre-check going last because it is stamped with the current time. When the required part leaves room, the packet ends with a marker that older context was omitted. A packet can exceed 32 KiB if the required part does. The required part and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
 
-A deterministic controller never gets a packet, since it holds no model grant. Today the packet reaches two kinds of runtime: the host coding adapter, which writes it to a session file in the worktree and uses it as the harness prompt, and the built-in `sablecourt-agent` container, which sends it as the first message to the Model Gate.
+A deterministic controller outside a council gets no packet, and the controller adapter refuses a model grant for it. Every other task carries the packet in the `context_packet` field of its launch input. The host coding adapter uses it as the harness prompt and, outside a council checkout, also writes it to a session file in the worktree. The built-in `sablecourt-agent` container sends it as the first message to the Model Gate, together with the task history. Docker and Kubernetes workloads receive it in `SABLECOURT_INPUT_JSON` and use it only if their own code reads it.
 
 ## The repository pre-check
 
-The pre-check runs only when the workload has a repository directory. It has 10 seconds in total and is cut at 16 KiB after redaction.
+The pre-check runs only when the workload has a `coding.repoPath` that names an existing directory. It has 10 seconds in total and is cut at 16 KiB after redaction.
 
 | Step | Runs when | Appears in the packet |
 | --- | --- | --- |
-| `git status --short` and `git diff --stat` | always, read-only, without filters or external diff tools | when not empty |
+| `git status --short` and `git diff --stat` | read-only, without filters or external diff tools; skipped when repository discovery or filter setup fails | when not empty |
 | `go vet ./...` | the repository has a `go.mod` and `go` is on the path | only when it reports issues |
 | `sg scan` | the repository has an `sgconfig.yml` and `sg` is on the path | only when it reports issues |
 
@@ -37,17 +37,17 @@ The paths from `git status` also decide which path-scoped learnings match. The d
 
 ## Learnings today
 
-A learning today is a Court Memory entry whose namespace starts with `learning:`. The matcher reads the 200 most recently updated memory rows, keeps those with such a namespace, and takes up to 20:
+A learning today is a Court Memory entry whose namespace starts with `learning:`. The matcher reads the 200 most recently updated Court Memory rows of any namespace, keeps those with such a namespace, and takes up to 20, so an entry that is not among those 200 rows is never seen:
 
-- `learning:global` always matches.
+- `learning:global` matches every task.
 - `learning:repo:<name>` matches when `<name>` is the last element of the repository path.
 - `learning:path:<glob>` matches when the glob fits a changed path. `dir/**` matches everything under `dir`; other globs match the whole path or its last element.
 
-An entry appears in the packet as `[namespace / key] text`. Nothing can create such an entry any more. `memory.put` and `memory.delete` refuse the namespace and write a `denied` audit row with reason `reserved_namespace`. `POST /api/v1/memory`, `DELETE /api/v1/memory/{namespace}/{key}` and the `/memory` page answer 403, and `POST /api/v1/learnings` answers 410. The memory tools, the page and `GET /api/v1/memory` hide these namespaces. `GET /api/v1/learnings?repo=&path=` (operator credential) still lists the matches. So only rows written before the namespace was closed reach packets.
+An entry appears in the packet as `[namespace / key] text`. The daemon no longer has a way to create such an entry. `memory.put` and `memory.delete` refuse the namespace and write a `denied` audit row with reason `reserved_namespace`. `POST /api/v1/memory`, `DELETE /api/v1/memory/{namespace}/{key}` and the save and delete forms of the `/memory` page answer 403, and `POST /api/v1/learnings` answers 410. `memory.get` and `memory.search` refuse these namespaces, and the page and `GET /api/v1/memory` hide them. `GET /api/v1/learnings?repo=&path=` (operator credential) still lists up to 100 matches. So rows written before the namespace was closed are the ones that reach packets.
 
-The Conclave page has a "Save as learning" button. It writes a proposal as a Court Memory entry under `proposed:learning:...` with the redacted rule and its source message, and an audit row `learning.propose`. No code reads these proposals back.
+The Conclave page has a "Save as learning" button next to each message. It writes a proposal as a Court Memory entry under `proposed:learning:...` with the redacted rule and its source message, and an audit row `learning.propose`. Nothing acts on these proposals, and they never reach a packet.
 
-Migration 0012 copied every existing `learning:*` row into the learning table as a `proposed` record with legacy provenance. The original rows stay in Court Memory and keep matching.
+Migration 0012 imports each existing `learning:*` row once into the learning table as a `proposed` record with legacy provenance. Only `learning:global` keeps a scope. Every other scope is marked as needing an operator mapping, and a malformed row gets a placeholder statement. The original rows stay in Court Memory and keep matching.
 
 ## The learning record of ADR-0012
 
@@ -55,12 +55,12 @@ Migration 0012 copied every existing `learning:*` row into the learning table as
 
 [![Learning states: proposed, accepted and retired, with accept, confirm, contradiction or 90 days, and retire as dashed planned transitions.](../diagrams/learning-states.svg)](../diagrams/learning-states.svg "Open full size")
 
-Every line is dashed because the store enforces the transitions but nothing calls them yet (planned).
+Every line is dashed because the store enforces the transitions but no route, page or command calls them yet (planned). Only the migration creates `proposed` records today.
 
-- A record holds an immutable redacted statement (up to 4 KiB), a scope, a source kind (`operator`, `agent`, `verifier`, `shadewright`, `task`, `council` or `incident`), an evidence reference such as `artifact:<name>` or `relic:<name>`, an author and a SHA-256 digest of those fields.
-- Acceptance takes the expected digest and an operator in the request context. It needs evidence that resolves to a real artifact or Relic of the source, and it refuses a record whose scope still needs mapping. It starts a 90-day clock. Accepting a replacement retires its predecessor in the same transaction.
-- A supporting outcome that the operator confirms restarts the clock. A contradiction with an evidence reference, or the 90 days, returns the record to `proposed` and the record is withheld from then on. An injection, a plain pass or an inconclusive outcome leaves the clock alone.
-- Every transition is appended to a history table, and these tables refuse deletes.
+- A record holds an immutable redacted statement (up to 4 KiB), a scope, a source kind (`operator`, `agent`, `verifier`, `shadewright`, `task`, `council` or `incident`, plus `legacy` for imported rows), an evidence reference such as `artifact:<name>` or `relic:<name>`, an author and a SHA-256 digest of the immutable fields (statement, scope, source, evidence reference, predecessor).
+- Acceptance takes the expected digest and an operator in the request context. It needs evidence that resolves to a real artifact (sources `task`, `agent` and `verifier`) or Relic (sources `council`, `incident` and `shadewright`) of the source, so a record with source `operator` or `legacy` cannot be accepted yet. It also refuses a record whose scope still needs mapping. It starts a 90-day clock. Accepting a replacement retires its predecessor in the same transaction.
+- A supporting outcome that the operator confirms restarts the clock. A contradiction with an evidence reference, or the 90 days, returns the record to `proposed` and the record is withheld from then on. An injection or an inconclusive outcome leaves the clock alone.
+- Every transition is appended to a history table. The learning, history, outcome and injection tables refuse deletes.
 - Scopes combine a global flag, a repository remote URL, up to 16 path globs and incident selectors (cluster, namespace, workload kind, symptom).
 
 ## Not built yet
@@ -68,12 +68,12 @@ Every line is dashed because the store enforces the transitions but nothing call
 - Proposing, accepting, confirming and retiring through a route, page or command. ADR-0014 would give acceptance to the `approver` role; it is Proposed.
 - Proposing candidates when a run ends.
 - Matching and injecting from the record: at most ten statements in an advisory section of at most 4 KiB, most specific first. The packet today takes up to 20 entries and only the 32 KiB cap applies. The 4 KiB in the store limits one statement.
-- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, goes to the harness or to the Model Gate.
+- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, is the harness prompt of a host coding task, and the built-in agent sends it to a model provider through the Model Gate.
 - PostgreSQL has no learning table.
 
 ## Verifier steps
 
-A workflow step with `role: verifier` is checked by an independent run. The example loads with the current loader (checked with `sablectl validate`).
+A workflow step with `role: verifier` is an independent run that checks the work of the author step before it. The example passes `sablectl validate`.
 
 ```yaml
 apiVersion: sablecourt.io/v1alpha1
@@ -126,18 +126,18 @@ spec:
       prompt: Check the change for regressions and missing tests.
 ```
 
-- The verifier gets a prompt that tells it not to trust the author, with the author's artifacts (each cut at 4096 bytes). It must run on a `coding-agent` workload. Its checkout is read-only and pinned to the author's commit, recorded as a `verifier_checkout_pinned` event. Otherwise the launch fails with "runtime cannot guarantee the author's checkout for this step".
+- The verifier gets a prompt that tells it not to trust the author, with the text of the author's artifacts (each cut at 4096 bytes). It must run on a `coding-agent` workload. Its checkout is read-only and pinned to the author's commit, recorded as a `verifier_checkout_pinned` event. If the workload is not a coding agent, the runtime cannot pin a commit, or the author recorded no commit, the launch fails with "runtime cannot guarantee the author's checkout for this step".
 - The verdict is the last line of the single `final-message` artifact (plain text, at most 64 KiB), exactly `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. A message that repeats the prompt does not count.
-- `PASS` moves the workflow to the next step. With no valid verdict, the workflow halts with reason `verdict_missing` and an audit row `workflow.verify`. `CHANGES_REQUESTED` runs the author step again with the redacted findings as its handoff while `retry_count` is below `maxRetries`; at the limit the workflow stops.
-- If an author step fails and has `maxRetries` set, the daemon retries it with a handoff, up to that number (one retry if the value is unset but auto remediation is on). See [retry with handoff](../how-to/retry-with-handoff.md).
+- `PASS` moves the workflow to the next step. With no valid verdict, the workflow halts with reason `verdict_missing` and an audit row `workflow.verify`. `CHANGES_REQUESTED` writes a `workflow.verify` audit row and runs the author step again with the redacted findings as its handoff while `retry_count` is below `maxRetries`; at the limit no further step starts. The `maxRetries` that counts is the one on the verifier step, or the author step's own when the verifier step sets none.
+- A task of a step that has `maxRetries` set, or a task whose input sets `auto_remediate`, is retried with a handoff when it fails, up to that number (one retry if only `auto_remediate` is set). The retry happens only when the daemon saw the runtime exit (`runtime_exit_observed`). A task that fails to launch, or is lost on restart, is not retried. In the example above `maxRetries` is on the `check` step, so it limits the verdict loop and the `check` run itself, not a failure of the `fix` step. See [retry with handoff](../how-to/retry-with-handoff.md).
 
 ## Failure handoff
 
-`contextpack.BuildFailureHandoff` writes the block that a retry carries: the failed task, workload and state, the reason, the last 6 lifecycle events, each captured artifact with text (the last 4096 bytes of it), the last 5 task messages (each cut at 1024 bytes) and a fixed instruction to fix the root cause and verify with tests. It is redacted and sits in the packet under "Failure Handoff".
+`contextpack.BuildFailureHandoff` writes the block that a retry carries: the failed task, workload and state, the reason, the last 6 lifecycle events, each captured artifact with text (the last 4096 bytes of it), the last 5 task messages (each cut at 1024 bytes) and a fixed instruction to fix the root cause and verify with tests. It is redacted. In the packet of a task that gets one it sits under "Failure Handoff" and is not cut. A deterministic controller gets no packet, so a retried controller receives the block only as the `failure_handoff` field of its input.
 
 ## Model tiers
 
-A step may name a tier, `fast`, `coding` or `critic`, instead of a provider and model. The loader checks the tier against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:claude` with `claude-opus-5-5`. A route must suit the workload: a deterministic controller cannot use a tier, and a coding workload needs a `cli:` provider of its own harness and a model that harness accepts.
+A step may name a tier, `fast`, `coding` or `critic`, as shorthand for a provider and model. A provider or model set on the step itself replaces the route of the tier. The loader checks the tier name and route against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:claude` with `claude-opus-5-5`. A route must suit the workload: a deterministic controller cannot use a tier, and a `coding-agent` workload needs a `cli:` provider of its own harness and a model that harness accepts. Other classes get no further check.
 
 ## In depth
 

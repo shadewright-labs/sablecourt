@@ -25,19 +25,20 @@ Prerequisites: the daemon is running and you are signed in ([install and start](
    sablectl task retry <task-id> --handoff
    ```
 
-   In the web UI the task page shows "Retry" and "Fix from failure (handoff)" buttons for a task that is not running. The API is `POST /api/v1/tasks/{id}/retry`, with `?handoff=true` for the handoff.
+   In the web UI the task page shows "Retry" and "Fix from failure (handoff)" buttons for any task that is not submitted, working or input-required. A suspended task shows them too, and the daemon refuses it. The API is `POST /api/v1/tasks/{id}/retry`, with `?handoff=true` for the handoff.
 
 ## What the retry does
 
-- It submits a new task for the same workload with the original input, `retried_from` set to the old task and `retry_count` one higher.
-- The idempotency key is `retry-<old task id>-<attempt>`, new for each attempt. Retrying the same task a second time returns the task the first retry created instead of starting another. To go again, retry the new task.
-- With a handoff, the input also carries the handoff block, which the new task's [context packet](../how-it-works/context-and-learning.md) shows under "Failure Handoff". It is redacted and bounded.
+- It submits a new task for the same workload with the input of the old task, `retried_from` set to the old task and `retry_count` one higher. The input is decoded and encoded again, so key order can change and a JSON integer too large for a 64-bit float can lose precision. An input that is not a JSON object becomes the `prompt` field.
+- For a task outside a Conclave, the idempotency key is `retry-<old task id>-<attempt>`, new for each attempt. Retrying the same task a second time returns the task the first retry created instead of starting another. To go again, retry the new task.
+- With a handoff, the input also carries the handoff block. It is redacted, and each part has a size cut (the last 6 events, the last 4096 bytes of each artifact, the last 5 messages of 1024 bytes each). The new task's [context packet](../how-it-works/context-and-learning.md) shows the block under "Failure Handoff". A task of a deterministic-controller workload gets no packet, so it receives the block only in its input.
+- For a workflow step on a `coding-agent` workload, the retry starts from the commit the failed attempt recorded. If none was recorded, the new task fails at launch with "runtime cannot guarantee the author's checkout for this step".
 - The API and `sablectl` write an audit row `task.retry` with outcome `submitted`, naming the old task and whether a handoff was attached. The web UI button does not write that row.
 - A task that is still running or whose runtime cleanup is pending is refused (HTTP 400, text "retry requires a terminal task" or "runtime cleanup is pending"). A council round task cannot be retried by hand ("council retries require a planned reservation").
 
 ## Retry without you
 
-A workflow step with `maxRetries` retries itself when its run fails, with a handoff, until `retry_count` reaches the limit. A verifier that answers `VERDICT: CHANGES_REQUESTED` triggers the same loop on the author step, with the verifier's findings as the handoff. Each automatic retry writes `task.auto_remediate` (after a failure) or `workflow.verify` (after a verdict). See [verifier steps](../how-it-works/context-and-learning.md#verifier-steps).
+A task of a workflow step with `maxRetries`, or whose input sets `auto_remediate`, is retried with a handoff when it fails, until `retry_count` reaches the limit. This happens only if the daemon saw the runtime exit; a task that failed to launch or was lost on restart is not retried. A verifier that answers `VERDICT: CHANGES_REQUESTED` starts the author step again, with the verifier's findings as the handoff, while `retry_count` is below the limit. A retry after a failure writes `task.auto_remediate`. A `CHANGES_REQUESTED` verdict writes `workflow.verify` with outcome `changes_requested`, whether or not another run follows. See [verifier steps](../how-it-works/context-and-learning.md#verifier-steps).
 
 ## Check it worked
 
