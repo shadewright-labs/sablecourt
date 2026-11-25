@@ -91,7 +91,7 @@ func TestHarnessLogin(t *testing.T) {
 		{name: "login absent then stored", role: "codex", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultLoginMissing), nil}}, wantCalls: "check image volume proxy run check"},
 		{name: "already logged in", role: "agy", fake: &fakeLogin{}, wantCalls: "check image volume proxy run check"},
 		{name: "image missing", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultImageMissing)}}, wantErr: "sablectl harness build claude", wantCalls: "check"},
-		{name: "unlabelled volume", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeInvalid)}}, wantErr: "not the labelled", wantCalls: "check"},
+		{name: "unlabelled volume", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeInvalid)}}, wantErr: "not a local Sablecourt volume", wantCalls: "check"},
 		{name: "engine failure", role: "claude", fake: &fakeLogin{checks: []error{&docker.HarnessError{Harness: "claude", Fault: docker.FaultBackend, Err: errors.New("sk-ant-secret")}}}, wantErr: "unavailable", notErr: "secret", wantCalls: "check"},
 		{name: "proxy image missing", role: "codex", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultLoginMissing)}, imageErr: errNotFound{}}, wantErr: "sablectl harness build codex", wantCalls: "check image"},
 		{name: "volume create fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, ensureErr: errors.New("denied")}, wantErr: "prepare login volume", wantCalls: "check image volume"},

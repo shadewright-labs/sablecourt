@@ -56,8 +56,9 @@ const (
 	loginProbeAbsent = 1
 )
 
-// The script reads only file names and sizes: test -s never opens the file.
-const loginProbeScript = `for f in "$@"; do if test -s "$f"; then exit 0; fi; done; exit 1`
+// The script accepts only a regular, non-empty file that is not a symlink. It
+// never opens the file, so contents are not read.
+const loginProbeScript = `for f in "$@"; do if test -f "$f" && test ! -L "$f" && test -s "$f"; then exit 0; fi; done; exit 1`
 
 type volumeCreator interface {
 	VolumeCreate(context.Context, client.VolumeCreateOptions) (client.VolumeCreateResult, error)
@@ -65,7 +66,7 @@ type volumeCreator interface {
 
 // CheckCouncilHarness verifies, with no pull and no network, that the harness
 // image exists locally, that its login volume is the labelled local volume, and
-// that the volume holds a credential file. Every failure is a *HarnessError.
+// that the volume holds a credential file by path. Every failure is a *HarnessError.
 func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error {
 	fault := func(f HarnessFault, err error) error { return &HarnessError{Harness: harness, Fault: f, Err: err} }
 	cfg, ok := a.CouncilHarnesses[harness]
@@ -93,8 +94,12 @@ func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error
 	if err := validateCouncilLoginVolume(vol.Volume, harness, cfg.LoginVolume); err != nil {
 		return fault(FaultVolumeInvalid, err)
 	}
-	present, err := a.probeLogin(ctx, engine, imageID, cfg)
+	present, err := a.probeLogin(ctx, engine, imageID, harness, cfg)
 	if err != nil {
+		var he *HarnessError
+		if errors.As(err, &he) {
+			return he
+		}
 		return fault(FaultBackend, err)
 	}
 	if !present {
@@ -105,7 +110,7 @@ func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error
 
 // EnsureCouncilLoginVolume creates the labelled login volume when it does not
 // exist and refuses a volume that exists without the labels. Only the login
-// command calls it: the daemon never creates a volume.
+// command calls it: the daemon never calls VolumeCreate.
 func (a *Adapter) EnsureCouncilLoginVolume(ctx context.Context, harness string) error {
 	fault := func(f HarnessFault, err error) error { return &HarnessError{Harness: harness, Fault: f, Err: err} }
 	cfg, ok := a.CouncilHarnesses[harness]
@@ -143,8 +148,8 @@ func (a *Adapter) EnsureCouncilLoginVolume(ctx context.Context, harness string) 
 
 // probeLogin runs one short container from the pinned image: no network, no
 // capabilities, read-only root, the volume mounted read-only, no environment
-// beyond the base. It reports whether any credential file is non-empty.
-func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, imageID string, cfg CouncilHarness) (bool, error) {
+// beyond the base. It reports whether any credential path is a regular, non-empty file.
+func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, imageID, harness string, cfg CouncilHarness) (bool, error) {
 	ctx, cancel := context.WithTimeout(parent, loginProbeTimeout)
 	defer cancel()
 	pids := loginProbePIDs
@@ -184,6 +189,15 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	}()
 	if len(created.Warnings) > 0 {
 		return false, errors.New("Docker reported a warning applying the login probe configuration")
+	}
+	// The mount names the volume, so check again that the name still refers to
+	// the labelled local volume now that the container pins it.
+	vol, err := engine.VolumeInspect(ctx, cfg.LoginVolume, client.VolumeInspectOptions{})
+	if err != nil {
+		return false, fmt.Errorf("inspect council login volume: %w", err)
+	}
+	if err := validateCouncilLoginVolume(vol.Volume, harness, cfg.LoginVolume); err != nil {
+		return false, &HarnessError{Harness: harness, Fault: FaultVolumeInvalid, Err: err}
 	}
 	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return false, fmt.Errorf("start login probe: %w", err)
