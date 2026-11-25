@@ -39,8 +39,11 @@ func probeSeatbelt(ctx context.Context, executable string) (err error) {
 		cmd.Dir, cmd.Env = "/", []string{"LC_ALL=C", "PATH=/usr/bin:/bin"}
 		return cmd
 	}
-	if err := command("/usr/bin/true").Run(); err != nil {
-		return fmt.Errorf("apply Seatbelt probe profile: %w", err)
+	apply := command("/usr/bin/true")
+	var applyOutput strings.Builder
+	apply.Stdout, apply.Stderr = &applyOutput, &applyOutput
+	if err := apply.Run(); err != nil {
+		return fmt.Errorf("apply Seatbelt probe profile: %w: %s", err, strings.TrimSpace(applyOutput.String()))
 	}
 	file, err := os.CreateTemp("", "sablecourt-probe-*")
 	if err != nil {
