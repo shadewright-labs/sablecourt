@@ -102,10 +102,10 @@ Source: `internal/domain/types.go` (`BudgetSpec`), `internal/config/loader.go`, 
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `spec.perTask.maxInputTokens` | integer | no | Input tokens one task may use. |
-| `spec.perTask.maxOutputTokens` | integer | no | Output tokens one task may use. |
-| `spec.perTask.maxCostUSD` | number | no | Cost one task may reach, compared in micro-USD. |
-| `spec.daily.maxCostUSD` | number | no | Cost per workload over the UTC calendar day, live reservations included. |
+| `spec.perTask.maxInputTokens` | integer | conditional | Input tokens one task may use. Must be positive when the other three are 0 or unset. |
+| `spec.perTask.maxOutputTokens` | integer | conditional | Output tokens one task may use. Must be positive when the other three are 0 or unset. |
+| `spec.perTask.maxCostUSD` | number | conditional | Cost one task may reach, compared in micro-USD. Must be positive when the other three are 0 or unset. |
+| `spec.daily.maxCostUSD` | number | conditional | Cost per workload over the UTC calendar day, live reservations included. Must be positive when the other three are 0 or unset. |
 
 ## Workflow
 
