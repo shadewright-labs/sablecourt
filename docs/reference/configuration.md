@@ -8,11 +8,13 @@ Status: built.
 
 Source: `internal/operatortoken/token.go` and `cmd/sablecourtd/main.go`. The directory is `SABLECOURT_STATE_DIR` if set (it must be an absolute path), otherwise `.local/share/sablecourt` under the home directory. It is created with mode 0700.
 
+`TestConfigurationStateDirectory` in `internal/refdocs` checks this section: it calls the code that picks and creates the directory with a temporary home directory and fails when the default path, the directory mode, or the name and mode of an entry the daemon creates differ from this page.
+
 | Entry | Purpose |
 | --- | --- |
 | `operator.token` | The operator token, `op_` followed by 64 hex characters, mode 0600. The daemon creates it on first start. `sablectl` reads it when it talks to a local daemon and has no other token. |
 | `operator.token.pending` | Short-lived file the daemon writes while it creates `operator.token`. |
-| `daemon.lock` | Lock file. A second daemon on the same directory refuses to start. |
+| `daemon.lock` | Lock file, mode 0600. A second daemon on the same directory refuses to start. |
 | `gates/` | Council gate sockets. A council launch in Unix socket mode keeps its `gate.sock` here until cleanup; a launch in host-gateway mode uses a TLS gate and keeps no socket. |
 
 ## Other files
@@ -70,7 +72,9 @@ Source: `internal/gate/model/gate.go`. With `--model-gateway-url` set, every pro
 
 ## Environment variables
 
-Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`.
+Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`, `internal/harnessimages`, `internal/runtime/coding`.
+
+The tables in this section and the Environment variable column of the voice table are checked by `TestConfigurationEnvironmentVariables` in `internal/refdocs`: it finds every `os.Getenv`, `os.LookupEnv` and `os.Environ` call in `cmd/sablecourtd`, `cmd/sablectl` and `internal`, and fails when a name the code reads is missing here or a name here is not read. The "Read by" and "Passed by" columns are not checked. No flag takes its default from the environment through a binding library; each fallback is one of these calls.
 
 | Variable | Read by | Meaning |
 | --- | --- | --- |
@@ -81,7 +85,17 @@ Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sable
 | `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | The operator token. Without it, `sablectl` reads `operator.token` from the state directory when the daemon is local. Sent only over HTTPS or to a local daemon. There is no matching flag. |
 | `SABLECOURT_GITHUB_CLIENT_ID` | `sablectl` | Same as `auth github --client-id` (parked). |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
-| `DOCKER_HOST` | `sablecourtd` | Docker endpoint, as for the Docker client. |
+| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. |
+| `SABLECOURT_NOTIFY_WEBHOOK_URL` | `sablecourtd` | Chat alert webhook, used when the `notify_webhook_url` secret is not set (parked). |
+
+Some names are read only to copy them into the environment of a program the daemon or `sablectl` starts. Writable Git commands in `internal/runtime/coding/git.go` get the whole environment without the `GIT_*` variables. The table lists only names copied one by one; a child process started without an explicit environment inherits the whole one, and that is not listed.
+
+| Variable | Passed by | To |
+| --- | --- | --- |
+| `PATH` | Git commands of councils and coding tasks, `sablectl harness build` | `git`, `docker`, `go` |
+| `HOME` | `sablectl harness build` | `docker`, and `go` when it builds the council proxy |
+| `GOCACHE`, `TMPDIR` | `sablectl harness build` | `go` when it builds the council proxy |
+| `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH` | `sablectl harness build` | `docker` |
 
 ## Environment passed to workloads
 

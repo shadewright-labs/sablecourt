@@ -13,7 +13,7 @@ vet:
 
 # Reference pages under docs/reference are generated from the code or checked
 # against it by tests, which `go test ./...` (and so CI) also runs.
-DOCS_TESTS = TestCLIReferenceIsCurrent|TestHTTPReferenceListsEveryRoute|TestManifestReferenceMatchesTypesAndLoader|TestLimitsReferenceMatchesConstants|TestMetricsReferenceListsEveryMetric
+DOCS_TESTS = TestCLIReferenceIsCurrent|TestConfigurationStateDirectory|TestConfigurationEnvironmentVariables|TestHTTPReferenceListsEveryRoute|TestManifestReferenceMatchesTypesAndLoader|TestLimitsReferenceMatchesConstants|TestMetricsReferenceListsEveryMetric
 DOCS_PKGS = ./cmd/sablectl ./cmd/sablecourtd ./internal/config ./internal/refdocs ./internal/telemetry
 
 # docs regenerates the generated blocks of docs/reference/cli.md. Each command
