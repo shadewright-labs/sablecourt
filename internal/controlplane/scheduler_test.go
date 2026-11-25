@@ -354,3 +354,131 @@ func TestSchedulerWorkflowDedupeAndReload(t *testing.T) {
 		})
 	}
 }
+
+func TestSchedulerWorkflowSlotSurvivesRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset time.Duration
+	}{
+		{name: "same instant"},
+		{name: "later in the same minute", offset: 59 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, bundle, schedule := newWorkflowScheduleFixture(t)
+			ctx := t.Context()
+			slot := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+			first := NewScheduler(NewReconciler(Options{Store: db, Bundle: bundle}))
+			first.now = func() time.Time { return slot }
+			if err := first.Fire(ctx, schedule); err != nil {
+				t.Fatalf("first Fire: %v", err)
+			}
+			root := workflowScheduleRoot(t, db)
+
+			restarted := NewScheduler(NewReconciler(Options{Store: db, Bundle: bundle}))
+			restarted.now = func() time.Time { return slot.Add(tc.offset) }
+			if err := restarted.Fire(ctx, schedule); err != nil {
+				t.Fatalf("Fire after restart: %v", err)
+			}
+			if got := workflowScheduleRoot(t, db); got.ID != root.ID {
+				t.Fatalf("root after restart = %q, want %q", got.ID, root.ID)
+			}
+		})
+	}
+}
+
+func TestSchedulerWorkflowRetryAfterCommitError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		restart bool
+	}{
+		{name: "retry in the same scheduler"},
+		{name: "retry after restart", restart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, bundle, schedule := newWorkflowScheduleFixture(t)
+			ctx := t.Context()
+			commitErr := errors.New("lost commit acknowledgement")
+			st := &scheduleCommitErrorStore{Store: db, nextError: commitErr}
+			newScheduler := func() *Scheduler {
+				s := NewScheduler(NewReconciler(Options{Store: st, Bundle: bundle}))
+				s.now = func() time.Time { return time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC) }
+				return s
+			}
+
+			scheduler := newScheduler()
+			if err := scheduler.Fire(ctx, schedule); !errors.Is(err, commitErr) {
+				t.Fatalf("first Fire error = %v, want %v", err, commitErr)
+			}
+			root := workflowScheduleRoot(t, db)
+
+			if tc.restart {
+				scheduler = newScheduler()
+			}
+			if err := scheduler.Fire(ctx, schedule); err != nil {
+				t.Fatalf("retry Fire: %v", err)
+			}
+			if st.attempts != 2 {
+				t.Fatalf("got %d store attempts, want 2", st.attempts)
+			}
+			if got := workflowScheduleRoot(t, db); got.ID != root.ID {
+				t.Fatalf("root after retry = %q, want %q", got.ID, root.ID)
+			}
+		})
+	}
+}
+
+type scheduleCommitErrorStore struct {
+	store.Store
+	nextError error
+	attempts  int
+}
+
+func (s *scheduleCommitErrorStore) CreateTask(ctx context.Context, task domain.Task) error {
+	s.attempts++
+	if err := s.Store.CreateTask(ctx, task); err != nil {
+		return err
+	}
+	err := s.nextError
+	s.nextError = nil
+	return err
+}
+
+func newWorkflowScheduleFixture(t *testing.T) (*sqlite.SQLiteStore, *config.Bundle, domain.Schedule) {
+	t.Helper()
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertWorkload(t.Context(), domain.WorkloadRecord{Name: "health-ctrl"}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := &config.Bundle{
+		Workloads: map[string]domain.Workload{"health-ctrl": {}},
+		Workflows: map[string]domain.Workflow{
+			"health-check": {Spec: domain.WorkflowSpec{
+				Steps: []domain.WorkflowStep{{Name: "check", Workload: "health-ctrl"}},
+			}},
+		},
+	}
+	schedule := domain.Schedule{
+		Metadata: domain.ObjectMeta{Name: "health-schedule"},
+		Spec:     domain.ScheduleSpec{TargetKind: "workflow", TargetName: "health-check"},
+	}
+	return db, bundle, schedule
+}
+
+func workflowScheduleRoot(t *testing.T, st store.Store) domain.Task {
+	t.Helper()
+	tasks, err := st.ListTasks(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].ParentTaskID != "" {
+		t.Fatalf("got %d tasks, want exactly one workflow root", len(tasks))
+	}
+	return tasks[0]
+}
