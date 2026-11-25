@@ -47,7 +47,7 @@ case "$SABLECOURT_WORKLOAD" in
   review) if touch /workspace/probe 2>/dev/null; then exit 32; fi ;;
 esac
 printf 'clean answer\n'
-printf '%s\n' "${!#}" "$SABLECOURT_TASK_TOKEN" >&2
+printf '%s\n' "${!#}" "$(cat "$SABLECOURT_TASK_TOKEN_FILE")" >&2
 exit 7
 `
 

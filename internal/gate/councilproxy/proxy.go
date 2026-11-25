@@ -45,6 +45,8 @@ type Config struct {
 	GateSPKISHA256 string
 	SocketRoot     string
 	GateHandler    http.Handler
+	// RecordResources persists cleanup identities before the first Docker call.
+	RecordResources func(proxy, network string) error
 }
 
 func validPort(port string) bool {

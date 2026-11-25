@@ -32,6 +32,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
@@ -191,6 +192,33 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
 }
 
+func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string) {
+	if isCitadel || dockerAdapter == nil {
+		return
+	}
+	harnesses := make(map[string]docker.CouncilHarness, len(councilPanel))
+	for _, role := range councilPanel {
+		def, lookupErr := harnessimages.Lookup(role)
+		if lookupErr != nil {
+			continue
+		}
+		harnesses[role] = docker.CouncilHarness{
+			Image:       def.Image,
+			LoginVolume: def.Volume,
+		}
+	}
+	dockerAdapter.CouncilHarnesses = harnesses
+	codingAdapter, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
+	if !ok || codingAdapter == nil {
+		codingAdapter = newCodingAdapter(hub, dbPath, retention)
+		adapters[domain.ClassCodingAgent] = codingAdapter
+	}
+	codingAdapter.CouncilRunner = dockerAdapter
+	codingAdapter.CouncilProxy = dockerAdapter
+	codingAdapter.CouncilProxyImage = harnessimages.ProxyImage()
+	codingAdapter.DaemonListen = listenAddr
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -276,6 +304,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
+	if cfg.runtimeBackend != "k8s" {
+		if da, err := docker.NewFromEnv(); err == nil {
+			da.SetAttachHub(ctx, attachHub)
+			adapters[domain.ClassLongLivedAgent] = da
+			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
+			if da.CouncilRuntimeConfigured() {
+				wireCouncilContainers(adapters, isCitadel, da, attachHub, dbPath, cfg.branchRetention, listenAddr)
+			}
+		} else {
+			return fmt.Errorf("configure Docker runtime: %w", err)
+		}
+	}
 
 	var (
 		bundleMu sync.RWMutex
@@ -395,8 +435,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
-	switch cfg.runtimeBackend {
-	case "k8s":
+	if cfg.runtimeBackend == "k8s" {
 		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
 			k8sAdapter.SetAttachHub(ctx, attachHub)
 			adapters[domain.ClassLongLivedAgent] = k8sAdapter
@@ -404,14 +443,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
 		} else {
 			logger.Warn("kubernetes runtime unavailable", "error", err)
-		}
-	default:
-		if dockerAdapter, err := docker.NewFromEnv(); err == nil {
-			dockerAdapter.SetAttachHub(ctx, attachHub)
-			adapters[domain.ClassLongLivedAgent] = dockerAdapter
-			adapters[domain.ClassDeterministicController] = controller.NewAdapter(dockerAdapter)
-		} else {
-			logger.Warn("docker runtime unavailable", "error", err)
 		}
 	}
 
@@ -448,15 +479,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	})
 	conclaveBroker.RegisterMCPTools(dataActionGate)
 
-	if err := reconcileDaemonPass(ctx, reconciler.Recover, conclaveBroker); err != nil {
-		logger.Warn("startup reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
-	}
 	scheduler := controlplane.NewScheduler(reconciler)
-	if err := scheduler.Reload(ctx, bundle); err != nil {
-		return err
-	}
-	defer scheduler.Stop()
-
 	reloadFn := func() error {
 		b, pol, err := loadAndSync()
 		if err != nil {
@@ -475,6 +498,62 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 		return nil
 	}
+
+	provReg := providers.NewRegistry(providers.Options{
+		Store:   st,
+		Secrets: secretStore,
+	})
+
+	dash, err := ui.NewDashboard(ui.Options{
+		Store:         st,
+		Approvals:     approvalQueue,
+		Reconciler:    reconciler,
+		Scheduler:     scheduler,
+		Conclave:      conclaveBroker,
+		Providers:     provReg,
+		GetBundle:     getBundle,
+		Reload:        reloadFn,
+		ManifestsPath: manifestsPath,
+	})
+	if err != nil {
+		return fmt.Errorf("init web ui: %w", err)
+	}
+
+	privateDirs := []string{dir}
+	if dbPath != "" {
+		if absDB, err := filepath.Abs(dbPath); err == nil {
+			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
+		}
+	}
+	if secretFile != "" {
+		if absSecret, err := filepath.Abs(secretFile); err == nil {
+			privateDirs = append(privateDirs, absSecret)
+		}
+	}
+
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
+		handlerConfig{
+			incidentTemplate:    cfg.incidentTemplate,
+			operatorToken:       operatorToken,
+			councilsDisabled:    isCitadel,
+			councilPrivateDirs:  privateDirs,
+			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
+		})
+	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca.SupportsCouncilContainers() {
+		ca.CouncilGateHandler, err = cfg.councilGateHandler(mux)
+		if err != nil {
+			return err
+		}
+		ca.CouncilSocketRoot = councilproxy.SocketRoot(dir)
+	}
+
+	if err := reconcileDaemonPass(ctx, reconciler.Recover, conclaveBroker); err != nil {
+		logger.Warn("startup reconciliation completed with errors", "error", store.RedactCouncilAnswer(err.Error()))
+	}
+	if err := scheduler.Reload(ctx, bundle); err != nil {
+		return err
+	}
+	defer scheduler.Stop()
 
 	if gitSyncer != nil {
 		interval := cfg.manifestsGitInterval
@@ -528,46 +607,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}()
 
-	provReg := providers.NewRegistry(providers.Options{
-		Store:   st,
-		Secrets: secretStore,
-	})
-
-	dash, err := ui.NewDashboard(ui.Options{
-		Store:         st,
-		Approvals:     approvalQueue,
-		Reconciler:    reconciler,
-		Scheduler:     scheduler,
-		Conclave:      conclaveBroker,
-		Providers:     provReg,
-		GetBundle:     getBundle,
-		Reload:        reloadFn,
-		ManifestsPath: manifestsPath,
-	})
-	if err != nil {
-		return fmt.Errorf("init web ui: %w", err)
-	}
-
-	privateDirs := []string{dir}
-	if dbPath != "" {
-		if absDB, err := filepath.Abs(dbPath); err == nil {
-			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
-		}
-	}
-	if secretFile != "" {
-		if absSecret, err := filepath.Abs(secretFile); err == nil {
-			privateDirs = append(privateDirs, absSecret)
-		}
-	}
-
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
-		handlerConfig{
-			incidentTemplate:    cfg.incidentTemplate,
-			operatorToken:       operatorToken,
-			councilsDisabled:    isCitadel,
-			councilPrivateDirs:  privateDirs,
-			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
-		})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err

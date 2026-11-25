@@ -43,8 +43,9 @@ type worktreeState struct {
 	Tip          string
 	FinishedAt   time.Time
 	Artifacts    []scruntime.Artifact
-	Worker       *workerIdentity `json:",omitempty"`
-	Result       *processResult  `json:",omitempty"`
+	Worker       *workerIdentity    `json:",omitempty"`
+	Container    *containerIdentity `json:",omitempty"`
+	Result       *processResult     `json:",omitempty"`
 }
 
 func (s *worktreeState) checkoutDir(taskBase string) string {
@@ -332,6 +333,25 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 	state, err := readWorktreeState(taskBase + stateSuffix)
 	if err != nil {
 		return nil, err
+	}
+	// A restart can find the checkout before the proxy resource journal exists.
+	if state.Container == nil && state.Worker == nil && state.Mode != "" && state.TaskID == handle.ExternalID &&
+		handle.WorkDir == "" && handle.ContainerName == "sablecourt-council-"+state.TaskID && handle.CreateAttempt != "" && handle.ContainerID == "" {
+		a.bindConfigLock(state)
+		return state, nil
+	}
+	if state.Container != nil {
+		if !matchesContainerHandle(state.Container, handle) {
+			return nil, errors.New("coding container identity does not match handle")
+		}
+		if handle.WorkDir != "" && (handle.WorkDir != state.checkoutDir(taskBase) || handle.Branch != state.Branch) {
+			return nil, errors.New("invalid coding worktree handle")
+		}
+		if state.TaskID != handle.ExternalID {
+			return nil, errors.New("coding worktree state does not match handle")
+		}
+		a.bindConfigLock(state)
+		return state, nil
 	}
 	if state.Mode == "" {
 		if handle.WorkDir != taskBase || handle.Branch != "sablecourt/"+segment {

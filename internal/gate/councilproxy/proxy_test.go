@@ -851,3 +851,71 @@ func TestProxyConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestCouncilLeaseOverPinnedPipe(t *testing.T) {
+	key, err := newLaunchKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := signLaunchCertificate(key, time.Now(), launchCertLifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256.Sum256(cert.Leaf.RawSubjectPublicKeyInfo)
+	token := rand.Text()
+	digest := sha256.Sum256([]byte(token))
+	authority, err := GateAuthority(loopbackAddress())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		valid  bool
+		status int
+	}{
+		{"launch pin", true, http.StatusNoContent}, {"other launch pin", false, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			ln := newFakePipeListener()
+			srv := NewGateServer(gateRouteHandler(authority, digest[:], http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			})), DefaultGateLimits())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = srv.Serve(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}))
+			}()
+			t.Cleanup(func() { _ = ln.Close(); _ = srv.Close(); <-done })
+			clientPin := pin
+			if !tc.valid {
+				clientPin[0] ^= 1
+			}
+			tr := newTLSGateTransport(clientPin, func(ctx context.Context, _, _ string) (net.Conn, error) {
+				client, server := net.Pipe()
+				select {
+				case ln.ch <- server:
+					return client, nil
+				case <-ctx.Done():
+					_ = client.Close()
+					_ = server.Close()
+					return nil, ctx.Err()
+				}
+			})
+			defer tr.CloseIdleConnections()
+			cfg := Config{Harness: "codex", DaemonListen: loopbackAddress(), LeaseSHA256: hex.EncodeToString(digest[:]), GateTLSPort: "7432", GateSPKISHA256: hex.EncodeToString(clientPin[:])}
+			handler, err := newProxy(cfg, tr, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/gate/task/messages", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tc.status || (calls.Load() == 1) != tc.valid {
+				t.Fatalf("status=%d gate calls=%d", w.Code, calls.Load())
+			}
+		})
+	}
+}
