@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -37,7 +38,10 @@ var modelName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$`)
 // script and the public command. The CLI receives EOF on its first read.
 const bootstrap = `IFS= read -r -d '' SABLECOURT_TASK_TOKEN || exit 125
 IFS= read -r -d '' prompt || exit 125
-export SABLECOURT_TASK_TOKEN
+SABLECOURT_TASK_TOKEN_FILE="$TMPDIR/task.lease"
+(umask 077; printf '%s' "$SABLECOURT_TASK_TOKEN" > "$SABLECOURT_TASK_TOKEN_FILE") || exit 125
+unset SABLECOURT_TASK_TOKEN
+export SABLECOURT_TASK_TOKEN_FILE
 exec "$@" "$prompt" </dev/null`
 
 func councilCommand(s rt.CouncilLaunch, login bool) ([]string, error) {
@@ -49,7 +53,9 @@ func councilCommand(s rt.CouncilLaunch, login bool) ([]string, error) {
 			return append(cmd, "auth", "login"), nil
 		}
 		cmd = append(cmd, "--no-session-persistence", "--output-format", "text")
-		if s.Checkout.Kind != rt.CouncilWriter {
+		if s.Checkout.Kind == rt.CouncilWriter {
+			cmd = append(cmd, "--permission-mode", "acceptEdits")
+		} else {
 			cmd = append(cmd, "--permission-mode", "plan")
 		}
 	case "codex":
@@ -64,10 +70,8 @@ func councilCommand(s rt.CouncilLaunch, login bool) ([]string, error) {
 		if login {
 			return cmd, nil
 		}
-		cmd = append(cmd, "--output-format", "text")
-		if s.Checkout.Kind != rt.CouncilWriter {
-			cmd = append(cmd, "--mode", "plan")
-		}
+		// Read-only workspace confinement is enforced by the container mount.
+		cmd = append(cmd, "--output-format", "text", "--sandbox")
 	default:
 		return nil, errors.New("unknown council harness")
 	}
@@ -174,20 +178,27 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	if err != nil {
 		return o, err
 	}
-	proxy, err := proxyEndpoint(cfg.ProxyURL)
+	proxyRaw := cfg.ProxyURL
+	if s.ProxyURL != "" {
+		proxyRaw = s.ProxyURL
+	}
+	gateRaw := cfg.DataGateURL
+	if s.DataGateURL != "" {
+		gateRaw = s.DataGateURL
+	}
+	proxy, err := proxyEndpoint(proxyRaw)
 	if err != nil || (proxy.Path != "" && proxy.Path != "/") {
 		return o, errors.New("invalid council forward proxy")
 	}
-	gate, err := proxyEndpoint(cfg.DataGateURL)
+	gate, err := proxyEndpoint(gateRaw)
 	if err != nil || gate.Hostname() != proxy.Hostname() {
 		return o, errors.New("gate must use the pinned council proxy")
 	}
-	env := []string{
-		"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/home/harness", "TMPDIR=/scratch",
-		"HTTP_PROXY=" + cfg.ProxyURL, "HTTPS_PROXY=" + cfg.ProxyURL,
-		"http_proxy=" + cfg.ProxyURL, "https_proxy=" + cfg.ProxyURL,
-		"NO_PROXY=" + gate.Hostname(), "no_proxy=" + gate.Hostname(),
-	}
+	env := append(slices.Clone(councilBaseEnv),
+		"HTTP_PROXY="+proxyRaw, "HTTPS_PROXY="+proxyRaw,
+		"http_proxy="+proxyRaw, "https_proxy="+proxyRaw,
+		"NO_PROXY="+gate.Hostname(), "no_proxy="+gate.Hostname(),
+	)
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
@@ -197,14 +208,24 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 		}
 		mounts = append(mounts, m)
 		wd = m.Target
-		env = append(env, "SABLECOURT_MANAGED=1", "SABLECOURT_TASK_ID="+s.TaskID, "SABLECOURT_WORKLOAD="+s.Workload, "SABLECOURT_DATA_GATE_URL="+cfg.DataGateURL)
+		env = append(env, "SABLECOURT_MANAGED=1", "SABLECOURT_TASK_ID="+s.TaskID, "SABLECOURT_WORKLOAD="+s.Workload, "SABLECOURT_DATA_GATE_URL="+gateRaw)
 		if m.ReadOnly {
 			env = append(env, "GIT_OPTIONAL_LOCKS=0")
 		}
 	}
-	networkID, err := a.internalNetwork(ctx, false)
+	netName := a.NetworkName
+	if s.Network != "" {
+		if !councilName.MatchString(s.Network) {
+			return o, errors.New("invalid council network name")
+		}
+		netName = s.Network
+	}
+	networkID, err := a.internalNetworkNamed(ctx, netName, false)
 	if err != nil {
 		return o, fmt.Errorf("inspect council network: %w", err)
+	}
+	if s.NetworkID != "" && s.NetworkID != networkID {
+		return o, errors.New("council harness network was replaced")
 	}
 	imageID, err := a.inspectCouncilHarness(ctx, engine, s.Harness, cfg)
 	if err != nil {
@@ -250,7 +271,20 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 }
 
 func (a *Adapter) inspectCouncilHarness(ctx context.Context, engine councilEngineAPI, harness string, cfg CouncilHarness) (string, error) {
-	image, err := a.localImage(ctx, cfg.Image)
+	id, err := a.councilImageID(ctx, cfg.Image)
+	if err != nil {
+		return "", err
+	}
+	if err := inspectCouncilLoginVolume(ctx, engine, harness, cfg.LoginVolume); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+var councilBaseEnv = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/home/harness", "TMPDIR=/scratch"}
+
+func (a *Adapter) councilImageID(ctx context.Context, ref string) (string, error) {
+	image, err := a.localImage(ctx, ref)
 	if err != nil {
 		return "", err
 	}
@@ -264,9 +298,6 @@ func (a *Adapter) inspectCouncilHarness(ctx context.Context, engine councilEngin
 		if !ok || (key != "HOME" && key != "PATH" && key != "TMPDIR") {
 			return "", errors.New("council image has unexpected environment defaults")
 		}
-	}
-	if err := inspectCouncilLoginVolume(ctx, engine, harness, cfg.LoginVolume); err != nil {
-		return "", err
 	}
 	return image.ID, nil
 }

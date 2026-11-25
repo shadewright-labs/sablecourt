@@ -24,7 +24,13 @@ func (a *Adapter) probe(ctx context.Context, handle scruntime.Handle, exit bool)
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if a == nil || a.WorktreeRoot == "" || handle.PID <= 0 || handle.ProcessStartTime.IsZero() {
+	if a == nil || a.WorktreeRoot == "" {
+		return false, nil
+	}
+	if isContainerHandle(handle) {
+		return a.probeContainer(ctx, handle, exit)
+	}
+	if handle.PID <= 0 || handle.ProcessStartTime.IsZero() {
 		return false, nil
 	}
 	taskBase, err := a.taskBase(handle.ExternalID)

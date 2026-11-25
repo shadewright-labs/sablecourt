@@ -86,6 +86,10 @@ type pinnedStarter interface {
 	StartAtCommit(context.Context, scruntime.LaunchSpec, string, bool) (scruntime.Handle, error)
 }
 
+type councilContainerCapable interface {
+	SupportsCouncilContainers() bool
+}
+
 func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl domain.Workload) (string, bool, error) {
 	var meta struct {
 		Workflow   string `json:"workflow"`

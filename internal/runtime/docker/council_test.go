@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -643,5 +644,131 @@ func TestCouncilExitDrainsUnbufferedWaitOnCancel(t *testing.T) {
 	case <-sent:
 	case <-time.After(time.Second):
 		t.Fatal("unbuffered ContainerWait sender remained blocked after cancellation")
+	}
+}
+
+func TestCouncilHeadlessCommandArgv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		harness string
+		kind    rt.CouncilCheckoutKind
+		model   string
+		want    []string
+	}{
+		{
+			name:    "claude read-only",
+			harness: "claude",
+			kind:    rt.CouncilLive,
+			model:   "haiku",
+			want:    []string{"/usr/local/bin/claude", "--no-session-persistence", "--output-format", "text", "--permission-mode", "plan", "--model", "haiku", "-p"},
+		},
+		{
+			name:    "claude writer",
+			harness: "claude",
+			kind:    rt.CouncilWriter,
+			model:   "sonnet",
+			want:    []string{"/usr/local/bin/claude", "--no-session-persistence", "--output-format", "text", "--permission-mode", "acceptEdits", "--model", "sonnet", "-p"},
+		},
+		{
+			name:    "codex read-only",
+			harness: "codex",
+			kind:    rt.CouncilRef,
+			model:   "gpt-5.6-luna",
+			want:    []string{"/usr/local/bin/codex", "exec", "--sandbox", "danger-full-access", "--ephemeral", "--model", "gpt-5.6-luna"},
+		},
+		{
+			name:    "codex writer",
+			harness: "codex",
+			kind:    rt.CouncilWriter,
+			model:   "gpt-5.6-luna",
+			want:    []string{"/usr/local/bin/codex", "exec", "--sandbox", "danger-full-access", "--ephemeral", "--model", "gpt-5.6-luna"},
+		},
+		{
+			name:    "agy read-only",
+			harness: "agy",
+			kind:    rt.CouncilReview,
+			model:   "gemini-3.8-flash-low",
+			want:    []string{"/usr/local/bin/agy", "--output-format", "text", "--sandbox", "--model", "gemini-3.8-flash-low", "-p"},
+		},
+		{
+			name:    "agy writer",
+			harness: "agy",
+			kind:    rt.CouncilWriter,
+			model:   "gemini-3.8-flash-low",
+			want:    []string{"/usr/local/bin/agy", "--output-format", "text", "--sandbox", "--model", "gemini-3.8-flash-low", "-p"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, err := councilCommand(rt.CouncilLaunch{
+				Harness:  tc.harness,
+				Model:    tc.model,
+				Checkout: rt.CouncilCheckout{Kind: tc.kind},
+			}, false)
+			if err != nil {
+				t.Fatalf("councilCommand: %v", err)
+			}
+			// Bootstrap prefix is: /bin/bash --noprofile --norc -c <bootstrap> bootstrap <argv...>
+			if len(cmd) < 6 {
+				t.Fatalf("unexpected command %v", cmd)
+			}
+			got := cmd[6:]
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("argv = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCouncilPerLaunchOverridesAndInspect(t *testing.T) {
+	a, f, s := fixtureRun(t)
+	f.net.Name = "sablecourt-council-custom-net"
+	s.Network = "sablecourt-council-custom-net"
+	s.ProxyURL = "http://sablecourt-council-custom:8888"
+	s.DataGateURL = "http://sablecourt-council-custom:8888/gate/mcp"
+	s.CreateAttempt = "attempt-custom-1"
+	var createdID, startedID rt.CouncilIdentity
+	s.OnCreated = func(_ context.Context, id rt.CouncilIdentity) error {
+		createdID = id
+		return nil
+	}
+	s.OnStarted = func(_ context.Context, id rt.CouncilIdentity) error {
+		startedID = id
+		insp, err := a.InspectCouncil(t.Context(), rt.CouncilIdentity{ContainerName: id.ContainerName, CreateAttempt: id.CreateAttempt})
+		if err != nil || !insp.Exists || insp.ContainerID != id.ContainerID {
+			return fmt.Errorf("unexpected inspect during run: %+v err=%v", insp, err)
+		}
+		wrongAttempt, err := a.InspectCouncil(t.Context(), rt.CouncilIdentity{ContainerName: id.ContainerName, CreateAttempt: "other-attempt"})
+		if err != nil || wrongAttempt.Exists {
+			return fmt.Errorf("wrong attempt matched container: %+v err=%v", wrongAttempt, err)
+		}
+		return nil
+	}
+	res, err := a.RunCouncil(t.Context(), s, discardResult)
+	if err != nil {
+		t.Fatalf("RunCouncil: %v", err)
+	}
+	if createdID.ContainerID != "container-id" || startedID.ContainerID != "container-id" || res.CreateAttempt != "attempt-custom-1" {
+		t.Fatalf("created=%+v started=%+v res=%+v", createdID, startedID, res)
+	}
+	if !slices.Contains(f.createdOpts.Config.Env, "SABLECOURT_DATA_GATE_URL="+s.DataGateURL) ||
+		!slices.Contains(f.createdOpts.Config.Env, "HTTP_PROXY="+s.ProxyURL) {
+		t.Fatalf("env did not use per-launch proxy override: %v", f.createdOpts.Config.Env)
+	}
+	after, err := a.InspectCouncil(t.Context(), rt.CouncilIdentity{ContainerID: res.ContainerID})
+	if err != nil || after.Exists {
+		t.Fatalf("expected missing container after cleanup, got %+v err=%v", after, err)
+	}
+}
+
+func TestBootstrapKeepsLeaseOutsideProcessEnvironment(t *testing.T) {
+	// Run the production shell with a private scratch directory and inspect the child process.
+	for _, token := range []string{"sc_task_fixture_one", "sc_task_fixture_two"} {
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-c", bootstrap, "bootstrap", "bash", "-c", `test -z "${SABLECOURT_TASK_TOKEN+x}" && cat "$SABLECOURT_TASK_TOKEN_FILE"`, "harness")
+		cmd.Env = []string{"TMPDIR=" + t.TempDir(), "PATH=" + os.Getenv("PATH")}
+		cmd.Stdin = strings.NewReader(token + "\x00review\x00")
+		out, err := cmd.Output()
+		if err != nil || string(out) != token {
+			t.Fatal("child did not receive private file-based lease")
+		}
 	}
 }
