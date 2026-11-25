@@ -1,142 +1,604 @@
 # CLI reference
 
-The command-line programs: `sablectl` talks to a running daemon over its HTTP API, `sablecourtd` is the daemon, and `sablecourt-agent` is the agent loop that runs inside a Workload. Run `sablectl <command> --help` for the generated help of any command.
+The command-line programs: `sablectl` talks to a running daemon over its HTTP API, `sablecourtd` is the daemon, and `sablecourt-agent` is the agent loop that runs inside a Workload.
 
 Status: built.
 
-## sablectl global flags
+The `sablectl` and `sablecourtd` sections are generated from the command trees in `cmd/sablectl` and `cmd/sablecourtd` by `make docs`, and `go test ./...` fails when they are stale. They list every visible command with its short help and the flags it defines, with type and default. A flag is listed once, on the command that defines it; persistent flags of `sablectl` apply to every command below it. Hidden commands (cobra's `__complete` and `__completeNoDesc`), deprecated flags and the `-h`, `--help` flag that every command has are left out. Run `sablectl <command> --help` for the same text.
 
-Source: `cmd/sablectl/main.go`.
+## Operator token
 
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--api` | `http://127.0.0.1:7432` | Base URL of the daemon. |
-| `--json` | off | Print raw JSON where a command supports it. |
-| `--socket` | empty | Path of the daemon's Unix socket. Replaces the host in `--api`; the operator token is still read and sent. |
-| `--secret-file` | empty | Optional JSON secret file (mode 0600) used by the `secret` commands instead of the OS keyring. |
+There is no token flag, because a token on the command line shows in the process table. `sablectl` takes the operator token from the `SABLECOURT_OPERATOR_TOKEN` environment variable. With it unset, a client talking to a local daemon (a loopback host or `--socket`) reads `operator.token` from the [state directory](configuration.md#state-directory).
 
-There is no token flag, because a token on the command line shows in the process table. `sablectl` takes the operator token from the `SABLECOURT_OPERATOR_TOKEN` environment variable. With it unset, a client talking to a local daemon (a loopback host or `--socket`) reads `operator.token` from the [state directory](configuration.md#state-directory), and every call fails if that file cannot be read. The token is sent only over HTTPS or to a local daemon, and only to the host named in `--api`. Each command sets its own request timeout, listed under [limits](limits.md#sablectl).
+## sablectl
 
-## sablectl commands
+<!-- BEGIN GENERATED sablectl: do not edit, run `make docs` -->
 
-Source: `cmd/sablectl/*.go`. The route column names the API route that the command calls.
+### `sablectl`
 
-### Tasks and workloads
+CLI client for the Sablecourt control plane
 
-| Command | Flags and arguments | Route | Status |
+Groups the commands below; it does nothing on its own.
+
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `task submit <workload>` | `--input` (default `{}`), `--idempotency-key`, `--provider`, `--model` | `POST /api/v1/tasks` | built |
-| `task list` | none | `GET /api/v1/tasks` | built |
-| `task inspect <id>` | none | `GET /api/v1/tasks/{id}` | built |
-| `task cancel <id>` | none | `POST /api/v1/tasks/{id}/cancel` | built |
-| `task suspend <id>` | none | `POST /api/v1/tasks/{id}/suspend` | built |
-| `task resume <id>` | none | `POST /api/v1/tasks/{id}/resume` | built |
-| `task retry <id>` | `--handoff` | `POST /api/v1/tasks/{id}/retry` | built |
-| `task scry <id>` | none | `GET /api/v1/tasks/{id}/scry` | built |
-| `task takeover <id>` | none | `POST /api/v1/tasks/{id}/takeover` and `/stdin` | parked |
-| `task diff <id>` | none | `GET /api/v1/tasks/{id}`, then prints the `git-diff` artifact of a coding task | built |
-| `workload list` | none | `GET /api/v1/workloads` | built |
-| `promote <workload>` | none | `POST /api/v1/promote/{name}` | built |
-| `budget status` | none | `GET /api/v1/budget` | built |
+| `--api` | string | `http://127.0.0.1:7432` | sablecourtd HTTP API base URL |
+| `--json` | bool | `false` | Output raw JSON instead of styled tables |
+| `--secret-file` | string | empty | Optional 0600 JSON secret file instead of OS Keychain |
+| `--socket` | string | empty | Optional sablecourtd Unix domain socket path |
 
-### Approvals, audit and devices
+### `sablectl apply`
 
-| Command | Flags and arguments | Route | Status |
+Reload Git-tracked manifests in a running sablecourtd instance
+
+No flags of its own.
+
+### `sablectl approval`
+
+Inspect and decide runtime approval requests
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl approval approve <approval-id>`
+
+Approve a pending request (triggers out-of-band confirmation on daemon)
+
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `approval list` | none (pending only) | `GET /api/v1/approvals?status=pending` | built |
-| `approval approve <id>` | `--digest` (the expected payload SHA-256) | `POST /api/v1/approvals/{id}/approve` | built |
-| `approval deny <id>` | `--reason` | `POST /api/v1/approvals/{id}/deny` | built |
-| `audit tail` | none | `GET /api/v1/audit` | built |
-| `audit verify` | none | `GET /api/v1/audit/verify` | built |
-| `audit export` | none | `GET /api/v1/audit/export` (printed as JSON lines) | built |
-| `device list` | none | `GET /api/v1/devices` | built |
-| `device revoke <id>` | none | `POST /api/v1/devices/{id}/revoke` | built |
-| `pair` | none | `POST /api/v1/devices/pair/start` (always 503) | disabled |
+| `--digest` | string | empty | Expected SHA-256 digest of the canonical payload |
 
-`approval approve` waits for the macOS confirmation dialog, so its client timeout is 65 seconds.
+### `sablectl approval deny <approval-id>`
 
-### Conclaves and councils
+Deny a pending approval request
 
-| Command | Flags and arguments | Route | Status |
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `conclave open <template>` | `--title`, `--decree` | `POST /api/v1/conclaves` | built |
-| `conclave list` | none | `GET /api/v1/conclaves` | built |
-| `conclave inspect <id>` | none | `GET /api/v1/conclaves/{id}` | built |
-| `conclave watch <id>` | none | `GET /api/v1/conclaves/{id}/stream`, then `GET /api/v1/conclaves/{id}` on each event | built |
-| `conclave decree <id> <message>` | `--to` (default `all`) | `POST /api/v1/conclaves/{id}/decree` | built |
-| `conclave relic put <id> <name>` | `--body` (reads standard input if empty), `--type` (default `text/plain`) | `POST /api/v1/conclaves/{id}/relics` | built |
-| `conclave relic get <id> <name>` | none | `GET /api/v1/conclaves/{id}/relics/{name}` | built |
-| `conclave close <id>` | none | `POST /api/v1/conclaves/{id}/close` with state `completed`, then `GET /api/v1/tasks` and `POST /api/v1/tasks/{id}/cancel` for each unfinished task of that Conclave | built |
-| `council [question]` | `--repo` (default `.`), `--ref`, `--live`, `--rounds` (default 2), `--with` (default `claude,codex,agy`), `--sequential` | `POST /api/v1/councils` | built |
+| `--reason` | string | empty | Reason for denial |
 
-`council` prompts for the question when none is given, and the question is at most 30 KiB. It needs the `claude`, `codex` and `agy` executables on the client's path and `--rounds` of at least 1. It polls the Conclave every 500 ms and, if polling fails repeatedly, closes the council and cancels its tasks. `--ref` and `--live` exclude each other; with neither, the daemon reads the working tree live. The command sends a fresh `Idempotency-Key` of the form `ccl_req_<random>`. The API fields `writer`, `starts` and `durationSeconds` have no flag. See the [body table](http-api.md#councils-and-conclaves).
+### `sablectl approval list`
 
-### Manifests, memory, providers and secrets
+List pending approvals from sablecourtd
 
-| Command | Flags and arguments | Route or effect | Status |
+No flags of its own.
+
+### `sablectl audit`
+
+Inspect audit log
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl audit export`
+
+Export audit records as JSONL to stdout
+
+No flags of its own.
+
+### `sablectl audit tail`
+
+Show recent audit events from sablecourtd
+
+No flags of its own.
+
+### `sablectl audit verify`
+
+Verify the tamper-evident SHA-256 hash chain across all audit records
+
+No flags of its own.
+
+### `sablectl auth`
+
+Authenticate external providers via OAuth flows
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl auth github`
+
+Authenticate GitHub via OAuth Device Flow and store github_token in SecretStore
+
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `init` | `--out` (default `sablecourt.yaml`), `--force` | Writes a starter manifest (one Budget, one Policy, Workloads `coder` and `reviewer`, one Conclave) with mode 0600. Refuses to overwrite without `--force`. | built |
-| `validate <path>` | none | Loads the manifests locally and prints counts of Workloads, Policies, Budgets and Workflows and the first 12 characters of the manifest digest (the full digest with `--json`). Schedules and Conclaves are validated but not counted. No daemon needed. | built |
-| `apply` | none | `POST /api/v1/reload` | built |
-| `memory list` | `--namespace`, `--q` | `GET /api/v1/memory` | built |
-| `memory set <namespace> <key> <value>` | none | `POST /api/v1/memory` | built |
-| `memory delete <namespace> <key>` | none | `DELETE /api/v1/memory/{namespace}/{key}` | built |
-| `provider list` | none | `GET /api/v1/providers` | built |
-| `provider sync <id>` | none | `POST /api/v1/providers/{id}/sync` | built |
-| `secret set <name>` | `--value` (reads standard input if empty) | Stores the secret in the OS keyring. | built |
-| `secret check <name>` | none | Reports whether the secret exists, never its value. | built |
-| `secret delete <name>` | none | Removes it from the keyring. | built |
-| `harness build <role>` | `--source` (default `.`) | Builds the Docker image for the council harness `claude`, `codex` or `agy`. See [configuration](configuration.md#harness-images). | built |
+| `--client-id` | string | empty | GitHub OAuth App client_id (or set SABLECOURT_GITHUB_CLIENT_ID) |
 
-### Setup, diagnosis and integrations
+### `sablectl budget`
 
-| Command | Flags and arguments | Route or effect | Status |
+Inspect observed model budget usage
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl budget status`
+
+Show aggregate token and micro-USD usage
+
+No flags of its own.
+
+### `sablectl completion`
+
+Generate the autocompletion script for the specified shell
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl completion bash`
+
+Generate the autocompletion script for bash
+
+| Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `service install` | `--listen` (default `127.0.0.1:7432`), `--db` (default `sablecourt.db` in `.local/share/sablecourt` under the home directory), `--manifests` (default `.config/sablecourt/manifests` under the home directory) | Writes a launchd job `io.shadewright.sablecourtd` (a plist in `Library/LaunchAgents`) on macOS or a systemd user unit `sablecourtd.service` on Linux, runs `--mode=sanctum`, and loads it. On macOS the job writes `sablecourtd.out.log` and `sablecourtd.err.log` in `.local/share/sablecourt`; the Linux unit sets no log files. | built |
-| `doctor` | none | Calls `GET /healthz`, `GET /api/v1/audit/verify`, `GET /api/v1/providers` and `GET /api/v1/voice/status`, and reports daemon health, audit chain validity, connected providers, the speech backends, and whether `docker`, `kubectl`, `ollama`, `claude`, `codex`, `agy` and `whisper-server` are on the path. | built |
-| `version` | none | Prints the version. | built |
-| `completion bash`, `fish`, `powershell` or `zsh` | none | Prints the completion script for that shell. Generated by the command framework. | built |
-| `help [command]` | a command path | Prints the generated help of a command. Generated by the command framework. | built |
-| `mcp-server` | none | Runs a stdio MCP server for an editor or agent. Tools: `sablecourt_list_workloads`, `sablecourt_submit_task`, `sablecourt_inspect_task`, `sablecourt_open_conclave`, `sablecourt_conclave_decree`, `sablecourt_inspect_conclave`, `sablecourt_budget_status`, `sablecourt_council_convene`, `sablecourt_council_read`, `sablecourt_council_say`. Arguments are limited to 256 KiB. | built |
-| `voice status` | none | `GET /api/v1/voice/status` | parked |
-| `voice speak <text>` | `--out`, `--voice` | `POST /api/v1/voice/speak` | parked |
-| `auth github` | `--client-id` (or `SABLECOURT_GITHUB_CLIENT_ID`) | GitHub device flow, stores `github_token`. | parked |
-| `tailscale expose` | `--port` (default 7432) | Publishes the daemon through Tailscale. | parked |
-| `tailscale status` | none | Shows the Tailscale state. | parked |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
 
-## sablecourtd flags
+### `sablectl completion fish`
 
-Source: `cmd/sablecourtd/main.go`.
+Generate the autocompletion script for fish
 
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--mode` | `sanctum` | `sanctum` (alias `local`) or `citadel` (alias `enterprise`, parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)). The `SABLECOURT_MODE` variable applies only when the flag is empty, `sanctum` or `local`. |
-| `--listen` | `127.0.0.1:7432` | TCP address. Citadel changes the default to `0.0.0.0:7432`. |
-| `--allow-host` | none | Extra `Host` header values to accept. Repeatable. A bare host uses the listen port. |
-| `--socket` | empty | Also serve on this Unix socket, mode 0600. |
-| `--gate-host` | `host.docker.internal:<port>` when the listen host is `127.0.0.1` or empty, otherwise the listen address | Authority that containers use to reach `/gate/`. Required when the listener is a wildcard address. |
-| `--db` | `sablecourt.db` | SQLite file. Relative to the working directory. |
-| `--postgres-dsn` | empty | PostgreSQL connection string (parked). Also `SABLECOURT_POSTGRES_DSN`. |
-| `--manifests` | empty | Manifest file or directory. With none, the daemon tries `manifests`, then `examples/local-demo.yaml`, then the user config directory (`.config/sablecourt/manifests` under the home directory). |
-| `--manifests-git-repo` | empty | Git URL to sync manifests from. Parked with the other Git integrations. |
-| `--manifests-git-branch` | `main` | Branch to sync. |
-| `--manifests-git-interval` | `60s` | Sync interval. |
-| `--coding-branch-retention` | `0` | How long to keep coding task branches. `0` keeps them. |
-| `--max-concurrent` | `4` | Maximum tasks launched in parallel. `0` means unlimited. |
-| `--model-gateway-url` | empty | Send every Model Gate provider to this URL, with no provider secret. Also `SABLECOURT_MODEL_GATEWAY_URL`. |
-| `--incident-conclave-template` | empty | Default Conclave template for Shadewright incidents. |
-| `--secret-file` | empty | Secrets file read after the OS keyring. |
-| `--repo-root` | `.` | Git root used by the `git.create_branch` action. `promote` runs `git branch` in the daemon's working directory instead. |
-| `--runtime` | `docker` | `docker` or `k8s`. Citadel forces `k8s` when it is `docker` or empty. |
-| `--k8s-namespace` | `default` | Namespace for Kubernetes workloads (parked). |
-| `--k8s-runtime-class` | empty | Runtime class for Kubernetes workloads (parked). |
-| `--kubeconfig` | empty | Kubeconfig path (parked). |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
 
-`--operator-auth-required` is hidden and deprecated. It is ignored, and operator authentication is always required.
+### `sablectl completion powershell`
+
+Generate the autocompletion script for powershell
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
+### `sablectl completion zsh`
+
+Generate the autocompletion script for zsh
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--no-descriptions` | bool | `false` | disable completion descriptions |
+
+### `sablectl conclave`
+
+Convene and direct multi-agent Conclaves (Vassals, Wards, Decrees, Relics)
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl conclave close <conclave-id>`
+
+Close a Conclave session
+
+No flags of its own.
+
+### `sablectl conclave decree <conclave-id> <message>`
+
+Issue an operator Decree to direct Vassals or resume a Ward-paused Conclave
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--to` | string | `all` | Target Vassal role or all |
+
+### `sablectl conclave inspect <conclave-id>`
+
+Inspect a Conclave session, message log, and Relics
+
+No flags of its own.
+
+### `sablectl conclave list`
+
+List Conclave sessions
+
+No flags of its own.
+
+### `sablectl conclave open <template>`
+
+Convene a new Conclave from a manifest template
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--decree` | string | empty | Optional opening operator Decree |
+| `--title` | string | empty | Conclave session title |
+
+### `sablectl conclave relic`
+
+Store and fetch shared Relics inside a Conclave
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl conclave relic get <conclave-id> <name>`
+
+Fetch a Relic from a Conclave
+
+No flags of its own.
+
+### `sablectl conclave relic put <conclave-id> <name>`
+
+Store a Relic (reads stdin if --body is omitted)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--body` | string | empty | Relic text body (reads stdin when omitted) |
+| `--type` | string | `text/plain` | Relic MIME content type |
+
+### `sablectl conclave watch <conclave-id>`
+
+Watch live Conclave messages in real time
+
+No flags of its own.
+
+### `sablectl council [question]`
+
+Convene a bounded multi-agent council, stream round answers, and print the digest
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--live` | bool | `false` | Use a read-only view of the live working tree (mutually exclusive with --ref) |
+| `--ref` | string | empty | Pin a read-only checkout to a Git ref (mutually exclusive with --live) |
+| `--repo` | string | `.` | Repository directory path |
+| `--rounds` | int | `2` | Maximum council rounds |
+| `--sequential` | bool | `false` | Run participants sequentially within each round |
+| `--with` | string | `claude,codex,agy` | Comma-separated participant harnesses (claude,codex,agy) |
+
+### `sablectl device`
+
+List and revoke paired ECDSA P-256 signing devices
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl device list`
+
+List paired signing devices
+
+No flags of its own.
+
+### `sablectl device revoke <device-id>`
+
+Revoke a paired device
+
+No flags of its own.
+
+### `sablectl doctor`
+
+Check daemon health, audit chain, runtimes, coding harnesses, providers, and voice backends
+
+No flags of its own.
+
+### `sablectl harness`
+
+Build local council harness images
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl harness build <role>`
+
+Build a pinned harness image and its proxy locally
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--source` | string | `.` | Sablecourt source checkout containing the council proxy |
+
+### `sablectl help [command]`
+
+Help about any command
+
+No flags of its own.
+
+### `sablectl init`
+
+Generate a starter sablecourt.yaml manifest tailored to the current repository
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--force` | bool | `false` | Overwrite existing manifest file |
+| `--out` | string | `sablecourt.yaml` | Output manifest file path |
+
+### `sablectl mcp-server`
+
+Run Sablecourt as a stdio MCP server for Claude Code, Codex, or IDE agents
+
+No flags of its own.
+
+### `sablectl memory`
+
+Manage persistent Court Memory shared across tasks and Conclaves
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl memory delete <namespace> <key>`
+
+Delete a Court Memory entry
+
+No flags of its own.
+
+### `sablectl memory list`
+
+List or search Court Memory entries
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--namespace` | string | empty | Optional memory namespace filter |
+| `--q` | string | empty | Optional substring search |
+
+### `sablectl memory set <namespace> <key> <value>`
+
+Store a redacted Court Memory entry
+
+No flags of its own.
+
+### `sablectl pair`
+
+Generate a single-use pairing code and URI for an iOS or CLI signing device
+
+No flags of its own.
+
+### `sablectl promote <workload>`
+
+Create a GitOps promotion branch to graduate a sandbox workload to runtime
+
+No flags of its own.
+
+### `sablectl provider`
+
+Inspect connected LLM providers and sync available models
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl provider list`
+
+List provider connection status and cached models
+
+No flags of its own.
+
+### `sablectl provider sync <provider-id>`
+
+Query upstream /models endpoint and refresh cached model list
+
+No flags of its own.
+
+### `sablectl secret`
+
+Manage upstream gate credentials in OS Keychain or 0600 file
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl secret check <name>`
+
+Check whether a secret exists without printing its value
+
+No flags of its own.
+
+### `sablectl secret delete <name>`
+
+Delete a stored secret
+
+No flags of its own.
+
+### `sablectl secret set <name>`
+
+Store a secret (reads from stdin if --value is omitted)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--value` | string | empty | Secret value (prefer stdin pipe over shell args) |
+
+### `sablectl service`
+
+Install and manage sablecourtd as a background service (macOS launchd or Ubuntu systemd)
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl service install`
+
+Install sablecourtd as a user background service on macOS (launchd) or Linux/Ubuntu (systemd)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--db` | string | empty | SQLite database path |
+| `--listen` | string | `127.0.0.1:7432` | Daemon listen address |
+| `--manifests` | string | empty | Manifests directory or file |
+
+### `sablectl tailscale`
+
+Expose local sablecourtd privately to your Tailscale tailnet via tailscale serve
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl tailscale expose`
+
+Expose local sablecourtd over HTTPS inside your Tailscale tailnet (no public port)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--port` | int | `7432` | Local sablecourtd port |
+
+### `sablectl tailscale status`
+
+Show current Tailscale serve status
+
+No flags of its own.
+
+### `sablectl task`
+
+Submit and inspect tasks
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl task cancel <task-id>`
+
+Cancel an active task and revoke its gate leases
+
+No flags of its own.
+
+### `sablectl task diff <task-id>`
+
+Print the colorized git-diff artifact recorded for a coding task
+
+No flags of its own.
+
+### `sablectl task inspect <task-id>`
+
+Inspect a task, its state transitions, and budget usage
+
+No flags of its own.
+
+### `sablectl task list`
+
+List tasks from sablecourtd
+
+No flags of its own.
+
+### `sablectl task resume <task-id>`
+
+Restore checkpoint and resume a suspended task
+
+No flags of its own.
+
+### `sablectl task retry <task-id>`
+
+Re-submit an interrupted or failed task (use --handoff to attach failure-handoff.md)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--handoff` | bool | `false` | Attach standardized failure-handoff.md from artifacts and events |
+
+### `sablectl task scry <task-id>`
+
+Stream live redacted output from a running task (read-only)
+
+No flags of its own.
+
+### `sablectl task submit <workload>`
+
+Submit a new task to sablecourtd
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--idempotency-key` | string | empty | Optional idempotency key |
+| `--input` | string | `{}` | JSON task input or plain prompt text |
+| `--model` | string | empty | Optional model ID |
+| `--provider` | string | empty | Optional LLM provider (openai, anthropic, gemini, local) |
+
+### `sablectl task suspend <task-id>`
+
+Checkpoint and suspend a working task
+
+No flags of its own.
+
+### `sablectl task takeover <task-id>`
+
+Attach to a running task with exclusive stdin control (Ctrl-C to detach)
+
+No flags of its own.
+
+### `sablectl validate <path>`
+
+Validate Git-tracked Sablecourt YAML manifests
+
+No flags of its own.
+
+### `sablectl version`
+
+Print sablectl version
+
+No flags of its own.
+
+### `sablectl voice`
+
+Local-first Speech-to-Text and Text-to-Speech commands
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl voice speak <text>`
+
+Synthesize and play speech audio via local TTS (Kokoro/Piper or macOS say)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--out` | string | empty | Output audio file path (e.g. reply.wav) |
+| `--voice` | string | empty | Optional TTS voice name (e.g. Zosia, Samantha, af_heart) |
+
+### `sablectl voice status`
+
+Show configured local STT and TTS backends
+
+No flags of its own.
+
+### `sablectl workload`
+
+Inspect registered workloads
+
+Groups the commands below; it does nothing on its own.
+
+No flags of its own.
+
+### `sablectl workload list`
+
+List registered workloads from sablecourtd
+
+No flags of its own.
+
+<!-- END GENERATED sablectl -->
+
+## sablecourtd
+
+<!-- BEGIN GENERATED sablecourtd: do not edit, run `make docs` -->
+
+### `sablecourtd`
+
+Sablecourt local-first and enterprise Kubernetes control plane daemon
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--allow-host` | stringSlice | none | Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port) |
+| `--coding-branch-retention` | duration | `0s` | Age before merged coding branches can be pruned (0 disables pruning) |
+| `--db` | string | `sablecourt.db` | SQLite database path |
+| `--gate-host` | string | empty | Optional host:port injected into containers for gates (defaults to --listen) |
+| `--incident-conclave-template` | string | empty | Default Conclave template for new Shadewright incidents |
+| `--k8s-namespace` | string | `default` | Kubernetes namespace when --runtime=k8s |
+| `--k8s-runtime-class` | string | empty | Optional Kubernetes RuntimeClassName (e.g. gvisor, kata) |
+| `--kubeconfig` | string | empty | Optional kubeconfig path when --runtime=k8s |
+| `--listen` | string | `127.0.0.1:7432` | HTTP listen address |
+| `--manifests` | string | empty | Path to Git-tracked YAML manifests file or directory |
+| `--manifests-git-branch` | string | `main` | Branch for --manifests-git-repo |
+| `--manifests-git-interval` | duration | `1m0s` | Poll interval for --manifests-git-repo |
+| `--manifests-git-repo` | string | empty | Optional Git repository URL to sync manifests from automatically |
+| `--max-concurrent` | int | `4` | Maximum number of concurrently running tasks (0 = unlimited) |
+| `--mode` | string | `sanctum` | Operating mode: sanctum (local macOS/Ubuntu) or citadel (Kubernetes) |
+| `--model-gateway-url` | string | empty | Optional upstream AI gateway URL (e.g. agentgateway or Agent Router) |
+| `--postgres-dsn` | string | empty | Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite |
+| `--repo-root` | string | `.` | Git repository root for GitOps typed actions |
+| `--runtime` | string | `docker` | Container runtime backend: docker or k8s |
+| `--secret-file` | string | empty | Optional 0600 JSON secret file fallback path |
+| `--socket` | string | empty | Optional Unix domain socket path for local CLI access (0600) |
+
+<!-- END GENERATED sablecourtd -->
 
 ## sablecourt-agent
 
-Source: `cmd/sablecourt-agent/main.go`. The program that a Workload image can run as its agent loop; the starter manifest from `sablectl init` names an image `sablecourt-agent:0.1.0` for it. You do not run it by hand. It has no flags and reads its environment: `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` are required (it exits 1 without them), and `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_INPUT_JSON` are optional. The task input may carry `provider` (default `anthropic`), `model` and `prompt`. It talks only to the Model Gate and the data gate, for at most 4 turns.
+Source: `cmd/sablecourt-agent/main.go`. The program that a Workload image can run as its agent loop; the starter manifest from `sablectl init` names an image `sablecourt-agent:0.1.0` for it. You do not run it by hand. It has no flags and reads its environment: `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` are required (it exits 1 without them), and `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_INPUT_JSON` are optional. The task input may carry `provider` (default `anthropic`), `model` and `prompt`.
 
 ## Not built yet
 
