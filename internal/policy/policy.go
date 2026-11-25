@@ -28,17 +28,27 @@ func NewEngine(policies []domain.Policy, breaker *CircuitBreaker) *Engine {
 	}
 }
 
-// RecordOutcome records the result of running capability on the engine's
-// circuit breaker, the same one Evaluate checks. It does nothing without a breaker.
-func (e *Engine) RecordOutcome(capability string, failed bool) {
+// BreakerKey is the circuit breaker key for one workload using one
+// capability. Breakers are kept per workload so a workload whose calls keep
+// failing stops only itself, not every workload granted the capability.
+func BreakerKey(capability, workload string) string {
+	return capability + "\x00" + workload
+}
+
+// RecordOutcome records the result of workload running capability on the
+// engine's circuit breaker, the same one Evaluate checks. Only failures of the
+// downstream system should be recorded as failed; a refusal of the caller's
+// own input is not a failure of the capability. It does nothing without a breaker.
+func (e *Engine) RecordOutcome(capability, workload string, failed bool) {
 	if e == nil || e.breaker == nil {
 		return
 	}
+	key := BreakerKey(capability, workload)
 	if failed {
-		e.breaker.RecordFailure(capability)
+		e.breaker.RecordFailure(key)
 		return
 	}
-	e.breaker.RecordSuccess(capability)
+	e.breaker.RecordSuccess(key)
 }
 
 // Evaluate determines allow, approve, or deny deterministically.
@@ -68,7 +78,7 @@ func (e *Engine) Evaluate(w domain.Workload, capability string) Decision {
 	}
 
 	// Circuit breaker fails closed for mutating actions when tripped.
-	if strings.HasPrefix(capability, "action:") && e.breaker != nil && e.breaker.IsOpen(capability) {
+	if strings.HasPrefix(capability, "action:") && e.breaker != nil && e.breaker.IsOpen(BreakerKey(capability, w.Metadata.Name)) {
 		return Decision{Effect: domain.EffectDeny, Reason: "circuit_breaker_open"}
 	}
 
@@ -162,9 +172,15 @@ func (cb *CircuitBreaker) RecordFailure(key string) {
 	}
 }
 
+// RecordSuccess resets the failure count. It does not close an open breaker
+// before its cool-down ends: a success that was in flight when the breaker
+// opened says nothing about the calls that tripped it.
 func (cb *CircuitBreaker) RecordSuccess(key string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	if until, ok := cb.openUntil[key]; ok && cb.now().Before(until) {
+		return
+	}
 	delete(cb.failures, key)
 	delete(cb.openUntil, key)
 }

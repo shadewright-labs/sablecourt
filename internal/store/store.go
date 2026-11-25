@@ -38,12 +38,15 @@ type Store interface {
 	GetApproval(ctx context.Context, id string) (domain.Approval, error)
 	ListApprovals(ctx context.Context, status domain.ApprovalStatus) ([]domain.Approval, error)
 	DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error
-	// ConsumeApproval moves an approved approval to consumed in one transaction,
-	// after checking it belongs to taskID and capability, pins payloadSHA256 and
-	// has not expired at now. A row past its expiry is marked expired and
-	// ErrExpired is returned; any other mismatch or a row that is not approved
-	// returns ErrConflict. A consumed row never becomes usable again.
-	ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error
+	// ConsumeApproval moves an approved approval to consumed and appends
+	// req.Audit to the audit chain in one transaction, after checking the row
+	// belongs to the task and capability and pins the payload digest. Expiry is
+	// checked against req.Now called after the row is locked. A row past its
+	// expiry is marked expired and ErrExpired is returned; any other mismatch
+	// or a row that is not approved returns ErrConflict. Any other error means
+	// the transaction rolled back and the approval was not used. A consumed row
+	// never becomes usable again.
+	ConsumeApproval(ctx context.Context, req ConsumeRequest) error
 
 	CreateLease(ctx context.Context, lease domain.Lease) error
 	GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error)
@@ -87,4 +90,17 @@ type Store interface {
 	GetMemory(ctx context.Context, namespace, key string) (domain.MemoryEntry, error)
 	SearchMemory(ctx context.Context, namespace, query string, limit int) ([]domain.MemoryEntry, error)
 	DeleteMemory(ctx context.Context, namespace, key string) error
+}
+
+// ConsumeRequest is one use of an approved approval.
+type ConsumeRequest struct {
+	ID            string
+	TaskID        string
+	Capability    string
+	PayloadSHA256 string
+	// Now is called once, after the approval row is locked.
+	Now func() time.Time
+	// Audit is appended in the same transaction as the consumption. A record
+	// with an empty CreatedAt gets the time Now returned.
+	Audit domain.AuditRecord
 }

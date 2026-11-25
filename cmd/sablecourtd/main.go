@@ -386,7 +386,12 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Policy:    policyEng,
 		Approvals: approvalQueue,
 	})
-	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	// The repository git.open_pr may target is read from the repo root's origin
+	// now and on each reload, never per request.
+	repoBinding := mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	if err := repoBinding.Resolve(ctx); err != nil {
+		logger.Warn("git.open_pr has no target repository; every call is refused", "error", err)
+	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
 	registerUpstreamMCP := func(b *config.Bundle) {
@@ -464,6 +469,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		bundleMu.Unlock()
 		modelGate.SetBundle(b)
 		dataActionGate.Reload(b, pol)
+		if err := repoBinding.Resolve(ctx); err != nil {
+			logger.Warn("git.open_pr has no target repository after reload; every call is refused", "error", err)
+		}
 		registerUpstreamMCP(b)
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)

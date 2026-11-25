@@ -111,17 +111,18 @@ func TestBuiltinGitOpsActions(t *testing.T) {
 
 	h := gate.ActionHandler()
 
-	// 1. Rejects unsafe branch name (main).
+	// 1. Rejects unsafe branch name (main) as invalid input, before any git call.
 	req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.create_branch", strings.NewReader(`{"payload":{"branch":"main"}}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("expected failure for protected branch main, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected refusal for protected branch main, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Creates sablecourt/fix-1 branch in repo.
-	req = httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.create_branch", strings.NewReader(`{"payload":{"branch":"sablecourt/fix-1"}}`))
+	// 2. Creates sablecourt/fix-1 branch in repo from an explicit base.
+	base := strings.TrimSpace(gitOut(t, repo, "symbolic-ref", "--short", "HEAD"))
+	req = httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.create_branch", strings.NewReader(`{"payload":{"branch":"sablecourt/fix-1","base":"`+base+`"}}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

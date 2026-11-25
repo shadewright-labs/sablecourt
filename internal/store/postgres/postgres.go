@@ -389,7 +389,10 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 	return nil
 }
 
-func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error {
+func (s *PostgresStore) ConsumeApproval(ctx context.Context, req store.ConsumeRequest) error {
+	if req.Now == nil {
+		return errors.New("consume approval: no clock")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -400,27 +403,30 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capabil
 	err = tx.QueryRowContext(ctx, `
 		SELECT task_id, capability, payload_sha256, status, expires_at
 		FROM approvals WHERE id = $1 FOR UPDATE
-	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
+	`, req.ID).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if status != string(domain.ApprovalApproved) || rowTask != taskID || rowCapability != capability || rowDigest != payloadSHA256 {
+	if status != string(domain.ApprovalApproved) || rowTask != req.TaskID || rowCapability != req.Capability || rowDigest != req.PayloadSHA256 {
 		return store.ErrConflict
 	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
 	if err != nil {
 		return fmt.Errorf("parse approval expiry: %w", err)
 	}
+	// Sampled only now that this transaction holds the row, so a wait for the
+	// lock cannot carry a time from before the expiry past it.
+	now := req.Now()
 	next, outcome := domain.ApprovalConsumed, error(nil)
 	if !now.Before(expiresAt) {
 		next, outcome = domain.ApprovalExpired, store.ErrExpired
 	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE approvals SET status = $1 WHERE id = $2 AND status = $3
-	`, string(next), id, string(domain.ApprovalApproved))
+	`, string(next), req.ID, string(domain.ApprovalApproved))
 	if err != nil {
 		return err
 	}
@@ -428,6 +434,15 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capabil
 		return err
 	} else if n != 1 {
 		return store.ErrConflict
+	}
+	if outcome == nil && req.Audit.Category != "" {
+		rec := req.Audit
+		if rec.CreatedAt.IsZero() {
+			rec.CreatedAt = now
+		}
+		if err := s.appendAuditTx(ctx, tx, rec); err != nil {
+			return fmt.Errorf("record approval use: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
