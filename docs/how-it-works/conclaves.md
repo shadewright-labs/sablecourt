@@ -9,11 +9,11 @@ A Conclave is a room where several workloads, called Vassals, exchange short mes
 A `Conclave` manifest lists Vassals. Each has a `role`, the `workload` it runs, an `activation` and a `canMessage` list. The loader rejects a room with no Vassals, a duplicate or reserved role (`operator`, `all`, `system`, or a name that starts with `@`), an activation other than `always-on` or `on-mention`, and a `canMessage` target that is not a role in the room.
 
 - `always-on` Vassals get one turn when the room opens, with the opening Decree as their prompt. They are not started again by the room.
-- `on-mention` Vassals get a turn each time a message is addressed to their role, or to `all`, by someone else. The prompt names the message, not its text, and says to treat it as untrusted peer context.
+- `on-mention` Vassals get a turn each time a message is addressed to their role, or to `all`, by someone else. For a Decree the prompt is the Decree's text. For a message from another Vassal the prompt names the message, not its text, and says to treat it as untrusted peer context.
 
 ## Who may message whom
 
-A Vassal posts only to roles in its own `canMessage` list (`all` and `operator` are allowed values). A sandbox-zone workload can never message a runtime-zone Vassal, and cannot use `all` when the room holds one. The loader checks this when manifests load, and the broker checks the route again on every post. A refused post is written to the audit chain as `conclave.post` with outcome `denied`. Message bodies are redacted and capped at 64 KiB.
+A Vassal posts only to roles in its own `canMessage` list (`all` and `operator` are allowed values). The loader rejects a sandbox-zone workload that lists a runtime-zone Vassal, or that lists `all` when the room holds one. On each post the broker checks only that the target is in the sender's `canMessage` list (or that the list holds `all`); it does not compare zones again. A refused post is written to the audit chain as `conclave.post` with outcome `denied`. Message bodies are redacted and capped at 64 KiB.
 
 ## Wards
 
@@ -38,7 +38,7 @@ The states are `active`, `input-required`, `completed` and `cancelled`. `sablect
 
 A Relic is a named file (`sablectl conclave relic put <id> <name>`, or the gate for a Vassal). Its body is redacted and its SHA-256 is stored with it. Relics cannot be added to a paused or closed room.
 
-Scry is a read-only, redacted view of a task's output (`sablectl task scry <task-id>`), kept in a 64 KiB ring buffer. It exists for tasks the daemon runs as host processes. A council turn in a container has no live stream: its answer appears when the turn exits. Takeover (exclusive input) is in the code and parked.
+Scry is a read-only, redacted view of a task's output (`sablectl task scry <task-id>`), kept in a 64 KiB ring buffer. Host-run coding tasks and long-lived container workloads stream to it. A council turn in a container does not: its answer appears when the turn exits. Takeover (exclusive input) is in the code and parked.
 
 ## Not built yet
 

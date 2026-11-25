@@ -2,7 +2,7 @@
 
 Status: partly built. Building images is a command; the login is manual until `sablectl harness login` exists (#79, not built yet).
 
-Build the three pinned harness images and sign each CLI in once, inside its own container and volume, so council turns can use your subscription logins without any credential leaving Docker. `sablectl harness login <harness>` will replace the manual steps below: it will create the labelled volume and run the login for you.
+Build the three pinned harness images and sign each CLI in once, inside its own container and volume, so council turns can use your subscription logins. Each login is stored in that harness's own Docker volume. `sablectl harness login <harness>` will replace the manual steps below: it will create the labelled volume and run the login for you.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
    sablectl harness build agy
    ```
 
-2. Create the labelled login volume for each harness. The daemon refuses a volume without both labels, and every harness needs its own volume. The name `sablecourt-harness-<role>` is the one the daemon looks for:
+2. Create the labelled login volume for each harness. The daemon refuses a volume without both labels, with a driver other than `local` or with driver options, and every harness needs its own volume. The name `sablecourt-harness-<role>` is the one the daemon looks for:
 
    ```sh
    docker volume create \
@@ -30,7 +30,7 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
    ```
 
    Repeat with `codex` and `agy` in the label and the name.
-3. Check that a container shaped like a council turn starts and sees no login yet. Use the tag from step 1:
+3. Check that a container with the user, read-only root, scratch and volume of a council turn starts and sees no login yet. It runs on Docker's default network, not behind the council proxy. Use the tag from step 1:
 
    ```sh
    docker run --rm --user 10001:10001 --read-only --cap-drop ALL \
@@ -41,15 +41,15 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
    ```
 
    Before a login it prints `"loggedIn": false`. For `codex` the end of the command is `codex login status` (prints `Not logged in`, exit code 1). `agy` has no status command; `agy --version` only proves the container starts.
-4. Sign in by running the same command with `-it` added after `--rm` and the login command in place of the status command: `claude auth login`, `codex login --device-auth`, or `agy` alone (finish the sign-in, then type `/exit`). Open the printed address in your host browser. This step needs an account, so it was not run while writing this page.
+4. Sign in by running the same command with `-it` added after `--rm` and the login command in place of the status command: `claude auth login`, `codex login --device-auth`, or `agy` alone (finish the sign-in, then type `/exit`). Open the printed address in your host browser. Like step 3, this container uses Docker's default network.
 
 ## Check it worked
 
-Run the step 3 command again. `claude` should report `"loggedIn": true` and `codex` should print that you are logged in. Then run a [council](run-a-council.md). An expired login is not caught early: the turn fails inside the harness with its own message.
+Run the step 3 command again. `claude` should report `"loggedIn": true` and `codex` should print that you are logged in. Then run a [council](run-a-council.md). Nothing in Sablecourt checks that a login is still valid before a turn starts.
 
 ## Not built yet
 
-Nothing checks logins before a round (#79). The decision on that issue: a refused round will name the harness and the command to run, `sablectl harness login <harness>` will create the volume with its label and start the login through Docker with a terminal attached, and "login present" will mean that credential files exist in the volume, read from a container with no network, with no live call to the provider. An expired login would still fail at the turn.
+Nothing checks logins before a round (#79). The decision on that issue: a refused round will name the harness and the command to run, `sablectl harness login <harness>` will create the volume with its label and start the login through Docker with a terminal attached, and "login present" will mean that credential files exist in the volume, read from a container with no network, with no live call to the provider. Under that decision an expired login would still show up only in the turn.
 
 ## In depth
 

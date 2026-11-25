@@ -37,13 +37,13 @@ Watch a running task, open a Conclave from a manifest, steer it with a Decree, s
    sablectl conclave relic get <id> notes.md
    ```
 
-5. Watch the live output of a host-run task. It is read-only and redacted. Container council turns have no live stream:
+5. Watch the live output of a host-run coding task or a long-lived container workload. It is read-only and redacted. Council turns in containers have no live stream:
 
    ```sh
    sablectl task scry <task-id>
    ```
 
-6. Close the room. This also cancels tasks still running for it:
+6. Close the room. The CLI then cancels the room's tasks that are still active:
 
    ```sh
    sablectl conclave close <id>

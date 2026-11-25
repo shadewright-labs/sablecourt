@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 740" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Container launch order</title>
-  <desc id="d">The daemon asks the container engine to probe socket sharing and create the internal network, then to create and start the proxy. The engine runs a readiness call in the proxy, which answers 401, and the engine reports it ready. The daemon then creates the harness, which the engine starts with the lease and prompt on its standard input. When the harness exits the engine returns the exit code and output, and the daemon removes the harness, proxy and network.</desc>
+  <desc id="d">The daemon asks the container engine to run a socket probe and create the internal network, then to create the proxy, attach it to the default bridge and start it. The engine runs a readiness call in the proxy, which answers 401, and the engine reports it ready. The daemon then creates the harness, which the engine starts with the lease and prompt on its standard input. When the harness exits the engine returns the exit code and output, and the daemon removes the harness container, closes its per-launch gate, and removes the proxy and the network.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -49,7 +49,7 @@
   <path class="f" d="M156 178H414" marker-end="url(#a)"/>
   <text class="lbl" x="285" y="170" text-anchor="middle">create network</text>
   <path class="f" d="M156 232H414" marker-end="url(#a)"/>
-  <text class="lbl" x="285" y="224" text-anchor="middle">create proxy</text>
+  <text class="lbl" x="285" y="224" text-anchor="middle">create proxy, attach egress</text>
   <path class="f" d="M426 286H684" marker-end="url(#a)"/>
   <text class="lbl" x="555" y="278" text-anchor="middle">start</text>
   <path class="r" d="M684 340H426" marker-end="url(#m)"/>
@@ -65,5 +65,5 @@
   <path class="r" d="M414 610H156" marker-end="url(#m)"/>
   <text class="lbl" x="285" y="602" text-anchor="middle">result</text>
   <path class="f" d="M156 664H414" marker-end="url(#a)"/>
-  <text class="lbl" x="285" y="656" text-anchor="middle">remove all</text>
+  <text class="lbl" x="285" y="656" text-anchor="middle">remove harness, proxy, network</text>
 </svg>
