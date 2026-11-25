@@ -564,7 +564,7 @@ func councilAssertEmpty(t *testing.T, st store.Store) {
 
 func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	st := daemonTestStore(t)
-	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
 	if err != nil {
 		t.Fatalf("ensureCouncilPanelWorkloads: %v", err)
 	}
@@ -580,12 +580,12 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{
 		domain.ClassCodingAgent: &councilTestAdapter{},
 	}
-	check := councilRuntimeChecker(func() *config.Bundle { return bundle }, adapters)
+	check := councilRuntimeChecker(func() *config.Bundle { return bundle }, adapters, "seatbelt")
 	if err := check(t.Context(), store.CouncilCheckout{Source: repo}); err != nil {
 		t.Fatalf("expected built-in panel to pass runtime check: %v", err)
 	}
 
-	if err := councilRuntimeChecker(func() *config.Bundle { return bundle }, nil)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return bundle }, nil, "seatbelt")(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
 		t.Fatal("expected missing coding adapter to fail runtime check")
 	}
 
@@ -594,7 +594,7 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	wl := badBundle.Workloads["claude"]
 	wl.Spec.Grants.ModelGate.Allowed = true
 	badBundle.Workloads["claude"] = wl
-	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
 		t.Fatal("expected Model Gate grant on council panel workload to fail runtime check")
 	}
 
@@ -617,7 +617,7 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 		w.Spec.Coding = &cfg
 		relBundle.Workloads[role] = w
 	}
-	if err := councilRuntimeChecker(func() *config.Bundle { return relBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: canonRelRepo}); err != nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return relBundle }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: canonRelRepo}); err != nil {
 		t.Fatalf("expected relative RepoPath matching absolute checkout.Source to pass: %v", err)
 	}
 }
@@ -727,7 +727,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 					},
 				},
 			}
-			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b); err == nil {
+			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b, "seatbelt"); err == nil {
 				t.Fatalf("ensureCouncilPanelWorkloads accepted manifest workload named %q", role)
 			}
 		})
@@ -735,7 +735,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 
 	t.Run("runtime checker refuses extra grants on panel workload", func(t *testing.T) {
 		st := daemonTestStore(t)
-		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -744,7 +744,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 		wl.Spec.Grants.MCPTools = []string{"conclave.read"}
 		bad.Workloads["claude"] = wl
 		adapters := map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: &councilTestAdapter{}}
-		if err := councilRuntimeChecker(func() *config.Bundle { return bad }, adapters)(t.Context(), store.CouncilCheckout{Source: t.TempDir()}); err == nil {
+		if err := councilRuntimeChecker(func() *config.Bundle { return bad }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: t.TempDir()}); err == nil {
 			t.Fatal("expected extra MCP grants on council panel workload to fail runtime check")
 		}
 	})

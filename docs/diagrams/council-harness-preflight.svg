@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 420" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Council harness preflight</title>
+  <desc id="d">An open-council request reaches sablecourtd, which runs a preflight for each of claude, codex and agy before it records anything. The preflight asks three questions in order. Does the harness image exist locally? If not, the request is refused with the command sablectl harness build. Is the login volume the labelled Sablecourt volume? If it is missing or unlabelled, the request is refused with the command sablectl harness login. Does a short container from that image, with no network and the volume read-only, find a credential file? If not, the request is refused with the command sablectl harness login. When all three roles pass, the council is created. Refusals are drawn in red and create nothing.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="420" rx="18" fill="#08060e"/>
+  <rect class="frame" x="210" y="56" width="640" height="312" rx="14"/>
+  <text class="pn" x="226" y="80">PREFLIGHT, EACH OF CLAUDE, CODEX AND AGY</text>
+
+  <rect class="box" x="24" y="138" width="160" height="64" rx="10"/>
+  <text class="h" x="40" y="164">Open council</text>
+  <text class="s" x="40" y="185">to sablecourtd</text>
+
+  <polygon class="box" points="230,170 310,122 390,170 310,218"/>
+  <text class="s" x="310" y="175" text-anchor="middle">Image exists?</text>
+  <polygon class="box" points="440,170 520,122 600,170 520,218"/>
+  <text class="s" x="520" y="175" text-anchor="middle">Volume labelled?</text>
+  <polygon class="box" points="650,170 730,122 810,170 730,218"/>
+  <text class="s" x="730" y="175" text-anchor="middle">Credential file?</text>
+
+  <rect class="key" x="880" y="138" width="216" height="64" rx="12"/>
+  <text class="h" x="896" y="164">Council created</text>
+  <text class="s" x="896" y="185">all three roles passed</text>
+
+  <rect class="bad" x="215" y="282" width="190" height="70" rx="10"/>
+  <text class="no" x="231" y="308">Refused, no image</text>
+  <text class="s" x="231" y="330">run sablectl harness build</text>
+  <rect class="bad" x="425" y="282" width="190" height="70" rx="10"/>
+  <text class="no" x="441" y="308">Refused, no volume</text>
+  <text class="s" x="441" y="330">run sablectl harness login</text>
+  <rect class="bad" x="635" y="282" width="190" height="70" rx="10"/>
+  <text class="no" x="651" y="308">Refused, no login</text>
+  <text class="s" x="651" y="330">run sablectl harness login</text>
+
+  <path class="f" d="M184 170H224" marker-end="url(#a)"/>
+  <path class="f" d="M390 170H434" marker-end="url(#a)"/>
+  <text class="lbl" x="412" y="162" text-anchor="middle">yes</text>
+  <path class="f" d="M600 170H644" marker-end="url(#a)"/>
+  <text class="lbl" x="622" y="162" text-anchor="middle">yes</text>
+  <path class="f" d="M810 170H874" marker-end="url(#a)"/>
+  <text class="lbl" x="828" y="162" text-anchor="middle">yes</text>
+  <path class="deny" d="M310 218V276" marker-end="url(#x)"/>
+  <text class="lbl" x="322" y="252">no</text>
+  <path class="deny" d="M520 218V276" marker-end="url(#x)"/>
+  <text class="lbl" x="532" y="252">no</text>
+  <path class="deny" d="M730 218V276" marker-end="url(#x)"/>
+  <text class="lbl" x="742" y="252">no</text>
+
+  <rect class="bad" x="24" y="388" width="14" height="14" rx="3"/>
+  <text class="cap" x="46" y="400">refused: nothing is recorded</text>
+  <rect class="key" x="264" y="388" width="14" height="14" rx="3"/>
+  <text class="cap" x="286" y="400">outcome of the request</text>
+</svg>
