@@ -38,7 +38,7 @@ One transaction checks the reservation against the workload's `Budget` and recor
 - per day: `daily.maxCostUSD`, counting the workload's settled usage since 00:00 UTC plus all its live reservations;
 - a value of zero means no limit for that dimension. A request is refused when usage is already at the limit or when usage plus the reservation would pass it.
 
-A reservation lasts 15 minutes. After a 2xx response the gate settles: it removes the reservation and writes the actual usage to the ledger, priced with the model named in the request. If the response reports no usage, for instance a stream without a usage event, the reserved estimate is charged, so a call is never free. Usage is read from the first 8 MiB of the response. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high.
+A reservation lasts 15 minutes. After a 2xx response the gate settles: it removes the reservation and writes the actual usage to the ledger, priced with the model named in the request. If the response reports no usage, for instance a stream without a usage event, the reserved estimate is charged, so a call is never free. Usage is read from the first 8 MiB of the response. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high for those 15 minutes. No ledger entry is written for that call, so once the reservation expires its usage no longer counts against any budget.
 
 Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting.
 
