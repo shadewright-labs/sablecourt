@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 const seatbeltExecutable = "/usr/bin/sandbox-exec"
@@ -34,10 +36,7 @@ func (a *Adapter) validateSandbox(sandbox string, readOnly bool) error {
 	switch sandbox {
 	case "seatbelt":
 		if runtime.GOOS == "darwin" {
-			if _, err := exec.LookPath(seatbeltExecutable); err != nil {
-				return fmt.Errorf("Seatbelt executable unavailable: %w", err)
-			}
-			return nil
+			return validateSeatbeltExecutable(seatbeltExecutable)
 		}
 	case "none":
 		if a.allowUnconfined && !readOnly {
@@ -47,8 +46,25 @@ func (a *Adapter) validateSandbox(sandbox string, readOnly bool) error {
 	return fmt.Errorf("coding sandbox %q cannot enforce confinement on %s", sandbox, runtime.GOOS)
 }
 
+func validateSeatbeltExecutable(path string) error {
+	if _, err := exec.LookPath(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
+			err = &scruntime.MissingBinaryError{Path: path, Err: err}
+		}
+		return fmt.Errorf("Seatbelt executable unavailable: %w", err)
+	}
+	return nil
+}
+
 func seatbeltCommand(profile, bin string, args []string) (string, []string) {
 	return seatbeltExecutable, append([]string{"-p", profile, bin}, args...)
+}
+
+func sandboxTarget(cmd *exec.Cmd) string {
+	if cmd.Path == seatbeltExecutable && len(cmd.Args) >= 4 && cmd.Args[1] == "-p" {
+		return cmd.Args[3]
+	}
+	return cmd.Path
 }
 
 func checkSeatbelt(ctx context.Context, profile, dir string) error {
