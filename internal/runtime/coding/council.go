@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -271,6 +272,10 @@ func (h *startJournalHandle) discard() error {
 	return errors.Join(rmErr, unlockErr, closeErr)
 }
 
+// reconcileAfterOpen is a test hook that runs after a start journal is opened
+// and before reconcile tries to lock it.
+var reconcileAfterOpen func(path string)
+
 func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 	councilDir := councilDirPath(root, key)
 	entries, err := os.ReadDir(councilDir)
@@ -294,6 +299,9 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 		if err != nil {
 			return err
 		}
+		if reconcileAfterOpen != nil {
+			reconcileAfterOpen(jPath)
+		}
 		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if lockErr != nil {
 			_ = f.Close()
@@ -302,6 +310,21 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 				continue
 			}
 			return lockErr
+		}
+		// A launch commits by removing its journal and then unlocking it. If that
+		// happened between our open and our lock, we hold an orphaned file for a
+		// launch that finished, and acting on it would undo that launch.
+		held, heldErr := f.Stat()
+		current, currentErr := os.Stat(jPath)
+		if errors.Is(currentErr, os.ErrNotExist) || (heldErr == nil && currentErr == nil && !os.SameFile(held, current)) {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+			continue
+		}
+		if err := errors.Join(heldErr, currentErr); err != nil {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+			return err
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(f, 64*1024))
 		if readErr != nil {
@@ -327,7 +350,7 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				_ = f.Close()
 				return stErr
-			case st.Worker == nil:
+			case st.Worker == nil && st.Container == nil:
 				if _, runErr := os.Lstat(rec.TaskBase + ".run"); errors.Is(runErr, os.ErrNotExist) {
 					incomplete = true
 					_ = removeFile(rec.TaskBase + stateSuffix)
@@ -1351,6 +1374,16 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		}
 	}()
 
+	if state.Container != nil {
+		var session councilproxy.LaunchSession
+		if proc := a.containerProc(taskBase); proc != nil {
+			session = proc.session
+		}
+		if err := a.cleanupContainerResources(ctx, state.Container, session); err != nil {
+			return err
+		}
+	}
+
 	checkoutDir := state.checkoutDir(taskBase)
 	justFinished := state.FinishedAt.IsZero()
 	failedWriter := state.Mode == checkoutModeWriter && !state.ReadOnly && state.Result != nil && state.Result.ExitCode != 0
@@ -1462,6 +1495,7 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		}
 	}
 	a.running.Delete(taskBase)
+	a.containers.Delete(taskBase)
 	if state.CleanupError != "" {
 		state.CleanupError = ""
 		return writeWorktreeState(taskBase, state)

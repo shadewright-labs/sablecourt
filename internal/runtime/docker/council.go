@@ -21,6 +21,8 @@ type councilEngineAPI interface {
 }
 
 var _ rt.CouncilRunner = (*Adapter)(nil)
+var _ rt.CouncilInspector = (*Adapter)(nil)
+var _ rt.LocalImageResolver = (*Adapter)(nil)
 var _ councilEngineAPI = (*client.Client)(nil)
 
 func (a *Adapter) RunCouncil(ctx context.Context, s rt.CouncilLaunch, record rt.CouncilRecorder) (rt.CouncilResult, error) {
@@ -58,7 +60,14 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		return result, err
 	}
 	result.ContainerName = o.Name
-	result.CreateAttempt = rand.Text()
+	if s.CreateAttempt != "" {
+		if !councilName.MatchString(s.CreateAttempt) {
+			return result, errors.New("invalid council create attempt")
+		}
+		result.CreateAttempt = s.CreateAttempt
+	} else {
+		result.CreateAttempt = rand.Text()
+	}
 	o.Config.Labels[attemptLabel] = result.CreateAttempt
 	created, err := a.Client.ContainerCreate(ctx, o)
 	result.ContainerID = created.ID
@@ -77,6 +86,16 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	if len(created.Warnings) > 0 {
 		return result, errors.New("Docker reported a warning applying council configuration")
+	}
+	ident := rt.CouncilIdentity{
+		ContainerName: result.ContainerName,
+		CreateAttempt: result.CreateAttempt,
+		ContainerID:   result.ContainerID,
+	}
+	if s.OnCreated != nil {
+		if err = s.OnCreated(ctx, ident); err != nil {
+			return result, fmt.Errorf("record council container creation: %w", err)
+		}
 	}
 	// Revalidate once the container pins the named volume so an autocreated or replaced volume cannot start.
 	if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
@@ -105,11 +124,21 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	var stdout, stderr councilOutput
 	if login {
+		if s.OnStarted != nil {
+			if err = s.OnStarted(ctx, ident); err != nil {
+				return result, fmt.Errorf("record council container start: %w", err)
+			}
+		}
 		err = session(ctx, stream.Reader, stream.Conn)
 	} else {
 		_, err = io.WriteString(stream.Conn, s.TaskToken+"\x00"+prompt+"\x00")
 		if err == nil {
 			err = halfClose.CloseWrite()
+		}
+		if err == nil && s.OnStarted != nil {
+			if err = s.OnStarted(ctx, ident); err != nil {
+				return result, fmt.Errorf("record council container start: %w", err)
+			}
 		}
 		if err == nil {
 			err = copyDockerStreams(stream.Reader, &stdout, &stderr)
@@ -127,6 +156,51 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	result.Stdout = stdout.visible(prompt, s.TaskToken)
 	result.Stderr = stderr.visible(prompt, s.TaskToken)
 	return result, record(ctx, result)
+}
+
+// InspectCouncil verifies a council container by ID or by name and create attempt.
+func (a *Adapter) InspectCouncil(ctx context.Context, id rt.CouncilIdentity) (rt.CouncilInspection, error) {
+	target := id.ContainerID
+	if target == "" {
+		if id.ContainerName == "" || id.CreateAttempt == "" {
+			return rt.CouncilInspection{}, errors.New("missing council container identity")
+		}
+		target = id.ContainerName
+	}
+	found, err := a.Client.ContainerInspect(ctx, target, client.ContainerInspectOptions{})
+	if isMissing(err) {
+		return rt.CouncilInspection{Exists: false}, nil
+	}
+	if err != nil {
+		return rt.CouncilInspection{}, err
+	}
+	if found.Container.ID == "" || found.Container.Config == nil {
+		return rt.CouncilInspection{}, errors.New("incomplete council container inspect evidence")
+	}
+	if id.ContainerID != "" && found.Container.ID != id.ContainerID {
+		return rt.CouncilInspection{Exists: false}, nil
+	}
+	if id.CreateAttempt != "" && found.Container.Config.Labels[attemptLabel] != id.CreateAttempt {
+		return rt.CouncilInspection{Exists: false}, nil
+	}
+	insp := rt.CouncilInspection{
+		Exists:      true,
+		ContainerID: found.Container.ID,
+	}
+	st := found.Container.State
+	if st == nil {
+		return insp, nil
+	}
+	if st.Running && !st.Dead && !st.Restarting && (st.Status == "running" || st.Status == "paused") {
+		insp.Running = true
+		return insp, nil
+	}
+	if finished, err := verifiedExit(st); err == nil {
+		insp.Exited = true
+		insp.ExitCode = st.ExitCode
+		insp.FinishedAt = finished
+	}
+	return insp, nil
 }
 
 // CleanupCouncil retries removal without starting a second workload. A lost

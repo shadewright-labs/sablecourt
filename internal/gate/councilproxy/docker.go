@@ -43,6 +43,7 @@ type InternalNetworkSpec struct {
 }
 
 type InternalNetworkInfo struct {
+	ID            string
 	EngineVersion string
 	Driver        string
 	Internal      bool
@@ -68,21 +69,21 @@ type Docker interface {
 }
 
 type ProxyContainer struct {
-	Name, InternalNetwork, ImageID string
-	User, HostGateway              string
-	HostGatewayTarget              string
-	GateSocketHostPath             string
-	GateSocketContainerPath        string
-	ReadOnlyRootFS                 bool
-	DropAllCapabilities            bool
-	NoNewPrivileges                bool
-	Args                           []string
+	Name, InternalNetwork, InternalNetworkID, ImageID string
+	User, HostGateway                                 string
+	HostGatewayTarget                                 string
+	GateSocketHostPath                                string
+	GateSocketContainerPath                           string
+	ReadOnlyRootFS                                    bool
+	DropAllCapabilities                               bool
+	NoNewPrivileges                                   bool
+	Args                                              []string
 }
 
 type WorkloadEndpoint struct {
-	Network, ProxyURL, DataGateURL string
-	GateMode                       GateMode
-	proxyName                      string
+	Network, NetworkID, ProxyURL, DataGateURL string
+	GateMode                                  GateMode
+	proxyName                                 string
 }
 
 func (w WorkloadEndpoint) Env() []string {
@@ -98,6 +99,12 @@ func (w WorkloadEndpoint) Env() []string {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+w.DataGateURL)
 	}
 	return env
+}
+
+// LaunchSession owns the per-launch listener and Docker resources.
+type LaunchSession interface {
+	Workload() WorkloadEndpoint
+	Close(context.Context) error
 }
 
 type Session struct {
@@ -131,6 +138,12 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		return nil, fmt.Errorf("generate council proxy name: %w", err)
 	}
 	name := "sablecourt-council-" + hex.EncodeToString(nonce[:])
+
+	if cfg.RecordResources != nil {
+		if err := cfg.RecordResources(name, name+"-net"); err != nil {
+			return nil, err
+		}
+	}
 
 	mode := GateModeNone
 	var ug *unixGate
@@ -181,7 +194,7 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		"-lease-sha256", cfg.LeaseSHA256, "-listen-name", name,
 	}
 	spec := ProxyContainer{
-		Name: name, InternalNetwork: s.network, ImageID: imageID,
+		Name: name, InternalNetwork: s.network, InternalNetworkID: netInfo.ID, ImageID: imageID,
 		User:           "10001:10001",
 		ReadOnlyRootFS: true, DropAllCapabilities: true, NoNewPrivileges: true,
 	}
@@ -213,7 +226,7 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		return s.rollback(ctx, fmt.Errorf("start council proxy: %w", err))
 	}
 	s.endpoint = WorkloadEndpoint{
-		Network:   s.network,
+		Network: s.network, NetworkID: netInfo.ID,
 		ProxyURL:  "http://" + net.JoinHostPort(name, Port),
 		GateMode:  mode,
 		proxyName: name,

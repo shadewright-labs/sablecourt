@@ -204,3 +204,29 @@ func TestLogCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestCouncilRuntimeSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		explicit, present, want bool
+	}{
+		{"no runtime", false, false, false}, {"local runtime", false, true, true}, {"configured offline engine", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", "")
+			if tc.explicit {
+				t.Setenv("DOCKER_HOST", "unix:///engine.sock")
+			}
+			a := NewAdapter(nil, "")
+			a.discoverSocket = func() string {
+				if tc.present {
+					return "/engine.sock"
+				}
+				return ""
+			}
+			if a.CouncilRuntimeConfigured() != tc.want {
+				t.Fatal("wrong council runtime selection")
+			}
+		})
+	}
+}
