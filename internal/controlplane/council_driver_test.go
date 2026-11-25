@@ -27,6 +27,16 @@ func TestCouncilCheckoutAtDispatch(t *testing.T) {
 	if err := os.Symlink(realDir, linkDir); err != nil {
 		t.Fatal(err)
 	}
+	relParent := t.TempDir()
+	relProjectDir := filepath.Join(relParent, "project")
+	if err := os.Mkdir(relProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonRelProject, err := filepath.EvalSymlinks(relProjectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(relParent)
 	for _, tc := range []struct {
 		name     string
 		repoPath string
@@ -36,6 +46,7 @@ func TestCouncilCheckoutAtDispatch(t *testing.T) {
 	}{
 		{"working tree", "project", store.CouncilCheckout{}, true, "project"},
 		{"pinned reader", "project", store.CouncilCheckout{Commit: commit, Source: "project"}, true, "project"},
+		{"relative repo matches absolute source", "project", store.CouncilCheckout{Commit: commit, Source: canonRelProject}, true, canonRelProject},
 		{"wrong project", "project", store.CouncilCheckout{Commit: commit, Source: "other"}, false, ""},
 		{"writer", "project", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "reader"}, true, "project"},
 		{"writer peer", "project", store.CouncilCheckout{Commit: commit, Source: "project", WriterRole: "author"}, true, "project"},

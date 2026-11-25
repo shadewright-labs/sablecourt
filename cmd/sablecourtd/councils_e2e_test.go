@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
 func TestCouncilEndToEndMacOS(t *testing.T) {
@@ -74,8 +76,98 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 	tokenPath := filepath.Join(stateDir, "operator.token")
 	stubDir := t.TempDir()
 
+	// Gate ref-mode checkout reads until after HEAD moves, record every real
+	// harness launch, and verify the running task's active lease scope in SQLite.
+	headMoved := make(chan struct{})
+	var headMovedOnce sync.Once
+	releaseHead := func() { headMovedOnce.Do(func() { close(headMoved) }) }
+	defer releaseHead()
+	if mode != "ref" {
+		releaseHead()
+	}
+
+	var (
+		launchMu     sync.Mutex
+		launchCounts = make(map[string]int)
+		totalStarts  int
+		leaseErrors  []string
+		checkStore   *sqlite.SQLiteStore
+	)
+	t.Cleanup(func() {
+		launchMu.Lock()
+		st := checkStore
+		checkStore = nil
+		launchMu.Unlock()
+		if st != nil {
+			_ = st.Close()
+		}
+	})
+
+	gateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/launch" {
+			http.NotFound(w, r)
+			return
+		}
+		taskID := strings.TrimSpace(r.Header.Get("X-Task-ID"))
+		workload := strings.TrimSpace(r.Header.Get("X-Workload"))
+		rawTaskToken := strings.TrimSpace(r.Header.Get("X-Task-Token"))
+		tokenHash := ""
+		if rawTaskToken != "" {
+			tokenHash = model.HashToken(rawTaskToken)
+		}
+
+		launchMu.Lock()
+		totalStarts++
+		launchCounts[taskID]++
+		st := checkStore
+		if st == nil {
+			openedStore, err := sqlite.Open(dbPath)
+			if err != nil {
+				leaseErrors = append(leaseErrors, fmt.Sprintf("open store for task %s: %v", taskID, err))
+			} else {
+				checkStore = openedStore
+				st = openedStore
+			}
+		}
+		launchMu.Unlock()
+
+		if st == nil || taskID == "" || workload == "" || tokenHash == "" {
+			launchMu.Lock()
+			leaseErrors = append(leaseErrors, fmt.Sprintf("invalid launch callback metadata for task=%q workload=%q hasToken=%t", taskID, workload, tokenHash != ""))
+			launchMu.Unlock()
+			http.Error(w, "invalid launch metadata", http.StatusBadRequest)
+			return
+		}
+		lookupCtx, cancelLookup := context.WithTimeout(t.Context(), 5*time.Second)
+		lease, err := st.GetActiveLeaseByTokenHash(lookupCtx, tokenHash, time.Now())
+		cancelLookup()
+		if err != nil || lease.TaskID != taskID || lease.WorkloadName != workload {
+			launchMu.Lock()
+			leaseErrors = append(leaseErrors, fmt.Sprintf("lease scope mismatch for task=%q workload=%q: got task=%q workload=%q err=%v",
+				taskID, workload, lease.TaskID, lease.WorkloadName, err))
+			launchMu.Unlock()
+			http.Error(w, "invalid lease scope", http.StatusForbidden)
+			return
+		}
+
+		select {
+		case <-headMoved:
+		case <-t.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() {
+		releaseHead()
+		gateSrv.Close()
+	})
+
+	gateHost, gatePort, err := net.SplitHostPort(gateSrv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("parse gate addr: %v", err)
+	}
 	for _, role := range []string{"claude", "codex", "agy"} {
-		script := councilStubScript(role, mode, tokenPath)
+		script := councilStubScript(role, mode, tokenPath, gateHost, gatePort)
 		if err := os.WriteFile(filepath.Join(stubDir, role), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -145,13 +237,15 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 		t.Fatalf("decode opened council: %v (%s)", err, body)
 	}
 
-	// Move HEAD in ref mode after open to verify all rounds stay pinned to the opening commit.
+	// Move HEAD in ref mode after open, then release the checkout-read gate so
+	// every participant reads its checkout after HEAD has moved to committed-v2.
 	if mode == "ref" {
 		if err := os.WriteFile(filepath.Join(repo, "committed.txt"), []byte("committed-v2\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		councilTestGit(t, repo, "add", "committed.txt")
 		councilTestGit(t, repo, "commit", "-qm", "move head after open")
+		releaseHead()
 	}
 
 	type detailMessage struct {
@@ -188,8 +282,11 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 
 	if detail.Conclave.State != domain.ConclaveStateCompleted || detail.Conclave.WardReason != "round_cap" {
 		_, rawTasks := doDaemonJSON(t, http.MethodGet, baseURL+"/api/v1/tasks", token, "")
-		t.Fatalf("mode %s finished with state=%s reason=%q (messages=%d)\ntasks:\n%s\ndaemon log:\n%s",
-			mode, detail.Conclave.State, detail.Conclave.WardReason, len(detail.Messages), rawTasks, daemonLog.String())
+		launchMu.Lock()
+		errsCopy := append([]string(nil), leaseErrors...)
+		launchMu.Unlock()
+		t.Fatalf("mode %s finished with state=%s reason=%q (messages=%d)\nlease errors:\n%s\ntasks:\n%s\ndaemon log:\n%s",
+			mode, detail.Conclave.State, detail.Conclave.WardReason, len(detail.Messages), strings.Join(errsCopy, "\n"), rawTasks, daemonLog.String())
 	}
 	if len(detail.Messages) != 6 {
 		t.Fatalf("mode %s messages = %d, want 6: %+v", mode, len(detail.Messages), detail.Messages)
@@ -254,7 +351,7 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 		t.Fatalf("mode %s expected only digest Relic, got %d", mode, len(detail.Relics))
 	}
 
-	// Verify execution log contains exactly 6 launches for this council.
+	// Verify execution log and actual stub launches both record exactly 6 starts.
 	tCode, rawTasks := doDaemonJSON(t, http.MethodGet, baseURL+"/api/v1/tasks", token, "")
 	if tCode != http.StatusOK {
 		t.Fatalf("GET /api/v1/tasks = %d %s", tCode, rawTasks)
@@ -263,17 +360,36 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 	if err := json.Unmarshal(rawTasks, &tasks); err != nil {
 		t.Fatalf("decode tasks: %v", err)
 	}
-	launches := 0
+	councilTaskIDs := make([]string, 0, 6)
 	for _, task := range tasks {
 		if a, ok := store.TaskConclaveAssignment(task); ok && a.ConclaveID == opened.ID {
-			launches++
+			councilTaskIDs = append(councilTaskIDs, task.ID)
 			if task.State != domain.TaskStateCompleted {
 				t.Errorf("council task %s ended in state %s", task.ID, task.State)
 			}
 		}
 	}
-	if launches != 6 {
-		t.Fatalf("mode %s launch count = %d, want 6", mode, launches)
+	if len(councilTaskIDs) != 6 {
+		t.Fatalf("mode %s task count = %d, want 6", mode, len(councilTaskIDs))
+	}
+	launchMu.Lock()
+	gotTotalStarts := totalStarts
+	gotLaunchCounts := make(map[string]int, len(launchCounts))
+	for id, n := range launchCounts {
+		gotLaunchCounts[id] = n
+	}
+	gotLeaseErrors := append([]string(nil), leaseErrors...)
+	launchMu.Unlock()
+	if len(gotLeaseErrors) > 0 {
+		t.Fatalf("mode %s task lease verification errors:\n%s", mode, strings.Join(gotLeaseErrors, "\n"))
+	}
+	if gotTotalStarts != 6 || len(gotLaunchCounts) != 6 {
+		t.Fatalf("mode %s actual stub starts = %d (unique tasks = %d), want 6", mode, gotTotalStarts, len(gotLaunchCounts))
+	}
+	for _, taskID := range councilTaskIDs {
+		if gotLaunchCounts[taskID] != 1 {
+			t.Errorf("mode %s task %s launched %d times, want 1", mode, taskID, gotLaunchCounts[taskID])
+		}
 	}
 
 	// Verify shared council worktrees (ref / writer) are cleaned up after closure.
@@ -292,7 +408,7 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 	}
 }
 
-func councilStubScript(role, mode, tokenPath string) string {
+func councilStubScript(role, mode, tokenPath, gateHost, gatePort string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\nset -u\n")
 	// Extract the prompt (final positional argument).
@@ -304,19 +420,20 @@ func councilStubScript(role, mode, tokenPath string) string {
 	b.WriteString("if [ -n \"${SABLECOURT_MODEL_GATE_URL:-}\" ]; then echo 'unexpected model gate url' >&2; exit 11; fi\n")
 	b.WriteString("if [ -z \"${SABLECOURT_DATA_GATE_URL:-}\" ]; then echo 'missing data gate url' >&2; exit 12; fi\n")
 	b.WriteString("if cat " + shellSingleQuote(tokenPath) + " >/dev/null 2>&1; then echo 'read operator token' >&2; exit 13; fi\n")
+	// Report this launch to the test callback server for start counting, live lease verification, and ref-mode HEAD gating.
+	b.WriteString("resp=$(printf 'POST /launch HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\nX-Task-ID: %s\\r\\nX-Workload: %s\\r\\nX-Task-Token: %s\\r\\nContent-Length: 0\\r\\n\\r\\n' \"$SABLECOURT_TASK_ID\" \"$SABLECOURT_WORKLOAD\" \"$SABLECOURT_TASK_TOKEN\" | /usr/bin/nc " + shellSingleQuote(gateHost) + " " + shellSingleQuote(gatePort) + ") || exit 16\n")
+	b.WriteString("case \"$resp\" in 'HTTP/1.1 200 '*) ;; *) echo \"launch callback failed: $resp\" >&2; exit 17 ;; esac\n")
 
 	b.WriteString("round=1\ncase \"$prompt\" in *'### Round 1'*) round=2 ;; esac\n")
 
 	switch mode {
 	case "ref":
-		b.WriteString("read -r val < committed.txt || exit 20\n")
-		b.WriteString("[ \"$val\" = committed-v1 ] || { echo \"unexpected committed.txt: $val\" >&2; exit 21; }\n")
+		b.WriteString("printf 'committed-v1\\n' | /usr/bin/cmp -s - committed.txt || { echo 'unexpected committed.txt' >&2; exit 21; }\n")
 		b.WriteString("if [ -e uncommitted.txt ]; then echo 'saw uncommitted file in ref mode' >&2; exit 22; fi\n")
 		b.WriteString("if (echo mutate > committed.txt) 2>/dev/null; then echo 'wrote read-only ref checkout' >&2; exit 23; fi\n")
 		b.WriteString("if (echo mutate > probe.tmp) 2>/dev/null; then echo 'created file in read-only ref checkout' >&2; exit 24; fi\n")
 	case "live":
-		b.WriteString("read -r val < uncommitted.txt || exit 30\n")
-		b.WriteString("[ \"$val\" = uncommitted-fixture ] || { echo \"unexpected uncommitted.txt: $val\" >&2; exit 31; }\n")
+		b.WriteString("printf 'uncommitted-fixture\\n' | /usr/bin/cmp -s - uncommitted.txt || { echo 'unexpected uncommitted.txt' >&2; exit 31; }\n")
 		b.WriteString("if (echo mutate > uncommitted.txt) 2>/dev/null; then echo 'wrote read-only live checkout' >&2; exit 32; fi\n")
 		b.WriteString("if (echo mutate > probe.tmp) 2>/dev/null; then echo 'created file in read-only live checkout' >&2; exit 33; fi\n")
 	case "writer":
@@ -335,8 +452,7 @@ func councilStubScript(role, mode, tokenPath string) string {
 			b.WriteString("  } > committed.txt || exit 40\n")
 			b.WriteString("fi\n")
 		} else {
-			b.WriteString("read -r val < committed.txt || exit 41\n")
-			b.WriteString("[ \"$val\" = committed-v1 ] || { echo \"reviewer saw mutated checkout: $val\" >&2; exit 42; }\n")
+			b.WriteString("printf 'committed-v1\\n' | /usr/bin/cmp -s - committed.txt || { echo 'reviewer saw mutated checkout' >&2; exit 42; }\n")
 			b.WriteString("if (echo mutate > committed.txt) 2>/dev/null; then echo 'reviewer wrote checkout' >&2; exit 43; fi\n")
 			b.WriteString("if [ \"$round\" = 2 ]; then\n")
 			b.WriteString("  case \"$prompt\" in *'Writer diff'*) ;; *) echo 'missing Writer diff header' >&2; exit 44 ;; esac\n")
