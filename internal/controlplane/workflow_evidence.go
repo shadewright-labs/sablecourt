@@ -120,6 +120,47 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 	return "", false, nil
 }
 
+// The coding adapter chooses its checkout in Start from these reserved fields.
+func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[string]json.RawMessage, assignment store.ConclaveAssignment, wl domain.Workload) error {
+	councils, err := store.Councils(r.store)
+	if err != nil {
+		return err
+	}
+	s, err := councils.CouncilSnapshot(ctx, assignment.ConclaveID)
+	if err != nil {
+		return err
+	}
+	c := s.Checkout
+	if wl.Spec.Coding == nil && c == (store.CouncilCheckout{}) {
+		return nil
+	}
+	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil ||
+		(c.Source != "" && c.Source != wl.Spec.Coding.RepoPath) {
+		return errors.New("council checkout isolation unavailable")
+	}
+
+	// Rebuild from the pinned policy and seat, including reservations made
+	// before the dispatcher started writing explicit checkout fields.
+	for key := range payload {
+		if strings.EqualFold(key, "role") || strings.EqualFold(key, "checkoutMode") ||
+			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") {
+			delete(payload, key)
+		}
+	}
+	mode := "live"
+	if c.Commit != "" {
+		mode = "ref"
+		payload["checkoutRef"], _ = json.Marshal(c.Commit)
+	}
+	if c.WriterRole != "" {
+		mode = "writer"
+		payload["checkoutWriter"], _ = json.Marshal(c.WriterRole)
+	}
+	payload["checkoutMode"], _ = json.Marshal(mode)
+	payload["role"], _ = json.Marshal(assignment.Role)
+	return nil
+}
+
 func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
@@ -144,6 +185,9 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	// carries the already filtered packet. Other tasks receive an assembled one.
 	var markdown string
 	if council {
+		if err := r.prepareCouncilCheckout(ctx, payload, assignment, wl); err != nil {
+			return "", err
+		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
 		// Check the stored bytes before JSON decoding can replace invalid UTF-8.
@@ -333,4 +377,30 @@ func finalVerifierVerdict(artifactsJSON, prompt, digest string) (verdict, findin
 	default:
 		return "", ""
 	}
+}
+
+// CouncilWriterDiffName identifies the immutable Relic for one attempt.
+func CouncilWriterDiffName(taskID string) string { return "git-diff-" + taskID }
+
+// CouncilWriterDiff selects exactly one inline diff. A nil Relic with valid
+// evidence means the writer made no changes.
+func CouncilWriterDiff(a store.ConclaveAssignment, taskID string, artifacts []*scruntime.Artifact) (relic *domain.ConclaveRelic, valid bool) {
+	for _, artifact := range artifacts {
+		if artifact == nil {
+			return nil, false
+		}
+		if artifact.Name != "git-diff" {
+			continue
+		}
+		if relic != nil || artifact.URI != "" || artifact.ContentType != "text/x-diff" || !store.ValidCouncilText(artifact.Text) {
+			return nil, false
+		}
+		body := store.RedactCouncilAnswer(artifact.Text)
+		if !store.ValidCouncilText(body) {
+			return nil, false
+		}
+		relic = &domain.ConclaveRelic{ConclaveID: a.ConclaveID, AuthorRole: a.Role, Name: CouncilWriterDiffName(taskID),
+			ContentType: "text/x-diff", Body: body}
+	}
+	return relic, true
 }
