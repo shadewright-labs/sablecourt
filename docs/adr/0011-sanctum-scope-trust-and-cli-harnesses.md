@@ -67,6 +67,31 @@ On macOS, the outer Seatbelt profile causes the `codex` inner sandbox to fail wi
 - The user checks whether each provider's terms allow use of a subscription login from a container on the same machine.
 - Measure image sizes and repeat startup measurements after login. In the unauthenticated spike, first output took `365.8 ms` for `claude`, `175.6 ms` cold and `123.3 ms` warm for `codex`, and `204.7 ms` for `agy`. [Container startup measurements](../harnesses.md#summary-table-1).
 
+## Amendment (2026-11-25): proxy to daemon hop
+
+Status of this amendment: Proposed.
+
+This records how a council harness reaches the daemon gate now that the per-launch proxy is in the tree. If accepted, it closes the first open check above (choose between the pinned gate proxy and the per-workload Unix socket): both are built, and a launch probe picks one. Wiring the proxy into the production launcher is tracked in issue 78 and is not part of this amendment. [council proxy](../../internal/gate/councilproxy), [daemon host routing](../../cmd/sablecourtd/host.go).
+
+Each launch gets its own internal network and its own proxy container. The harness joins only the internal network. The proxy is the only other member of that network and the only container with egress. The network is created with the isolated bridge gateway mode for IPv4 and IPv6, which needs Docker Engine 28.0 or newer. The daemon reads the network back and refuses to publish an endpoint unless the engine applied that mode and assigned no gateway.
+
+The proxy reaches the daemon gate by one of two transports, chosen by a probe before the proxy is created:
+
+- **Native Linux: per-launch Unix socket.** The daemon listens on a socket inside a fresh 0700 directory that it owns, and bind-mounts only that socket into the proxy. Every ancestor of the socket root must be owned by root or the daemon user and must not be replaceable by anyone else; a shared sticky directory such as a temporary directory is accepted only when the entry beneath it belongs to a trusted user. The mount source is the resolved path and is checked again just before the mount. Closing the listener does not unlink by pathname, and cleanup goes through a directory handle opened and verified at creation. The proxy never falls back to TCP at run time.
+- **Docker Desktop: per-launch pinned TLS 1.3.** A host Unix socket cannot be connected from a container there, so the daemon serves the gate on a loopback port over TLS 1.3 with a fresh P-256 key. The proxy receives the SHA-256 digest of that public key as an argument and rejects any other peer before it writes a byte of HTTP. Session resumption is off. The certificate is reissued with the same key at half its lifetime so the pin stays valid for the life of the lease.
+
+The probe fails closed. A Docker error, an accept error on the probe listener, or a drain marker that the daemon did not consume is an error, never a result that selects TLS.
+
+Gate requests are dispatched to the gate handler in process. No network listener serves the council virtual host, so a client that selects that authority on the plain loopback listener gets a refusal before any body is read. The proxy and the per-launch gate each check the task lease, a fixed route allow-list, and the request size before the daemon's own gate routes run.
+
+Limits on this hop:
+
+- The per-launch gate accepts at most 32 connections, 2 MiB request bodies, and 30 seconds for reading or writing a request.
+- The proxy allows at most 16 concurrent provider tunnels, so tunnels cannot take every listener slot from gate calls. A tunnel lasts at most 15 minutes. It reaches only the provider hosts for that harness, on port 443, at public addresses.
+- The daemon's own servers cap connections at 256, give request headers 5 seconds, close idle connections after 60 seconds, and read a whole request within 60 seconds. They set no write deadline, so a streaming response is not cut.
+
+Stated limit: the hop from the harness to the proxy is plain HTTP inside the per-launch internal network, so the lease crosses it unencrypted. This is accepted because the proxy is the only other member of that network and nothing else can join it during the launch. It stops being acceptable if the network ever gains another member or is shared between launches, and a change like that needs a new amendment that serves the proxy over TLS as well.
+
 ## Summary
 
 - Accept the two-milestone scope and retained components to unblock #2.

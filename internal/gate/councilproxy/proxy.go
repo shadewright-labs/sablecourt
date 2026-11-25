@@ -30,6 +30,9 @@ const (
 	Port              = "8888"
 	dialTimeout       = 5 * time.Second
 	tunnelLifetime    = 15 * time.Minute
+	// MaxTunnels bounds concurrent CONNECT tunnels so they cannot occupy every
+	// listener slot and starve gate calls.
+	MaxTunnels = MaxGateConns / 2
 )
 
 // Config comes from the daemon at launch. An empty digest permits provider login only.
@@ -293,9 +296,10 @@ func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dia
 
 	gateHandler := gateRouteHandler("", digest, forward)
 	hosts := providerHosts[cfg.Harness]
+	tunnels := make(chan struct{}, MaxTunnels)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
-			providerConnect(w, r, hosts, lookup, dial)
+			providerConnect(w, r, hosts, tunnels, lookup, dial)
 			return
 		}
 		gateHandler.ServeHTTP(w, r)
@@ -358,12 +362,20 @@ func (cfg Config) validateProxy() error {
 	return nil
 }
 
-func providerConnect(w http.ResponseWriter, r *http.Request, hosts []string, lookup lookupIP, dial dialContext) {
+func providerConnect(w http.ResponseWriter, r *http.Request, hosts []string, tunnels chan struct{}, lookup lookupIP, dial dialContext) {
 	host, port, err := net.SplitHostPort(r.URL.Host)
 	if err != nil || r.RequestURI != r.URL.Host || r.Host != r.URL.Host ||
 		port != "443" || !listedHost(host, hosts) ||
 		r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
 		http.Error(w, "provider destination refused", http.StatusForbidden)
+		return
+	}
+	select {
+	case tunnels <- struct{}{}:
+		defer func() { <-tunnels }()
+	default:
+		w.Header().Set("Connection", "close")
+		http.Error(w, "provider tunnels busy", http.StatusServiceUnavailable)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), dialTimeout)
