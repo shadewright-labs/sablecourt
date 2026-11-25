@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 836" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Sablecourt trust boundaries</title>
+  <desc id="d">The host is trusted and holds the daemon, you, a gate proxy and harness container on an internal network, and a host-mode harness. Model providers, the Git host and the harness provider hosts are outside the host above it, and Shadewright and Nightloom callers are outside below it. Inside the daemon and gates boundary sit the Model Gate, the audit chain, the MCP Gate and routes, the operator routes and the integration routes. The Model Gate sends requests to model providers with a key it holds, and the MCP Gate sends Git actions to the Git host with a token it holds. Both gates record decisions in the audit chain. You reach the operator routes with an operator token or session. Shadewright and Nightloom reach the integration routes with a scoped token. In the internal network the harness container sends its task lease to the gate proxy, the proxy checks the lease and forwards to the MCP Gate and routes, and the proxy alone reaches the allow-listed provider hosts. A direct route from the harness container out of the internal network is never allowed. The host-mode harness reaches the MCP Gate and routes over loopback with its lease, inside a macOS Seatbelt sandbox that is weaker than the container.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="836" rx="18" fill="#08060e"/>
+
+  <rect class="lane" x="24" y="24" width="1232" height="128" rx="14"/>
+  <text class="lanet" x="44" y="54">OUTSIDE THE HOST</text>
+  <rect class="ext" x="80" y="72" width="210" height="64" rx="10"/>
+  <text class="h" x="96" y="98">Model providers</text>
+  <text class="s" x="96" y="119">keys stay in the gate</text>
+  <rect class="ext" x="628" y="72" width="210" height="64" rx="10"/>
+  <text class="h" x="644" y="98">Git host</text>
+  <text class="s" x="644" y="119">token stays in the gate</text>
+  <rect class="ext" x="1002" y="72" width="210" height="64" rx="10"/>
+  <text class="h" x="1018" y="98">Provider hosts</text>
+  <text class="s" x="1018" y="119">harness traffic only</text>
+
+  <rect class="lane" x="24" y="184" width="1232" height="440" rx="14"/>
+  <text class="lanet" x="44" y="214">HOST (TRUSTED)</text>
+
+  <rect class="frame" x="56" y="232" width="806" height="264" rx="12"/>
+  <text class="idt" x="76" y="256">DAEMON AND GATES</text>
+  <rect class="frame" x="980" y="232" width="252" height="264" rx="12"/>
+  <text class="idt" x="1000" y="256">INTERNAL NETWORK</text>
+
+  <rect class="box" x="80" y="280" width="210" height="64" rx="10"/>
+  <text class="h" x="96" y="306">Model Gate</text>
+  <text class="s" x="96" y="327">holds provider keys</text>
+  <rect class="box" x="354" y="280" width="210" height="64" rx="10"/>
+  <text class="h" x="370" y="306">Audit chain</text>
+  <text class="s" x="370" y="327">one row per decision</text>
+  <rect class="key" x="628" y="280" width="210" height="64" rx="12"/>
+  <text class="h" x="644" y="306">MCP Gate and routes</text>
+  <text class="s" x="644" y="327">tools, actions, room posts</text>
+  <rect class="box" x="80" y="408" width="210" height="64" rx="10"/>
+  <text class="h" x="96" y="434">Operator routes</text>
+  <text class="s" x="96" y="455">operator token or session</text>
+  <rect class="box" x="354" y="408" width="210" height="64" rx="10"/>
+  <text class="h" x="370" y="434">Integration routes</text>
+  <text class="s" x="370" y="455">scoped tokens only</text>
+
+  <rect class="box" x="1002" y="280" width="210" height="64" rx="10"/>
+  <text class="h" x="1018" y="306">Gate proxy</text>
+  <text class="s" x="1018" y="327">per launch, allow-list</text>
+  <rect class="box" x="1002" y="408" width="210" height="64" rx="10"/>
+  <text class="h" x="1018" y="434">Harness container</text>
+  <text class="s" x="1018" y="455">scoped lease, own login</text>
+
+  <rect class="box" x="80" y="536" width="210" height="64" rx="10"/>
+  <text class="h" x="96" y="562">You</text>
+  <text class="s" x="96" y="583">sablectl and browser</text>
+  <rect class="box" x="1002" y="536" width="210" height="64" rx="10"/>
+  <text class="h" x="1018" y="562">Host-mode harness</text>
+  <text class="s" x="1018" y="583">macOS Seatbelt, weaker</text>
+
+  <rect class="lane" x="24" y="656" width="1232" height="128" rx="14"/>
+  <text class="lanet" x="44" y="686">OUTSIDE THE HOST</text>
+  <rect class="ext" x="354" y="704" width="210" height="64" rx="10"/>
+  <text class="h" x="370" y="730">Integration callers</text>
+  <text class="s" x="370" y="751">Shadewright, Nightloom</text>
+
+  <path class="f" d="M260 280V136" marker-end="url(#a)"/>
+  <text class="lbl" x="272" y="172">provider key</text>
+  <path class="f" d="M784 280V136" marker-end="url(#a)"/>
+  <text class="lbl" x="796" y="172">Git token</text>
+  <path class="f" d="M1180 280V136" marker-end="url(#a)"/>
+  <text class="lbl" x="1168" y="172" text-anchor="end">allow-listed hosts</text>
+  <path class="f" d="M290 312H354" marker-end="url(#a)"/>
+  <text class="lbl" x="322" y="304" text-anchor="middle">records</text>
+  <path class="f" d="M628 312H564" marker-end="url(#a)"/>
+  <text class="lbl" x="596" y="304" text-anchor="middle">records</text>
+  <path class="f" d="M1002 312H838" marker-end="url(#a)"/>
+  <text class="lbl" x="921" y="304" text-anchor="middle">lease checked</text>
+  <path class="f" d="M1060 408V344" marker-end="url(#a)"/>
+  <text class="lbl" x="1070" y="382">task lease</text>
+  <path class="deny" d="M1002 440H902" marker-end="url(#x)"/>
+  <text class="lbl" x="941" y="424" text-anchor="middle">direct route</text>
+  <text class="no" x="941" y="462" text-anchor="middle">never</text>
+  <path class="f" d="M185 536V472" marker-end="url(#a)"/>
+  <text class="lbl" x="197" y="508">token or session</text>
+  <path class="f" d="M459 704V472" marker-end="url(#a)"/>
+  <text class="lbl" x="471" y="644">scoped token</text>
+  <path class="f" d="M1002 568H733V344" marker-end="url(#a)"/>
+  <text class="lbl" x="868" y="560" text-anchor="middle">loopback lease</text>
+
+  <path class="f" d="M44 808H84"/>
+  <text class="lbl" x="92" y="812">request with a lease or token</text>
+  <path class="deny" d="M372 808H412"/>
+  <text class="lbl" x="420" y="812">refused</text>
+  <rect class="ext" x="500" y="800" width="28" height="14" rx="3"/>
+  <text class="lbl" x="536" y="812">outside the host</text>
+  <rect class="frame" x="700" y="800" width="28" height="14" rx="3"/>
+  <text class="lbl" x="736" y="812">trust boundary</text>
+</svg>
