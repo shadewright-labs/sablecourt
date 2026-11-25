@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 576" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">From manifest to process</title>
+  <desc id="d">Manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule, Conclave) declare a workload with a class, zone, runtime and grants. A task is one run of that workload with its own lease; a retry creates a new task. sablectl, a workflow step, a schedule or a Conclave submits tasks. A council attempt, numbered by round, role and attempt, maps to one task. The task is started by the runtime adapter that the workload class picks, with the lease. The adapter starts one of three things: a host process (coding adapter under macOS Seatbelt, a harness CLI) for a coding-agent workload, a council container (coding adapter through Docker, a harness CLI with its own login) for a council turn when Docker is configured, or a container (Docker adapter, for a long-lived agent, or a deterministic controller through the controller wrapper).</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="576" rx="18" fill="#08060e"/>
+
+  <rect class="box" x="380" y="40" width="360" height="72" rx="10"/>
+  <text class="h" x="396" y="66">Manifests</text>
+  <text class="s" x="396" y="87">Workload, Policy, Budget,</text>
+  <text class="s" x="396" y="104">Workflow, Schedule, Conclave</text>
+
+  <path class="f" d="M560 112V146" marker-end="url(#a)"/>
+  <text class="lbl" x="572" y="134">declares</text>
+
+  <rect class="box" x="380" y="152" width="360" height="64" rx="10"/>
+  <text class="h" x="396" y="178">Workload</text>
+  <text class="s" x="396" y="199">class, zone, runtime, grants</text>
+
+  <path class="f" d="M560 216V250" marker-end="url(#a)"/>
+  <text class="lbl" x="572" y="238">one run is</text>
+
+  <rect class="box" x="44" y="256" width="260" height="72" rx="10"/>
+  <text class="h" x="60" y="282">Who starts tasks</text>
+  <text class="s" x="60" y="303">sablectl, workflow step,</text>
+  <text class="s" x="60" y="320">schedule, Conclave</text>
+
+  <rect class="key" x="380" y="256" width="360" height="72" rx="12"/>
+  <text class="h" x="396" y="282">Task</text>
+  <text class="s" x="396" y="303">one run of a workload, own lease</text>
+  <text class="s" x="396" y="320">a retry creates a new task</text>
+
+  <rect class="box" x="816" y="256" width="260" height="72" rx="10"/>
+  <text class="h" x="832" y="282">Council attempt</text>
+  <text class="s" x="832" y="303">round, role, number</text>
+  <text class="s" x="832" y="320">only in a council</text>
+
+  <path class="f" d="M304 292H374" marker-end="url(#a)"/>
+  <text class="lbl" x="342" y="284" text-anchor="middle">submits</text>
+  <path class="f" d="M816 292H746" marker-end="url(#a)"/>
+  <text class="lbl" x="778" y="284" text-anchor="middle">one task</text>
+
+  <path class="f" d="M560 328V362" marker-end="url(#a)"/>
+  <text class="lbl" x="572" y="350">started with lease</text>
+
+  <rect class="box" x="380" y="368" width="360" height="64" rx="10"/>
+  <text class="h" x="396" y="394">Runtime adapter</text>
+  <text class="s" x="396" y="415">picked by workload class</text>
+
+  <path class="f" d="M380 400H204V474" marker-end="url(#a)"/>
+  <text class="lbl" x="292" y="392" text-anchor="middle">coding-agent</text>
+  <path class="f" d="M560 432V474" marker-end="url(#a)"/>
+  <text class="lbl" x="572" y="458">council, Docker</text>
+  <path class="f" d="M740 400H916V474" marker-end="url(#a)"/>
+  <text class="lbl" x="828" y="392" text-anchor="middle">agent, controller</text>
+
+  <rect class="box" x="44" y="480" width="320" height="72" rx="10"/>
+  <text class="h" x="60" y="506">Host process</text>
+  <text class="s" x="60" y="527">coding adapter, Seatbelt</text>
+  <text class="s" x="60" y="544">harness CLI, macOS only</text>
+
+  <rect class="box" x="400" y="480" width="320" height="72" rx="10"/>
+  <text class="h" x="416" y="506">Council container</text>
+  <text class="s" x="416" y="527">coding adapter through Docker</text>
+  <text class="s" x="416" y="544">harness CLI, own login</text>
+
+  <rect class="box" x="756" y="480" width="320" height="72" rx="10"/>
+  <text class="h" x="772" y="506">Container</text>
+  <text class="s" x="772" y="527">Docker adapter, long-lived agent</text>
+  <text class="s" x="772" y="544">controller through a wrapper</text>
+</svg>
