@@ -1073,18 +1073,41 @@ func TestCodingMissingBinaryRecordsLaunchFailedPath(t *testing.T) {
 		t.Fatalf("look up git: %v", err)
 	}
 	missingConfigured := filepath.Join(t.TempDir(), "missing-claude")
+	missingInterp := filepath.Join(t.TempDir(), "missing-interpreter")
 	emptyBinDir := t.TempDir()
 	for _, tc := range []struct {
 		name     string
 		pathEnv  string
 		harness  string
+		script   string
 		wantPath string
 	}{
 		{name: "configured path", harness: missingConfigured, wantPath: missingConfigured},
 		{name: "missing from PATH", pathEnv: emptyBinDir + string(os.PathListSeparator) + filepath.Dir(gitBin), wantPath: "claude"},
+		{name: "missing interpreter", script: "#!" + missingInterp + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
+			wantPath := tc.wantPath
+			if tc.script != "" {
+				if err := coding.CheckSandbox(ctx); err != nil {
+					if strings.Contains(err.Error(), "sandbox_apply: Operation not permitted") {
+						t.Skip("host sandbox denies nested Seatbelt profiles")
+					}
+					t.Fatalf("CheckSandbox: %v", err)
+				}
+				binDir := t.TempDir()
+				claudePath := filepath.Join(binDir, "claude")
+				if err := os.WriteFile(claudePath, []byte(tc.script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := filepath.EvalSymlinks(claudePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantPath = resolved
+				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
 			if tc.pathEnv != "" {
 				t.Setenv("PATH", tc.pathEnv)
 				if _, err := exec.LookPath("claude"); err == nil {
@@ -1159,8 +1182,8 @@ func TestCodingMissingBinaryRecordsLaunchFailedPath(t *testing.T) {
 			if err := json.Unmarshal([]byte(launchEvent.FactJSON), &facts); err != nil {
 				t.Fatalf("unmarshal launch_failed FactJSON %q: %v", launchEvent.FactJSON, err)
 			}
-			if facts.Reason != "missing_binary" || facts.Path != tc.wantPath {
-				t.Fatalf("launch_failed facts = %+v (raw %s), want reason=missing_binary path=%q", facts, launchEvent.FactJSON, tc.wantPath)
+			if facts.Reason != "missing_binary" || facts.Path != wantPath {
+				t.Fatalf("launch_failed facts = %+v (raw %s), want reason=missing_binary path=%q", facts, launchEvent.FactJSON, wantPath)
 			}
 		})
 	}

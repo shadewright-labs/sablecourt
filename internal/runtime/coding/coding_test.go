@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -366,6 +367,133 @@ func TestMissingBinaryReportsPath(t *testing.T) {
 			var missing *scruntime.MissingBinaryError
 			if !errors.As(err, &missing) || missing.Path != wantPath {
 				t.Fatalf("Start err = %v, missing = %+v, want Path %q", err, missing, wantPath)
+			}
+		})
+	}
+}
+
+func TestSeatbeltMissingTargetReportsPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Seatbelt requires macOS")
+	}
+	missingInterp := filepath.Join(t.TempDir(), "missing-interpreter")
+	missingTarget := filepath.Join(t.TempDir(), "missing-harness")
+	for _, tc := range []struct {
+		name      string
+		script    string
+		useTarget string
+	}{
+		{name: "missing interpreter", script: "#!" + missingInterp + "\n"},
+		{name: "missing interpreter with args", script: "#! " + missingInterp + " --flag\n"},
+		{name: "missing target binary", useTarget: missingTarget},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, spec := codingFixture(t)
+			a.DryRun = true
+			spec.Workload.Spec.Coding.Sandbox = "seatbelt"
+			h := startTestTask(t, a, spec)
+			state, err := a.worktreeState(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var bin string
+			if tc.useTarget != "" {
+				bin = tc.useTarget
+			} else {
+				dir := t.TempDir()
+				testWrite(t, dir, "claude", tc.script, 0o700)
+				resolved, err := resolvedPath(filepath.Join(dir, "claude"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				bin = resolved
+			}
+
+			cmd := exec.Command(seatbeltExecutable, "-p", "(version 1)(allow default)", bin)
+			cmd.Dir = h.WorkDir
+			cmd.Env = strippedEnv(spec, t.TempDir(), false)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+			p, _, err := launchWrapper(cmd, h.WorkDir, t.TempDir(), state.TaskID, time.Minute, nil)
+			if p != nil {
+				p.requestStop()
+				<-p.done
+			}
+			var missing *scruntime.MissingBinaryError
+			if !errors.As(err, &missing) || missing.Path != bin {
+				t.Fatalf("launchWrapper err = %v, missing = %+v, want Path %q", err, missing, bin)
+			}
+			if _, statErr := os.Stat(h.WorkDir + ".run"); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("failed wrapper launch left .run directory: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSeatbeltStartMissingInterpreterReportsPath(t *testing.T) {
+	requireNestedSeatbelt(t)
+	missingInterp := filepath.Join(t.TempDir(), "missing-interpreter")
+	fakeHarness(t, "#!"+missingInterp+"\n")
+	resolved, err := resolvedPath(filepath.Join(strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0], "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, spec := codingFixture(t)
+	spec.Workload.Spec.Coding.Sandbox = "seatbelt"
+	_, err = a.Start(context.Background(), spec)
+	var missing *scruntime.MissingBinaryError
+	if !errors.As(err, &missing) || missing.Path != resolved {
+		t.Fatalf("Start err = %v, missing = %+v, want Path %q", err, missing, resolved)
+	}
+}
+
+func TestCheckWrappedTarget(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	workDir := t.TempDir()
+	testWrite(t, workDir, "rel-interp", "#!"+shell+"\n", 0o700)
+	nonExecInterp := filepath.Join(dir, "non-exec-interp")
+	testWrite(t, dir, "non-exec-interp", "data", 0o600)
+
+	for _, tc := range []struct {
+		name        string
+		content     string
+		target      string
+		wantMissing bool
+	}{
+		{name: "valid shebang", content: "#!" + shell + "\nexit 0\n"},
+		{name: "valid shebang without newline", content: "#!" + shell},
+		{name: "relative existing interpreter", content: "#!rel-interp\n"},
+		{name: "relative missing interpreter", content: "#!missing-rel-interp\n", wantMissing: true},
+		{name: "missing interpreter", content: "#!" + filepath.Join(dir, "no-such-interp") + "\n", wantMissing: true},
+		{name: "missing interpreter with whitespace and args", content: "#!  \t" + filepath.Join(dir, "no-such-interp") + "\t--flag\n", wantMissing: true},
+		{name: "non-executable existing interpreter", content: "#!" + nonExecInterp + "\n"},
+		{name: "empty shebang", content: "#!   \n"},
+		{name: "oversized shebang", content: "#!" + strings.Repeat("a", 520) + "\n"},
+		{name: "binary without shebang", content: "\xcf\xfa\xed\xfe\x00\x00"},
+		{name: "empty file", content: ""},
+		{name: "missing target file", target: filepath.Join(dir, "missing-bin"), wantMissing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := tc.target
+			if target == "" {
+				sub := t.TempDir()
+				testWrite(t, sub, "harness", tc.content, 0o700)
+				target = filepath.Join(sub, "harness")
+			}
+			err := checkWrappedTarget(target, workDir)
+			if tc.wantMissing {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("checkWrappedTarget = %v, want os.ErrNotExist", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("checkWrappedTarget = %v, want nil", err)
 			}
 		})
 	}
