@@ -516,10 +516,13 @@ func TestCheckWrappedTargetSkipsNonRegularFile(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		// Unblock the stuck open so the goroutine can finish.
-		if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+		if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
 			_ = w.Close()
 		}
-		<-done
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
 		t.Fatal("checkWrappedTarget blocked opening a FIFO")
 	}
 }
