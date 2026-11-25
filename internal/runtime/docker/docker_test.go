@@ -3,7 +3,10 @@ package docker
 import (
 	"context"
 	"errors"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
@@ -24,9 +27,9 @@ type fakeEngine struct {
 
 func (f *fakeEngine) NetworkInspect(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
 	if !f.networkExists {
-		return client.NetworkInspectResult{}, errors.New("not found")
+		return client.NetworkInspectResult{}, missing{errors.New("not found")}
 	}
-	return client.NetworkInspectResult{}, nil
+	return client.NetworkInspectResult{Network: network.Inspect{Network: network.Network{ID: "net-1", Name: DefaultNetworkName, Internal: true, Driver: "bridge"}}}, nil
 }
 
 func (f *fakeEngine) NetworkCreate(_ context.Context, _ string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
@@ -36,7 +39,7 @@ func (f *fakeEngine) NetworkCreate(_ context.Context, _ string, options client.N
 }
 
 func (f *fakeEngine) ImageInspect(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
-	return client.ImageInspectResult{}, nil
+	return client.ImageInspectResult{InspectResponse: image.InspectResponse{ID: "sha256:" + strings.Repeat("a", 64)}}, nil
 }
 
 func (f *fakeEngine) ImagePull(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
