@@ -8,18 +8,7 @@ Status: partly built. The packet, the verifier step, the failure handoff and the
 
 The flow below shows how a task gets its packet: a deterministic controller gets none, a council turn gets the scheduler's packet, and every other task gets the required part plus optional parts trimmed to 32 KiB.
 
-```mermaid
-flowchart TD
-    A[Task input] --> B{Which kind of task?}
-    B -- deterministic controller --> C[No packet, input unchanged]
-    B -- council turn --> D[Council packet from the scheduler]
-    B -- any other --> E[Required part: role card, intent, failure handoff]
-    E --> F[Optional parts: learnings, decrees, relics, pre-check]
-    F --> G{Over 32 KiB?}
-    G -- yes --> H[Drop the oldest optional entry]
-    H --> G
-    G -- no --> I[Redact and hand to the runtime]
-```
+[![Packet assembly: a deterministic controller gets no packet, a council turn gets the scheduler's packet, and any other task gets the required part and optional parts, with the oldest optional entry dropped until the packet is 32 KiB or less.](../diagrams/context-packet.svg)](../diagrams/context-packet.svg "Open full size")
 
 `internal/contextpack` assembles the packet each time a task launches. A `context_packet` field sent by a caller is deleted and rebuilt, and so is a `repo_path` field: the repository is the `coding.repoPath` of the workload. The parts, in order:
 
@@ -30,7 +19,7 @@ flowchart TD
 5. The failure handoff, when the task is a retry with one.
 6. Scoped learnings (up to 20), the last 5 operator Decrees and decisions of the room, the last 4 Relics (each cut at 2048 bytes, wrapped as untrusted data) and the pre-check.
 
-Parts 1 to 5 are required and never cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole, the pre-check last, and the packet ends with a marker that older context was omitted. A packet can therefore exceed 32 KiB if the required part does. The whole packet and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
+Parts 1 to 5 are required and never cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole and the size is checked again, the pre-check going last, and the packet ends with a marker that older context was omitted. A packet can therefore exceed 32 KiB if the required part does. The whole packet and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
 
 A deterministic controller never gets a packet, since it holds no model grant. Today the packet reaches two kinds of runtime: the host coding adapter, which writes it to a session file in the worktree and uses it as the harness prompt, and the built-in `sablecourt-agent` container, which sends it as the first message to the Model Gate.
 
@@ -64,15 +53,9 @@ Migration 0012 copied every existing `learning:*` row into the learning table as
 
 [ADR-0012](../adr/0012-learning-evidence-and-expiry.md) replaces these entries with a versioned record. The store (`internal/store/learning.go`, `internal/store/sqlite/learning.go`, SQLite only) implements it and enforces the rules below. No daemon route, page or command calls it.
 
-```mermaid
-stateDiagram-v2
-    [*] --> proposed: propose (planned)
-    proposed --> accepted: accept with evidence (planned)
-    accepted --> accepted: confirm with supporting outcome (planned)
-    accepted --> proposed: contradiction or 90 days pass (planned)
-    proposed --> retired: retire (planned)
-    accepted --> retired: retire or replaced (planned)
-```
+[![Learning states: proposed, accepted and retired, with accept, confirm, contradiction or 90 days, and retire as dashed planned transitions.](../diagrams/learning-states.svg)](../diagrams/learning-states.svg "Open full size")
+
+Every line is dashed because the store enforces the transitions but nothing calls them yet (planned).
 
 - A record holds an immutable redacted statement (up to 4 KiB), a scope, a source kind (`operator`, `agent`, `verifier`, `shadewright`, `task`, `council` or `incident`), an evidence reference such as `artifact:<name>` or `relic:<name>`, an author and a SHA-256 digest of those fields.
 - Acceptance takes the expected digest and an operator in the request context. It needs evidence that resolves to a real artifact or Relic of the source, and it refuses a record whose scope still needs mapping. It starts a 90-day clock. Accepting a replacement retires its predecessor in the same transaction.

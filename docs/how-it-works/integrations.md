@@ -6,23 +6,7 @@ Status: partly built. Incident intake, verification reports, the observer routes
 
 ## Shadewright: incident and verification
 
-```mermaid
-sequenceDiagram
-    participant A as Shadewright analyzer
-    participant D as Daemon
-    participant V as Vassal
-    participant F as Shadewright verifier
-    A->>D: POST incident with the integration token
-    D->>D: open the room, store the redacted evidence Relic, audit
-    D->>V: start the always-on Vassals
-    D-->>A: 201 with the room and the Relic
-    V->>D: read the Relic, post findings
-    F->>D: POST verification report with the same token
-    D->>D: store the report Relic, tell the operator, audit
-    D-->>F: 201 recorded
-    A->>D: GET incident status *(planned)*
-    A->>D: GET learnings for the incident *(planned)*
-```
+[![Incident calls: the Shadewright analyzer posts an incident, the daemon opens a room and starts a Vassal, the verifier later posts a report, and status and learnings reads are marked not built yet.](../diagrams/incident-sequence.svg)](../diagrams/incident-sequence.svg "Open full size")
 
 Both routes are self-authenticated: the operator check skips them and each handler checks the token itself.
 
