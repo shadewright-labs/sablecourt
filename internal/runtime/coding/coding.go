@@ -103,7 +103,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		taskBase = dir
 		rollback = func(rbCtx context.Context) error { return rollbackWorktree(rbCtx, dir, state) }
 	case checkoutModeLive:
-		dir, taskBase, state, rollback, err = a.prepareLiveCheckout(ctx, cfg.RepoPath, spec.TaskID)
+		dir, taskBase, state, rollback, err = a.prepareLiveCheckout(ctx, cfg.RepoPath, spec.TaskID, input.checkoutSourceID)
 		if err != nil {
 			return scruntime.Handle{}, err
 		}

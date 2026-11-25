@@ -15,7 +15,7 @@ import (
 func (s *SQLiteStore) ListReconcileCouncils(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id FROM councils p JOIN conclaves c ON c.id=p.id
-		WHERE c.state IN ('active','input-required') OR EXISTS (
+		WHERE c.state IN ('active','input-required') OR p.cleanup_pending = 1 OR EXISTS (
 			SELECT 1 FROM council_attempts a JOIN tasks t ON t.id=a.task_id
 			WHERE a.council_id=c.id AND t.state IN ('submitted','working','input-required')
 		)
@@ -62,6 +62,11 @@ func readCouncilSnapshot(ctx context.Context, tx *sql.Tx, id string) (store.Coun
 		return snap, store.ErrNotFound
 	}
 	snap.CouncilPolicy = *p
+	var cleanupPending int
+	if err := tx.QueryRowContext(ctx, "SELECT cleanup_pending FROM councils WHERE id=?", id).Scan(&cleanupPending); err != nil {
+		return snap, err
+	}
+	snap.CleanupPending = cleanupPending != 0
 	r := &snap.Session
 	var created, updated string
 	err = tx.QueryRowContext(ctx, `SELECT id,template_name,title,state,ward_reason,created_at,updated_at FROM conclaves WHERE id=?`, id).

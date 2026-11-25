@@ -61,9 +61,35 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 			stdin:     "",
 		},
 		{
-			name:      "oversized_question",
+			name:      "oversized_question_over_daemon_budget",
 			harnesses: []string{"claude", "codex", "agy"},
-			args:      []string{"council", strings.Repeat("x", (64<<10)+1), "--repo", validRepo},
+			args:      []string{"council", strings.Repeat("x", (30<<10)+1), "--repo", validRepo},
+		},
+		{
+			name:      "oversized_stdin_with_cr_suffix",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "--repo", validRepo},
+			stdin:     strings.Repeat("x", 30<<10) + "\rkeep this suffix\n",
+		},
+		{
+			name:      "escaped_question_over_launch_budget",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", strings.Repeat("<", 12<<10), "--repo", validRepo},
+		},
+		{
+			name:      "escaped_question_exceeds_round2_budget",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", strings.Repeat("<", 10240), "--repo", validRepo},
+		},
+		{
+			name:      "partial_panel_two",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,codex"},
+		},
+		{
+			name:      "partial_panel_one",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude"},
 		},
 		{
 			name:      "missing_default_harness_agy",
@@ -73,7 +99,7 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 		{
 			name:      "unknown_harness",
 			harnesses: []string{"claude", "codex", "agy", "bash"},
-			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,bash"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,codex,bash"},
 		},
 		{
 			name:      "empty_with",
@@ -83,7 +109,7 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 		{
 			name:      "duplicate_with",
 			harnesses: []string{"claude", "codex", "agy"},
-			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,claude"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,claude,agy"},
 		},
 		{
 			name:      "zero_rounds",
@@ -605,7 +631,7 @@ func TestCouncilStdinPromptUsesRecordedRoundsAndPrintsNoDigestRecorded(t *testin
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
 	root.SetIn(strings.NewReader("stdin question\n"))
-	root.SetArgs([]string{"--api", "http://unix", "council", "--repo", repoDir, "--with", "claude,codex", "--live"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "--repo", repoDir, "--with", "claude,codex,agy", "--live"})
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("council failed: %v (stderr=%s)", err, stderr.String())
@@ -829,7 +855,7 @@ func TestCouncilDigestRejectsParticipantRelicAndPrintsNoDigestRecorded(t *testin
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude,codex,agy"})
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("council failed: %v (stderr=%s)", err, stderr.String())
@@ -875,7 +901,7 @@ func TestCouncilClarificationQuestionsFailClosedWithoutInferredRoundOrFallbackDi
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude,codex,agy"})
 
 	err := root.ExecuteContext(context.Background())
 	if err == nil {
@@ -1010,5 +1036,66 @@ func TestCouncilStdinPromptCancelsOnContextDone(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("council question prompt remained blocked after context cancellation")
+	}
+}
+
+func TestCouncilClientSendsIdempotencyKey(t *testing.T) {
+	installStubHarnesses(t, "claude", "codex", "agy")
+	repoDir := t.TempDir()
+
+	var gotKey string
+	rt := &handlerRoundTripper{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/councils":
+			gotKey = r.Header.Get("Idempotency-Key")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"ccl-idem-1","title":"Review","state":"active"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-idem-1/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-idem-1":
+			_, _ = w.Write([]byte(`{"conclave":{"id":"ccl-idem-1","state":"completed"},"messages":[{"id":1,"conclaveId":"ccl-idem-1","fromRole":"claude","toRole":"all","kind":"proposal","body":"ok","round":1}],"relics":[{"name":"digest","authorRole":"system","body":"ok"}],"turns":[{"round":1,"role":"claude","state":"completed"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+
+	root := newRootCmdWithTransport(rt)
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--api", "http://unix", "council", "Review this", "--repo", repoDir})
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("council command failed: %v (stderr=%s)", err, stderr.String())
+	}
+	if strings.TrimSpace(gotKey) == "" {
+		t.Fatal("expected sablectl council to send a non-empty Idempotency-Key header")
+	}
+}
+
+func TestCouncilStdinMaxQuestionPreserved(t *testing.T) {
+	exact := strings.Repeat("x", maxCouncilQuestionBytes)
+	for _, tc := range []struct {
+		name  string
+		stdin string
+	}{
+		{name: "exact_eof", stdin: exact},
+		{name: "exact_lf", stdin: exact + "\n"},
+		{name: "exact_crlf", stdin: exact + "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line, err := readLineContext(context.Background(), strings.NewReader(tc.stdin), maxCouncilQuestionBytes)
+			if err != nil {
+				t.Fatalf("readLineContext(%s) err = %v", tc.name, err)
+			}
+			got, err := validateCouncilQuestion(line)
+			if err != nil {
+				t.Fatalf("validateCouncilQuestion(%s) err = %v", tc.name, err)
+			}
+			if got != exact {
+				t.Fatalf("got len=%d, want %d", len(got), len(exact))
+			}
+		})
 	}
 }

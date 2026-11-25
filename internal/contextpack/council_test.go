@@ -1,6 +1,7 @@
 package contextpack
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -103,5 +104,34 @@ func TestCouncilLatestAtPeerLimit(t *testing.T) {
 				t.Error("latest answer does not match the space left by the omission marker")
 			}
 		})
+	}
+}
+
+func TestCouncilPacketEncodedBudget(t *testing.T) {
+	// A question and peer answers heavy in JSON-escaped characters (<, >, &)
+	// must stay within the 63 KiB encoded packet budget so the 64 KiB launch input never overflows.
+	question := strings.Repeat("<", 9000)
+	ans := strings.Repeat("<", 1024)
+	rounds := []CouncilRound{{
+		Number: 1,
+		Answers: []CouncilAnswer{
+			{Role: "claude", Body: ans},
+			{Role: "codex", Body: ans},
+			{Role: "agy", Body: ans},
+		},
+	}}
+	p, err := AssembleCouncil("", question, nil, rounds)
+	if err != nil {
+		t.Fatalf("AssembleCouncil: %v", err)
+	}
+	encoded, err := json.Marshal(p.Markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > 63<<10 {
+		t.Fatalf("encoded council packet = %d bytes, want <= %d", len(encoded), 63<<10)
+	}
+	if !strings.Contains(p.Markdown, "[peer text omitted]") || !utf8.ValidString(p.Markdown) {
+		t.Fatalf("expected valid UTF-8 packet with omission marker")
 	}
 }

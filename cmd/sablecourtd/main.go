@@ -269,39 +269,56 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return err
 	}
 
+	attachHub := attach.NewHub()
+	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
+	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
+		return coding.CheckSandbox(ctx)
+	}, logger)
+
 	var (
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
+		var b *config.Bundle
+		var pol *policy.Engine
 		if manifestsPath == "" {
-			return nil, policy.NewEngine(nil, nil), nil
-		}
-		b, err := config.LoadPath(manifestsPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load manifests: %w", err)
-		}
-		for _, w := range b.Workloads {
-			cardBytes, err := json.Marshal(w.Spec.AgentCard)
+			pol = policy.NewEngine(nil, nil)
+		} else {
+			loaded, err := config.LoadPath(manifestsPath)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("load manifests: %w", err)
 			}
-			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
-				Name:           w.Metadata.Name,
-				Zone:           w.Metadata.Zone,
-				Class:          w.Spec.Class,
-				ManifestDigest: b.ManifestDigest,
-				AgentCardJSON:  string(cardBytes),
-			}); err != nil {
-				return nil, nil, err
+			for _, w := range loaded.Workloads {
+				cardBytes, err := json.Marshal(w.Spec.AgentCard)
+				if err != nil {
+					return nil, nil, err
+				}
+				if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
+					Name:           w.Metadata.Name,
+					Zone:           w.Metadata.Zone,
+					Class:          w.Spec.Class,
+					ManifestDigest: loaded.ManifestDigest,
+					AgentCardJSON:  string(cardBytes),
+				}); err != nil {
+					return nil, nil, err
+				}
+			}
+			var policies []domain.Policy
+			for _, p := range loaded.Policies {
+				policies = append(policies, p)
+			}
+			breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+			b, pol = loaded, policy.NewEngine(policies, breaker)
+		}
+		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
+			var err error
+			b, err = ensureCouncilPanelWorkloads(ctx, st, b)
+			if err != nil {
+				return nil, nil, fmt.Errorf("register council panel workloads: %w", err)
 			}
 		}
-		var policies []domain.Policy
-		for _, p := range b.Policies {
-			policies = append(policies, p)
-		}
-		breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-		return b, policy.NewEngine(policies, breaker), nil
+		return b, pol, nil
 	}
 
 	var policyEng *policy.Engine
@@ -309,7 +326,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	if bundle != nil {
+	if manifestsPath != "" && bundle != nil {
 		logger.Info("loaded manifests", "path", manifestsPath, "workloads", len(bundle.Workloads), "policies", len(bundle.Policies), "budgets", len(bundle.Budgets), "workflows", len(bundle.Workflows))
 	} else {
 		logger.Warn("no manifests loaded; pass --manifests=<path> or create ~/.config/sablecourt/manifests")
@@ -370,11 +387,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 	registerUpstreamMCP(bundle)
 
-	attachHub := attach.NewHub()
-	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
-		return coding.CheckSandbox(ctx)
-	}, logger)
 	if isCitadel {
 		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
@@ -457,7 +469,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)
 		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", b.ManifestDigest[:12])
+			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 		}
 		return nil
 	}
@@ -534,8 +546,26 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
+	privateDirs := []string{dir}
+	if dbPath != "" {
+		if absDB, err := filepath.Abs(dbPath); err == nil {
+			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
+		}
+	}
+	if secretFile != "" {
+		if absSecret, err := filepath.Abs(secretFile); err == nil {
+			privateDirs = append(privateDirs, absSecret)
+		}
+	}
+
 	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
-		handlerConfig{incidentTemplate: cfg.incidentTemplate, operatorToken: operatorToken})
+		handlerConfig{
+			incidentTemplate:    cfg.incidentTemplate,
+			operatorToken:       operatorToken,
+			councilsDisabled:    isCitadel,
+			councilPrivateDirs:  privateDirs,
+			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
+		})
 	unixMux, err := cfg.hostHandler(mux, true)
 	if err != nil {
 		return err
@@ -591,14 +621,25 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
+func shortDigest(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
 func reconcileDaemonPass(ctx context.Context, reconcileTasks func(context.Context) error, broker *conclave.Broker) error {
 	taskErr := reconcileTasks(ctx)
 	return errors.Join(taskErr, broker.ReconcileCouncils(ctx, taskErr == nil))
 }
 
 type handlerConfig struct {
-	incidentTemplate string
-	operatorToken    string
+	incidentTemplate    string
+	operatorToken       string
+	councilsDisabled    bool
+	councilPrivateDirs  []string
+	checkCouncilSandbox func(context.Context) error
+	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
@@ -1399,6 +1440,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		mux.Handle("/gate/actions/", http.StripPrefix("/gate/actions", dataActionGate.ActionHandler()))
 	}
 	if conclaveBroker != nil {
+		mux.HandleFunc("POST /api/v1/councils", councilOpen(st, cfg))
 		mux.HandleFunc("GET /api/v1/conclaves", func(w http.ResponseWriter, r *http.Request) {
 			items, err := st.ListConclaves(r.Context())
 			if err != nil {
@@ -1424,7 +1466,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			writeJSON(w, http.StatusCreated, sess)
 		})
-		mux.HandleFunc("GET /api/v1/conclaves/{id}", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("GET /api/v1/conclaves/{id}", councilDetail(st, func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
 			sess, err := st.GetConclave(r.Context(), id)
 			if err != nil {
@@ -1438,7 +1480,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				"messages": msgs,
 				"relics":   relics,
 			})
-		})
+		}))
 		mux.HandleFunc("GET /api/v1/conclaves/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
 			flusher, ok := w.(http.Flusher)

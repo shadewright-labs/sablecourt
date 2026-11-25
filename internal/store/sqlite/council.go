@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -120,6 +121,12 @@ func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSes
 	if len(raw) > store.MaxConclaveTurnInput {
 		return errors.New("council policy too large")
 	}
+	if spec.IdempotencyKey != "" {
+		if len(spec.IdempotencyKey) > 256 || strings.TrimSpace(spec.IdempotencyKey) != spec.IdempotencyKey ||
+			strings.ContainsRune(spec.IdempotencyKey, 0) || spec.RequestSHA256 == "" {
+			return errors.New("invalid council idempotency metadata")
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -128,10 +135,49 @@ func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSes
 	if err := createConclave(ctx, tx, room); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO councils(id,policy) VALUES (?,?)", room.ID, string(raw)); err != nil {
+	idemKey := sql.NullString{String: spec.IdempotencyKey, Valid: spec.IdempotencyKey != ""}
+	cleanupPending := 0
+	if p.Checkout.Commit != "" || p.Checkout.WriterRole != "" {
+		cleanupPending = 1
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO councils(id,policy,idempotency_key,request_sha256,cleanup_pending) VALUES (?,?,?,?,?)", room.ID, string(raw), idemKey, spec.RequestSHA256, cleanupPending); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("%w: %v", store.ErrConflict, err)
+		}
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *SQLiteStore) CouncilByIdempotencyKey(ctx context.Context, key string) (domain.ConclaveSession, string, error) {
+	if key == "" {
+		return domain.ConclaveSession{}, "", store.ErrNotFound
+	}
+	var room domain.ConclaveSession
+	var created, updated, digest string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT c.id, c.template_name, c.title, c.state, c.ward_reason, c.created_at, c.updated_at, p.request_sha256
+		FROM councils p JOIN conclaves c ON c.id = p.id
+		WHERE p.idempotency_key = ?
+	`, key).Scan(&room.ID, &room.TemplateName, &room.Title, &room.State, &room.WardReason, &created, &updated, &digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ConclaveSession{}, "", store.ErrNotFound
+	}
+	if err != nil {
+		return domain.ConclaveSession{}, "", err
+	}
+	if room.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return domain.ConclaveSession{}, "", err
+	}
+	if room.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+		return domain.ConclaveSession{}, "", err
+	}
+	return room, digest, nil
+}
+
+func (s *SQLiteStore) MarkCouncilCleanedUp(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE councils SET cleanup_pending = 0 WHERE id = ?", id)
+	return err
 }
 
 func readCouncilPolicy(ctx context.Context, tx *sql.Tx, id string) (*store.CouncilPolicy, error) {

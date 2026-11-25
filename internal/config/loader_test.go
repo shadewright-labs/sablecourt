@@ -290,3 +290,38 @@ spec:
 		})
 	}
 }
+
+func TestLoadPathRefusesReservedCouncilPanelNames(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "agy"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			data := `apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: ` + name + `
+  zone: sandbox
+spec:
+  class: coding-agent
+  coding:
+    harness: ` + name + `
+    repoPath: /tmp/repo
+    sandbox: seatbelt
+  runtime:
+    type: worktree-cli
+  grants:
+    mcpTools:
+      - conclave.read
+`
+			if err := os.WriteFile(filepath.Join(root, "panel.yaml"), []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadPath(root)
+			if err == nil {
+				t.Fatalf("LoadPath accepted reserved council panel workload name %q", name)
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("LoadPath error = %q, want clear reserved error", err)
+			}
+		})
+	}
+}
