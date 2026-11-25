@@ -24,16 +24,16 @@ func TestEstimateRequestReserveBillableFields(t *testing.T) {
 		wantIn  int64
 		wantOut int64
 	}{
-		{name: "short message", body: `{"messages":[{"role":"user","content":"hi"}]}`, wantIn: 1, wantOut: 1},
+		{name: "short message", body: `{"messages":[{"role":"user","content":"hi"}]}`, wantIn: 4, wantOut: 1},
 		{
 			name:   "tools definitions count as input",
 			body:   `{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","description":"` + longText + `"}}]}`,
-			wantIn: 100, wantOut: 1,
+			wantIn: 113, wantOut: 1,
 		},
 		{
 			name:   "legacy functions count as input",
 			body:   `{"messages":[],"functions":[{"name":"f","description":"` + longText + `"}]}`,
-			wantIn: 100, wantOut: 1,
+			wantIn: 104, wantOut: 1,
 		},
 		{name: "n scales output", body: `{"max_tokens":3,"n":2}`, wantIn: 1, wantOut: 6},
 		{name: "n of one", body: `{"max_tokens":3,"n":1}`, wantIn: 1, wantOut: 3},
@@ -44,6 +44,14 @@ func TestEstimateRequestReserveBillableFields(t *testing.T) {
 		{name: "gemini candidate count scales output", body: `{"generationConfig":{"maxOutputTokens":3,"candidateCount":2}}`, wantIn: 1, wantOut: 6},
 		{name: "gemini candidate count of one", body: `{"generationConfig":{"maxOutputTokens":3,"candidateCount":1}}`, wantIn: 1, wantOut: 3},
 		{name: "gemini candidate count saturates", body: `{"generationConfig":{"maxOutputTokens":9e18,"candidateCount":8}}`, wantIn: 1, wantOut: maxReservedTokens},
+		{name: "gemini snake case config", body: `{"generation_config":{"max_output_tokens":3,"candidate_count":2}}`, wantIn: 1, wantOut: 6},
+		{name: "gemini string limits", body: `{"generationConfig":{"maxOutputTokens":"3","candidateCount":"2"}}`, wantIn: 1, wantOut: 6},
+		{name: "gemini larger of both configs", body: `{"generationConfig":{"maxOutputTokens":3},"generation_config":{"max_output_tokens":5}}`, wantIn: 1, wantOut: 5},
+		{
+			name:   "tool property named name still counts",
+			body:   `{"tools":[{"parameters":{"properties":{"name":{"type":"string","description":"` + longText + `"}}}}]}`,
+			wantIn: 111, wantOut: 1,
+		},
 		{name: "n product saturates", body: `{"max_tokens":9e18,"n":128}`, wantIn: 1, wantOut: maxReservedTokens},
 		{name: "huge limit is clamped", body: `{"max_tokens":1e300}`, wantIn: 1, wantOut: maxReservedTokens},
 	}
@@ -452,6 +460,33 @@ func TestModelGateConcurrentLocalFallbackRespectsCostCeiling(t *testing.T) {
 	}
 	if totals.CostMicroUSD > ceilingMicroUSD {
 		t.Fatalf("settled cost = %d microUSD, exceeds ceiling %d", totals.CostMicroUSD, ceilingMicroUSD)
+	}
+	if totals.CostMicroUSD != 103 {
+		t.Fatalf("settled cost = %d microUSD, want the openai charge of 103", totals.CostMicroUSD)
+	}
+}
+
+func TestModelGateSettlesAtRequestModelPrice(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-5-expensive","usage":{"prompt_tokens":1,"completion_tokens":10}}`))
+	})
+	c := newChildGate(t, `{"maxCostUSD":0.000150}`, upstream)
+	c.gate.pricing = map[string]PricePerMillionTokens{
+		"gpt-5":           {InputUSD: 1, OutputUSD: 1},
+		"gpt-5-expensive": {InputUSD: 50, OutputUSD: 50},
+	}
+	rec := doGateRequest(c.gate.Handler(), http.MethodPost, "/openai/v1/chat/completions",
+		`{"model":"gpt-5","max_tokens":10}`, map[string]string{"Authorization": "Bearer " + c.token})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	totals, err := c.st.TaskBudgetTotals(t.Context(), "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.CostMicroUSD != 11 {
+		t.Fatalf("settled cost = %d microUSD, want 11 at the request model rate", totals.CostMicroUSD)
 	}
 }
 

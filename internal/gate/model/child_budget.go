@@ -2,6 +2,8 @@ package model
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -63,11 +65,7 @@ func countPromptTextBytes(v any) int64 {
 	case map[string]any:
 		var total int64
 		for k, item := range x {
-			switch k {
-			case "role", "type", "name", "id", "tool_call_id", "mimeType", "media_type":
-				continue
-			}
-			total += countPromptTextBytes(item)
+			total += int64(len(k)) + countPromptTextBytes(item)
 		}
 		return total
 	default:
@@ -81,10 +79,8 @@ func extractRequestedOutputTokens(payload map[string]any) int64 {
 			return n
 		}
 	}
-	if genCfg, ok := payload["generationConfig"].(map[string]any); ok {
-		if n, ok := positiveJSONInt64(genCfg["maxOutputTokens"]); ok {
-			return n
-		}
+	if n, ok := geminiConfigInt(payload, "maxOutputTokens", "max_output_tokens"); ok {
+		return n
 	}
 	return 0
 }
@@ -96,10 +92,8 @@ func scaleOutputTokensByChoices(outTokens int64, payload map[string]any) int64 {
 	if n, ok := positiveJSONInt64(payload["n"]); ok {
 		choices = n
 	}
-	if genCfg, ok := payload["generationConfig"].(map[string]any); ok {
-		if c, ok := positiveJSONInt64(genCfg["candidateCount"]); ok && c > choices {
-			choices = c
-		}
+	if c, ok := geminiConfigInt(payload, "candidateCount", "candidate_count"); ok && c > choices {
+		choices = c
 	}
 	if choices <= 1 {
 		return outTokens
@@ -123,4 +117,32 @@ func positiveJSONInt64(v any) (int64, bool) {
 		return maxReservedTokens, true
 	}
 	return int64(f), true
+}
+
+// geminiConfigInt reads a Gemini generation limit from either spelling of the config
+// object and either spelling of the field, accepting JSON numbers or decimal strings,
+// and returns the largest valid value so the reservation is never understated.
+func geminiConfigInt(payload map[string]any, names ...string) (int64, bool) {
+	var best int64
+	var found bool
+	for _, cfgKey := range []string{"generationConfig", "generation_config"} {
+		cfg, ok := payload[cfgKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, name := range names {
+			v := cfg[name]
+			if str, isStr := v.(string); isStr {
+				f, err := strconv.ParseFloat(strings.TrimSpace(str), 64)
+				if err != nil {
+					continue
+				}
+				v = f
+			}
+			if n, ok := positiveJSONInt64(v); ok && n > best {
+				best, found = n, true
+			}
+		}
+	}
+	return best, found
 }

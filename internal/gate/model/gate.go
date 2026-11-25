@@ -351,7 +351,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if modelName == "" {
 			modelName = reqModel
 		}
-		costMicro := max(EstimateMicroUSD(activeProvider, modelName, inTokens, outTokens, g.pricing), 0)
+		// Price with the admitted request model, the identity the reservation was
+		// sized for, so a reported model name cannot settle above the reserve.
+		costMicro := max(EstimateMicroUSD(activeProvider, reqModel, inTokens, outTokens, g.pricing), 0)
 		entry := domain.BudgetEntry{
 			TaskID:       lease.TaskID,
 			WorkloadName: lease.WorkloadName,
