@@ -106,12 +106,19 @@ func (cfg daemonConfig) hostHandler(next http.Handler, unixSocket bool) (http.Ha
 		return nil, err
 	}
 	councilGate, _ := councilproxy.GateAuthority(cfg.listenAddr)
+	limitedCouncilGate := councilproxy.WrapGateHandler(next, councilproxy.DefaultGateLimits())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, valid := hostAuthority(r.Host)
 		if valid && strings.HasPrefix(host, councilproxy.Authority+":") {
-			if !unixSocket && host == councilGate && councilproxy.AllowsGateRequest(r) {
-				next.ServeHTTP(w, r)
-				return
+			if !unixSocket && host == councilGate {
+				if councilproxy.IsPreflightRequest(r) {
+					councilproxy.HandleGatePreflight(w, r, councilGate)
+					return
+				}
+				if councilproxy.AllowsGateRequest(r) {
+					limitedCouncilGate.ServeHTTP(w, r)
+					return
+				}
 			}
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "council gate route is not allowed"})
 			return

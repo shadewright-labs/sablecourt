@@ -29,6 +29,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
@@ -222,9 +223,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
 	}
-	operatorToken, err := operatortoken.LoadOrCreate(dir)
+	operatorToken, err := initDaemonState(dir)
 	if err != nil {
-		return fmt.Errorf("initialize operator credential: %w", err)
+		return err
 	}
 	logger := telemetry.NewLogger()
 
@@ -575,19 +576,25 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return err
 	}
 	srv := &http.Server{
-		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	tcpLn, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen %q: %w", listenAddr, err)
+	}
+	limitedTCPLn := councilproxy.LimitListener(tcpLn, 256)
 
 	var unixSrv *http.Server
 	if socketPath != "" {
 		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			_ = limitedTCPLn.Close()
 			return fmt.Errorf("mkdir socket dir: %w", err)
 		}
 		_ = os.Remove(socketPath)
 		uln, err := net.Listen("unix", socketPath)
 		if err != nil {
+			_ = limitedTCPLn.Close()
 			return fmt.Errorf("listen unix socket %q: %w", socketPath, err)
 		}
 		_ = os.Chmod(socketPath, 0o600)
@@ -595,14 +602,14 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		unixSrv = &http.Server{Handler: unixMux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
-			_ = unixSrv.Serve(uln)
+			_ = unixSrv.Serve(councilproxy.LimitListener(uln, 256))
 		}()
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("sablecourtd listening", "addr", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(limitedTCPLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 		close(errCh)
@@ -619,6 +626,17 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func initDaemonState(dir string) (string, error) {
+	operatorToken, err := operatortoken.LoadOrCreate(dir)
+	if err != nil {
+		return "", fmt.Errorf("initialize operator credential: %w", err)
+	}
+	if err := councilproxy.SweepStaleSockets(councilproxy.SocketRoot(dir)); err != nil {
+		return "", fmt.Errorf("sweep stale council gate sockets: %w", err)
+	}
+	return operatorToken, nil
 }
 
 func shortDigest(s string) string {

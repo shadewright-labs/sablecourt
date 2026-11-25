@@ -8,9 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
-	"net/netip"
-	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,23 +17,49 @@ import (
 const (
 	cleanupTimeout           = 10 * time.Second
 	defaultHostGatewayTarget = "host-gateway"
+	BridgeGatewayModeIPv4    = "com.docker.network.bridge.gateway_mode_ipv4"
+	BridgeGatewayModeIPv6    = "com.docker.network.bridge.gateway_mode_ipv6"
+	GatewayModeIsolated      = "isolated"
 )
 
 // ResourceLabel marks each generated proxy and network with its own name.
 const ResourceLabel = "sablecourt.io/council-proxy"
 
-// Docker is implemented by the shared runtime. EgressGateway returns the egress
-// bridge's gateway IP when known, or an empty string when Docker exposes no local
-// bridge gateway. CreateProxy uses a local image ID, joins only InternalNetwork
-// initially, maps HostGateway to HostGatewayTarget, and sets no mounts or
-// published ports. ConnectProxyEgress joins Docker's egress bridge and gives it
-// default gateway priority. StartProxy returns success once the proxy listens on
-// the private network. Remove methods must verify the generated resource's
-// ownership label and treat an absent resource as success. Connection errors can
-// leave creations committed.
+type GateSocketProbe struct {
+	Name                string
+	ImageID             string
+	User                string
+	HostSocketPath      string
+	ContainerSocketPath string
+	ReadOnlyRootFS      bool
+	DropAllCapabilities bool
+	NoNewPrivileges     bool
+	Args                []string
+}
+
+type InternalNetworkSpec struct {
+	Name    string
+	Options map[string]string
+}
+
+type InternalNetworkInfo struct {
+	EngineVersion string
+	Driver        string
+	Internal      bool
+	Options       map[string]string
+	Subnets       []string
+	Gateways      []string
+}
+
+// Docker is implemented by the container runtime. ProbeGateSocket tests whether a
+// read-only, non-root container can connect to a daemon-owned Unix socket on the host.
+// CreateInternalNetwork creates an --internal bridge network with isolated gateway
+// options so harness containers cannot reach host listeners via the bridge gateway.
+// CreateProxy uses a local image ID, joins only InternalNetwork initially, mounts only
+// GateSocketHostPath when set (never into harness containers), and sets no published ports.
 type Docker interface {
-	EgressGateway(ctx context.Context) (string, error)
-	CreateInternalNetwork(ctx context.Context, name string) error
+	ProbeGateSocket(ctx context.Context, spec GateSocketProbe) error
+	CreateInternalNetwork(ctx context.Context, spec InternalNetworkSpec) (InternalNetworkInfo, error)
 	CreateProxy(ctx context.Context, spec ProxyContainer) error
 	ConnectProxyEgress(ctx context.Context, name string) error
 	StartProxy(ctx context.Context, name string) error
@@ -47,6 +71,8 @@ type ProxyContainer struct {
 	Name, InternalNetwork, ImageID string
 	User, HostGateway              string
 	HostGatewayTarget              string
+	GateSocketHostPath             string
+	GateSocketContainerPath        string
 	ReadOnlyRootFS                 bool
 	DropAllCapabilities            bool
 	NoNewPrivileges                bool
@@ -55,11 +81,10 @@ type ProxyContainer struct {
 
 type WorkloadEndpoint struct {
 	Network, ProxyURL, DataGateURL string
+	GateMode                       GateMode
 	proxyName                      string
 }
 
-// Env supplies proxy settings for a workload that joins Network alone and
-// starts with a clean environment.
 func (w WorkloadEndpoint) Env() []string {
 	if w.ProxyURL == "" {
 		return nil
@@ -80,108 +105,22 @@ type Session struct {
 	docker   Docker
 	network  string
 	proxy    string
-	bridge   *gateBridge
+	unixGate *unixGate
+	registry *Registry
+	gateAuth string
+	launchID string
 	endpoint WorkloadEndpoint
+	evidence LaunchEvidence
 }
 
-type gateBridge struct {
-	port      string
-	server    *http.Server
-	transport *http.Transport
-	done      chan struct{}
-}
-
-func (b *gateBridge) close() {
-	if b == nil {
-		return
-	}
-	_ = b.server.Close()
-	<-b.done
-	b.transport.CloseIdleConnections()
-}
-
-var (
-	isLocalHostIP = localHostInterfaceIP
-	listenBridge  = net.Listen
-)
-
-func localHostInterfaceIP(target netip.Addr) bool {
-	target = target.Unmap()
-	if !target.IsValid() || target.IsLoopback() || target.IsUnspecified() {
-		return false
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, addr := range addrs {
-		var ip net.IP
-		switch v := addr.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		}
-		if parsed, ok := netip.AddrFromSlice(ip); ok && parsed.Unmap() == target {
-			return true
-		}
-	}
-	return false
-}
-
-func startGateBridge(gateway netip.Addr, cfg Config) (*gateBridge, error) {
-	gate, err := GateAuthority(cfg.DaemonListen)
-	if err != nil {
-		return nil, err
-	}
-	digest, err := hex.DecodeString(cfg.LeaseSHA256)
-	if err != nil || len(digest) != sha256.Size {
-		return nil, errors.New("invalid council task lease digest")
-	}
-	ln, err := listenBridge("tcp", net.JoinHostPort(gateway.String(), "0"))
-	if err != nil {
-		return nil, fmt.Errorf("listen council gate bridge: %w", err)
-	}
-	_, port, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil || !validPort(port) {
-		_ = ln.Close()
-		return nil, errors.New("resolve council gate bridge port")
-	}
-	transport := newGateTransport()
-	reverse := newGateReverseProxy(&url.URL{Scheme: "http", Host: cfg.DaemonListen}, gate, transport)
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Host != gate || !AllowsGateRequest(r) || r.Header.Get("Upgrade") != "" {
-				http.Error(w, "council route refused", http.StatusForbidden)
-				return
-			}
-			if validLeaseHeader(r, digest) {
-				reverse.ServeHTTP(w, r)
-				return
-			}
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, "task lease required", http.StatusUnauthorized)
-		}),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       30 * time.Second,
-		MaxHeaderBytes:    32 << 10,
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = server.Serve(ln)
-	}()
-	return &gateBridge{port: port, server: server, transport: transport, done: done}, nil
-}
-
-// Provision builds a private network and one hardened proxy per launch. On
-// native Linux, where Docker's egress bridge gateway is a local host interface
-// and cannot reach a loopback-only daemon directly, Provision binds a scoped
-// per-session gate bridge on that gateway IP. A failed launch returns a session
-// only if cleanup must be retried.
+// Provision builds an isolated internal network and one hardened proxy per launch.
+// When a task lease is present, Provision probes whether a container can dial a
+// per-launch Unix socket on the host; when reachable it mounts that socket into the
+// proxy container only, and otherwise falls back to host-gateway with per-launch
+// preflight proof verification. A failed launch returns a session only if Docker
+// cleanup must be retried.
 func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (*Session, error) {
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validateProvision(); err != nil {
 		return nil, err
 	}
 	id, ok := strings.CutPrefix(imageID, "sha256:")
@@ -189,54 +128,88 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 	if !ok || err != nil || len(digest) != sha256.Size || strings.ToLower(id) != id {
 		return nil, errors.New("council proxy requires a local image ID")
 	}
-	gatewayText, err := docker.EgressGateway(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("inspect council egress gateway: %w", err)
-	}
-	hostGatewayTarget := defaultHostGatewayTarget
-	gatePort := cfg.GatePort
-	var bridge *gateBridge
-	if gatewayText != "" {
-		gw, err := netip.ParseAddr(strings.TrimSpace(gatewayText))
-		gw = gw.Unmap()
-		if err != nil || !gw.IsValid() || gw.IsLoopback() || gw.IsUnspecified() {
-			return nil, errors.New("invalid council egress gateway address")
-		}
-		if isLocalHostIP(gw) {
-			hostGatewayTarget = gw.String()
-			if cfg.LeaseSHA256 != "" {
-				bridge, err = startGateBridge(gw, cfg)
-				if err != nil {
-					return nil, err
-				}
-				gatePort = bridge.port
-			}
-		}
-	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		bridge.close()
 		return nil, fmt.Errorf("generate council proxy name: %w", err)
 	}
 	name := "sablecourt-council-" + hex.EncodeToString(nonce[:])
-	s := &Session{docker: docker, network: name + "-net", bridge: bridge}
-	if err := docker.CreateInternalNetwork(ctx, s.network); err != nil {
+	gateAuth, _ := GateAuthority(cfg.DaemonListen)
+	reg := cfg.Registry
+	if reg == nil {
+		reg = DefaultRegistry
+	}
+
+	mode := GateModeNone
+	var ug *unixGate
+	var gateSecret [32]byte
+	var registeredLaunch string
+	if cfg.LeaseSHA256 != "" {
+		useUnix, err := probeUnixSocketMode(ctx, docker, imageID, name, cfg.SocketRoot)
+		if err != nil {
+			return nil, fmt.Errorf("probe council gate socket: %w", err)
+		}
+		if useUnix {
+			ug, err = startUnixGate(cfg.SocketRoot, cfg, DefaultGateLimits())
+			if err != nil {
+				return nil, err
+			}
+			mode = GateModeUnixSocket
+		} else {
+			if _, err := rand.Read(gateSecret[:]); err != nil {
+				return nil, fmt.Errorf("generate council gate secret: %w", err)
+			}
+			reg.Register(gateAuth, name, gateSecret)
+			registeredLaunch = name
+			mode = GateModeHostGateway
+		}
+	}
+
+	s := &Session{
+		docker:   docker,
+		network:  name + "-net",
+		unixGate: ug,
+		registry: reg,
+		gateAuth: gateAuth,
+		launchID: registeredLaunch,
+	}
+	netInfo, err := docker.CreateInternalNetwork(ctx, InternalNetworkSpec{
+		Name: s.network,
+		Options: map[string]string{
+			BridgeGatewayModeIPv4: GatewayModeIsolated,
+			BridgeGatewayModeIPv6: GatewayModeIsolated,
+		},
+	})
+	if err != nil {
 		return s.rollback(ctx, fmt.Errorf("create council network: %w", err))
 	}
+	if err := validateIsolatedNetwork(netInfo); err != nil {
+		return s.rollback(ctx, err)
+	}
+
 	s.proxy = name
 	args := []string{
 		"-harness", cfg.Harness, "-daemon-listen", cfg.DaemonListen,
 		"-lease-sha256", cfg.LeaseSHA256, "-listen-name", name,
 	}
-	if gatePort != "" {
-		args = append(args, "-gate-port", gatePort)
-	}
-	if err := docker.CreateProxy(ctx, ProxyContainer{
+	spec := ProxyContainer{
 		Name: name, InternalNetwork: s.network, ImageID: imageID,
-		User: "10001:10001", HostGateway: DockerHostGateway, HostGatewayTarget: hostGatewayTarget,
+		User:           "10001:10001",
 		ReadOnlyRootFS: true, DropAllCapabilities: true, NoNewPrivileges: true,
-		Args: args,
-	}); err != nil {
+	}
+	switch mode {
+	case GateModeUnixSocket:
+		spec.GateSocketHostPath = ug.sockPath
+		spec.GateSocketContainerPath = ContainerGateSocket
+		spec.Args = append(args, "-gate-socket", ContainerGateSocket)
+	case GateModeHostGateway:
+		spec.HostGateway = DockerHostGateway
+		spec.HostGatewayTarget = defaultHostGatewayTarget
+		spec.Args = append(args, "-gate-launch-id", name, "-gate-secret", hex.EncodeToString(gateSecret[:]))
+	default:
+		spec.Args = args
+	}
+
+	if err := docker.CreateProxy(ctx, spec); err != nil {
 		return s.rollback(ctx, fmt.Errorf("create council proxy: %w", err))
 	}
 	if err := docker.ConnectProxyEgress(ctx, name); err != nil {
@@ -246,10 +219,19 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		return s.rollback(ctx, fmt.Errorf("start council proxy: %w", err))
 	}
 	s.endpoint = WorkloadEndpoint{
-		Network: s.network, ProxyURL: "http://" + net.JoinHostPort(name, Port), proxyName: name,
+		Network:   s.network,
+		ProxyURL:  "http://" + net.JoinHostPort(name, Port),
+		GateMode:  mode,
+		proxyName: name,
 	}
 	if cfg.LeaseSHA256 != "" {
 		s.endpoint.DataGateURL = s.endpoint.ProxyURL + "/gate/mcp"
+	}
+	s.evidence = LaunchEvidence{
+		Network:      s.network,
+		Proxy:        name,
+		ProxyImageID: imageID,
+		GateMode:     mode,
 	}
 	return s, nil
 }
@@ -260,6 +242,12 @@ func (s *Session) Workload() WorkloadEndpoint {
 	return s.endpoint
 }
 
+func (s *Session) Evidence() LaunchEvidence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evidence
+}
+
 func (s *Session) rollback(ctx context.Context, launchErr error) (*Session, error) {
 	if err := s.Close(ctx); err != nil {
 		return s, errors.Join(launchErr, err)
@@ -267,30 +255,84 @@ func (s *Session) rollback(ctx context.Context, launchErr error) (*Session, erro
 	return nil, launchErr
 }
 
-// Close closes any host-side gate bridge and removes the proxy before its
-// network. Stop the workload before closing its session. Cleanup can be retried
-// after a failed removal.
+// Close tears down the per-launch Unix socket or preflight secret first so any
+// surviving proxy immediately fails closed, then removes the proxy before its network.
 func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.endpoint = WorkloadEndpoint{}
-	if s.bridge != nil {
-		s.bridge.close()
-		s.bridge = nil
+	s.evidence = LaunchEvidence{}
+	var sockErr error
+	if s.unixGate != nil {
+		sockErr = s.unixGate.close()
+		s.unixGate = nil
+	}
+	if s.launchID != "" && s.registry != nil {
+		s.registry.Unregister(s.gateAuth, s.launchID)
+		s.launchID = ""
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	if s.proxy != "" {
 		if err := s.docker.RemoveProxy(ctx, s.proxy); err != nil {
-			return fmt.Errorf("remove council proxy: %w", err)
+			return errors.Join(sockErr, fmt.Errorf("remove council proxy: %w", err))
 		}
 		s.proxy = ""
 	}
 	if s.network != "" {
 		if err := s.docker.RemoveInternalNetwork(ctx, s.network); err != nil {
-			return fmt.Errorf("remove council network: %w", err)
+			return errors.Join(sockErr, fmt.Errorf("remove council network: %w", err))
 		}
 		s.network = ""
 	}
+	return sockErr
+}
+
+func validateIsolatedNetwork(info InternalNetworkInfo) error {
+	if !supportsIsolatedGateway(info.EngineVersion) {
+		return fmt.Errorf("docker engine %q does not support isolated internal network gateway mode (requires Docker Engine 27.1+)", strings.TrimSpace(info.EngineVersion))
+	}
+	if info.Driver != "bridge" || !info.Internal {
+		return errors.New("council network must be an internal bridge network")
+	}
+	if info.Options[BridgeGatewayModeIPv4] != GatewayModeIsolated ||
+		info.Options[BridgeGatewayModeIPv6] != GatewayModeIsolated {
+		return errors.New("docker engine did not apply isolated gateway mode on council internal network (requires Docker Engine 27.1+)")
+	}
+	if len(info.Subnets) == 0 {
+		return errors.New("council internal network has no isolated subnet")
+	}
+	for _, gw := range info.Gateways {
+		if strings.TrimSpace(gw) != "" {
+			return errors.New("docker engine assigned a gateway to an isolated council internal network (requires Docker Engine 27.1+)")
+		}
+	}
 	return nil
+}
+
+func supportsIsolatedGateway(version string) bool {
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := parseVersionNumber(parts[0], true)
+	if err != nil {
+		return false
+	}
+	minor, err := parseVersionNumber(parts[1], false)
+	if err != nil {
+		return false
+	}
+	return major > 27 || (major == 27 && minor >= 1)
+}
+
+func parseVersionNumber(part string, exact bool) (int, error) {
+	end := 0
+	for end < len(part) && part[end] >= '0' && part[end] <= '9' {
+		end++
+	}
+	if end == 0 || (exact && end != len(part)) {
+		return 0, errors.New("invalid version component")
+	}
+	return strconv.Atoi(part[:end])
 }

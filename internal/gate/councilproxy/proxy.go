@@ -3,6 +3,7 @@ package councilproxy
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -28,13 +29,15 @@ const (
 )
 
 // Config comes from the daemon at launch. An empty digest permits provider login only.
-// GatePort optionally overrides the host-gateway upstream port when a local bridge
-// forwards to the loopback daemon; the Host authority still comes from DaemonListen.
 type Config struct {
 	Harness      string
 	DaemonListen string
-	GatePort     string
 	LeaseSHA256  string
+	GateSocket   string
+	GateLaunchID string
+	GateSecret   string
+	SocketRoot   string
+	Registry     *Registry
 }
 
 func validPort(port string) bool {
@@ -55,7 +58,7 @@ func GateAuthority(listen string) (string, error) {
 	return net.JoinHostPort(Authority, port), nil
 }
 
-// AllowsGateRequest is shared by the proxy and the daemon's council virtual host.
+// AllowsGateRequest is shared by the proxy, per-launch Unix socket, and daemon council virtual host.
 func AllowsGateRequest(r *http.Request) bool {
 	u := r.URL
 	if u == nil || u.IsAbs() || u.Host != "" || u.Opaque != "" || u.User != nil ||
@@ -109,6 +112,18 @@ func newGateTransport() *http.Transport {
 	}
 }
 
+func newUnixGateTransport(socketPath string) *http.Transport {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          8,
+	}
+}
+
 func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTripper) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: transport,
@@ -116,6 +131,9 @@ func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTri
 			p.SetURL(upstream)
 			p.Out.Host = gate
 			p.Out.Header.Del("Cookie")
+			p.Out.Header.Del(LaunchHeader)
+			p.Out.Header.Del(ChallengeHeader)
+			p.Out.Header.Del(ProofHeader)
 		},
 		ModifyResponse: func(r *http.Response) error {
 			if r.StatusCode >= http.StatusMultipleChoices && r.StatusCode < http.StatusBadRequest {
@@ -123,6 +141,7 @@ func newGateReverseProxy(upstream *url.URL, gate string, transport http.RoundTri
 			}
 			r.Header.Del("Location")
 			r.Header.Del("Set-Cookie")
+			r.Header.Del(ProofHeader)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
@@ -147,55 +166,165 @@ func validLeaseHeader(r *http.Request, digest []byte) bool {
 	return subtle.ConstantTimeCompare(got[:], digest) == 1
 }
 
+// gateRouteHandler enforces the shared route and bearer boundary on both the proxy and per-launch Unix socket.
+func gateRouteHandler(expectedHost string, digest []byte, forward http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (expectedHost != "" && r.Host != expectedHost) || !AllowsGateRequest(r) || r.Header.Get("Upgrade") != "" {
+			http.Error(w, "council route refused", http.StatusForbidden)
+			return
+		}
+		if validLeaseHeader(r, digest) {
+			forward.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "task lease required", http.StatusUnauthorized)
+	})
+}
+
+func verifyGateUpstream(ctx context.Context, transport http.RoundTripper, upstream *url.URL, gate, launchID string, secret [32]byte) error {
+	var challengeRaw [16]byte
+	if _, err := rand.Read(challengeRaw[:]); err != nil {
+		return err
+	}
+	challenge := hex.EncodeToString(challengeRaw[:])
+	preCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
+	target := upstream.ResolveReference(&url.URL{Path: PreflightPath})
+	req, err := http.NewRequestWithContext(preCtx, http.MethodHead, target.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Host = gate
+	req.Header.Set(LaunchHeader, launchID)
+	req.Header.Set(ChallengeHeader, challenge)
+
+	res, err := transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	if res.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+		_ = res.Body.Close()
+	}
+	if res.StatusCode != http.StatusNoContent {
+		return errors.New("upstream preflight unexpected status")
+	}
+	proofs := res.Header.Values(ProofHeader)
+	if len(proofs) != 1 {
+		return errors.New("upstream preflight missing single proof header")
+	}
+	want := ComputeGateProof(secret, gate, launchID, challenge)
+	if subtle.ConstantTimeCompare([]byte(proofs[0]), []byte(want)) != 1 {
+		return errors.New("upstream preflight proof mismatch")
+	}
+	return nil
+}
+
 // New constructs the gate and HTTPS CONNECT proxy without consulting environment proxy settings.
 func New(cfg Config) (http.Handler, error) {
 	dialer := &net.Dialer{Timeout: dialTimeout}
-	return newProxy(cfg, newGateTransport(), net.DefaultResolver.LookupNetIP, dialer.DialContext)
+	var transport http.RoundTripper
+	if cfg.GateSocket != "" {
+		transport = newUnixGateTransport(cfg.GateSocket)
+	} else {
+		transport = newGateTransport()
+	}
+	return newProxy(cfg, transport, net.DefaultResolver.LookupNetIP, dialer.DialContext)
 }
 
 func newProxy(cfg Config, transport http.RoundTripper, lookup lookupIP, dial dialContext) (http.Handler, error) {
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validateProxy(); err != nil {
 		return nil, err
 	}
 	gate, _ := GateAuthority(cfg.DaemonListen)
 	_, port, _ := net.SplitHostPort(gate)
-	if cfg.GatePort != "" {
-		port = cfg.GatePort
-	}
 	digest, _ := hex.DecodeString(cfg.LeaseSHA256)
-	upstream := &url.URL{Scheme: "http", Host: net.JoinHostPort(DockerHostGateway, port)}
-	reverse := newGateReverseProxy(upstream, gate, transport)
+
+	var forward http.Handler = http.NotFoundHandler()
+	switch {
+	case cfg.GateSocket != "":
+		if transport == nil {
+			transport = newUnixGateTransport(cfg.GateSocket)
+		}
+		forward = newGateReverseProxy(&url.URL{Scheme: "http", Host: "unix"}, gate, transport)
+	case cfg.GateSecret != "":
+		if transport == nil {
+			transport = newGateTransport()
+		}
+		rawSecret, _ := hex.DecodeString(cfg.GateSecret)
+		var secret [32]byte
+		copy(secret[:], rawSecret)
+		upstream := &url.URL{Scheme: "http", Host: net.JoinHostPort(DockerHostGateway, port)}
+		reverse := newGateReverseProxy(upstream, gate, transport)
+		launchID := cfg.GateLaunchID
+		forward = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := verifyGateUpstream(r.Context(), transport, upstream, gate, launchID, secret); err != nil {
+				http.Error(w, "council gate unavailable", http.StatusBadGateway)
+				return
+			}
+			reverse.ServeHTTP(w, r)
+		})
+	}
+
+	gateHandler := gateRouteHandler("", digest, forward)
 	hosts := providerHosts[cfg.Harness]
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
 			providerConnect(w, r, hosts, lookup, dial)
 			return
 		}
-		if !AllowsGateRequest(r) || r.Header.Get("Upgrade") != "" {
-			http.Error(w, "council route refused", http.StatusForbidden)
-			return
-		}
-		if validLeaseHeader(r, digest) {
-			reverse.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		http.Error(w, "task lease required", http.StatusUnauthorized)
+		gateHandler.ServeHTTP(w, r)
 	}), nil
 }
 
-func (cfg Config) validate() error {
+func (cfg Config) validateCommon() error {
 	if _, ok := providerHosts[cfg.Harness]; !ok {
 		return errors.New("unknown council harness")
 	}
 	if _, err := GateAuthority(cfg.DaemonListen); err != nil {
 		return err
 	}
-	if cfg.GatePort != "" && !validPort(cfg.GatePort) {
-		return errors.New("invalid council gate port")
-	}
 	if digest, err := hex.DecodeString(cfg.LeaseSHA256); err != nil || (cfg.LeaseSHA256 != "" && len(digest) != sha256.Size) {
 		return errors.New("invalid council task lease digest")
+	}
+	return nil
+}
+
+func (cfg Config) validateProvision() error {
+	if err := cfg.validateCommon(); err != nil {
+		return err
+	}
+	if cfg.GateSocket != "" || cfg.GateLaunchID != "" || cfg.GateSecret != "" {
+		return errors.New("provision selects gate transport parameters automatically")
+	}
+	return nil
+}
+
+func (cfg Config) validateProxy() error {
+	if err := cfg.validateCommon(); err != nil {
+		return err
+	}
+	if cfg.LeaseSHA256 == "" {
+		if cfg.GateSocket != "" || cfg.GateLaunchID != "" || cfg.GateSecret != "" {
+			return errors.New("login proxy must not carry gate upstream credentials or socket")
+		}
+		return nil
+	}
+	hasSocket := cfg.GateSocket != ""
+	hasGatewayAuth := cfg.GateLaunchID != "" || cfg.GateSecret != ""
+	if hasSocket == hasGatewayAuth {
+		return errors.New("council gate proxy requires either a unix socket or upstream preflight credentials")
+	}
+	if hasSocket {
+		if !strings.HasPrefix(cfg.GateSocket, "/") || path.Clean(cfg.GateSocket) != cfg.GateSocket || strings.ContainsRune(cfg.GateSocket, 0) {
+			return errors.New("council gate socket must be a clean absolute path")
+		}
+		return nil
+	}
+	if !validLaunchID(cfg.GateLaunchID) || !validHexBytes(cfg.GateSecret, 32, 32) {
+		return errors.New("invalid council gate preflight credentials")
 	}
 	return nil
 }
