@@ -41,6 +41,9 @@ func TestEstimateRequestReserveBillableFields(t *testing.T) {
 		{name: "zero n ignored", body: `{"max_tokens":3,"n":0}`, wantIn: 1, wantOut: 3},
 		{name: "negative n ignored", body: `{"max_tokens":3,"n":-2}`, wantIn: 1, wantOut: 3},
 		{name: "non numeric n ignored", body: `{"max_tokens":3,"n":"2"}`, wantIn: 1, wantOut: 3},
+		{name: "gemini candidate count scales output", body: `{"generationConfig":{"maxOutputTokens":3,"candidateCount":2}}`, wantIn: 1, wantOut: 6},
+		{name: "gemini candidate count of one", body: `{"generationConfig":{"maxOutputTokens":3,"candidateCount":1}}`, wantIn: 1, wantOut: 3},
+		{name: "gemini candidate count saturates", body: `{"generationConfig":{"maxOutputTokens":9e18,"candidateCount":8}}`, wantIn: 1, wantOut: maxReservedTokens},
 		{name: "n product saturates", body: `{"max_tokens":9e18,"n":128}`, wantIn: 1, wantOut: maxReservedTokens},
 		{name: "huge limit is clamped", body: `{"max_tokens":1e300}`, wantIn: 1, wantOut: maxReservedTokens},
 	}
