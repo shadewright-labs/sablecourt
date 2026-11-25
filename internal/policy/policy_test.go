@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -122,4 +123,76 @@ func TestInFlightSuccessDoesNotCloseAnOpenBreaker(t *testing.T) {
 	if breaker.IsOpen("k") {
 		t.Fatal("breaker still open after its cool-down")
 	}
+}
+
+// Medium 6: after the cool-down exactly one probe is admitted. Its failure
+// opens the breaker again; its success closes it.
+func TestHalfOpenAdmitsOneProbe(t *testing.T) {
+	breaker := NewCircuitBreaker(2, time.Minute)
+	now := time.Now().UTC()
+	breaker.now = func() time.Time { return now }
+	trip := func() {
+		breaker.RecordFailure("k")
+		breaker.RecordFailure("k")
+	}
+	trip()
+	if admit(breaker, "k") {
+		t.Fatal("open breaker admitted a call")
+	}
+	now = now.Add(2 * time.Minute)
+	if !admit(breaker, "k") {
+		t.Fatal("no probe admitted after the cool-down")
+	}
+	if admit(breaker, "k") {
+		t.Fatal("a second call admitted while the probe is in flight")
+	}
+	breaker.RecordFailure("k")
+	if admit(breaker, "k") {
+		t.Fatal("a failed probe must open the breaker again")
+	}
+	now = now.Add(2 * time.Minute)
+	if !admit(breaker, "k") {
+		t.Fatal("no probe after the second cool-down")
+	}
+	breaker.RecordSuccess("k")
+	for i := 0; i < 3; i++ {
+		if !admit(breaker, "k") {
+			t.Fatal("a successful probe must close the breaker")
+		}
+	}
+	// A probe that ends without an outcome (refused input, an approval
+	// request) gives the slot back.
+	trip()
+	now = now.Add(2 * time.Minute)
+	if !admit(breaker, "k") {
+		t.Fatal("no probe")
+	}
+	breaker.Release("k")
+	if !admit(breaker, "k") {
+		t.Fatal("released probe slot not given to the next call")
+	}
+}
+
+// Medium 6: the per-workload state is bounded. Pruning drops the entries of
+// workloads no longer loaded, and the map never grows past its cap with closed
+// entries.
+func TestBreakerStateIsBounded(t *testing.T) {
+	breaker := NewCircuitBreaker(3, time.Minute)
+	breaker.RecordFailure(BreakerKey("action:git.open_pr", "gone"))
+	breaker.RecordFailure(BreakerKey("action:git.open_pr", "kept"))
+	breaker.Prune(func(workload string) bool { return workload == "kept" })
+	if n := breaker.Tracked(); n != 1 {
+		t.Fatalf("%d entries after prune, want 1", n)
+	}
+	for i := 0; i < maxBreakerKeys+100; i++ {
+		breaker.RecordFailure(BreakerKey("action:git.open_pr", "w"+strconv.Itoa(i)))
+	}
+	if n := breaker.Tracked(); n > maxBreakerKeys {
+		t.Fatalf("%d entries, cap %d", n, maxBreakerKeys)
+	}
+}
+
+func admit(cb *CircuitBreaker, key string) bool {
+	ok, _ := cb.Admit(key)
+	return ok
 }

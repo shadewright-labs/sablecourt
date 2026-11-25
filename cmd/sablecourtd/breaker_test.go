@@ -114,3 +114,34 @@ func TestDaemonBreakerSharedByPolicyAndGateAcrossReload(t *testing.T) {
 		t.Fatalf("action ran %d times, want 3", calls)
 	}
 }
+
+// Medium 6: a reload drops the breaker state of workloads no longer declared.
+func TestReloadPrunesBreakerStateOfRemovedWorkloads(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	manifests := filepath.Join(dir, "sablecourt.yaml")
+	if err := os.WriteFile(manifests, []byte(breakerManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(filepath.Join(dir, "sablecourt.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	loader := newPolicyLoader(st, manifests)
+	_, pol, err := loader.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol.RecordOutcome("action:git.open_pr", "pr-agent", true)
+	pol.RecordOutcome("action:git.open_pr", "removed-agent", true)
+	if _, _, err := loader.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := loader.breaker.Tracked(); n != 1 {
+		t.Fatalf("%d breaker entries after reload, want 1 (pr-agent only)", n)
+	}
+}

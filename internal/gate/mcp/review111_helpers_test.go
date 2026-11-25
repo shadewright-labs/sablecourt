@@ -71,6 +71,7 @@ type typedGateOptions struct {
 	workloads []string
 	wrapStore func(store.Store) store.Store
 	clock     *atomic.Pointer[time.Time]
+	opener    PROpener // replaces the recording opener when set
 }
 
 type typedGate struct {
@@ -156,7 +157,11 @@ func setupTypedGate(t *testing.T, opts typedGateOptions) *typedGate {
 	engine := policy.NewEngine([]domain.Policy{pol}, breaker)
 	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue, Now: now})
 	pr := &recordingPROpener{}
-	binding := RegisterBuiltinGitOps(gate, repo, pr)
+	var opener PROpener = pr
+	if opts.opener != nil {
+		opener = opts.opener
+	}
+	binding := RegisterBuiltinGitOps(gate, repo, opener)
 	return &typedGate{gate: gate, st: st, dbPath: dbPath, queue: queue, approver: approver, pr: pr, repo: repo, tokens: tokens, breaker: breaker, binding: binding, bundle: bundle, policy: engine}
 }
 

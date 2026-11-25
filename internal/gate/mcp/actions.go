@@ -112,7 +112,7 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("github API returned HTTP %d", resp.StatusCode)
+		return "", classifyUpstreamStatus(resp.StatusCode)
 	}
 	var out struct {
 		HTMLURL string `json:"html_url"`
@@ -121,6 +121,30 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 		return "", err
 	}
 	return out.HTMLURL, nil
+}
+
+// errUpstreamRejected marks an upstream 4xx answer caused by the request
+// itself (for example 422 for a head branch that does not exist). It is not a
+// failure of the dependency, so the breaker does not count it.
+var errUpstreamRejected = errors.New("upstream rejected the request")
+
+// errCheckoutUnreadable marks a repo root whose GitHub origin cannot be read:
+// a failure of the daemon's own checkout, which the breaker counts.
+var errCheckoutUnreadable = errors.New("repo root origin unreadable")
+
+// classifyUpstreamStatus turns a non-2xx GitHub answer into an error. 401, 403
+// and 429 mean the gate's own token or quota is failing, and 5xx (or anything
+// else outside 4xx) means GitHub is: those count on the breaker. Any other 4xx
+// is the request's doing and is wrapped in errUpstreamRejected.
+func classifyUpstreamStatus(code int) error {
+	switch {
+	case code == http.StatusUnauthorized, code == http.StatusForbidden, code == http.StatusTooManyRequests:
+		return fmt.Errorf("github API returned HTTP %d", code)
+	case code >= 400 && code < 500:
+		return fmt.Errorf("%w: github API returned HTTP %d", errUpstreamRejected, code)
+	default:
+		return fmt.Errorf("github API returned HTTP %d", code)
+	}
 }
 
 // RepoBinding holds the GitHub repository the GitOps actions may target: the
@@ -219,6 +243,9 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) *RepoBin
 
 	RegisterTypedAction(g, "git.open_pr", validateOpenPR, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
 		if err := checkOpenPRTarget(ctx, repoRoot, g.snapshotFromContext(ctx).allowedRepo, in.Owner, in.Repo); err != nil {
+			if errors.Is(err, errCheckoutUnreadable) {
+				return nil, err // the daemon's checkout fails: counts on the breaker
+			}
 			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
 		}
 		if prOpener == nil {
@@ -339,11 +366,11 @@ func readGitHubOrigin(ctx context.Context, repoRoot string) (owner, repo string,
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
 	if err != nil {
-		return "", "", errors.New("repo root has no origin remote for git.open_pr")
+		return "", "", fmt.Errorf("%w: repo root has no origin remote for git.open_pr", errCheckoutUnreadable)
 	}
 	owner, repo, ok := parseGitHubRemote(strings.TrimSpace(string(out)))
 	if !ok {
-		return "", "", errors.New("origin remote of the repo root is not a GitHub repository")
+		return "", "", fmt.Errorf("%w: origin remote of the repo root is not a GitHub repository", errCheckoutUnreadable)
 	}
 	return owner, repo, nil
 }

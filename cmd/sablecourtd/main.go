@@ -1904,6 +1904,7 @@ func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
 
 func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine, error) {
 	if l.manifestsPath == "" {
+		l.breaker.Prune(func(string) bool { return false })
 		return nil, policy.NewEngine(nil, l.breaker), nil
 	}
 	loaded, err := config.LoadPath(l.manifestsPath)
@@ -1929,5 +1930,11 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	for _, p := range loaded.Policies {
 		policies = append(policies, p)
 	}
+	// Breaker state of workloads no longer declared is dropped, so the map
+	// stays bounded by the loaded manifests.
+	l.breaker.Prune(func(workload string) bool {
+		_, ok := loaded.Workloads[workload]
+		return ok
+	})
 	return loaded, policy.NewEngine(policies, l.breaker), nil
 }

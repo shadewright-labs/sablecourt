@@ -355,6 +355,16 @@ func (g *Gate) ActionHandler() http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy denied: " + decision.Reason})
 			return
 		}
+		// A call admitted as the breaker's probe either records an outcome
+		// below or gives the probe slot back when it ends without one.
+		outcomeRecorded := false
+		if decision.Probe {
+			defer func() {
+				if !outcomeRecorded {
+					snap.policy.ReleaseProbe(capability, wlName)
+				}
+			}()
+		}
 
 		// One strict decode into the action's typed value. From here on the
 		// caller's bytes are not used: the digest, the dialog (through the
@@ -457,15 +467,26 @@ func (g *Gate) ActionHandler() http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
+		if errors.Is(err, errUpstreamRejected) {
+			// The upstream refused this request (a 4xx other than 401, 403 or
+			// 429): the request's doing, not a failing dependency.
+			auditAction("error", map[string]any{"reason": "upstream_rejected_request", "error": redact.String(err.Error()), "approval_id": approvalUsed})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
+			return
+		}
 		if err != nil {
-			// A failure of the downstream system, recorded on this workload's
-			// breaker for the capability, which every later Evaluate checks.
+			// A failure of the downstream system (upstream 5xx, 401, 403, 429,
+			// a timeout, a connection error, an unreadable checkout), recorded
+			// on this workload's breaker for the capability, which every later
+			// Evaluate checks.
 			snap.policy.RecordOutcome(capability, wlName, true)
+			outcomeRecorded = true
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
 		snap.policy.RecordOutcome(capability, wlName, false)
+		outcomeRecorded = true
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
 		auditAction("allowed", map[string]any{"redaction_hits": red.Hits, "approval_id": approvalUsed})
