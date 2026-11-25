@@ -17,15 +17,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 const (
-	defaultCouncilRounds    = 2
-	maxCouncilQuestionBytes = 64 << 10
-	defaultCouncilPollEvery = 500 * time.Millisecond
+	defaultCouncilRounds         = 2
+	maxCouncilQuestionBytes      = 30 << 10
+	maxCouncilEncodedPacketBytes = 63 << 10
+	defaultCouncilPollEvery      = 500 * time.Millisecond
 )
 
 var defaultCouncilHarnesses = []string{"claude", "codex", "agy"}
@@ -381,7 +382,7 @@ func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, 
 }
 
 func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, harnesses []string, sequential bool) map[string]any {
-	redactedQuestion := redact.String(question)
+	redactedQuestion := store.RedactCouncilAnswer(question)
 	payload := map[string]any{
 		"title":      singleLineSummary(redactedQuestion, 120),
 		"decree":     redactedQuestion,
@@ -546,15 +547,28 @@ func findDigestRelic(relics []domain.ConclaveRelic) (domain.ConclaveRelic, bool)
 }
 
 func validateCouncilQuestion(raw string) (string, error) {
+	if strings.ContainsRune(raw, '\x00') {
+		return "", errors.New("question contains invalid NUL byte")
+	}
+	trimmedLine := strings.TrimRight(raw, "\r\n")
+	if len(trimmedLine) > maxCouncilQuestionBytes {
+		return "", errors.New("question exceeds 30 KiB")
+	}
 	q := strings.TrimSpace(raw)
 	if q == "" {
 		return "", errors.New("question is required")
 	}
-	if len(q) > maxCouncilQuestionBytes {
-		return "", errors.New("question exceeds 64 KiB")
+	redacted := store.RedactCouncilAnswer(q)
+	if len(redacted) > maxCouncilQuestionBytes {
+		return "", errors.New("question exceeds 30 KiB after redaction")
 	}
-	if strings.ContainsRune(q, '\x00') {
-		return "", errors.New("question contains invalid NUL byte")
+	packet, err := contextpack.AssembleCouncil("", redacted, nil, nil)
+	if err != nil {
+		return "", errors.New("question cannot be packed")
+	}
+	encoded, err := json.Marshal(packet.Markdown)
+	if err != nil || len(encoded) > maxCouncilEncodedPacketBytes {
+		return "", errors.New("question exceeds launch input budget")
 	}
 	return q, nil
 }
@@ -597,8 +611,8 @@ func parseCouncilHarnesses(raw string) ([]string, error) {
 }
 
 func validateCouncilHarnessSlice(parts []string) ([]string, error) {
-	if len(parts) == 0 {
-		return nil, errors.New("at least one harness is required")
+	if len(parts) != len(defaultCouncilHarnesses) {
+		return nil, errors.New("council panel requires claude, codex, and agy")
 	}
 	seen := make(map[string]bool, len(parts))
 	out := make([]string, 0, len(parts))

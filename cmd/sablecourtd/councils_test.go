@@ -62,14 +62,16 @@ func TestCouncilOpenRefusals(t *testing.T) {
 		{name: "fractional ceiling", body: valid + `,"rounds":1.5`, want: 400, message: "JSON"},
 		{name: "wrong ceiling type", body: valid + `,"starts":"2"`, want: 400, message: "JSON"},
 		{name: "blank repo", body: strings.Replace(valid, strconv.Quote(repo), `""`, 1), want: 400, message: "repo"},
-		{name: "missing ref", body: strings.TrimSuffix(valid, `,"ref":"HEAD"`), want: 400, message: "ref"},
+		{name: "explicit live false without ref", body: strings.TrimSuffix(valid, `,"ref":"HEAD"`) + `,"live":false`, want: 400, message: "ref"},
 		{name: "blank ref", body: strings.Replace(valid, "HEAD", " ", 1), want: 400, message: "ref"},
 		{name: "invalid ref", body: strings.Replace(valid, "HEAD", "missing", 1), want: 400, message: "ref"},
 		{name: "qualified branch cannot resolve as tag", body: strings.Replace(valid, "HEAD", "refs/heads/ghost", 1), want: 400, message: "ref"},
 		{name: "git revision expression", body: strings.Replace(valid, "HEAD", "HEAD^{commit}", 1), want: 400, message: "ref"},
-		{name: "live checkout", body: strings.TrimSuffix(valid, `,"ref":"HEAD"`) + `,"live":true`, want: 400, message: "live"},
 		{name: "ref and live", body: valid + `,"live":true`, want: 400, message: "live"},
-		{name: "writer checkout", body: valid + `,"writer":"claude"`, want: 400, message: "writer"},
+		{name: "writer and live", body: strings.TrimSuffix(valid, `,"ref":"HEAD"`) + `,"live":true,"writer":"claude"`, want: 400, message: "live"},
+		{name: "blank writer", body: valid + `,"writer":" "`, want: 400, message: "writer"},
+		{name: "unknown writer", body: valid + `,"writer":"other"`, want: 400, message: "writer"},
+		{name: "blank ref with writer", body: strings.Replace(valid, "HEAD", " ", 1) + `,"writer":"claude"`, want: 400, message: "ref"},
 		{name: "empty panel", body: valid + `,"with":[]`, want: 400, message: "panel"},
 		{name: "null panel member", body: valid + `,"with":["claude","codex",null]`, want: 400, message: "panel"},
 		{name: "partial panel", body: valid + `,"with":["claude","codex"]`, want: 400, message: "panel"},
@@ -149,17 +151,26 @@ func TestCouncilOpenRefusals(t *testing.T) {
 
 func TestCouncilOpenPersistsPolicy(t *testing.T) {
 	repo, _, token := councilTestInputs(t)
+	head := councilTestGit(t, repo, "rev-parse", "HEAD")
 	for _, tc := range []struct {
-		name, fields   string
-		rounds, starts int
-		duration       time.Duration
-		roles          string
-		sequential     bool
+		name, bodyExtra string
+		omitRef         bool
+		rounds, starts  int
+		duration        time.Duration
+		roles           string
+		sequential      bool
+		wantRef         string
+		wantCommit      string
+		wantWriter      string
 	}{
-		{"defaults", "", 2, 6, 15 * time.Minute, "claude,codex,agy", false},
-		{"client fields", `,"title":"Review this","decree":"Review this","rounds":1,"starts":3,"durationSeconds":7,"with":["agy","claude","codex"],"sequential":true`, 1, 3, 7 * time.Second, "agy,claude,codex", true},
-		{"redaction", `,"title":"-----BEGIN PRIVATE KEY----- concealed"`, 2, 6, 15 * time.Minute, "claude,codex,agy", false},
-		{"embedded credential", fmt.Sprintf(`,"title":%q`, "prefix"+token+"suffix"), 2, 6, 15 * time.Minute, "claude,codex,agy", false},
+		{name: "defaults", rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
+		{name: "default live", omitRef: true, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy"},
+		{name: "explicit live", omitRef: true, bodyExtra: `,"live":true`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy"},
+		{name: "writer with ref", bodyExtra: `,"writer":"claude"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "claude"},
+		{name: "writer default HEAD", omitRef: true, bodyExtra: `,"writer":"codex"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "codex"},
+		{name: "client fields", bodyExtra: `,"title":"Review this","decree":"Review this","rounds":1,"starts":3,"durationSeconds":7,"with":["agy","claude","codex"],"sequential":true`, rounds: 1, starts: 3, duration: 7 * time.Second, roles: "agy,claude,codex", sequential: true, wantRef: "HEAD", wantCommit: head},
+		{name: "redaction", bodyExtra: `,"title":"-----BEGIN PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
+		{name: "embedded credential", bodyExtra: fmt.Sprintf(`,"title":%q`, "prefix"+token+"suffix"), rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := daemonTestStore(t)
@@ -171,7 +182,11 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 			if tc.name == "embedded credential" {
 				question += " prefix" + token + "suffix"
 			}
-			body := fmt.Sprintf(`{"question":%q,"repo":%q,"ref":"HEAD"%s}`, question, repo, tc.fields)
+			refField := `,"ref":"HEAD"`
+			if tc.omitRef {
+				refField = ""
+			}
+			body := fmt.Sprintf(`{"question":%q,"repo":%q%s%s}`, question, repo, refField, tc.bodyExtra)
 			room := councilTestOpen(t, h, token, body)
 			cs, _ := store.Councils(st)
 			snap, err := cs.CouncilSnapshot(t.Context(), room.ID)
@@ -179,7 +194,7 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			if snap.MaxRounds != tc.rounds || snap.MaxStarts != tc.starts || snap.Deadline.Sub(snap.Session.CreatedAt) != tc.duration ||
-				snap.Sequential != tc.sequential || snap.Checkout.Commit != councilTestGit(t, repo, "rev-parse", "HEAD") || snap.Checkout.Ref != "HEAD" {
+				snap.Sequential != tc.sequential || snap.Checkout.Commit != tc.wantCommit || snap.Checkout.Ref != tc.wantRef || snap.Checkout.WriterRole != tc.wantWriter {
 				t.Fatalf("policy or checkout differs from request: %+v", snap.CouncilPolicy)
 			}
 			var roles []string
@@ -417,7 +432,7 @@ type councilTestAdapter struct {
 	starts   int
 }
 
-func (a *councilTestAdapter) StartAtCommit(ctx context.Context, spec scruntime.LaunchSpec, commit string, readOnly bool) (scruntime.Handle, error) {
+func (a *councilTestAdapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scruntime.Handle, error) {
 	var input struct {
 		store.ConclaveAssignment
 		Mode   string `json:"checkoutMode"`
@@ -426,7 +441,7 @@ func (a *councilTestAdapter) StartAtCommit(ctx context.Context, spec scruntime.L
 	if err := json.Unmarshal([]byte(spec.InputJSON), &input); err != nil {
 		return scruntime.Handle{}, err
 	}
-	if !readOnly || a.commit != commit || input.Commit != commit || input.Mode != "ref" ||
+	if a.commit != input.Commit || input.Mode != "ref" ||
 		input.Role != spec.Workload.Metadata.Name || spec.ModelGateURL != "" || spec.ModelGateToken != "" || spec.DataGateURL == "" ||
 		!strings.HasPrefix(spec.TaskToken, model.TokenPrefix) {
 		return scruntime.Handle{}, errors.New("invalid council launch contract")
@@ -441,6 +456,10 @@ func (a *councilTestAdapter) StartAtCommit(ctx context.Context, spec scruntime.L
 	a.starts++
 	a.launches[spec.TaskID] = councilTestLaunch{input.Role, hash, input.Round}
 	return scruntime.Handle{AdapterName: "fixture", ExternalID: spec.TaskID}, nil
+}
+
+func (a *councilTestAdapter) StartAtCommit(context.Context, scruntime.LaunchSpec, string, bool) (scruntime.Handle, error) {
+	return scruntime.Handle{}, errors.New("StartAtCommit must not be called for council checkoutMode launches")
 }
 
 func (a *councilTestAdapter) Observe(context.Context, scruntime.Handle) (scruntime.Observation, error) {
@@ -529,5 +548,42 @@ func councilAssertEmpty(t *testing.T, st store.Store) {
 	tasks, taskErr := st.ListTasks(t.Context())
 	if roomErr != nil || taskErr != nil || len(rooms) != 0 || len(tasks) != 0 {
 		t.Fatalf("refusal left %d rooms and %d tasks, errors %v, %v", len(rooms), len(tasks), roomErr, taskErr)
+	}
+}
+
+func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
+	st := daemonTestStore(t)
+	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+	if err != nil {
+		t.Fatalf("ensureCouncilPanelWorkloads: %v", err)
+	}
+	for _, role := range councilPanel {
+		wl, ok := bundle.Workloads[role]
+		if !ok || wl.Metadata.Zone != domain.ZoneSandbox || wl.Spec.Class != domain.ClassCodingAgent ||
+			wl.Spec.Coding == nil || wl.Spec.Coding.Harness != role || wl.Spec.Coding.Sandbox != "seatbelt" ||
+			wl.Spec.Grants.ModelGate.Allowed {
+			t.Fatalf("unexpected built-in workload for %s: %+v", role, wl)
+		}
+	}
+	repo := t.TempDir()
+	adapters := map[domain.WorkloadClass]scruntime.Adapter{
+		domain.ClassCodingAgent: &councilTestAdapter{},
+	}
+	check := councilRuntimeChecker(func() *config.Bundle { return bundle }, adapters)
+	if err := check(t.Context(), store.CouncilCheckout{Source: repo}); err != nil {
+		t.Fatalf("expected built-in panel to pass runtime check: %v", err)
+	}
+
+	if err := councilRuntimeChecker(func() *config.Bundle { return bundle }, nil)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+		t.Fatal("expected missing coding adapter to fail runtime check")
+	}
+
+	// Model Gate grant on a council workload must fail closed.
+	badBundle := &config.Bundle{Workloads: maps.Clone(bundle.Workloads)}
+	wl := badBundle.Workloads["claude"]
+	wl.Spec.Grants.ModelGate.Allowed = true
+	badBundle.Workloads["claude"] = wl
+	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+		t.Fatal("expected Model Gate grant on council panel workload to fail runtime check")
 	}
 }

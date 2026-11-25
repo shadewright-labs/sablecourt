@@ -61,9 +61,24 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 			stdin:     "",
 		},
 		{
-			name:      "oversized_question",
+			name:      "oversized_question_over_daemon_budget",
 			harnesses: []string{"claude", "codex", "agy"},
-			args:      []string{"council", strings.Repeat("x", (64<<10)+1), "--repo", validRepo},
+			args:      []string{"council", strings.Repeat("x", (30<<10)+1), "--repo", validRepo},
+		},
+		{
+			name:      "escaped_question_over_launch_budget",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", strings.Repeat("<", 12<<10), "--repo", validRepo},
+		},
+		{
+			name:      "partial_panel_two",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,codex"},
+		},
+		{
+			name:      "partial_panel_one",
+			harnesses: []string{"claude", "codex", "agy"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude"},
 		},
 		{
 			name:      "missing_default_harness_agy",
@@ -73,7 +88,7 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 		{
 			name:      "unknown_harness",
 			harnesses: []string{"claude", "codex", "agy", "bash"},
-			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,bash"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,codex,bash"},
 		},
 		{
 			name:      "empty_with",
@@ -83,7 +98,7 @@ func TestCouncilValidationFailsClosed(t *testing.T) {
 		{
 			name:      "duplicate_with",
 			harnesses: []string{"claude", "codex", "agy"},
-			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,claude"},
+			args:      []string{"council", "How does auth work?", "--repo", validRepo, "--with", "claude,claude,agy"},
 		},
 		{
 			name:      "zero_rounds",
@@ -605,7 +620,7 @@ func TestCouncilStdinPromptUsesRecordedRoundsAndPrintsNoDigestRecorded(t *testin
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
 	root.SetIn(strings.NewReader("stdin question\n"))
-	root.SetArgs([]string{"--api", "http://unix", "council", "--repo", repoDir, "--with", "claude,codex", "--live"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "--repo", repoDir, "--with", "claude,codex,agy", "--live"})
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("council failed: %v (stderr=%s)", err, stderr.String())
@@ -829,7 +844,7 @@ func TestCouncilDigestRejectsParticipantRelicAndPrintsNoDigestRecorded(t *testin
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude,codex,agy"})
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("council failed: %v (stderr=%s)", err, stderr.String())
@@ -875,7 +890,7 @@ func TestCouncilClarificationQuestionsFailClosedWithoutInferredRoundOrFallbackDi
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude"})
+	root.SetArgs([]string{"--api", "http://unix", "council", "q", "--repo", repoDir, "--rounds", "1", "--with", "claude,codex,agy"})
 
 	err := root.ExecuteContext(context.Background())
 	if err == nil {

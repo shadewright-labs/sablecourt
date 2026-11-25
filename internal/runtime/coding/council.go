@@ -1887,12 +1887,25 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 	}
 
 	// Copy primary checkout's own info/exclude if present.
-	srcExclude := filepath.Join(owner.gitDir, "info", "exclude")
-	if data, _, err := readMetadata(srcExclude); err == nil {
-		if err := os.MkdirAll(filepath.Join(liveGitDir, "info"), 0o700); err != nil {
-			return err
+	srcInfoDir := filepath.Join(owner.gitDir, "info")
+	infoStat, err := os.Lstat(srcInfoDir)
+	if err == nil {
+		if !infoStat.IsDir() {
+			return errors.New("primary repository info directory is not a directory")
 		}
-		if err := os.WriteFile(filepath.Join(liveGitDir, "info", "exclude"), data, 0o600); err != nil {
+		srcExclude := filepath.Join(srcInfoDir, "exclude")
+		if _, err := os.Lstat(srcExclude); err == nil {
+			data, _, err := readMetadata(srcExclude)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(liveGitDir, "info"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(liveGitDir, "info", "exclude"), data, 0o600); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

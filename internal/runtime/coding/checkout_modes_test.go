@@ -1858,3 +1858,51 @@ func TestCouncilInterruptedReservationReconciled(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveModeWithoutGitInfoExclude(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	testGit(t, repo, "init", "--template=", "-q")
+	testWrite(t, repo, "README.md", "base\n", 0o600)
+	testGit(t, repo, "add", "README.md")
+	testGit(t, repo, "commit", "-qm", "init")
+	if _, err := os.Lstat(filepath.Join(repo, ".git", "info", "exclude")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no .git/info/exclude with --template=, got err=%v", err)
+	}
+
+	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	a.DryRun = true
+	spec := scruntime.LaunchSpec{
+		TaskID: "live-no-exclude",
+		Workload: domain.Workload{
+			Metadata: domain.ObjectMeta{Name: "claude", Zone: domain.ZoneSandbox},
+			Spec: domain.WorkloadSpec{
+				Class:  domain.ClassCodingAgent,
+				Coding: &domain.CodingConfig{RepoPath: repo, Harness: "claude", Sandbox: "seatbelt"},
+			},
+		},
+		InputJSON: mustMarshalInput(t, map[string]any{
+			"checkoutMode": "live",
+			"conclaveId":   "ccl-live-no-exclude",
+			"role":         "claude",
+			"prompt":       "review",
+		}),
+	}
+	h, err := a.Start(ctx, spec)
+	if err != nil {
+		t.Fatalf("Start live mode without .git/info/exclude failed: %v", err)
+	}
+	if err := a.Stop(ctx, h); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// A symlinked .git/info directory must still be rejected.
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(repo, ".git", "info")); err != nil {
+		t.Fatal(err)
+	}
+	spec.TaskID = "live-symlink-info"
+	if _, err := a.Start(ctx, spec); err == nil {
+		t.Fatal("expected symlinked .git/info to be rejected")
+	}
+}
