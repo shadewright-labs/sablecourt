@@ -747,3 +747,21 @@ fi
 	}
 	t.Fatal("verifier did not confirm a read-only checkout")
 }
+
+func TestSessionFilePermissions(t *testing.T) {
+	for _, name := range []string{sessionMarkerFile, sessionContextFile} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := writeSessionFile(dir, name, []byte("session")); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o400 {
+				t.Fatalf("permissions = %o, want 0400", got)
+			}
+		})
+	}
+}

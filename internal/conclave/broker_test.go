@@ -16,7 +16,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
+	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
@@ -437,5 +439,29 @@ func TestMCPPostUsesTaskAssignment(t *testing.T) {
 				t.Errorf("expected role %q, stored %+v, error %v", tc.want, msgs, err)
 			}
 		})
+	}
+}
+
+type wardSecretLookup struct {
+	secret.SecretStore
+	observed chan context.Context
+}
+
+func (s wardSecretLookup) Get(ctx context.Context, _ string) (string, error) {
+	s.observed <- ctx
+	return "", secret.ErrSecretNotFound
+}
+
+func TestWardNotificationCancellation(t *testing.T) {
+	t.Setenv("SABLECOURT_NOTIFY_WEBHOOK_URL", "")
+	lookup := wardSecretLookup{observed: make(chan context.Context, 1)}
+	broker := NewBroker(Options{Store: brokerTestStore(t), Notifier: notify.New(notify.Options{Secrets: lookup})})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	broker.recordWard(ctx, domain.ConclaveSession{ID: "room"}, "", "limit")
+	observed := <-lookup.observed
+	cancel()
+	if observed.Err() != context.Canceled {
+		t.Fatal("notification outlived the ward request")
 	}
 }
