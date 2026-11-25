@@ -4,7 +4,7 @@
 
 Status: built.
 
-The metric names and types are checked by `TestMetricsReferenceListsEveryMetric` in `internal/telemetry`, which `go test ./...` runs: it fails when a metric the handler writes is missing here, a listed metric is not written, or a type differs.
+The metric names, types and label names are checked by `TestMetricsReferenceListsEveryMetric` in `internal/telemetry`, which `go test ./...` runs: it fails when a metric the handler writes is missing here, a listed metric is not written, or a type or the set of label names differs. The label values in parentheses are not checked.
 
 ## Metrics
 
