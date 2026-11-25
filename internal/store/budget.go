@@ -195,6 +195,8 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 	if b.Spec.Daily.MaxCostUSD > 0 {
 		var dailyCost int64
 		if err := tx.QueryRowContext(ctx, `
+			-- A live reservation settles into the day it completes, so it counts
+			-- toward today even when it was admitted before midnight.
 			SELECT COALESCE(SUM(cost_microusd), 0)
 			FROM (
 				SELECT cost_microusd
@@ -204,7 +206,6 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 				SELECT cost_microusd
 				FROM budget_reservations
 				WHERE workload_name = $1
-				  AND rtrim(created_at, 'Z') >= rtrim($2, 'Z')
 				  AND rtrim(expires_at, 'Z') > rtrim($3, 'Z')
 			) d
 		`, req.WorkloadName, dayStartStr, nowStr).Scan(&dailyCost); err != nil {
