@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
@@ -15,11 +16,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -172,10 +175,73 @@ func decodeCouncilOpen(raw []byte, operatorToken string) (councilOpenRequest, er
 	return req, nil
 }
 
+func parseCouncilIdempotencyKey(r *http.Request, operatorToken string) (string, error) {
+	vals := r.Header.Values("Idempotency-Key")
+	if len(vals) == 0 {
+		return "", nil
+	}
+	if len(vals) > 1 {
+		return "", errors.New("multiple Idempotency-Key headers are not allowed")
+	}
+	key := strings.TrimSpace(vals[0])
+	if key == "" || len(key) > 256 {
+		return "", errors.New("invalid Idempotency-Key")
+	}
+	for _, ch := range key {
+		if ch < 0x20 || ch == 0x7f {
+			return "", errors.New("invalid Idempotency-Key")
+		}
+	}
+	if (operatorToken != "" && strings.Contains(key, operatorToken)) || store.RedactCouncilAnswer(key) != key {
+		return "", errors.New("invalid Idempotency-Key")
+	}
+	return key, nil
+}
+
+func councilOpenDigest(req councilOpenRequest) string {
+	roles := make([]string, 0, len(req.spec.Members))
+	for _, m := range req.spec.Members {
+		roles = append(roles, m.Vassal.Role)
+	}
+	canonical := struct {
+		Title      string         `json:"title"`
+		Question   string         `json:"question"`
+		Repo       string         `json:"repo"`
+		Ref        string         `json:"ref"`
+		Live       bool           `json:"live"`
+		Writer     string         `json:"writer"`
+		MaxRounds  *int           `json:"maxRounds"`
+		MaxStarts  *int           `json:"maxStarts"`
+		Duration   *time.Duration `json:"duration"`
+		Sequential bool           `json:"sequential"`
+		Roles      []string       `json:"roles"`
+	}{
+		Title:      req.title,
+		Question:   req.spec.Question,
+		Repo:       req.repo,
+		Ref:        req.ref,
+		Live:       req.live,
+		Writer:     req.writer,
+		MaxRounds:  req.spec.MaxRounds,
+		MaxStarts:  req.spec.MaxStarts,
+		Duration:   req.spec.Duration,
+		Sequential: req.spec.Sequential,
+		Roles:      roles,
+	}
+	raw, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fail := func(status int, message string) {
 			writeJSON(w, status, map[string]string{"error": message})
+		}
+		idemKey, err := parseCouncilIdempotencyKey(r, cfg.operatorToken)
+		if err != nil {
+			fail(http.StatusBadRequest, err.Error())
+			return
 		}
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCouncilOpenBody))
 		var tooLarge *http.MaxBytesError
@@ -201,6 +267,23 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 			fail(http.StatusServiceUnavailable, "council storage is unavailable")
 			return
 		}
+		var payloadDigest string
+		if idemKey != "" {
+			payloadDigest = councilOpenDigest(req)
+			existing, savedDigest, lookupErr := councils.CouncilByIdempotencyKey(r.Context(), idemKey)
+			if lookupErr == nil {
+				if savedDigest != payloadDigest {
+					fail(http.StatusConflict, "idempotency key already used with a different council request")
+					return
+				}
+				writeJSON(w, http.StatusOK, existing)
+				return
+			}
+			if !errors.Is(lookupErr, store.ErrNotFound) {
+				fail(http.StatusInternalServerError, "cannot check council idempotency")
+				return
+			}
+		}
 		for _, role := range councilPanel {
 			bin, err := exec.LookPath(role)
 			if err != nil || !filepath.IsAbs(bin) {
@@ -211,7 +294,7 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		req.spec.Checkout, err = preflightCouncilCheckout(ctx, req.repo, req.ref, req.writer, req.live, cfg.operatorToken)
+		req.spec.Checkout, err = preflightCouncilCheckout(ctx, req.repo, req.ref, req.writer, req.live, cfg.operatorToken, cfg.councilPrivateDirs)
 		if err != nil {
 			if ctx.Err() != nil {
 				fail(http.StatusServiceUnavailable, "council checkout preflight timed out")
@@ -239,7 +322,20 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 			ID: "ccl_" + rand.Text(), Title: req.title, State: domain.ConclaveStateActive,
 			CreatedAt: now, UpdatedAt: now,
 		}
+		req.spec.IdempotencyKey = idemKey
+		req.spec.RequestSHA256 = payloadDigest
 		if err := councils.CreateCouncil(r.Context(), room, req.spec); err != nil {
+			if errors.Is(err, store.ErrConflict) && idemKey != "" {
+				existing, savedDigest, lookupErr := councils.CouncilByIdempotencyKey(r.Context(), idemKey)
+				if lookupErr == nil {
+					if savedDigest != payloadDigest {
+						fail(http.StatusConflict, "idempotency key already used with a different council request")
+						return
+					}
+					writeJSON(w, http.StatusOK, existing)
+					return
+				}
+			}
 			fail(http.StatusInternalServerError, "cannot persist council")
 			return
 		}
@@ -247,16 +343,138 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 	}
 }
 
-func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, live bool, operatorToken string) (store.CouncilCheckout, error) {
+var homeCredentialPaths = [...]string{
+	".ssh",
+	".gnupg",
+	".aws",
+	".kube",
+	".docker",
+	".config",
+	".azure",
+	".gcloud",
+	".gcp",
+	".claude",
+	".codex",
+	".gemini",
+	".agy",
+	".netrc",
+	".npmrc",
+	".pypirc",
+	".git-credentials",
+	filepath.Join(".local", "share", "sablecourt"),
+	filepath.Join("Library", "Keychains"),
+	filepath.Join("Library", "Application Support"),
+}
+
+func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool) {
+	if !info.IsDir() {
+		return 0, 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != euid {
+		return 0, 0, false
+	}
+	return uint64(stat.Dev), uint64(stat.Ino), true
+}
+
+func resolveExistingPath(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return "", errors.New("path must be absolute")
+	}
+	cur := clean
+	var tail []string
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return clean, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+func pathWithinDir(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
+}
+
+func pathOverlaps(a, b string) bool {
+	return pathWithinDir(a, b) || pathWithinDir(b, a)
+}
+
+func forbiddenCouncilPaths(extra []string) ([]string, error) {
+	stateDir, err := operatortoken.StateDir()
+	if err != nil {
+		return nil, errors.New("cannot resolve daemon state directory")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(homeDir) {
+		return nil, errors.New("cannot resolve daemon home directory")
+	}
+	raw := make([]string, 0, 1+len(extra)+len(homeCredentialPaths))
+	raw = append(raw, stateDir)
+	raw = append(raw, extra...)
+	for _, rel := range homeCredentialPaths {
+		raw = append(raw, filepath.Join(homeDir, rel))
+	}
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		resolved, err := resolveExistingPath(p)
+		if err != nil {
+			return nil, errors.New("cannot resolve protected daemon path")
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, live bool, operatorToken string, privateDirs []string) (store.CouncilCheckout, error) {
 	checkout := store.CouncilCheckout{}
 	source, err := filepath.EvalSymlinks(repo)
-	if err != nil || operatorToken != "" && strings.Contains(source, operatorToken) ||
+	if err != nil || !filepath.IsAbs(source) || operatorToken != "" && strings.Contains(source, operatorToken) ||
 		store.RedactCouncilAnswer(source) != source {
 		return checkout, errors.New("council repo is unavailable")
 	}
+	euid := uint32(os.Geteuid())
+	sourceInfo, err := os.Lstat(source)
+	if err != nil || !sourceInfo.IsDir() {
+		return checkout, errors.New("council repo is unavailable")
+	}
+	sourceDev, sourceIno, ok := ownedDirectoryIdentity(sourceInfo, euid)
+	if !ok {
+		return checkout, errors.New("council repo must be owned by the daemon user")
+	}
+	forbidden, err := forbiddenCouncilPaths(privateDirs)
+	if err != nil {
+		return checkout, err
+	}
+	for _, p := range forbidden {
+		if pathOverlaps(source, p) {
+			return checkout, errors.New("council repo must not overlap daemon state or credential directories")
+		}
+	}
 	gitDir := filepath.Join(source, ".git")
-	if info, err := os.Lstat(gitDir); err != nil || !info.IsDir() {
+	gitInfo, err := os.Lstat(gitDir)
+	if err != nil || !gitInfo.IsDir() {
 		return checkout, errors.New("council repo must be a primary Git checkout")
+	}
+	if _, _, ok := ownedDirectoryIdentity(gitInfo, euid); !ok {
+		return checkout, errors.New("council repo Git storage must be owned by the daemon user")
 	}
 	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); !errors.Is(err, os.ErrNotExist) {
 		return checkout, errors.New("council repo must have its own Git storage")
@@ -270,6 +488,15 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 		out, err := cmd.Output()
 		return strings.TrimSpace(string(out)), err
 	}
+	list, err := git("worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return checkout, errors.New("council repo must be a primary Git checkout")
+	}
+	primary, _, _ := strings.Cut(list, "\x00\x00")
+	primaryFields := strings.Split(primary, "\x00")
+	if len(primaryFields) < 2 || primaryFields[0] != "worktree "+source || !strings.HasPrefix(primaryFields[1], "HEAD ") {
+		return checkout, errors.New("council repo must be a primary Git checkout")
+	}
 	commitFor := func(name string) string {
 		id, err := git("rev-parse", "--verify", "--end-of-options", name+"^{commit}")
 		if err != nil || !councilCommitID(id) {
@@ -281,7 +508,10 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 		if commitFor("HEAD") == "" {
 			return checkout, errors.New("council repo HEAD must identify a commit")
 		}
-		return store.CouncilCheckout{Source: source}, nil
+		if curInfo, err := os.Lstat(source); err != nil || !os.SameFile(sourceInfo, curInfo) {
+			return checkout, errors.New("council repo changed during admission")
+		}
+		return store.CouncilCheckout{Source: source, SourceDev: sourceDev, SourceIno: sourceIno}, nil
 	}
 	badRef := errors.New("council ref must identify a branch, tag, HEAD, or full commit ID")
 	if _, err := git("check-ref-format", "--allow-onelevel", ref); err != nil {
@@ -318,7 +548,10 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 	if commit == "" {
 		return checkout, badRef
 	}
-	return store.CouncilCheckout{Source: source, Ref: ref, Commit: commit, WriterRole: writer}, nil
+	if curInfo, err := os.Lstat(source); err != nil || !os.SameFile(sourceInfo, curInfo) {
+		return checkout, errors.New("council repo changed during admission")
+	}
+	return store.CouncilCheckout{Source: source, SourceDev: sourceDev, SourceIno: sourceIno, Ref: ref, Commit: commit, WriterRole: writer}, nil
 }
 
 func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.Bundle) (*config.Bundle, error) {
@@ -330,7 +563,7 @@ func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.
 	}
 	for _, role := range councilPanel {
 		if _, exists := b.Workloads[role]; exists {
-			continue
+			return nil, errors.New("workload " + role + ": name is reserved for the built-in council panel")
 		}
 		w := domain.Workload{
 			Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox},
@@ -367,7 +600,9 @@ func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.
 			wl, ok := b.Workloads[role]
 			if !ok || wl.Metadata.Zone != domain.ZoneSandbox || wl.Spec.Class != domain.ClassCodingAgent ||
 				wl.Spec.Coding == nil || wl.Spec.Coding.Harness != role || wl.Spec.Coding.Sandbox != "seatbelt" ||
-				wl.Spec.Grants.ModelGate.Allowed {
+				wl.Spec.Grants.ModelGate.Allowed || len(wl.Spec.Grants.MCPTools) > 0 ||
+				len(wl.Spec.Grants.MCPServers) > 0 || len(wl.Spec.Grants.Actions) > 0 ||
+				len(wl.Spec.Grants.DelegateTo) > 0 {
 				return errors.New("council panel workload unavailable: " + role)
 			}
 			if wl.Spec.Coding.RepoPath != "" && checkout.Source != "" {

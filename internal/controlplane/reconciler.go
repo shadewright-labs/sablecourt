@@ -548,6 +548,31 @@ func (r *Reconciler) StartWorkflow(ctx context.Context, workflowName, userInput 
 	return r.submitTask(ctx, step.Workload, "", string(raw), "", &workflowStepRecord{Workflow: workflowName})
 }
 
+type councilCleaner interface {
+	CleanupCouncil(ctx context.Context, conclaveID string) error
+}
+
+// CleanupCouncil removes shared council runtime checkout state after all attempts stop.
+func (r *Reconciler) CleanupCouncil(ctx context.Context, conclaveID string) error {
+	var errs []error
+	for _, adapter := range r.adapters {
+		cleaner, ok := adapter.(councilCleaner)
+		if !ok {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
+		err := cleaner.CleanupCouncil(callCtx, conclaveID)
+		if callCtx.Err() != nil {
+			err = callCtx.Err()
+		}
+		cancel()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // CouncilRetryReady checks for unfinished cleanup, including handles and leases
 // left by the previous daemon. Recover owns the cleanup itself.
 func (r *Reconciler) CouncilRetryReady(ctx context.Context, id string) (bool, error) {
@@ -921,9 +946,17 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	if errors.Is(observeErr, scruntime.ErrProcessUnverified) {
 		return true, errors.Join(observeErr, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 	}
+	var earlyRevokeErr error
+	if errors.Is(observeErr, scruntime.ErrProcessNotFound) ||
+		(observeErr == nil && (obs.State == scruntime.StateCompleted || obs.State == scruntime.StateFailed)) {
+		earlyRevokeErr = r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID)
+		if earlyRevokeErr != nil && council {
+			return true, earlyRevokeErr
+		}
+	}
 	events, err := r.store.ListTaskEvents(ctx, task.ID)
 	if err != nil {
-		return true, err
+		return true, errors.Join(earlyRevokeErr, err)
 	}
 	failures := observationFailures(events)
 	reason := ""
@@ -971,27 +1004,22 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	hasTimestamp := !obs.ObservedAt.IsZero() && !obs.ObservedAt.After(now)
 	if hasTimestamp && (task.LastHeartbeatAt == nil || !obs.ObservedAt.Before(*task.LastHeartbeatAt)) {
 		if err := r.store.RecordHeartbeat(ctx, task.ID, obs.ObservedAt); err != nil {
-			return true, err
+			return true, errors.Join(earlyRevokeErr, err)
 		}
 		ts := obs.ObservedAt
 		task.LastHeartbeatAt = &ts
 	}
 	switch obs.State {
 	case scruntime.StateCompleted, scruntime.StateFailed:
-		if council {
-			if err := r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID); err != nil {
-				return true, err
-			}
-		}
 		target := domain.TaskStateCompleted
 		if obs.State == scruntime.StateFailed || (council && obs.ExitCode != 0) {
 			target = domain.TaskStateFailed
 		}
 		if err := r.persistArtifacts(ctx, task.ID, adapter, handle, assignment, target); err != nil {
-			return true, errors.Join(err, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
+			return true, errors.Join(earlyRevokeErr, err, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 		}
 		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, "runtime_exit_observed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
-			return true, err
+			return true, errors.Join(earlyRevokeErr, err)
 		}
 		if handle.AdapterName != "docker" {
 			r.mu.Lock()
@@ -1001,12 +1029,25 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 			_ = r.deletePersistedHandle(context.WithoutCancel(ctx), task.ID)
 		}
 		task.State = target
-		return false, r.reconcileTerminal(context.WithoutCancel(ctx), task)
+		return false, errors.Join(earlyRevokeErr, r.reconcileTerminal(context.WithoutCancel(ctx), task))
 	case scruntime.StateRunning:
 		now := r.now()
 		age := now.Sub(obs.ObservedAt)
 		if hasTimestamp && age >= 0 && age <= r.stalenessWindow {
-			if err := r.store.RenewTaskLeases(ctx, task.ID, now, obs.ObservedAt.Add(taskLeaseTTL)); err != nil {
+			expiresAt := obs.ObservedAt.Add(taskLeaseTTL)
+			if council {
+				deadline, err := r.councilDeadline(ctx, assignment.ConclaveID)
+				if err != nil {
+					return true, err
+				}
+				if !now.Before(deadline) {
+					return true, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID)
+				}
+				if expiresAt.After(deadline) {
+					expiresAt = deadline
+				}
+			}
+			if err := r.store.RenewTaskLeases(ctx, task.ID, now, expiresAt); err != nil {
 				return true, err
 			}
 		} else if r.isTaskStale(task, now) {
@@ -1129,7 +1170,14 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
-	token, err := r.issueLaunchToken(ctx, task.ID)
+	var maxLeaseExpiry time.Time
+	if assigned && assignment.Round > 0 {
+		maxLeaseExpiry, err = r.councilDeadline(ctx, assignment.ConclaveID)
+		if err != nil {
+			return err
+		}
+	}
+	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry)
 	if err != nil {
 		return err
 	}
@@ -1210,7 +1258,19 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	return nil
 }
 
-func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string) (string, error) {
+func (r *Reconciler) councilDeadline(ctx context.Context, conclaveID string) (time.Time, error) {
+	councils, err := store.Councils(r.store)
+	if err != nil {
+		return time.Time{}, err
+	}
+	snap, err := councils.CouncilSnapshot(ctx, conclaveID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return snap.Deadline, nil
+}
+
+func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time) (string, error) {
 	r.mu.Lock()
 	reservation := r.launching[taskID]
 	r.mu.Unlock()
@@ -1227,7 +1287,17 @@ func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string) (strin
 	if current.State != domain.TaskStateWorking {
 		return "", store.ErrConflict
 	}
-	return model.MintTaskToken(ctx, r.store, current.ID, current.WorkloadName, taskLeaseTTL)
+	now := r.now()
+	expiresAt := now.Add(taskLeaseTTL)
+	if !maxExpiry.IsZero() {
+		if !now.Before(maxExpiry) {
+			return "", errors.New("council deadline reached")
+		}
+		if expiresAt.After(maxExpiry) {
+			expiresAt = maxExpiry
+		}
+	}
+	return model.MintTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt)
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {

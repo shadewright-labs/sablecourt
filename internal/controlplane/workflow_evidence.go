@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
@@ -147,14 +149,40 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	if wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
 		return wl, errors.New("council checkout isolation unavailable")
 	}
-	if wl.Spec.Coding.RepoPath == "" {
-		if c.Source == "" || !filepath.IsAbs(c.Source) {
+	if c.Source != "" {
+		if wl.Spec.Coding.RepoPath != "" && !sameCheckoutSource(c.Source, wl.Spec.Coding.RepoPath) {
+			return wl, errors.New("council checkout isolation unavailable")
+		}
+		admitted := c.Source
+		if c.SourceDev != 0 || c.SourceIno != 0 {
+			if !filepath.IsAbs(admitted) {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			resolved, err := filepath.EvalSymlinks(admitted)
+			if err != nil || resolved != admitted {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			info, err := os.Lstat(admitted)
+			if err != nil || !info.IsDir() {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || uint64(stat.Dev) != c.SourceDev || uint64(stat.Ino) != c.SourceIno {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+		} else if filepath.IsAbs(admitted) {
+			resolved, err := filepath.EvalSymlinks(admitted)
+			if err != nil {
+				return wl, errors.New("council checkout isolation unavailable")
+			}
+			admitted = resolved
+		} else if wl.Spec.Coding.RepoPath == "" {
 			return wl, errors.New("council checkout isolation unavailable")
 		}
 		cfg := *wl.Spec.Coding
-		cfg.RepoPath = c.Source
+		cfg.RepoPath = admitted
 		wl.Spec.Coding = &cfg
-	} else if c.Source != "" && !sameCheckoutSource(c.Source, wl.Spec.Coding.RepoPath) {
+	} else if wl.Spec.Coding.RepoPath == "" {
 		return wl, errors.New("council checkout isolation unavailable")
 	}
 
@@ -162,7 +190,8 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	// before the dispatcher started writing explicit checkout fields.
 	for key := range payload {
 		if strings.EqualFold(key, "role") || strings.EqualFold(key, "checkoutMode") ||
-			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") {
+			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") ||
+			strings.EqualFold(key, "checkoutSourceId") {
 			delete(payload, key)
 		}
 	}
@@ -174,6 +203,9 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	if c.WriterRole != "" {
 		mode = "writer"
 		payload["checkoutWriter"], _ = json.Marshal(c.WriterRole)
+	}
+	if c.SourceDev != 0 || c.SourceIno != 0 {
+		payload["checkoutSourceId"], _ = json.Marshal(fmt.Sprintf("%d:%d", c.SourceDev, c.SourceIno))
 	}
 	payload["checkoutMode"], _ = json.Marshal(mode)
 	payload["role"], _ = json.Marshal(assignment.Role)

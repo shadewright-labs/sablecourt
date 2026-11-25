@@ -30,8 +30,8 @@ const (
 var modelName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$`)
 
 type launchInput struct {
-	prompt, context, model, conclaveID, role  string
-	checkoutMode, checkoutRef, checkoutWriter string
+	prompt, context, model, conclaveID, role                    string
+	checkoutMode, checkoutRef, checkoutWriter, checkoutSourceID string
 }
 
 func (input launchInput) isReadOnly() bool {
@@ -102,7 +102,8 @@ func parseLaunchInput(raw string) (launchInput, error) {
 	fields := map[string]*string{
 		"prompt": &input.prompt, "context_packet": &input.context, "model": &input.model,
 		"conclaveId": &input.conclaveID, "role": &input.role,
-		"checkoutMode": &input.checkoutMode, "checkoutRef": &input.checkoutRef, "checkoutWriter": &input.checkoutWriter,
+		"checkoutMode": &input.checkoutMode, "checkoutRef": &input.checkoutRef,
+		"checkoutWriter": &input.checkoutWriter, "checkoutSourceId": &input.checkoutSourceID,
 	}
 	seen := make(map[string]bool)
 	for decoder.More() {

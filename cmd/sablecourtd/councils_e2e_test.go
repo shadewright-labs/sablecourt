@@ -275,6 +275,21 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 	if launches != 6 {
 		t.Fatalf("mode %s launch count = %d, want 6", mode, launches)
 	}
+
+	// Verify shared council worktrees (ref / writer) are cleaned up after closure.
+	if mode == "ref" || mode == "writer" {
+		cleanDeadline := time.Now().Add(10 * time.Second)
+		for {
+			wtList := councilTestGit(t, repo, "worktree", "list", "--porcelain")
+			if strings.Count(wtList, "worktree ") == 1 {
+				break
+			}
+			if time.Now().After(cleanDeadline) {
+				t.Fatalf("mode %s left council worktrees registered after close:\n%s\ndaemon log:\n%s", mode, wtList, daemonLog.String())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 }
 
 func councilStubScript(role, mode, tokenPath string) string {
@@ -417,4 +432,139 @@ func doDaemonJSON(t *testing.T, method, url, token, body string) (int, []byte) {
 		t.Fatalf("read response %s %s: %v", method, url, err)
 	}
 	return resp.StatusCode, out
+}
+
+func TestReloadBuiltinOnlyAndReservedPanelManifests(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("requires macOS Seatbelt to register built-in council panel")
+	}
+
+	// Build sablecourtd binary.
+	binDir := t.TempDir()
+	daemonBin := filepath.Join(binDir, "sablecourtd")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", daemonBin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build sablecourtd: %v\n%s", err, out)
+	}
+
+	// Case 1 (Finding 8): built-in-only bundle (no --manifests) reloaded via POST /api/v1/reload must not panic.
+	t.Run("reload builtin-only bundle", func(t *testing.T) {
+		stateDir := filepath.Join(t.TempDir(), "state")
+		dbPath := filepath.Join(t.TempDir(), "sablecourt.db")
+		tokenPath := filepath.Join(stateDir, "operator.token")
+		addr := freeLocalAddr(t)
+
+		ctx, stop := context.WithCancel(t.Context())
+		defer stop()
+		var logBuf lockedBuffer
+		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr)
+		cmd.Dir = t.TempDir()
+		cmd.Stdout = &logBuf
+		cmd.Stderr = &logBuf
+		cmd.Env = []string{
+			"PATH=/usr/bin:/bin",
+			"HOME=" + t.TempDir(),
+			"SABLECOURT_STATE_DIR=" + stateDir,
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start sablecourtd: %v", err)
+		}
+		t.Cleanup(func() {
+			stop()
+			_ = cmd.Wait()
+		})
+
+		baseURL := "http://" + addr
+		waitForDaemonHealth(t, baseURL, &logBuf)
+
+		rawToken, err := os.ReadFile(tokenPath)
+		if err != nil {
+			t.Fatalf("read token: %v\nlog:\n%s", err, logBuf.String())
+		}
+		token := strings.TrimSpace(string(rawToken))
+
+		status, body := doDaemonJSON(t, http.MethodPost, baseURL+"/api/v1/reload", token, "{}")
+		if status != http.StatusOK {
+			t.Fatalf("POST /api/v1/reload = %d %s\nlog:\n%s", status, body, logBuf.String())
+		}
+	})
+
+	// Case 2 (Finding 3): manifest defining reserved panel name refused at reload and does not replace built-in.
+	t.Run("reload refuses reserved panel name", func(t *testing.T) {
+		stateDir := filepath.Join(t.TempDir(), "state")
+		dbPath := filepath.Join(t.TempDir(), "sablecourt.db")
+		tokenPath := filepath.Join(stateDir, "operator.token")
+		manifestsDir := t.TempDir()
+		initialManifest := `apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: helper
+  zone: runtime
+spec:
+  class: deterministic-controller
+  runtime:
+    type: docker
+    image: helper:0.1.0
+`
+		manifestFile := filepath.Join(manifestsDir, "workloads.yaml")
+		if err := os.WriteFile(manifestFile, []byte(initialManifest), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		addr := freeLocalAddr(t)
+
+		ctx, stop := context.WithCancel(t.Context())
+		defer stop()
+		var logBuf lockedBuffer
+		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr, "--manifests", manifestsDir)
+		cmd.Dir = t.TempDir()
+		cmd.Stdout = &logBuf
+		cmd.Stderr = &logBuf
+		cmd.Env = []string{
+			"PATH=/usr/bin:/bin",
+			"HOME=" + t.TempDir(),
+			"SABLECOURT_STATE_DIR=" + stateDir,
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start sablecourtd: %v", err)
+		}
+		t.Cleanup(func() {
+			stop()
+			_ = cmd.Wait()
+		})
+
+		baseURL := "http://" + addr
+		waitForDaemonHealth(t, baseURL, &logBuf)
+
+		rawToken, err := os.ReadFile(tokenPath)
+		if err != nil {
+			t.Fatalf("read token: %v", err)
+		}
+		token := strings.TrimSpace(string(rawToken))
+
+		reservedManifest := initialManifest + `---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: claude
+  zone: sandbox
+spec:
+  class: coding-agent
+  coding:
+    harness: claude
+    repoPath: /tmp/repo
+    sandbox: seatbelt
+  runtime:
+    type: worktree-cli
+  grants:
+    mcpTools:
+      - conclave.read
+`
+		if err := os.WriteFile(manifestFile, []byte(reservedManifest), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		status, body := doDaemonJSON(t, http.MethodPost, baseURL+"/api/v1/reload", token, "{}")
+		if status != http.StatusBadRequest || !strings.Contains(string(body), "reserved") {
+			t.Fatalf("POST /api/v1/reload with reserved name = %d %s, want 400 containing reserved", status, body)
+		}
+	})
 }

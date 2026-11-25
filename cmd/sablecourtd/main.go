@@ -469,7 +469,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)
 		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", b.ManifestDigest[:12])
+			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 		}
 		return nil
 	}
@@ -546,11 +546,24 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
+	privateDirs := []string{dir}
+	if dbPath != "" {
+		if absDB, err := filepath.Abs(dbPath); err == nil {
+			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
+		}
+	}
+	if secretFile != "" {
+		if absSecret, err := filepath.Abs(secretFile); err == nil {
+			privateDirs = append(privateDirs, absSecret)
+		}
+	}
+
 	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
 		handlerConfig{
 			incidentTemplate:    cfg.incidentTemplate,
 			operatorToken:       operatorToken,
 			councilsDisabled:    isCitadel,
+			councilPrivateDirs:  privateDirs,
 			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
 		})
 	unixMux, err := cfg.hostHandler(mux, true)
@@ -608,6 +621,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 }
 
+func shortDigest(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
 func reconcileDaemonPass(ctx context.Context, reconcileTasks func(context.Context) error, broker *conclave.Broker) error {
 	taskErr := reconcileTasks(ctx)
 	return errors.Join(taskErr, broker.ReconcileCouncils(ctx, taskErr == nil))
@@ -617,6 +637,7 @@ type handlerConfig struct {
 	incidentTemplate    string
 	operatorToken       string
 	councilsDisabled    bool
+	councilPrivateDirs  []string
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 }

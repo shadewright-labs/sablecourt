@@ -36,12 +36,18 @@ func (b *Broker) council(ctx context.Context, id string) (*store.CouncilSnapshot
 	return &snap, nil
 }
 
+type councilPostAction struct {
+	snap    *store.CouncilSnapshot
+	reason  string
+	cleanup bool
+}
+
 // ReconcileCouncils follows task recovery at startup and task observation on each tick.
 func (b *Broker) ReconcileCouncils(ctx context.Context, allowStarts bool) error {
 	b.councilMu.Lock()
-	defer b.councilMu.Unlock()
 	councils, err := store.Councils(b.store)
 	if err != nil {
+		b.councilMu.Unlock()
 		if errors.Is(err, store.ErrCouncilUnsupported) {
 			return nil
 		}
@@ -49,22 +55,56 @@ func (b *Broker) ReconcileCouncils(ctx context.Context, allowStarts bool) error 
 	}
 	ids, err := councils.ListReconcileCouncils(ctx)
 	if err != nil {
+		b.councilMu.Unlock()
 		return err
 	}
+	if b.councilStopping == nil {
+		b.councilStopping = make(map[string]bool)
+	}
 	var passErr error
+	var actions []councilPostAction
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
+			b.councilMu.Unlock()
 			return errors.Join(passErr, err)
 		}
+		if b.councilStopping[id] {
+			continue
+		}
 		snap, err := b.council(ctx, id)
+		var action *councilPostAction
 		if err == nil && snap != nil {
-			err = b.driveCouncil(ctx, snap, allowStarts)
+			action, err = b.planCouncil(ctx, snap, allowStarts)
+		}
+		if action != nil {
+			b.councilStopping[action.snap.Session.ID] = true
+			actions = append(actions, *action)
 		}
 		if err != nil {
 			passErr = errors.Join(passErr, fmt.Errorf("reconcile council: %w", err))
 		}
 	}
-	return passErr
+	b.councilMu.Unlock()
+
+	if len(actions) == 0 {
+		return passErr
+	}
+	actionErrs := make([]error, len(actions))
+	var wg sync.WaitGroup
+	for i, action := range actions {
+		wg.Go(func() {
+			defer func() {
+				b.councilMu.Lock()
+				delete(b.councilStopping, action.snap.Session.ID)
+				b.councilMu.Unlock()
+			}()
+			if err := b.runCouncilPostAction(ctx, action); err != nil {
+				actionErrs[i] = fmt.Errorf("reconcile council: %w", err)
+			}
+		})
+	}
+	wg.Wait()
+	return errors.Join(append([]error{passErr}, actionErrs...)...)
 }
 
 func councilClosed(s *store.CouncilSnapshot) bool {
@@ -88,6 +128,17 @@ func (b *Broker) councilLimits(bundle *config.Bundle, room domain.ConclaveSessio
 // Plan only from a snapshot whose completed turns have each been inspected.
 // An exit committed during collection must not be mistaken for a silent turn.
 func (b *Broker) collectCouncil(ctx context.Context, snap *store.CouncilSnapshot, ownerClosing bool) (*store.CouncilSnapshot, error) {
+	s, cancelExpired, err := b.collectCouncilState(ctx, snap, ownerClosing)
+	if cancelExpired {
+		err = errors.Join(err, b.cancelCouncilTasks(ctx, s, "deadline"))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (b *Broker) collectCouncilState(ctx context.Context, snap *store.CouncilSnapshot, ownerClosing bool) (*store.CouncilSnapshot, bool, error) {
 	checked := map[string]bool{}
 	for !councilClosed(snap) {
 		refresh := false
@@ -103,11 +154,7 @@ func (b *Broker) collectCouncil(ctx context.Context, snap *store.CouncilSnapshot
 					// A forced close preserves admitted posts and marks refused seats missing.
 					continue
 				}
-				if expired && !ownerClosing {
-					// The deadline blocks reservations while collection retries.
-					err = errors.Join(err, b.cancelCouncilTasks(ctx, snap, "deadline"))
-				}
-				return nil, err
+				return snap, expired && !ownerClosing, err
 			}
 			checked[turn.TaskID] = true
 			refresh = true
@@ -117,53 +164,64 @@ func (b *Broker) collectCouncil(ctx context.Context, snap *store.CouncilSnapshot
 		}
 		fresh, err := b.council(ctx, snap.Session.ID)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if fresh == nil {
-			return nil, store.ErrNotFound
+			return nil, false, store.ErrNotFound
 		}
 		snap = fresh
 	}
-	return snap, nil
+	return snap, false, nil
 }
 
-func (b *Broker) driveCouncil(ctx context.Context, initial *store.CouncilSnapshot, allowStarts bool) error {
-	s, err := b.collectCouncil(ctx, initial, false)
+func (b *Broker) planCouncil(ctx context.Context, initial *store.CouncilSnapshot, allowStarts bool) (*councilPostAction, error) {
+	s, cancelExpired, err := b.collectCouncilState(ctx, initial, false)
+	if cancelExpired {
+		return &councilPostAction{snap: s, reason: "deadline"}, err
+	}
 	if errors.Is(err, ErrWardTripped) || errors.Is(err, ErrConclavePaused) || errors.Is(err, ErrConclaveClosed) {
 		// The next pass will inspect the unposted answer again, even if a
 		// concurrent Decree resumes the room after the refused post.
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if councilClosed(s) {
-		return b.cancelCouncilTasks(ctx, s, s.Session.WardReason)
+		return &councilPostAction{snap: s, reason: s.Session.WardReason, cleanup: s.CleanupPending}, nil
 	}
 	plan := CouncilSnapshot{Session: s.Session, Members: s.Members, Question: s.Question, Decrees: s.Decrees, MaxRounds: s.MaxRounds, MaxStarts: s.MaxStarts, Deadline: s.Deadline, Sequential: s.Sequential, Turns: s.Turns}
 	step, err := plan.Next(b.now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch step.Action {
 	case "wait":
-		return nil
+		return nil, nil
 	case "cancel":
-		return b.finishCouncil(ctx, s.Session.ID, domain.ConclaveStateCancelled, step.Reason)
+		closed, err := b.recordCouncilClose(ctx, s.Session.ID, domain.ConclaveStateCancelled, step.Reason)
+		if err != nil {
+			return nil, err
+		}
+		return &councilPostAction{snap: closed, reason: closed.Session.WardReason, cleanup: closed.CleanupPending}, nil
 	case "close":
-		return b.finishCouncil(ctx, s.Session.ID, domain.ConclaveStateCompleted, step.Reason)
+		closed, err := b.recordCouncilClose(ctx, s.Session.ID, domain.ConclaveStateCompleted, step.Reason)
+		if err != nil {
+			return nil, err
+		}
+		return &councilPostAction{snap: closed, reason: closed.Session.WardReason, cleanup: closed.CleanupPending}, nil
 	case "start":
 		if !allowStarts {
-			return nil
+			return nil, nil
 		}
 		if s.Checkout.WriterRole != "" {
 			if err := prepareWriterPackets(s, plan, step); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		return b.reserveCouncilStarts(ctx, s, step)
+		return nil, b.reserveCouncilStarts(ctx, s, step)
 	default:
-		return errors.New("unexpected council planner action")
+		return nil, errors.New("unexpected council planner action")
 	}
 }
 
@@ -288,19 +346,69 @@ func (b *Broker) reserveCouncilStarts(ctx context.Context, s *store.CouncilSnaps
 }
 
 // Close under the reservation lock first, then read back all admitted attempts.
-// A later pass finishes cancellation if the daemon stops between the two steps.
-func (b *Broker) finishCouncil(ctx context.Context, id string, state domain.ConclaveState, reason string) error {
+// A later pass finishes cancellation and worktree cleanup if the daemon stops in between.
+func (b *Broker) recordCouncilClose(ctx context.Context, id string, state domain.ConclaveState, reason string) (*store.CouncilSnapshot, error) {
 	if _, err := b.closeCouncil(ctx, id, state, reason); err != nil {
-		return err
+		return nil, err
 	}
 	s, err := b.council(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if s == nil || !councilClosed(s) {
-		return store.ErrConflict
+		return nil, store.ErrConflict
 	}
-	return b.cancelCouncilTasks(ctx, s, s.Session.WardReason)
+	return s, nil
+}
+
+func (b *Broker) finishCouncil(ctx context.Context, id string, state domain.ConclaveState, reason string) error {
+	s, err := b.recordCouncilClose(ctx, id, state, reason)
+	if err != nil {
+		return err
+	}
+	return b.runCouncilPostAction(ctx, councilPostAction{snap: s, reason: s.Session.WardReason, cleanup: s.CleanupPending})
+}
+
+func (b *Broker) runCouncilPostAction(ctx context.Context, action councilPostAction) error {
+	if err := b.cancelCouncilTasks(ctx, action.snap, action.reason); err != nil {
+		return err
+	}
+	if !action.cleanup {
+		return nil
+	}
+	return b.cleanupCouncilCheckout(ctx, action.snap.Session.ID)
+}
+
+func (b *Broker) cleanupCouncilCheckout(ctx context.Context, id string) error {
+	s, err := b.council(ctx, id)
+	if err != nil || s == nil || !councilClosed(s) || !s.CleanupPending {
+		return err
+	}
+	if b.reconciler == nil {
+		return errors.New("council checkout cleanup unavailable")
+	}
+	for _, a := range s.Attempts {
+		switch a.State {
+		case domain.TaskStateFailed, domain.TaskStateCancelled, domain.TaskStateCompleted:
+		default:
+			return nil
+		}
+		ready, err := b.reconciler.CouncilRetryReady(ctx, a.TaskID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return nil
+		}
+	}
+	if err := b.reconciler.CleanupCouncil(ctx, id); err != nil {
+		return err
+	}
+	councils, err := store.Councils(b.store)
+	if err != nil {
+		return err
+	}
+	return councils.MarkCouncilCleanedUp(ctx, id)
 }
 
 func (b *Broker) cancelCouncilTasks(ctx context.Context, s *store.CouncilSnapshot, reason string) error {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -301,7 +303,22 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 }
 
 func postCouncilOpen(ctx context.Context, cli *http.Client, base string, payload map[string]any) ([]byte, error) {
-	raw, err := fetchPOSTContext(ctx, cli, base+"/api/v1/councils", payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/councils", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "ccl_req_"+rand.Text())
+	resp, err := cli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := readBoundedHTTPResponse(resp)
 	if err != nil {
 		var statusErr *httpStatusError
 		if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusMethodNotAllowed) {
