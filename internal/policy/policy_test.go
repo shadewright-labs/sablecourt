@@ -67,3 +67,27 @@ func TestEngineEvaluateInvariants(t *testing.T) {
 		t.Fatalf("expected sandbox deny, got %+v", d)
 	}
 }
+
+func TestRecordOutcomeOpensTheBreakerEvaluateChecks(t *testing.T) {
+	wl := domain.Workload{
+		Metadata: domain.ObjectMeta{Name: "pr-agent", Zone: domain.ZoneRuntime},
+		Spec:     domain.WorkloadSpec{Grants: domain.GrantSet{Actions: []string{"git.open_pr"}}},
+	}
+	pols := []domain.Policy{{Spec: domain.PolicySpec{Rules: []domain.PolicyRule{{Workload: "pr-agent", Capability: "action:git.open_pr", Effect: domain.EffectAllow}}}}}
+	breaker := NewCircuitBreaker(3, time.Minute)
+	first := NewEngine(pols, breaker)
+	for i := 0; i < 3; i++ {
+		first.RecordOutcome("action:git.open_pr", true)
+	}
+	// An engine rebuilt on reload with the same breaker sees the open breaker.
+	if d := NewEngine(pols, breaker).Evaluate(wl, "action:git.open_pr"); d.Reason != "circuit_breaker_open" {
+		t.Fatalf("want circuit_breaker_open, got %+v", d)
+	}
+	first.RecordOutcome("action:git.open_pr", false)
+	if d := first.Evaluate(wl, "action:git.open_pr"); d.Effect != domain.EffectAllow {
+		t.Fatalf("success must close the breaker, got %+v", d)
+	}
+	var nilEngine *Engine
+	nilEngine.RecordOutcome("action:git.open_pr", true)
+	NewEngine(pols, nil).RecordOutcome("action:git.open_pr", true)
+}

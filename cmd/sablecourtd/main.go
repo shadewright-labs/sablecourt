@@ -364,7 +364,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		logger.Info("model gate routing through external AI gateway", "url", cfg.modelGatewayURL)
 	}
 
-	breaker := policies.Breaker()
 	notifier := notify.New(notify.Options{Secrets: secretStore})
 	var oobApprover approval.Approver
 	if !isCitadel {
@@ -385,7 +384,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Store:     gateLeaseStore{st},
 		Bundle:    bundle,
 		Policy:    policyEng,
-		Breaker:   breaker,
 		Approvals: approvalQueue,
 	})
 	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
@@ -1856,25 +1854,22 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 }
 
 // policyLoader reads the manifests, records the declared workloads and builds
-// the policy engine for each load.
+// the policy engine for each load. Every engine it builds shares one circuit
+// breaker, so failures recorded by the action gate keep the breaker open across
+// manifest reloads.
 type policyLoader struct {
 	st            store.Store
 	manifestsPath string
-	gateBreaker   *policy.CircuitBreaker
+	breaker       *policy.CircuitBreaker
 }
 
 func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
-	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
-}
-
-// Breaker returns the circuit breaker the action gate records outcomes on.
-func (l *policyLoader) Breaker() *policy.CircuitBreaker {
-	return l.gateBreaker
+	return &policyLoader{st: st, manifestsPath: manifestsPath, breaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
 }
 
 func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine, error) {
 	if l.manifestsPath == "" {
-		return nil, policy.NewEngine(nil, nil), nil
+		return nil, policy.NewEngine(nil, l.breaker), nil
 	}
 	loaded, err := config.LoadPath(l.manifestsPath)
 	if err != nil {
@@ -1899,6 +1894,5 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	for _, p := range loaded.Policies {
 		policies = append(policies, p)
 	}
-	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-	return loaded, policy.NewEngine(policies, breaker), nil
+	return loaded, policy.NewEngine(policies, l.breaker), nil
 }

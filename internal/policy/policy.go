@@ -28,6 +28,19 @@ func NewEngine(policies []domain.Policy, breaker *CircuitBreaker) *Engine {
 	}
 }
 
+// RecordOutcome records the result of running capability on the engine's
+// circuit breaker, the same one Evaluate checks. It does nothing without a breaker.
+func (e *Engine) RecordOutcome(capability string, failed bool) {
+	if e == nil || e.breaker == nil {
+		return
+	}
+	if failed {
+		e.breaker.RecordFailure(capability)
+		return
+	}
+	e.breaker.RecordSuccess(capability)
+}
+
 // Evaluate determines allow, approve, or deny deterministically.
 // Defaults and errors always fail closed to deny.
 func (e *Engine) Evaluate(w domain.Workload, capability string) Decision {

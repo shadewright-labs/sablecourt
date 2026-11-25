@@ -38,7 +38,6 @@ type Options struct {
 	Store     store.Store
 	Bundle    *config.Bundle
 	Policy    *policy.Engine
-	Breaker   *policy.CircuitBreaker
 	Approvals *approval.Queue
 	Now       func() time.Time
 }
@@ -47,7 +46,6 @@ type Gate struct {
 	store     store.Store
 	bundle    *config.Bundle
 	policy    *policy.Engine
-	breaker   *policy.CircuitBreaker
 	approvals *approval.Queue
 	now       func() time.Time
 
@@ -65,7 +63,6 @@ func New(opts Options) *Gate {
 		store:     opts.Store,
 		bundle:    opts.Bundle,
 		policy:    opts.Policy,
-		breaker:   opts.Breaker,
 		approvals: opts.Approvals,
 		now:       nowFn,
 		tools:     make(map[string]ToolDef),
@@ -373,16 +370,14 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 		if err != nil {
-			if g.breaker != nil {
-				g.breaker.RecordFailure(capability)
-			}
+			// Recorded on the breaker of the engine that allowed the call, which is the
+			// one every later Evaluate checks.
+			snap.policy.RecordOutcome(capability, true)
 			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q,"approval_id":%q}`, redact.String(err.Error()), approvalUsed))
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
-		if g.breaker != nil {
-			g.breaker.RecordSuccess(capability)
-		}
+		snap.policy.RecordOutcome(capability, false)
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
 		g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d,"approval_id":%q}`, red.Hits, approvalUsed))

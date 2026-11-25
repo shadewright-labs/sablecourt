@@ -89,7 +89,6 @@ func setupMCPGateTest(t *testing.T) (*Gate, *sqlite.SQLiteStore, *approval.Queue
 		Store:     st,
 		Bundle:    bundle,
 		Policy:    eng,
-		Breaker:   breaker,
 		Approvals: queue,
 	})
 

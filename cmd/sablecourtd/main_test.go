@@ -61,7 +61,7 @@ func TestDaemonSmokeWithLocalDemoManifests(t *testing.T) {
 	policyEng := policy.NewEngine(policies, breaker)
 	approvals := approval.NewQueue(st, nil)
 	modelGate := model.New(model.Options{Store: st, Secrets: secret.NewMemoryStore(nil), Bundle: bundle})
-	dataGate := mcpgate.New(mcpgate.Options{Store: st, Bundle: bundle, Policy: policyEng, Breaker: breaker, Approvals: approvals})
+	dataGate := mcpgate.New(mcpgate.Options{Store: st, Bundle: bundle, Policy: policyEng, Approvals: approvals})
 	mcpgate.RegisterBuiltinGitOps(dataGate, t.TempDir(), nil)
 	reconciler := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle, Policy: policyEng})
 	conclaveBroker := conclave.NewBroker(conclave.Options{Store: st, Reconciler: reconciler, GetBundle: func() *config.Bundle { return bundle }})
