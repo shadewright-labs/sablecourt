@@ -1,75 +1,90 @@
 package model
 
 import (
-	"encoding/json/jsontext"
-	"encoding/json/v2"
-	"errors"
-	"math"
-	"strconv"
+	"encoding/json"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-const maxChildBudgetCeilingBytes = 4 << 10
+var errInvalidChildBudgetCeiling = store.ErrInvalidChildBudgetCeiling
 
-var errInvalidChildBudgetCeiling = errors.New("invalid_child_budget_ceiling")
+// estimateRequestReserve derives conservative pre-flight token and cost reservation bounds
+// from a provider request body while preserving a 1-unit minimum per dimension.
+func estimateRequestReserve(provider, modelName string, body []byte, pricing map[string]PricePerMillionTokens) domain.BudgetTotals {
+	inTokens := int64(1)
+	outTokens := int64(1)
 
-func childBudgetReason(raw string, totals domain.BudgetTotals) (string, error) {
-	if len(raw) > maxChildBudgetCeilingBytes {
-		return "", errInvalidChildBudgetCeiling
-	}
-	var ceiling struct {
-		Input  jsontext.Value `json:"maxInputTokens"`
-		Output jsontext.Value `json:"maxOutputTokens"`
-		Cost   jsontext.Value `json:"maxCostUSD"`
-	}
-	if err := json.Unmarshal([]byte(raw), &ceiling, json.RejectUnknownMembers(true)); err != nil {
-		return "", errInvalidChildBudgetCeiling
-	}
-	if ceiling.Input == nil && ceiling.Output == nil && ceiling.Cost == nil {
-		return "", errInvalidChildBudgetCeiling
-	}
-
-	var reason string
-	for _, limit := range []struct {
-		value  jsontext.Value
-		used   int64
-		reason string
-		usd    bool
-	}{
-		{value: ceiling.Input, used: totals.InputTokens, reason: "child_input_tokens"},
-		{value: ceiling.Output, used: totals.OutputTokens, reason: "child_output_tokens"},
-		{value: ceiling.Cost, used: totals.CostMicroUSD, reason: "child_cost_usd", usd: true},
-	} {
-		if limit.value == nil {
-			continue
+	var payload map[string]any
+	if len(body) > 0 && json.Unmarshal(body, &payload) == nil && payload != nil {
+		var textBytes int64
+		for _, field := range []string{"messages", "input", "contents", "system", "systemInstruction", "prompt"} {
+			if val, ok := payload[field]; ok {
+				textBytes += countPromptTextBytes(val)
+			}
 		}
-		maximum, err := childBudgetLimit(limit.value, limit.usd)
-		if err != nil {
-			return "", err
+		if est := textBytes / 4; est > inTokens {
+			inTokens = est
 		}
-		if reason == "" && limit.used >= maximum {
-			reason = limit.reason
+		if requested := extractRequestedOutputTokens(payload); requested > outTokens {
+			outTokens = requested
 		}
 	}
-	return reason, nil
+
+	costMicro := EstimateMicroUSD(provider, modelName, inTokens, outTokens, pricing)
+	if costMicro < 1 {
+		costMicro = 1
+	}
+	return domain.BudgetTotals{
+		InputTokens:  inTokens,
+		OutputTokens: outTokens,
+		CostMicroUSD: costMicro,
+	}
 }
 
-func childBudgetLimit(value jsontext.Value, usd bool) (int64, error) {
-	if value.Kind() != '0' {
-		return 0, errInvalidChildBudgetCeiling
-	}
-	if usd {
-		cost, err := strconv.ParseFloat(string(value), 64)
-		microUSD := cost * 1_000_000
-		if err != nil || microUSD < 0 || microUSD >= math.MaxInt64 {
-			return 0, errInvalidChildBudgetCeiling
+func countPromptTextBytes(v any) int64 {
+	switch x := v.(type) {
+	case string:
+		return int64(len(x))
+	case []any:
+		var total int64
+		for _, item := range x {
+			total += countPromptTextBytes(item)
 		}
-		return int64(microUSD), nil
+		return total
+	case map[string]any:
+		var total int64
+		for k, item := range x {
+			switch k {
+			case "role", "type", "name", "id", "tool_call_id", "mimeType", "media_type":
+				continue
+			}
+			total += countPromptTextBytes(item)
+		}
+		return total
+	default:
+		return 0
 	}
-	tokens, err := strconv.ParseInt(string(value), 10, 64)
-	if err != nil || tokens < 0 {
-		return 0, errInvalidChildBudgetCeiling
+}
+
+func extractRequestedOutputTokens(payload map[string]any) int64 {
+	for _, field := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if n, ok := positiveJSONInt64(payload[field]); ok {
+			return n
+		}
 	}
-	return tokens, nil
+	if genCfg, ok := payload["generationConfig"].(map[string]any); ok {
+		if n, ok := positiveJSONInt64(genCfg["maxOutputTokens"]); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+func positiveJSONInt64(v any) (int64, bool) {
+	f, ok := v.(float64)
+	if !ok || f <= 0 {
+		return 0, false
+	}
+	return int64(f), true
 }

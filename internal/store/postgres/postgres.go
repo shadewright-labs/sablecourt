@@ -443,6 +443,32 @@ func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.Budg
 	return err
 }
 
+func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (store.BudgetReservationResult, error) {
+	return store.ReserveBudgetTx(ctx, s.db, lockPostgresBudgetRows, req)
+}
+
+func (s *PostgresStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+	return store.SettleBudgetReservationTx(ctx, s.db, reservationID, actual)
+}
+
+func lockPostgresBudgetRows(ctx context.Context, tx *sql.Tx, taskID, workloadName string) error {
+	var wl string
+	if err := tx.QueryRowContext(ctx, `SELECT name FROM workloads WHERE name = $1 FOR UPDATE`, workloadName).Scan(&wl); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	var id string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id = $1 FOR UPDATE`, taskID).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *PostgresStore) TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
