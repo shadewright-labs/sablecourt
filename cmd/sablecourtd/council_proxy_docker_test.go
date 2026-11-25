@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -57,7 +58,17 @@ func TestCouncilProxyDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	serveProxyTest(t, ln, h)
-	other := proxyTestListener(t)
+	egressGateway, err := d.EgressGateway(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostGatewayTarget := "host-gateway"
+	otherBindHost := net.IPv4(127, 0, 0, 1).String()
+	if gw, err := netip.ParseAddr(egressGateway); err == nil && isLocalInterfaceIP(gw) {
+		hostGatewayTarget = gw.String()
+		otherBindHost = gw.String()
+	}
+	other := proxyTestListenerAt(t, net.JoinHostPort(otherBindHost, "0"))
 	serveProxyTest(t, other, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -89,7 +100,15 @@ func TestCouncilProxyDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// This control establishes that the other loopback listener is live from the egress side.
+	directGatePort := gatePort
+	proxyArgs := strings.Fields(d.must(t, "", "inspect", "--format", "{{range .Args}}{{println .}}{{end}}", proxyURL.Hostname()))
+	for i := 0; i+1 < len(proxyArgs); i++ {
+		if proxyArgs[i] == "-gate-port" {
+			directGatePort = proxyArgs[i+1]
+			break
+		}
+	}
+	// This control establishes that the arbitrary host listener is live from the egress side.
 	if got := d.must(t, "", "exec", proxyURL.Hostname(), "/probe", hostURL, ""); !strings.HasPrefix(got, "204\n") {
 		t.Fatalf("egress control returned %q", got)
 	}
@@ -122,7 +141,7 @@ func TestCouncilProxyDocker(t *testing.T) {
 		{"operator route", valid, "/api/v1/tasks", "", "403\n", endpoint},
 		{"arbitrary host port through proxy", "", hostURL, "proxy", "403\n", endpoint},
 		{"direct egress to a bridge peer", "", peerURL, "", "unreachable\n", endpoint},
-		{"direct egress to gate", valid, "http://" + net.JoinHostPort(councilproxy.DockerHostGateway, gatePort) + "/gate/task/messages", "", "unreachable\n", endpoint},
+		{"direct egress to gate", valid, "http://" + net.JoinHostPort(councilproxy.DockerHostGateway, directGatePort) + "/gate/task/messages", "", "unreachable\n", endpoint},
 		{"direct egress to arbitrary host port", "", hostURL, "", "unreachable\n", endpoint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,7 +155,7 @@ func TestCouncilProxyDocker(t *testing.T) {
 			}
 			got := d.must(t, tc.token, "run", "--rm", "-i", "--pull=never",
 				"--user", "10001:10001", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-				"--network", tc.endpoint.Network, "--add-host", councilproxy.DockerHostGateway+":host-gateway",
+				"--network", tc.endpoint.Network, "--add-host", councilproxy.DockerHostGateway+":"+hostGatewayTarget,
 				"--entrypoint", "/probe", image, target, proxy)
 			if !strings.HasPrefix(got, tc.want) || (tc.want == "200\n" && !strings.Contains(got, "assigned response")) {
 				t.Fatalf("probe returned %q, want prefix %q", got, tc.want)
@@ -153,12 +172,41 @@ func TestCouncilProxyDocker(t *testing.T) {
 
 func proxyTestListener(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp4", net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "0"))
+	return proxyTestListenerAt(t, net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "0"))
+}
+
+func proxyTestListenerAt(t *testing.T, addr string) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	return ln
+}
+
+func isLocalInterfaceIP(target netip.Addr) bool {
+	target = target.Unmap()
+	if !target.IsValid() || target.IsLoopback() || target.IsUnspecified() {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if parsed, ok := netip.AddrFromSlice(ip); ok && parsed.Unmap() == target {
+			return true
+		}
+	}
+	return false
 }
 
 func serveProxyTest(t *testing.T, ln net.Listener, h http.Handler) {
@@ -275,6 +323,28 @@ func (d proxyDockerCLI) build(t *testing.T) string {
 	return image
 }
 
+func (d proxyDockerCLI) EgressGateway(ctx context.Context) (string, error) {
+	out, err := d.run(ctx, "", "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{println .Gateway}}{{end}}")
+	if err != nil {
+		return "", err
+	}
+	var fallback string
+	for _, field := range strings.Fields(out) {
+		addr, err := netip.ParseAddr(field)
+		if err != nil {
+			continue
+		}
+		addr = addr.Unmap()
+		if addr.Is4() {
+			return addr.String(), nil
+		}
+		if fallback == "" {
+			fallback = addr.String()
+		}
+	}
+	return fallback, nil
+}
+
 func (d proxyDockerCLI) CreateInternalNetwork(ctx context.Context, name string) error {
 	_, err := d.run(ctx, "", "network", "create", "--driver", "bridge", "--internal", "--label", councilproxy.ResourceLabel+"="+name, name)
 	return err
@@ -283,7 +353,7 @@ func (d proxyDockerCLI) CreateInternalNetwork(ctx context.Context, name string) 
 func (d proxyDockerCLI) CreateProxy(ctx context.Context, spec councilproxy.ProxyContainer) error {
 	args := []string{"create", "--pull=never", "--name", spec.Name, "--network", spec.InternalNetwork,
 		"--network-alias", spec.Name, "--label", councilproxy.ResourceLabel + "=" + spec.Name,
-		"--user", spec.User, "--add-host", spec.HostGateway + ":host-gateway"}
+		"--user", spec.User, "--add-host", spec.HostGateway + ":" + spec.HostGatewayTarget}
 	if spec.ReadOnlyRootFS {
 		args = append(args, "--read-only")
 	}
@@ -401,7 +471,7 @@ func main() {
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println("unreachable")
+		fmt.Printf("unreachable\n%v\n", err)
 		return
 	}
 	defer res.Body.Close()
