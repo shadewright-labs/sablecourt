@@ -4,7 +4,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 )
 
 func TestCouncilProxyAuthority(t *testing.T) {
@@ -73,5 +78,106 @@ func TestCouncilProxyRequiresLoopbackDaemon(t *testing.T) {
 				t.Fatalf("unexpected status %d", w.Code)
 			}
 		})
+	}
+}
+
+func TestCouncilProxyPreflightOnDaemonHostHandler(t *testing.T) {
+	ip := net.IPv4(127, 0, 0, 1).String()
+	listen := net.JoinHostPort(ip, "7432")
+	authority, err := councilproxy.GateAuthority(listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const launchID = "sablecourt-council-host-test"
+	var secret [32]byte
+	for i := range secret {
+		secret[i] = byte(i + 7)
+	}
+	councilproxy.DefaultRegistry.Register(authority, launchID, secret)
+	t.Cleanup(func() {
+		councilproxy.DefaultRegistry.Unregister(authority, launchID)
+	})
+
+	cfg := daemonConfig{listenAddr: listen}
+	tcpHandler, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("preflight must not reach inner mux")
+		w.WriteHeader(http.StatusOK)
+	}), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixHandler, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	challenge := strings.Repeat("c", 32)
+	wantProof := councilproxy.ComputeGateProof(secret, authority, launchID, challenge)
+
+	for _, tc := range []struct {
+		name      string
+		h         http.Handler
+		method    string
+		launch    string
+		challenge string
+		want      int
+		wantProof string
+	}{
+		{"registered launch over tcp", tcpHandler, http.MethodHead, launchID, challenge, http.StatusNoContent, wantProof},
+		{"unregistered launch", tcpHandler, http.MethodHead, "unknown-launch", challenge, http.StatusForbidden, ""},
+		{"get method refused", tcpHandler, http.MethodGet, launchID, challenge, http.StatusForbidden, ""},
+		{"operator unix socket refused", unixHandler, http.MethodHead, launchID, challenge, http.StatusForbidden, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, councilproxy.PreflightPath, nil)
+			req.Host = authority
+			req.Header.Set(councilproxy.LaunchHeader, tc.launch)
+			req.Header.Set(councilproxy.ChallengeHeader, tc.challenge)
+			rec := httptest.NewRecorder()
+			tc.h.ServeHTTP(rec, req)
+			if rec.Code != tc.want || rec.Header().Get(councilproxy.ProofHeader) != tc.wantProof || (tc.want == http.StatusNoContent && tc.wantProof == "") {
+				t.Fatalf("status=%d proof=%q, want status=%d proof=%q", rec.Code, rec.Header().Get(councilproxy.ProofHeader), tc.want, tc.wantProof)
+			}
+		})
+	}
+}
+
+func TestInitDaemonStateSweepsStaleCouncilGateSockets(t *testing.T) {
+	stateDir, err := os.MkdirTemp("/tmp", "sc-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+
+	gatesDir := councilproxy.SocketRoot(stateDir)
+	staleLaunch := filepath.Join(gatesDir, "g-stale1234")
+	if err := os.MkdirAll(staleLaunch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleLaunch, "gate.sock"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := initDaemonState(stateDir); err != nil {
+		t.Fatalf("initDaemonState: %v", err)
+	}
+	entries, err := os.ReadDir(gatesDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("expected stale gate sockets swept on daemon start, err=%v entries=%v", err, entries)
+	}
+
+	if err := os.Chmod(gatesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initDaemonState(stateDir); err == nil {
+		t.Fatal("initDaemonState accepted unsafe 0755 gates directory")
 	}
 }
