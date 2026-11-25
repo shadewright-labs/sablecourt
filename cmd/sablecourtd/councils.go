@@ -307,13 +307,18 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 			fail(http.StatusBadRequest, err.Error())
 			return
 		}
+		if cfg.onCouncilCheckout != nil {
+			cfg.onCouncilCheckout(cancel)
+		}
 		if cfg.preflightCouncilHarness != nil {
 			// Container mode: the container is the confinement. Every image and
 			// login is checked before anything is reserved.
-			pctx, pcancel := context.WithTimeout(r.Context(), 45*time.Second)
-			defer pcancel()
+			// The checkout deadline is spent by now, so admission gets its own.
+			admit, acancel := context.WithTimeout(r.Context(), 45*time.Second)
+			defer acancel()
+			ctx = admit
 			for _, role := range councilPanel {
-				if err := cfg.preflightCouncilHarness(pctx, role); err != nil {
+				if err := cfg.preflightCouncilHarness(ctx, role); err != nil {
 					status, message := councilHarnessRefusal(role, err)
 					fail(status, message)
 					return

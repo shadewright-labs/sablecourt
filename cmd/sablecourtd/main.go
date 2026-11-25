@@ -733,6 +733,8 @@ type handlerConfig struct {
 	// preflightCouncilHarness is set in container mode. It replaces the host
 	// executable and sandbox checks with image, volume and login checks.
 	preflightCouncilHarness func(context.Context, string) error
+	// onCouncilCheckout is a test hook that runs once the checkout is verified.
+	onCouncilCheckout func(expire context.CancelFunc)
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
