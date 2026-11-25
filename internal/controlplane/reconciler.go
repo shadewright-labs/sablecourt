@@ -63,16 +63,17 @@ type Reconciler struct {
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
 
-	instance       string
-	recovering     map[string]bool
-	reconcileMu    sync.Mutex
-	mu             sync.Mutex
-	handles        map[string]scruntime.Handle
-	handleAdapters map[string]scruntime.Adapter
-	partialStarts  map[string]bool
-	launching      map[string]*launchReservation
-	launchErrors   error
-	stopping       map[string]chan struct{}
+	instance          string
+	recovering        map[string]bool
+	reconcileMu       sync.Mutex
+	mu                sync.Mutex
+	handles           map[string]scruntime.Handle
+	handleAdapters    map[string]scruntime.Adapter
+	partialStarts     map[string]bool
+	partialStartFacts map[string]string
+	launching         map[string]*launchReservation
+	launchErrors      error
+	stopping          map[string]chan struct{}
 }
 
 func (r *Reconciler) Reload(bundle *config.Bundle, pol *policy.Engine) {
@@ -219,6 +220,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 		delete(r.handles, taskID)
 		delete(r.handleAdapters, taskID)
 		delete(r.partialStarts, taskID)
+		delete(r.partialStartFacts, taskID)
 	}
 	r.mu.Unlock()
 	if err != nil {
@@ -374,23 +376,24 @@ func NewReconciler(opts Options) *Reconciler {
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return &Reconciler{
-		store:           opts.Store,
-		instance:        rand.Text(),
-		recovering:      make(map[string]bool),
-		bundle:          opts.Bundle,
-		policy:          opts.Policy,
-		adapters:        opts.Adapters,
-		modelGateURL:    opts.ModelGateURL,
-		dataGateURL:     opts.DataGateURL,
-		stalenessWindow: win,
-		maxConcurrent:   opts.MaxConcurrent,
-		onTaskFailed:    opts.OnTaskFailed,
-		now:             nowFn,
-		handles:         make(map[string]scruntime.Handle),
-		handleAdapters:  make(map[string]scruntime.Adapter),
-		partialStarts:   make(map[string]bool),
-		launching:       make(map[string]*launchReservation),
-		stopping:        make(map[string]chan struct{}),
+		store:             opts.Store,
+		instance:          rand.Text(),
+		recovering:        make(map[string]bool),
+		bundle:            opts.Bundle,
+		policy:            opts.Policy,
+		adapters:          opts.Adapters,
+		modelGateURL:      opts.ModelGateURL,
+		dataGateURL:       opts.DataGateURL,
+		stalenessWindow:   win,
+		maxConcurrent:     opts.MaxConcurrent,
+		onTaskFailed:      opts.OnTaskFailed,
+		now:               nowFn,
+		handles:           make(map[string]scruntime.Handle),
+		handleAdapters:    make(map[string]scruntime.Adapter),
+		partialStarts:     make(map[string]bool),
+		partialStartFacts: make(map[string]string),
+		launching:         make(map[string]*launchReservation),
+		stopping:          make(map[string]chan struct{}),
 	}
 }
 
@@ -920,9 +923,13 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 	handle, hasHandle := r.handles[task.ID]
 	adapter := r.handleAdapters[task.ID]
 	partialStart := r.partialStarts[task.ID]
+	partialFacts := r.partialStartFacts[task.ID]
 	r.mu.Unlock()
 	if partialStart {
-		return false, r.failTask(ctx, task, "launch_failed", `{}`)
+		if partialFacts == "" {
+			partialFacts = `{}`
+		}
+		return false, r.failTask(ctx, task, "launch_failed", partialFacts)
 	}
 	if !hasHandle || adapter == nil {
 		return false, r.failLostTask(ctx, task, `{"reason":"handle_missing"}`)
@@ -1101,9 +1108,27 @@ func (r *Reconciler) claimLaunch(taskID string) bool {
 	return true
 }
 
+func launchFailureFacts(err error) string {
+	var missing *scruntime.MissingBinaryError
+	if errors.As(err, &missing) && missing.Path != "" {
+		raw, marshalErr := json.Marshal(struct {
+			Reason string `json:"reason"`
+			Path   string `json:"path"`
+		}{
+			Reason: "missing_binary",
+			Path:   redact.String(missing.Path),
+		})
+		if marshalErr == nil {
+			return string(raw)
+		}
+	}
+	return `{}`
+}
+
 func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain.Workload, adapter scruntime.Adapter) (launchErr error) {
 	claimed := false
 	startFailed := false
+	launchFacts := `{}`
 	defer func() {
 		if launchErr != nil && claimed {
 			cleanupCtx := context.WithoutCancel(ctx)
@@ -1111,7 +1136,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
 				reason = "author_checkout_unavailable"
 			}
-			cleanupErr := r.failTask(cleanupCtx, task, reason, `{}`)
+			cleanupErr := r.failTask(cleanupCtx, task, reason, launchFacts)
 			if startFailed && cleanupErr != nil {
 				launchErr = errors.Join(launchErr, r.store.RevokeTaskLeases(cleanupCtx, task.ID))
 			}
@@ -1212,7 +1237,9 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 	cancel()
 	startFailed = startErr != nil
-	if !startFailed {
+	if startFailed {
+		launchFacts = launchFailureFacts(startErr)
+	} else {
 		if handle.LogPath == "" && handle.WorkDir != "" && strings.HasPrefix(handle.AdapterName, "coding:") {
 			handle.LogPath = handle.WorkDir + ".log"
 		}
@@ -1224,6 +1251,9 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		r.handleAdapters[task.ID] = adapter
 		if startFailed {
 			r.partialStarts[task.ID] = true
+			if launchFacts != `{}` {
+				r.partialStartFacts[task.ID] = launchFacts
+			}
 		}
 		r.mu.Unlock()
 	}
