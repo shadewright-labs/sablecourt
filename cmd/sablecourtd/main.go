@@ -447,13 +447,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	}
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:         st,
-		Bundle:        bundle,
-		Policy:        policyEng,
-		Adapters:      adapters,
-		ModelGateURL:  "http://" + gateHost + "/gate/model",
-		DataGateURL:   "http://" + gateHost + "/gate/mcp",
-		MaxConcurrent: cfg.maxConcurrent,
+		Store:        st,
+		Bundle:       bundle,
+		Policy:       policyEng,
+		Adapters:     adapters,
+		ModelGateURL: "http://" + gateHost + "/gate/model",
+		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		// Host coding agents reach the gate over loopback, not a container alias.
+		HostDataGateURL: cfg.hostGateURL(),
+		MaxConcurrent:   cfg.maxConcurrent,
 		OnTaskFailed: func(task domain.Task, reason string) {
 			go func() {
 				_ = notifier.Send(context.Background(), notify.Event{

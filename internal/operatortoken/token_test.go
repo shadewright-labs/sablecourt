@@ -247,3 +247,62 @@ func TestUnsafeTokenStateAncestorsRefused(t *testing.T) {
 		}
 	})
 }
+
+func TestStateDirCreationIgnoresRacedSymlink(t *testing.T) {
+	for _, name := range []string{"intermediate", "leaf"} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			shared := filepath.Join(base, "shared")
+			outside := filepath.Join(base, "outside")
+			for _, d := range []string{shared, outside} {
+				if err := os.Mkdir(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil {
+				t.Fatal(err)
+			}
+			// The path was checked while missing; another user now plants a link in the shared parent.
+			rel := filepath.Join("a", "state")
+			link := filepath.Join(shared, "a")
+			if name == "leaf" {
+				rel = "state"
+				link = filepath.Join(shared, "state")
+			}
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			err := mkdirBelow(shared, rel)
+			if name == "intermediate" && err == nil {
+				t.Fatal("creation followed a symlink out of the verified ancestor")
+			}
+			entries, readErr := os.ReadDir(outside)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("symlink target was modified: %v %v", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestStateDirCreationUnderStickyParent(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(shared, "a", "state")
+	lock, err := LockStateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Close()
+	if _, err := LoadOrCreate(filepath.Join(shared, "b", "c", "state")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("state directory mode: %v %v", info, err)
+	}
+}

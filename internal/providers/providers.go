@@ -578,23 +578,17 @@ func mergeCustomModels(raw []ModelInfo, providerID string, pref domain.ProviderP
 }
 
 func (r *Registry) syncCLIModels(ctx context.Context, def cliDef) ([]ModelInfo, error) {
-	binPath, err := r.look(def.Bin)
-	if err != nil || binPath == "" {
+	if def.ID == "cli:agy" {
+		var models []ModelInfo
+		for _, id := range def.DefaultModels {
+			models = append(models, ModelInfo{ID: id, Provider: def.ID})
+		}
+		return models, nil
+	}
+	if path, err := r.look(def.Bin); err != nil || path == "" {
 		return nil, fmt.Errorf("%s binary not found in PATH", def.Bin)
 	}
 	switch def.ID {
-	case "cli:agy":
-		tctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(tctx, binPath, "models").CombinedOutput()
-		if err != nil {
-			return nil, fmt.Errorf("agy models failed: %w", err)
-		}
-		models := parseAgyModelsOutput(string(out))
-		if len(models) == 0 {
-			return nil, errors.New("agy models returned no model IDs")
-		}
-		return models, nil
 	case "cli:codex":
 		home, _ := os.UserHomeDir()
 		if home != "" {
@@ -633,35 +627,6 @@ func (r *Registry) syncCLIModels(ctx context.Context, def cliDef) ([]ModelInfo, 
 	default:
 		return nil, fmt.Errorf("sync not supported for %q", def.ID)
 	}
-}
-
-func parseAgyModelsOutput(raw string) []ModelInfo {
-	seen := make(map[string]bool)
-	var out []ModelInfo
-	for _, line := range strings.Split(raw, "\n") {
-		// Strip spinner carriage-return prefixes like "\r⠋ Fetching...\rgemini-4-neon-high ..."
-		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
-			line = line[idx+1:]
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		id := fields[0]
-		// Skip non-model log/spinner lines.
-		if strings.HasPrefix(id, "ERROR:") || strings.HasPrefix(id, "WARNING:") || strings.HasPrefix(id, "Fetching") || !strings.Contains(id, "-") {
-			continue
-		}
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, ModelInfo{ID: id, Provider: "cli:agy"})
-		}
-	}
-	return out
 }
 
 func readCodexModelsCache(path string) ([]ModelInfo, error) {

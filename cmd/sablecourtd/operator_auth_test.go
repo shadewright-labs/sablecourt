@@ -6,8 +6,11 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -16,6 +19,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/conclave"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
 func TestOperatorRoutesRequireOperatorCredentials(t *testing.T) {
@@ -302,24 +306,13 @@ func TestOperatorLoginRateLimit(t *testing.T) {
 			t.Fatal("repeated wrong login attempts were never rate limited")
 		}
 
-		// Valid credentials from the same client remain blocked during the window.
-		blocked := doLogin(clientA, testOperatorToken)
-		if blocked.Code != http.StatusTooManyRequests || len(blocked.Result().Cookies()) != 0 {
-			t.Fatalf("blocked client status = %d, cookies = %d, want 429 and 0 cookies", blocked.Code, len(blocked.Result().Cookies()))
+		for _, remote := range []string{clientA, clientB} {
+			w := doLogin(remote, testOperatorToken)
+			if w.Code != http.StatusSeeOther || len(w.Result().Cookies()) != 1 {
+				t.Errorf("valid login status = %d, cookies = %d", w.Code, len(w.Result().Cookies()))
+			}
 		}
 
-		// An independent client is unaffected.
-		other := doLogin(clientB, testOperatorToken)
-		if other.Code != http.StatusSeeOther {
-			t.Fatalf("other client status = %d, want 303", other.Code)
-		}
-
-		// After the window elapses, the blocked client can authenticate again.
-		time.Sleep(2 * time.Minute)
-		recovered := doLogin(clientA, testOperatorToken)
-		if recovered.Code != http.StatusSeeOther {
-			t.Fatalf("recovered client status = %d, want 303", recovered.Code)
-		}
 	})
 }
 
@@ -474,7 +467,7 @@ func TestLoginLimiterMemoryBound(t *testing.T) {
 	for range 3 {
 		lim.recordFailure("client-0", now)
 	}
-	if ok, _ := lim.allow("client-0", now); ok {
+	if lim.recordFailure("client-0", now) == 0 {
 		t.Fatal("client-0 should be blocked")
 	}
 
@@ -488,7 +481,7 @@ func TestLoginLimiterMemoryBound(t *testing.T) {
 	}
 
 	// Blocked client-0 must not have been evicted by low-count churn.
-	if ok, _ := lim.allow("client-0", now.Add(30*time.Second)); ok {
+	if lim.recordFailure("client-0", now.Add(30*time.Second)) == 0 {
 		t.Fatal("blocked client-0 was evicted before its window expired")
 	}
 
@@ -499,10 +492,10 @@ func TestLoginLimiterMemoryBound(t *testing.T) {
 			lim.recordFailure(c, now)
 		}
 	}
-	if ok, _ := lim.allow("fresh-client", now.Add(10*time.Second)); ok {
+	if lim.recordFailure("fresh-client", now.Add(10*time.Second)) == 0 {
 		t.Fatal("saturated limiter should fail closed for new clients")
 	}
-	if ok, _ := lim.allow("fresh-client", now.Add(2*time.Minute)); !ok {
+	if lim.recordFailure("fresh-client", now.Add(2*time.Minute)) != 0 {
 		t.Fatal("limiter should recover after entries expire")
 	}
 }
@@ -524,5 +517,257 @@ func TestObserverTokenDigestEqual(t *testing.T) {
 				t.Errorf("tokenDigestEqual = %v, want %v", got, tc.expect)
 			}
 		})
+	}
+}
+
+func TestOperatorCredentialFormat(t *testing.T) {
+	for name, token := range map[string]string{
+		"short": "op_ab", "wrong prefix": strings.Repeat("a", 64), "nonhex": "op_" + strings.Repeat("g", 64),
+		"empty": "", "null": "null", "oversized": "op_" + strings.Repeat("0", maxBearerSize),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if newOperatorAuth(token).matches(token) {
+				t.Error("invalid configured credential authenticated")
+			}
+		})
+	}
+}
+
+func TestLoginAddressBuckets(t *testing.T) {
+	ip4 := netip.AddrFrom4([4]byte{127, 0, 0, 1})
+	ip6 := netip.AddrFrom16([16]byte{0xfe, 0x80, 15: 1})
+	mapped := netip.AddrFrom16(ip4.As16())
+	for _, tc := range []struct {
+		name string
+		ip   netip.Addr
+		want string
+	}{
+		{"mapped", mapped, ip4.String()}, {"zoned", ip6.WithZone("test"), netip.PrefixFrom(ip6, 64).Masked().String()},
+		{"same subnet", ip6.Next(), netip.PrefixFrom(ip6, 64).Masked().String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := loginClientKey(net.JoinHostPort(tc.ip.String(), "42"))
+			if key != tc.want {
+				t.Errorf("key = %q, want %q", key, tc.want)
+			}
+		})
+	}
+}
+
+func TestDistributedLoginFailures(t *testing.T) {
+	for _, distinct := range []int{2, 4} {
+		const capacity = 4
+		t.Run(strconv.Itoa(distinct), func(t *testing.T) {
+			a := newOperatorAuth(testOperatorToken)
+			a.limiter = newLoginLimiter(3, time.Minute, capacity)
+			req := func(client int, token string) int {
+				r := httptest.NewRequest("POST", "/login", strings.NewReader(url.Values{"token": {token}}.Encode()))
+				r.RemoteAddr = net.JoinHostPort(net.IPv4(127, 0, 0, byte(client+1)).String(), "80")
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				r.Header.Set("Origin", "http://"+r.Host)
+				w := httptest.NewRecorder()
+				a.login(w, r)
+				return w.Code
+			}
+			for i := range capacity {
+				if got := req(i%distinct, "bad"); got != 401 {
+					t.Fatalf("initial failure = %d", got)
+				}
+			}
+			if got := req(capacity, "bad"); got != 429 {
+				t.Errorf("new address at capacity = %d", got)
+			}
+			first := net.IPv4(127, 0, 0, 1).String()
+			if a.limiter.entries[first].failures != capacity/distinct {
+				t.Error("active failure counter was lost")
+			}
+			if got := req(capacity, testOperatorToken); got != 303 {
+				t.Errorf("valid login at capacity = %d", got)
+			}
+		})
+	}
+}
+
+func TestOperatorCredentialCollisions(t *testing.T) {
+	for _, tc := range []struct{ name, path, token, configured, scope string }{
+		{"integration on operator", "/tasks", testOperatorToken, testOperatorToken, "shadewright_bearer_token"},
+		{"operator on observer", "/api/v1/observer/snapshot", testOperatorToken, "", "observer_bearer_token"},
+		{"task on observer", "/api/v1/observer/snapshot", model.TokenPrefix + "test", "", "observer_bearer_token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET "+tc.path, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+			h := newOperatorAuth(tc.configured).requireOperatorAuth(mux, mux, secret.NewMemoryStore(map[string]string{tc.scope: tc.token}))
+			r := httptest.NewRequest("GET", tc.path, nil)
+			r.Header.Set("Authorization", "Bearer "+tc.token)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 401 {
+				t.Errorf("status = %d, want 401", w.Code)
+			}
+		})
+	}
+}
+
+func TestLogoutRevokesSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin string
+		want         int
+		revoked      bool
+	}{
+		{"same origin", "same", 303, true}, {"missing origin", "", 403, false}, {"opaque origin", "null", 403, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
+			login := httptest.NewRequest("POST", "/login", strings.NewReader("token="+testOperatorToken))
+			login.Header.Set("Origin", "http://"+login.Host)
+			login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, login)
+			cookies := w.Result().Cookies()
+			if w.Code != 303 || len(cookies) != 1 {
+				t.Fatalf("login status %d, cookies %d", w.Code, len(cookies))
+			}
+			r := httptest.NewRequest("POST", "/logout", nil)
+			origin := tc.origin
+			if origin == "same" {
+				origin = "http://" + r.Host
+			}
+			r.Header.Set("Origin", origin)
+			r.AddCookie(cookies[0])
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("logout = %d, want %d", w.Code, tc.want)
+			}
+			if tc.revoked {
+				c := w.Result().Cookies()
+				if len(c) != 1 || c[0].Name != operatorCookie || c[0].MaxAge >= 0 || c[0].Path != "/" || c[0].Value != "" {
+					t.Fatal("missing session deletion")
+				}
+			}
+			r = httptest.NewRequest("GET", "/api/v1/providers", nil)
+			r.AddCookie(cookies[0])
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if (tc.revoked && w.Code != 401) || (!tc.revoked && w.Code != 200) {
+				t.Errorf("old cookie returned %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestSecureLoginCookieOnHTTPLoopback(t *testing.T) {
+	_, _, _, h, _ := newIntegrationTestEnv(t, domain.ConclaveWards{}, defaultIntegrationSecrets())
+	ipv4 := net.IPv4(127, 0, 0, 1)
+	for _, tc := range []struct {
+		name string
+		ip   net.IP
+		tcp  bool
+	}{
+		{"IPv4", ipv4, false}, {"IPv6", net.IPv6loopback, false}, {"TCP", ipv4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := "http://" + net.JoinHostPort(tc.ip.String(), "7432")
+			var client *http.Client
+			if tc.tcp {
+				l, err := net.Listen("tcp", net.JoinHostPort(tc.ip.String(), "0"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				server := &httptest.Server{Listener: l, Config: &http.Server{Handler: h}}
+				server.Start()
+				t.Cleanup(server.Close)
+				origin, client = server.URL, server.Client()
+			} else {
+				client = httptest.NewTestServer(t, h).Client()
+			}
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.Jar = jar
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			r, err := http.NewRequestWithContext(t.Context(), "POST", origin+"/login", strings.NewReader("token="+testOperatorToken))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Header.Set("Origin", origin)
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			login, err := client.Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer login.Body.Close()
+			if login.StatusCode != 303 || !strings.Contains(login.Header.Get("Set-Cookie"), "; Secure") || login.Header.Get("Location") != "/" {
+				t.Fatal("login did not redirect to the dashboard with a Secure cookie")
+			}
+			dashboard, err := client.Get(origin + "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dashboard.Body.Close()
+			if dashboard.StatusCode != 200 {
+				t.Errorf("dashboard status %d", dashboard.StatusCode)
+			}
+		})
+	}
+}
+
+func TestIntegrationCollisionCannotIssueSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+		want         int
+	}{{"collision", testOperatorToken, 401}, {"distinct", "integration-test", 303}} {
+		t.Run(tc.name, func(t *testing.T) {
+			secrets := secret.NewMemoryStore(map[string]string{"shadewright_bearer_token": tc.secret})
+			h := newHandler(nil, secrets, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
+			r := httptest.NewRequest("POST", "/login", strings.NewReader("token="+testOperatorToken))
+			r.Header.Set("Origin", "http://"+r.Host)
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want || (w.Code == 401 && len(w.Result().Cookies()) != 0) {
+				t.Errorf("status %d, cookies %d", w.Code, len(w.Result().Cookies()))
+			}
+		})
+	}
+}
+
+func TestLoginLimiterRetryAfterCoversEveryGate(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := newLoginLimiter(1, time.Minute, 2)
+	if lim.recordFailure("x", now) != 0 || lim.recordFailure("y", now.Add(10*time.Second)) != 0 {
+		t.Fatal("first failures must be counted")
+	}
+	// The global cap is full until second 60, but y stays blocked until second 70.
+	if got := lim.recordFailure("y", now.Add(20*time.Second)); got != 50*time.Second {
+		t.Fatalf("retry delay = %s, want 50s", got)
+	}
+}
+
+func TestLoginLimiterClientTableSaturation(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := newLoginLimiter(3, time.Minute, 3)
+	// Spread entries over two global windows so the table is full while the global count is not.
+	for _, step := range []struct {
+		client string
+		at     time.Duration
+	}{{"z", 0}, {"a", 20 * time.Second}, {"b", 61 * time.Second}, {"c", 62 * time.Second}} {
+		if lim.recordFailure(step.client, now.Add(step.at)) != 0 {
+			t.Fatalf("%s must be counted", step.client)
+		}
+	}
+	if lim.global.failures >= lim.maxEntries {
+		t.Fatal("test setup must leave the global cap open")
+	}
+	if len(lim.entries) != 3 {
+		t.Fatalf("table holds %d entries, want 3", len(lim.entries))
+	}
+	if lim.recordFailure("d", now.Add(63*time.Second)) == 0 {
+		t.Fatal("a full table of active entries must refuse a new client")
+	}
+	if lim.recordFailure("d", now.Add(81*time.Second)) != 0 {
+		t.Fatal("a new client must be admitted once an entry expires")
 	}
 }

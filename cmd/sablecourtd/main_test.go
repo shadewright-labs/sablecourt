@@ -181,7 +181,7 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 	}
 
 	// 2. Configured token allows public/self-authenticated routes and enforces bearer on operator routes.
-	auth := newOperatorAuth("op-secret-123")
+	auth := newOperatorAuth(testOperatorToken)
 	h := auth.requireOperatorAuth(mux, mux, nil)
 
 	for _, openPath := range []string{"/healthz", "/.well-known/agent-card.json", "/gate/model/v1/chat/completions", "/api/v1/hooks/github", "/a2a"} {
@@ -211,7 +211,7 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 	}
 
 	reqOK := httptest.NewRequest(http.MethodGet, "/api/v1/workloads", nil)
-	reqOK.Header.Set("Authorization", "Bearer op-secret-123")
+	reqOK.Header.Set("Authorization", "Bearer "+testOperatorToken)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, reqOK)
 	if rec.Code != http.StatusOK {
@@ -220,7 +220,7 @@ func TestOperatorAuthRequiredMiddleware(t *testing.T) {
 
 	// 3. Read-only observer_bearer_token can access observer snapshot and scry, but is rejected on operator routes.
 	secWithObs := secret.NewMemoryStore(map[string]string{
-		"operator_bearer_token": "op-secret-123",
+		"operator_bearer_token": testOperatorToken,
 		"observer_bearer_token": "obs-readonly-456",
 	})
 	hObs := auth.requireOperatorAuth(mux, mux, secWithObs)
