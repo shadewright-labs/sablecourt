@@ -27,7 +27,11 @@ func (a *Adapter) probe(ctx context.Context, handle scruntime.Handle, exit bool)
 	if a == nil || a.WorktreeRoot == "" || handle.PID <= 0 || handle.ProcessStartTime.IsZero() {
 		return false, nil
 	}
-	if handle.LogPath != "" && handle.LogPath != handle.WorkDir+".log" {
+	taskBase, err := a.taskBase(handle.ExternalID)
+	if err != nil {
+		return false, nil
+	}
+	if handle.LogPath != "" && handle.LogPath != taskBase+".log" {
 		return false, nil
 	}
 	release, err := a.lockTask(ctx, handle.ExternalID, false)
@@ -47,7 +51,7 @@ func (a *Adapter) probe(ctx context.Context, handle scruntime.Handle, exit bool)
 		if state.Result != nil && state.Result.PID == handle.PID && state.Result.Start.Equal(handle.ProcessStartTime) {
 			return true, nil
 		}
-		result, err := recordedExit(handle)
+		result, err := recordedExitAt(taskBase, handle)
 		return result != nil, err
 	}
 	if !state.FinishedAt.IsZero() {

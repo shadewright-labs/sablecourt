@@ -62,6 +62,10 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	if err != nil {
 		return scruntime.Handle{}, err
 	}
+	if commit != "" && input.checkoutMode != "" {
+		return scruntime.Handle{}, errors.New("StartAtCommit cannot be combined with checkoutMode")
+	}
+	readOnly = readOnly || input.isReadOnly()
 	limit := a.WallTime
 	if limit == 0 {
 		limit = defaultWallTime
@@ -81,23 +85,51 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	}
 	defer release()
 
-	dir, state, err := a.prepareWorktree(ctx, cfg.RepoPath, spec.TaskID)
-	if err != nil {
-		return scruntime.Handle{}, err
-	}
-	defer func() {
-		if startErr != nil {
-			startErr = errors.Join(startErr, rollbackWorktree(context.WithoutCancel(ctx), dir, state))
+	var (
+		dir      string
+		taskBase string
+		state    *worktreeState
+		rollback func(context.Context) error
+	)
+	switch input.checkoutMode {
+	case "":
+		dir, state, err = a.prepareWorktree(ctx, cfg.RepoPath, spec.TaskID)
+		if err != nil {
+			return scruntime.Handle{}, err
 		}
-	}()
-
-	if commit != "" && commit != state.Base {
-		if err := pinWorktree(ctx, dir, state, commit); err != nil {
+		taskBase = dir
+		rollback = func(rbCtx context.Context) error { return rollbackWorktree(rbCtx, dir, state) }
+	case checkoutModeLive:
+		dir, taskBase, state, rollback, err = a.prepareLiveCheckout(ctx, cfg.RepoPath, spec.TaskID)
+		if err != nil {
+			return scruntime.Handle{}, err
+		}
+	case checkoutModeRef:
+		dir, taskBase, state, rollback, err = a.prepareRefCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
+		if err != nil {
+			return scruntime.Handle{}, err
+		}
+	case checkoutModeWriter:
+		dir, taskBase, state, rollback, err = a.prepareWriterCheckout(ctx, cfg.RepoPath, spec.TaskID, input)
+		if err != nil {
 			return scruntime.Handle{}, err
 		}
 	}
-	if err := writeSessionMarker(dir, spec, input); err != nil {
-		return scruntime.Handle{}, err
+	defer func() {
+		if startErr != nil && rollback != nil {
+			startErr = errors.Join(startErr, rollback(context.WithoutCancel(ctx)))
+		}
+	}()
+
+	if input.checkoutMode == "" {
+		if commit != "" && commit != state.Base {
+			if err := pinWorktree(ctx, dir, state, commit); err != nil {
+				return scruntime.Handle{}, err
+			}
+		}
+		if err := writeSessionMarker(dir, spec, input); err != nil {
+			return scruntime.Handle{}, err
+		}
 	}
 	handle := scruntime.Handle{
 		AdapterName: "coding:" + cfg.Harness,
@@ -105,16 +137,19 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		WorkDir:     dir,
 		Branch:      state.Branch,
 	}
+	if input.checkoutMode != "" {
+		handle.LogPath = taskBase + ".log"
+	}
 	if a.DryRun {
 		return handle, nil
 	}
 
-	if input.context != "" {
+	if input.checkoutMode == "" && input.context != "" {
 		if err := writeSessionFile(dir, sessionContextFile, []byte(input.context)); err != nil {
 			return scruntime.Handle{}, err
 		}
 	}
-	scratch, err := os.MkdirTemp(filepath.Dir(dir), ".coding-scratch-")
+	scratch, err := os.MkdirTemp(filepath.Dir(taskBase), ".coding-scratch-")
 	if err != nil {
 		return scruntime.Handle{}, err
 	}
@@ -137,12 +172,12 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, err
 	}
 
-	process, id, err := launchWrapper(cmd, dir, scratch, state.TaskID, limit, a.AttachHub)
+	process, id, err := launchWrapper(cmd, taskBase, scratch, state.TaskID, limit, a.AttachHub)
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, cmd.Path, err)
 	}
 	handle.PID, handle.ProcessStartTime = id.PID, id.Start
-	a.running.Store(dir, process)
+	a.running.Store(taskBase, process)
 	return handle, nil
 }
 
@@ -203,6 +238,13 @@ func writeSessionFile(dir, name string, data []byte) error {
 	return errors.Join(err, file.Close())
 }
 
+func (a *Adapter) finishTask(ctx context.Context, taskBase string, state *worktreeState) error {
+	if state.Mode != "" {
+		return a.finishCouncilTask(ctx, taskBase, state)
+	}
+	return a.finishWorktree(ctx, taskBase, state)
+}
+
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
 	release, err := a.lockTask(ctx, handle.ExternalID, false)
 	if err != nil {
@@ -213,12 +255,16 @@ func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scrunti
 	if err != nil {
 		return scruntime.Observation{}, err
 	}
+	taskBase, err := a.taskBase(handle.ExternalID)
+	if err != nil {
+		return scruntime.Observation{}, err
+	}
 	obs := scruntime.Observation{State: scruntime.StateRunning, ObservedAt: time.Now().UTC()}
-	ready, err := a.loadResult(handle, state)
+	ready, err := a.loadResult(taskBase, handle, state)
 	if err != nil || !ready {
 		return obs, err
 	}
-	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
+	if err := a.finishTask(ctx, taskBase, state); err != nil {
 		return scruntime.Observation{}, err
 	}
 	obs.State = scruntime.StateCompleted
@@ -248,14 +294,18 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	if err != nil {
 		return err
 	}
+	taskBase, err := a.taskBase(handle.ExternalID)
+	if err != nil {
+		return err
+	}
 	if !state.FinishedAt.IsZero() {
-		return a.finishWorktree(ctx, handle.WorkDir, state)
+		return a.finishTask(ctx, taskBase, state)
 	}
 	if handle.PID > 0 {
-		if err := stopVerified(ctx, handle, state); err != nil {
+		if err := stopVerified(ctx, handle, taskBase, state); err != nil {
 			return err
 		}
-		if process := a.process(handle.WorkDir); process != nil {
+		if process := a.process(taskBase); process != nil {
 			select {
 			case <-process.done:
 			case <-ctx.Done():
@@ -263,14 +313,14 @@ func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 			}
 		}
 	}
-	ready, err := a.loadResult(handle, state)
+	ready, err := a.loadResult(taskBase, handle, state)
 	if err != nil {
 		return err
 	}
 	if !ready {
 		return errors.New("coding process is still running")
 	}
-	return a.finishWorktree(ctx, handle.WorkDir, state)
+	return a.finishTask(ctx, taskBase, state)
 }
 
 func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle) ([]scruntime.Artifact, error) {
@@ -283,8 +333,12 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	if err != nil {
 		return nil, err
 	}
+	taskBase, err := a.taskBase(handle.ExternalID)
+	if err != nil {
+		return nil, err
+	}
 	if state.FinishedAt.IsZero() {
-		ready, err := a.loadResult(handle, state)
+		ready, err := a.loadResult(taskBase, handle, state)
 		if err != nil {
 			return nil, err
 		}
@@ -292,13 +346,13 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 			return nil, errors.New("coding worktree is still running")
 		}
 	}
-	if err := a.finishWorktree(ctx, handle.WorkDir, state); err != nil {
+	if err := a.finishTask(ctx, taskBase, state); err != nil {
 		return nil, err
 	}
 	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
 }
 
-func (a *Adapter) loadResult(handle scruntime.Handle, state *worktreeState) (bool, error) {
+func (a *Adapter) loadResult(taskBase string, handle scruntime.Handle, state *worktreeState) (bool, error) {
 	if handle.PID == 0 {
 		return true, nil
 	}
@@ -309,13 +363,13 @@ func (a *Adapter) loadResult(handle scruntime.Handle, state *worktreeState) (boo
 	if err != nil {
 		return false, err
 	}
-	result, err := recordedExit(handle)
+	result, err := recordedExitAt(taskBase, handle)
 	if err != nil {
 		return false, err
 	}
 	if result != nil {
 		state.Result = result
-		return true, writeWorktreeState(handle.WorkDir, state)
+		return true, writeWorktreeState(taskBase, state)
 	}
 	if alive {
 		return false, nil
@@ -327,6 +381,15 @@ func (a *Adapter) process(dir string) *codingProcess {
 	value, _ := a.running.Load(dir)
 	process, _ := value.(*codingProcess)
 	return process
+}
+
+func (a *Adapter) processForHandle(h scruntime.Handle) *codingProcess {
+	if base, err := a.taskBase(h.ExternalID); err == nil {
+		if p := a.process(base); p != nil {
+			return p
+		}
+	}
+	return a.process(h.WorkDir)
 }
 
 type taskGate struct {

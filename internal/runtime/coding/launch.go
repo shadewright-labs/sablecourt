@@ -16,12 +16,58 @@ import (
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
-const maxLaunchInput = 64 * 1024
+const (
+	maxLaunchInput      = 64 * 1024
+	maxCheckoutRefBytes = 256
+	maxConclaveIDBytes  = 128
+	maxCouncilRoleBytes = 64
+
+	checkoutModeLive   = "live"
+	checkoutModeRef    = "ref"
+	checkoutModeWriter = "writer"
+)
 
 var modelName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$`)
 
 type launchInput struct {
-	prompt, context, model, conclaveID, role string
+	prompt, context, model, conclaveID, role  string
+	checkoutMode, checkoutRef, checkoutWriter string
+}
+
+func (input launchInput) isReadOnly() bool {
+	switch input.checkoutMode {
+	case checkoutModeLive, checkoutModeRef:
+		return true
+	case checkoutModeWriter:
+		return input.role != input.checkoutWriter
+	default:
+		return false
+	}
+}
+
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func validCouncilRole(role string) bool {
+	return role != "" && len(role) <= maxCouncilRoleBytes && role == strings.TrimSpace(role) &&
+		!hasControlChars(role) && !strings.ContainsAny(role, " \t\n\r") &&
+		!strings.HasPrefix(role, "@") && role != "operator" && role != "all" && role != "system"
+}
+
+func validCheckoutRef(ref string) bool {
+	return ref != "" && len(ref) <= maxCheckoutRefBytes && ref == strings.TrimSpace(ref) &&
+		!strings.HasPrefix(ref, "-") && !strings.Contains(ref, "..") &&
+		!hasControlChars(ref) && !strings.ContainsAny(ref, " \t\n\r")
+}
+
+func validConclaveID(id string) bool {
+	return id != "" && len(id) <= maxConclaveIDBytes && id == strings.TrimSpace(id) && !hasControlChars(id)
 }
 
 func parseLaunchInput(raw string) (launchInput, error) {
@@ -39,6 +85,7 @@ func parseLaunchInput(raw string) (launchInput, error) {
 	fields := map[string]*string{
 		"prompt": &input.prompt, "context_packet": &input.context, "model": &input.model,
 		"conclaveId": &input.conclaveID, "role": &input.role,
+		"checkoutMode": &input.checkoutMode, "checkoutRef": &input.checkoutRef, "checkoutWriter": &input.checkoutWriter,
 	}
 	seen := make(map[string]bool)
 	for decoder.More() {
@@ -73,6 +120,58 @@ func parseLaunchInput(raw string) (launchInput, error) {
 	if seen["model"] && !modelName.MatchString(input.model) {
 		return input, errors.New("invalid coding model name")
 	}
+	if seen["checkoutMode"] {
+		switch input.checkoutMode {
+		case checkoutModeLive, checkoutModeRef, checkoutModeWriter:
+		default:
+			return input, errors.New("invalid coding checkoutMode")
+		}
+	}
+	if seen["checkoutRef"] {
+		if input.checkoutMode != checkoutModeRef && input.checkoutMode != checkoutModeWriter {
+			return input, errors.New("checkoutRef is only valid in ref or writer checkout modes")
+		}
+		if !validCheckoutRef(input.checkoutRef) {
+			return input, errors.New("invalid coding checkoutRef")
+		}
+	}
+	if seen["checkoutWriter"] {
+		if input.checkoutMode != checkoutModeWriter {
+			return input, errors.New("checkoutWriter is only valid in writer checkout mode")
+		}
+		if !validCouncilRole(input.checkoutWriter) {
+			return input, errors.New("invalid coding checkoutWriter")
+		}
+	}
+	switch input.checkoutMode {
+	case checkoutModeLive:
+		if seen["conclaveId"] && !validConclaveID(input.conclaveID) {
+			return input, errors.New("invalid coding conclaveId")
+		}
+		if seen["role"] && !validCouncilRole(input.role) {
+			return input, errors.New("invalid coding role")
+		}
+	case checkoutModeRef:
+		if !seen["checkoutRef"] {
+			return input, errors.New("ref checkout mode requires checkoutRef")
+		}
+		if !validConclaveID(input.conclaveID) {
+			return input, errors.New("ref checkout mode requires a valid conclaveId")
+		}
+		if seen["role"] && !validCouncilRole(input.role) {
+			return input, errors.New("invalid coding role")
+		}
+	case checkoutModeWriter:
+		if !seen["checkoutWriter"] {
+			return input, errors.New("writer checkout mode requires checkoutWriter")
+		}
+		if !validConclaveID(input.conclaveID) {
+			return input, errors.New("writer checkout mode requires a valid conclaveId")
+		}
+		if !validCouncilRole(input.role) {
+			return input, errors.New("writer checkout mode requires a valid role")
+		}
+	}
 	if strings.TrimSpace(input.context) != "" {
 		input.prompt = input.context
 	}
@@ -88,21 +187,36 @@ func parseLaunchInput(raw string) (launchInput, error) {
 		}
 		*field = redact.String(*field)
 	}
+	for _, id := range []string{input.checkoutRef, input.checkoutWriter} {
+		if hasUnfinishedPrivateKey(id) {
+			return input, errors.New("coding input contains an unfinished private key")
+		}
+	}
 	if len(input.prompt) > maxLaunchInput || len(input.context) > maxLaunchInput {
 		return input, errors.New("redacted coding input is oversized")
 	}
 	return input, nil
 }
 
-func (input launchInput) args(harness string) []string {
+func (input launchInput) args(harness string, readOnly bool) []string {
 	if harness == "codex" {
 		args := []string{"exec"}
+		if readOnly {
+			args = append(args, "--sandbox", "read-only")
+		}
 		if input.model != "" {
 			args = append(args, "-m", input.model)
 		}
 		return append(args, input.prompt)
 	}
 	var args []string
+	if readOnly {
+		if harness == "agy" {
+			args = append(args, "--mode", "plan")
+		} else {
+			args = append(args, "--permission-mode", "plan")
+		}
+	}
 	if input.model != "" {
 		args = append(args, "--model", input.model)
 	}
@@ -115,7 +229,7 @@ func (a *Adapter) buildCommand(spec scruntime.LaunchSpec, input launchInput, dir
 	if err != nil {
 		return nil, "", err
 	}
-	args := input.args(cfg.Harness)
+	args := input.args(cfg.Harness, readOnly)
 	var profile string
 	if cfg.Sandbox == "seatbelt" {
 		dir, err = resolvedPath(dir)
@@ -133,7 +247,7 @@ func (a *Adapter) buildCommand(spec scruntime.LaunchSpec, input launchInput, dir
 		bin, args = seatbeltCommand(profile, bin, args)
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.Dir, cmd.Env = dir, strippedEnv(spec, scratch)
+	cmd.Dir, cmd.Env = dir, strippedEnv(spec, scratch, readOnly)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, profile, nil
 }
@@ -161,10 +275,10 @@ func resolveHarness(harness, configured string) (string, error) {
 // BuildStrippedEnv returns an allowlisted environment with scoped gate credentials.
 func BuildStrippedEnv(spec scruntime.LaunchSpec) []string {
 	home, _ := os.UserHomeDir()
-	return strippedEnv(spec, home)
+	return strippedEnv(spec, home, false)
 }
 
-func strippedEnv(spec scruntime.LaunchSpec, home string) []string {
+func strippedEnv(spec scruntime.LaunchSpec, home string, readOnly bool) []string {
 	env := []string{
 		"PATH=/Library/Developer/CommandLineTools/usr/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
 		"LANG=en_US.UTF-8",
@@ -173,6 +287,9 @@ func strippedEnv(spec scruntime.LaunchSpec, home string) []string {
 		"SABLECOURT_MANAGED=1",
 		"SABLECOURT_TASK_ID=" + spec.TaskID,
 		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
+	}
+	if readOnly {
+		env = append(env, "GIT_OPTIONAL_LOCKS=0")
 	}
 	if spec.DataGateURL != "" && spec.TaskToken != "" {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)

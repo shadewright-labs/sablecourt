@@ -156,10 +156,49 @@ func allowGit(profile *strings.Builder, work string, state *worktreeState, readO
 	if err != nil {
 		return err
 	}
+	if state.Mode == checkoutModeLive {
+		if !readOnly {
+			return errors.New("live checkout mode requires read-only confinement")
+		}
+		expectedGit := filepath.Join(work, ".git")
+		if common != expectedGit || git != expectedGit || state.Branch != "" {
+			return errors.New("invalid coding sandbox live Git registration")
+		}
+		if err := checkSandboxGitPath(common); err != nil {
+			return err
+		}
+		for _, name := range []string{"objects", "refs"} {
+			if path, err := resolvedPath(filepath.Join(common, name)); err != nil || path != filepath.Join(common, name) {
+				return errors.New("coding sandbox Git storage is unavailable or redirected")
+			}
+		}
+		return nil
+	}
 	if filepath.Dir(git) != filepath.Join(common, "worktrees") ||
-		pathWithin(work, common) || pathWithin(common, work) ||
-		state.Branch != "sablecourt/"+sanitizeSegment(state.TaskID) {
+		pathWithin(work, common) || pathWithin(common, work) {
 		return errors.New("invalid coding sandbox Git registration")
+	}
+	switch state.Mode {
+	case "":
+		if state.Branch != "sablecourt/"+sanitizeSegment(state.TaskID) {
+			return errors.New("invalid coding sandbox Git registration")
+		}
+	case checkoutModeRef:
+		if !readOnly || state.Branch != "" {
+			return errors.New("invalid coding sandbox ref Git registration")
+		}
+	case checkoutModeWriter:
+		if state.ReadOnly {
+			if !readOnly || state.Branch != "" {
+				return errors.New("invalid coding sandbox reviewer Git registration")
+			}
+		} else {
+			if readOnly || state.CouncilKey == "" || state.Branch != councilWriterBranch(state.CouncilKey) {
+				return errors.New("invalid coding sandbox writer Git registration")
+			}
+		}
+	default:
+		return errors.New("unsupported coding sandbox checkout mode")
 	}
 	allowParentMetadata(profile, git)
 	for _, name := range []string{"objects", "refs"} {
@@ -168,8 +207,12 @@ func allowGit(profile *strings.Builder, work string, state *worktreeState, readO
 		}
 		fmt.Fprintf(profile, "(allow file-read* file-test-existence (subpath %q))\n", filepath.Join(common, name))
 	}
-	for _, path := range []string{common, filepath.Join(common, "config"), filepath.Join(common, "packed-refs"),
-		filepath.Join(common, "info", "exclude"), work + excludeConfigSuffix} {
+	readPaths := []string{common, filepath.Join(common, "config"), filepath.Join(common, "packed-refs"),
+		filepath.Join(common, "info", "exclude")}
+	if state.Mode == "" {
+		readPaths = append(readPaths, work+excludeConfigSuffix)
+	}
+	for _, path := range readPaths {
 		if err := checkSandboxGitPath(path); err != nil {
 			return err
 		}
