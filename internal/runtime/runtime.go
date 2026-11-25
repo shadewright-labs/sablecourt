@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -66,6 +67,21 @@ type Adapter interface {
 	Stop(ctx context.Context, handle Handle) error
 	CollectArtifacts(ctx context.Context, handle Handle) ([]Artifact, error)
 }
+
+// MissingBinaryError reports that a workload executable could not be found at Path.
+type MissingBinaryError struct {
+	Path string
+	Err  error
+}
+
+func (e *MissingBinaryError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("executable %q not found", e.Path)
+}
+
+func (e *MissingBinaryError) Unwrap() error { return e.Err }
 
 // CouncilCheckout refers to the directory already selected and verified by the coding adapter.
 type CouncilCheckout struct {
