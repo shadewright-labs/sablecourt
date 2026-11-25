@@ -1,6 +1,7 @@
 package contextpack
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,7 +11,31 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
-const councilPeerBudget = 16 << 10
+const (
+	councilPeerBudget = 16 << 10
+	// MaxCouncilEncodedPacketBytes bounds the JSON-encoded packet string so the
+	// full launch payload fits inside the coding adapter's 64 KiB input limit.
+	MaxCouncilEncodedPacketBytes = 63 << 10
+	// MaxCouncilOpeningEncodedPacketBytes reserves encoded headroom for later
+	// round peer excerpts when validating the opening question.
+	MaxCouncilOpeningEncodedPacketBytes = 59 << 10
+)
+
+func jsonEncodedStringLen(s string) int {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return MaxCouncilEncodedPacketBytes + 1
+	}
+	return len(raw)
+}
+
+func jsonEncodedContentLen(s string) int {
+	n := jsonEncodedStringLen(s)
+	if n < 2 {
+		return n
+	}
+	return n - 2
+}
 
 type CouncilAnswer struct {
 	Role string `json:"role"`
@@ -39,12 +64,14 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 			b.WriteString("\n" + redact.String(d) + "\n")
 		}
 	}
-	if b.Len() > maxPacketBytes {
+	prefixEncoded := jsonEncodedStringLen(b.String())
+	if b.Len() > maxPacketBytes || prefixEncoded > MaxCouncilEncodedPacketBytes {
 		return Packet{}, errors.New("council question and instructions exceed packet budget")
 	}
 	budget := min(councilPeerBudget, maxPacketBytes-b.Len())
+	encodedBudget := MaxCouncilEncodedPacketBytes - prefixEncoded
 	var blocks, summaries []string
-	var total, previous int
+	var total, encodedTotal, previous int
 	var latest CouncilRound
 	for _, round := range rounds {
 		if round.Number <= previous || len(round.Answers) == 0 {
@@ -61,6 +88,7 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 		block := renderCouncilRound(latest)
 		blocks = append(blocks, block)
 		total += len(block)
+		encodedTotal += jsonEncodedContentLen(block)
 		if len(blocks) < len(rounds) {
 			summary := CouncilRound{Number: latest.Number}
 			for _, a := range latest.Answers {
@@ -71,27 +99,32 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 		}
 	}
 	for i, summary := range summaries {
-		if total <= budget {
+		if total <= budget && encodedTotal <= encodedBudget {
 			break
 		}
-		if len(summary) < len(blocks[i]) {
+		sumEnc := jsonEncodedContentLen(summary)
+		blkEnc := jsonEncodedContentLen(blocks[i])
+		if len(summary) < len(blocks[i]) || sumEnc < blkEnc {
 			total += len(summary) - len(blocks[i])
+			encodedTotal += sumEnc - blkEnc
 			blocks[i] = summary
 		}
 	}
 	const omitted = "[older rounds omitted]\n"
 	for i := range summaries {
-		if total <= budget {
+		if total <= budget && encodedTotal <= encodedBudget {
 			break
 		}
 		total -= len(blocks[i])
+		encodedTotal -= jsonEncodedContentLen(blocks[i])
 		blocks[i] = ""
 		if i == 0 {
 			b.WriteString(omitted)
 			budget = min(councilPeerBudget-len(omitted), maxPacketBytes-b.Len())
+			encodedBudget = MaxCouncilEncodedPacketBytes - jsonEncodedStringLen(b.String())
 		}
 	}
-	if total > budget {
+	if total > budget || encodedTotal > encodedBudget {
 		// An oversized latest round gives each role the same maximum excerpt length.
 		// Redaction above covered the entire answer, including any truncated suffix.
 		const marker = "[peer text omitted]\n"
@@ -107,7 +140,10 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 			}
 			return renderCouncilRound(latest) + marker
 		}
-		limit := sort.Search(longest+1, func(n int) bool { return len(excerpt(n)) > budget }) - 1
+		limit := sort.Search(longest+1, func(n int) bool {
+			ex := excerpt(n)
+			return len(ex) > budget || jsonEncodedContentLen(ex) > encodedBudget
+		}) - 1
 		if limit <= 0 {
 			return Packet{}, errors.New("no peer text fits within the remaining council budget")
 		}
@@ -116,7 +152,11 @@ func AssembleCouncil(card, question string, decrees []string, rounds []CouncilRo
 	for _, block := range blocks {
 		b.WriteString(block)
 	}
-	return Packet{Markdown: b.String()}, nil
+	md := b.String()
+	if len(md) > maxPacketBytes || jsonEncodedStringLen(md) > MaxCouncilEncodedPacketBytes {
+		return Packet{}, errors.New("council packet exceeds launch input budget")
+	}
+	return Packet{Markdown: md}, nil
 }
 
 func renderCouncilRound(round CouncilRound) string {

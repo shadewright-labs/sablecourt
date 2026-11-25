@@ -219,6 +219,10 @@ func TestMCPCouncilRoundTripWithTestDaemon(t *testing.T) {
 				Metadata: domain.ObjectMeta{Name: "codex-wl", Zone: domain.ZoneRuntime},
 				Spec:     domain.WorkloadSpec{Class: domain.ClassLongLivedAgent, Runtime: domain.RuntimeConfig{Type: "docker", Image: "alpine:3.21"}},
 			},
+			"agy-wl": {
+				Metadata: domain.ObjectMeta{Name: "agy-wl", Zone: domain.ZoneRuntime},
+				Spec:     domain.WorkloadSpec{Class: domain.ClassLongLivedAgent, Runtime: domain.RuntimeConfig{Type: "docker", Image: "alpine:3.21"}},
+			},
 		},
 		Conclaves: map[string]domain.Conclave{
 			"council": {
@@ -228,6 +232,7 @@ func TestMCPCouncilRoundTripWithTestDaemon(t *testing.T) {
 					Vassals: []domain.ConclaveVassal{
 						{Role: "claude", Workload: "claude-wl", Activation: domain.ActivationAlwaysOn, CanMessage: []string{"all"}},
 						{Role: "codex", Workload: "codex-wl", Activation: domain.ActivationAlwaysOn, CanMessage: []string{"all"}},
+						{Role: "agy", Workload: "agy-wl", Activation: domain.ActivationAlwaysOn, CanMessage: []string{"all"}},
 					},
 				},
 			},
@@ -348,7 +353,7 @@ func TestMCPCouncilRoundTripWithTestDaemon(t *testing.T) {
 	// 1. Convene council
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "sablecourt_council_convene",
-		Arguments: map[string]any{"question": "How are tokens validated?", "rounds": 2, "with": []string{"claude", "codex"}},
+		Arguments: map[string]any{"question": "How are tokens validated?", "rounds": 2, "with": []string{"claude", "codex", "agy"}},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("convene failed: err=%v res=%+v", err, res)
@@ -416,8 +421,8 @@ func TestMCPCouncilRoundTripWithTestDaemon(t *testing.T) {
 		t.Fatalf("expected cancelled conclave, got %+v, err=%v", gotSess, err)
 	}
 	tasks, err := st.ListTasks(ctx)
-	if err != nil || len(tasks) != 2 {
-		t.Fatalf("expected 2 conclave tasks, got %+v, err=%v", tasks, err)
+	if err != nil || len(tasks) != 3 {
+		t.Fatalf("expected 3 conclave tasks, got %+v, err=%v", tasks, err)
 	}
 	for _, task := range tasks {
 		if a, ok := store.TaskConclaveAssignment(task); !ok || a.ConclaveID != sess.ID {
