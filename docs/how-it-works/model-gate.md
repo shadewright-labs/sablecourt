@@ -25,7 +25,7 @@ Each refusal returns an error; the audit rows are listed below.
 2. The workload must be declared (403), must not be a deterministic controller and must hold `modelGate.allowed` (403, `no_model_gate_grant`).
 3. If `providers` is listed it must include the route's provider (403, `provider_not_allowed`). An empty list allows all four.
 4. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
-5. The body (up to 16 MiB) is read and a cost is reserved. A refusal is 429 with `budget exceeded: <reason>`.
+5. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
 6. The provider key must be available (502 otherwise).
 
 ## Reserve, forward, settle

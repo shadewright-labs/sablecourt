@@ -16,7 +16,7 @@ A `Workload` manifest names a class and a zone. The adapter is chosen by the cla
 | `long-lived-agent` | Docker adapter | A container image. |
 | `deterministic-controller` | Controller adapter wrapping the Docker adapter | A container image and no Model Gate grant. |
 
-The zone is `runtime` or `sandbox`. The loader refuses a sandbox workload that lists `actions` or `delegateTo` grants, and the policy engine denies `action:` and `delegate:` capabilities for it at run time, so a sandbox workload cannot change anything. Moving a workload to the runtime zone is a reviewed change to its manifest. `sablectl promote <workload>` and the `sandbox.propose_promotion` action only create a branch named `sablecourt/promote-<workload>` (or check that the workload is in the sandbox zone); neither edits a manifest. The names `claude`, `codex` and `agy` are reserved for the council panel.
+The zone is `runtime` or `sandbox`. The loader refuses a sandbox workload that lists `actions` or `delegateTo` grants, and the policy engine denies `action:` and `delegate:` capabilities for it at run time, so a sandbox workload cannot use gate-mediated actions or delegate work. The host sandbox still allows outbound network traffic, so a sandbox coding workload on a host run can send a direct request that changes an external service. Moving a workload to the runtime zone is a reviewed change to its manifest. `sablectl promote <workload>` and the `sandbox.propose_promotion` action only create a branch named `sablecourt/promote-<workload>` (or check that the workload is in the sandbox zone); neither edits a manifest. The names `claude`, `codex` and `agy` are reserved for the council panel.
 
 ## Coding adapter: host sandbox
 

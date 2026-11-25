@@ -63,6 +63,7 @@ A task may have a parent: workflow steps after the first and retries of those st
 What the code does today, where it falls short of the design.
 
 - Suspend and resume. `task suspend` asks the adapter for a checkpoint, then always stops the workload; the coding and Docker adapters keep nothing resumable, and `task resume` fails for coding tasks. Tracking issue #14 lists the faults; use cancel and retry instead.
+- Model calls from workflow steps: steps after the first have a parent but are created without a budget ceiling, so the Model Gate refuses their calls with `invalid_child_budget_ceiling`; see [Model Gate](model-gate.md#known-gaps).
 - Delegation: `ProposeChildTask` exists in the reconciler but nothing calls it, so no agent can create a child task today.
 
 ## In depth

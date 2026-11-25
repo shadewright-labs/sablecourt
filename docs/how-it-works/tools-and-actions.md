@@ -55,6 +55,6 @@ What the code does today, where it falls short of the design.
 
 ## In depth
 
-- [Approvals](approvals.md), [model gate](model-gate.md), [concepts](../concepts.md)
+- [Approvals](approvals.md), [model gate](model-gate.md), concepts (page planned)
 - [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md), [ADR-0005](../adr/0005-dual-path-human-in-the-loop.md)
 - Code: `internal/gate/mcp/gate.go`, `internal/gate/mcp/actions.go`, `internal/gate/mcp/memory.go`, `internal/policy/policy.go`, `internal/redact/redact.go`

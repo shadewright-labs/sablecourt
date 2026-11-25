@@ -39,7 +39,7 @@ What the code does today, where it falls short of the design.
 
 - An approved approval is not marked consumed and its expiry is not checked when it is used, so the same action can run again while the lease lasts.
 - An empty `expectedSha256` is accepted on the dialog path; the dialog is then the only check.
-- The dialog truncates long payloads, so a long `body` can hide fields such as `head` or `repo`; compare the full digest with `sablectl approval list --json`.
+- The dialog truncates long payloads, so a long `body` can hide fields such as `head` or `repo`; read the full `PayloadCanonicalJSON` with `sablectl approval list --json` before approving.
 - On Linux no approver exists, so an `approve` effect cannot be confirmed there.
 
 ## Not built yet
@@ -49,6 +49,6 @@ What the code does today, where it falls short of the design.
 
 ## In depth
 
-- [Tools and actions](tools-and-actions.md), [identity and access](identity-and-access.md), [how to review an approval](../how-to/review-an-approval.md)
+- [Tools and actions](tools-and-actions.md), identity and access (page planned), [how to review an approval](../how-to/review-an-approval.md)
 - [ADR-0005](../adr/0005-dual-path-human-in-the-loop.md), [ADR-0009](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md), [ADR-0014](../adr/0014-identity-and-authentication.md)
 - Code: `internal/approval/approval.go`, `internal/approval/macos_oob.go`, `internal/approval/device.go`, `cmd/sablecourtd/main.go` (approval routes)
