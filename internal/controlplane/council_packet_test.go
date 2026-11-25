@@ -71,6 +71,18 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 				}
 				stub := &fakeAdapter{}
 				err = launchForTest(ctx, r, task, wl, stub)
+				if tc.name == "secret" {
+					// Intake redacts the secret, so neither the stored input nor
+					// anything handed to the adapter may hold it.
+					stored, getErr := st.GetTask(ctx, task.ID)
+					if getErr != nil {
+						t.Fatal(getErr)
+					}
+					if strings.Contains(stored.InputJSON, secret) || strings.Contains(stub.lastSpec.InputJSON, secret) {
+						t.Fatal("secret packet reached the store or launch")
+					}
+					return
+				}
 				if !tc.valid {
 					if err == nil || stub.lastSpec.TaskID != "" {
 						t.Fatal("invalid packet reached launch")

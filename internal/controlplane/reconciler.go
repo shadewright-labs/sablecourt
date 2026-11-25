@@ -409,6 +409,10 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 }
 
 func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON, parentID string, step *workflowStepRecord) (domain.Task, error) {
+	// Every submit path (API, A2A, UI, webhooks, schedules, workflow steps,
+	// retries, council turns) passes here, so the stored input, its task
+	// message and what readers get back hold no known secret form.
+	inputJSON = redact.JSON(inputJSON)
 	if step == nil && strings.HasPrefix(idempotencyKey, "wf:") {
 		return domain.Task{}, errWorkflowKeyReserved
 	}
@@ -697,6 +701,7 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 // ProposeChildTask enforces strict hub-and-spoke delegation: parent must hold a delegate:<target> grant
 // and pass deterministic policy before the control plane dispatches the child task.
 func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetWorkload, idempotencyKey, inputJSON, subBudgetJSON string) (domain.Task, error) {
+	inputJSON = redact.JSON(inputJSON)
 	if strings.HasPrefix(idempotencyKey, "wf:") {
 		return domain.Task{}, errWorkflowKeyReserved
 	}

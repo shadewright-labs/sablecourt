@@ -1,6 +1,7 @@
 package redact_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -33,4 +34,45 @@ func TestStringWithholdsUnterminatedPrivateKey(t *testing.T) {
 			t.Fatalf("prefix %d: text before the key was not kept", prefix)
 		}
 	}
+}
+
+func TestJSONRedactsGeneratedCorpusAndStaysValid(t *testing.T) {
+	for _, tc := range redacttest.Corpus() {
+		t.Run(tc.Name, func(t *testing.T) {
+			for name, input := range map[string]string{
+				"raw":     tc.Text,
+				"wrapped": mustJSON(t, map[string]string{"prompt": tc.Text}),
+			} {
+				out := redact.JSON(input)
+				if frag, ok := redacttest.Leak(out, tc.Secrets); ok {
+					t.Fatalf("%s: secret fragment %q survived: %q", name, frag, out)
+				}
+				if json.Valid([]byte(input)) && !json.Valid([]byte(out)) {
+					t.Fatalf("%s: valid JSON became invalid: %q", name, out)
+				}
+			}
+		})
+	}
+	text, body := redacttest.UnterminatedKey(10)
+	in := mustJSON(t, map[string]any{"prompt": text, "n": 1})
+	out := redact.JSON(in)
+	if _, ok := redacttest.Leak(out, []string{body}); ok || !json.Valid([]byte(out)) {
+		t.Fatalf("unterminated key in JSON: valid=%t out=%q", json.Valid([]byte(out)), out)
+	}
+	clean := `{"b":1, "a":"<ok>"}`
+	if got := redact.JSON(clean); got != clean {
+		t.Fatalf("clean JSON changed: %q", got)
+	}
+	if got := redact.JSON(`{"api_key_count":123456,"password":12345678}`); got != `{"api_key_count":123456,"password":"[REDACTED:secret]"}` {
+		t.Fatalf("numeric secret field: %q", got)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }

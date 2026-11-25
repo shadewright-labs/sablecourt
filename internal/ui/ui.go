@@ -26,6 +26,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -383,7 +384,7 @@ func (d *Dashboard) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		_ = d.store.AppendTaskMessage(r.Context(), domain.TaskMessage{
 			TaskID:    id,
 			Role:      "user",
-			Content:   content,
+			Content:   redact.String(content),
 			CreatedAt: time.Now().UTC(),
 		})
 	}
