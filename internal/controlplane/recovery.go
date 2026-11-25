@@ -361,6 +361,32 @@ func (r *Reconciler) staleWithoutExit(ctx context.Context, task domain.Task, ada
 	return !exited, nil
 }
 
+// persistedClassAdapter returns the adapter registered for the class stored with a handle.
+func (r *Reconciler) persistedClassAdapter(rec *persistedHandle) scruntime.Adapter {
+	if rec == nil || rec.WorkloadClass == "" {
+		return nil
+	}
+	return r.adapters[rec.WorkloadClass]
+}
+
+// cleanupContainerHandle revokes the task lease and then stops the container handle.
+func (r *Reconciler) cleanupContainerHandle(ctx context.Context, taskID string, adapter scruntime.Adapter, handle scruntime.Handle) error {
+	cleanupCtx := context.WithoutCancel(ctx)
+	if err := r.store.RevokeTaskLeases(cleanupCtx, taskID); err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
+	stopErr := adapter.Stop(callCtx, handle)
+	if callCtx.Err() != nil {
+		stopErr = callCtx.Err()
+	}
+	cancel()
+	if stopErr != nil {
+		return errors.New("runtime container cleanup failed")
+	}
+	return nil
+}
+
 // recoverTask attempts to reattach a task without an in-memory handle.
 // Probe errors retain the record for a later pass. A definitive loss revokes
 // access and fails the task without signaling the recorded PID.
@@ -373,6 +399,16 @@ func (r *Reconciler) recoverTask(ctx context.Context, task domain.Task, bundle *
 		return r.failLostTask(ctx, task, `{"reason":"handle_missing_or_invalid"}`)
 	}
 	adapter := r.resolveRecoveryAdapter(task, rec, bundle)
+	if adapter == nil && isContainerHandle(handle) {
+		// The manifest class changed, so the runtime cannot resume the turn. The
+		// adapter that created the container still removes it and its proxy.
+		if cleaner := r.persistedClassAdapter(rec); cleaner != nil {
+			if err := r.cleanupContainerHandle(ctx, task.ID, cleaner, handle); err != nil {
+				return err
+			}
+			return r.failLostTask(ctx, task, `{"reason":"workload_class_changed"}`)
+		}
+	}
 	if adapter == nil {
 		if isContainerHandle(handle) {
 			return errors.Join(errors.New("council runtime unavailable for cleanup"), r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
@@ -386,18 +422,8 @@ func (r *Reconciler) recoverTask(ctx context.Context, task domain.Task, bundle *
 	if isContainerHandle(handle) {
 		// Per-launch listeners belong to the previous daemon. Revoke the lease
 		// and remove its resources even when the final message is already durable.
-		cleanupCtx := context.WithoutCancel(ctx)
-		if err := r.store.RevokeTaskLeases(cleanupCtx, task.ID); err != nil {
+		if err := r.cleanupContainerHandle(ctx, task.ID, adapter, handle); err != nil {
 			return err
-		}
-		callCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
-		stopErr := adapter.Stop(callCtx, handle)
-		if callCtx.Err() != nil {
-			stopErr = callCtx.Err()
-		}
-		cancel()
-		if stopErr != nil {
-			return errors.New("runtime container cleanup failed")
 		}
 		if !alive {
 			return r.failLostTask(ctx, task, `{"reason":"container_not_alive"}`)

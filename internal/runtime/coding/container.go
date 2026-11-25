@@ -511,11 +511,14 @@ func (a *Adapter) loadContainerResult(ctx context.Context, taskBase string, hand
 		return false, nil
 	}
 	if insp.Exited {
-		msg := ""
-		if insp.ExitCode != 0 {
-			msg = fmt.Sprintf("coding harness exited with status %d", insp.ExitCode)
+		code, msg := insp.ExitCode, ""
+		if code != 0 {
+			msg = fmt.Sprintf("coding harness exited with status %d", code)
+		} else {
+			// Exit zero alone is not a completed turn: the output was lost with the daemon, so fail closed.
+			code, msg = 1, "coding harness output was not recorded before the daemon restarted"
 		}
-		state.Result = &processResult{ExitCode: insp.ExitCode, Message: msg}
+		state.Result = &processResult{ExitCode: code, Message: msg}
 		if insp.ContainerID != "" && state.Container != nil {
 			state.Container.ContainerID = insp.ContainerID
 		}

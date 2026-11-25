@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -45,22 +46,27 @@ code=$(printf 'Authorization: Bearer %s\n' "$(cat "$SABLECOURT_TASK_TOKEN_FILE")
 unauth=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${SABLECOURT_DATA_GATE_URL}")
 [[ "$unauth" == "401" ]]
 
+workspace_ro() { awk '$5 == "/workspace" && $6 ~ /^ro(,|$)/ {found=1} END{exit !found}' /proc/self/mountinfo; }
+
 prompt="${!#}"
 case "$prompt" in
   *MODE_LIVE*)
     grep -q "committed-v1" /workspace/committed.txt
     grep -q "uncommitted-v1" /workspace/uncommitted.txt
+    workspace_ro || exit 46
     if touch /workspace/write-attempt 2>/dev/null; then exit 41; fi
     printf 'live review complete\n'
     ;;
   *MODE_REF*)
     grep -q "committed-v1" /workspace/committed.txt
     if [ -e /workspace/uncommitted.txt ]; then exit 42; fi
+    workspace_ro || exit 47
     if touch /workspace/write-attempt 2>/dev/null; then exit 43; fi
     printf 'ref review complete\n'
     ;;
   *MODE_REVIEW*)
     grep -q "committed-v1" /workspace/committed.txt
+    workspace_ro || exit 48
     if touch /workspace/write-attempt 2>/dev/null; then exit 44; fi
     printf 'reviewer verdict\n'
     ;;
@@ -231,14 +237,17 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 			CouncilDeadline:  time.Now().Add(30 * time.Second),
 		}
 		h, err := adapter.Start(t.Context(), spec)
+		// A failed start can still return a handle that owns resources.
+		if isContainerHandle(h) {
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				_ = adapter.Stop(ctx, h)
+			})
+		}
 		if err != nil {
 			t.Fatalf("Start(%s): %v", taskID, err)
 		}
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			_ = adapter.Stop(ctx, h)
-		})
 
 		taskBase, err := adapter.taskBase(taskID)
 		if err != nil {
@@ -257,14 +266,14 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 			t.Fatalf("CollectArtifacts(%s): %v", taskID, err)
 		}
 		// Verify container, proxy, and internal network are all removed.
-		if _, err := cli.ContainerInspect(t.Context(), h.ContainerID, client.ContainerInspectOptions{}); err == nil {
-			t.Fatalf("council container %s survived completion", h.ContainerID)
+		if _, err := cli.ContainerInspect(t.Context(), h.ContainerID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+			t.Fatalf("council container %s cleanup is not confirmed: %v", h.ContainerID, err)
 		}
-		if _, err := cli.ContainerInspect(t.Context(), h.ProxyName, client.ContainerInspectOptions{}); err == nil {
-			t.Fatalf("council proxy %s survived completion", h.ProxyName)
+		if _, err := cli.ContainerInspect(t.Context(), h.ProxyName, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+			t.Fatalf("council proxy %s cleanup is not confirmed: %v", h.ProxyName, err)
 		}
-		if _, err := cli.NetworkInspect(t.Context(), h.NetworkName, client.NetworkInspectOptions{}); err == nil {
-			t.Fatalf("council network %s survived completion", h.NetworkName)
+		if _, err := cli.NetworkInspect(t.Context(), h.NetworkName, client.NetworkInspectOptions{}); !errdefs.IsNotFound(err) {
+			t.Fatalf("council network %s cleanup is not confirmed: %v", h.NetworkName, err)
 		}
 		return arts
 	}

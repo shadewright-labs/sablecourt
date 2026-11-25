@@ -243,51 +243,97 @@ func (a *Adapter) StartProxy(ctx context.Context, name string) error {
 		return errors.New("council proxy is not running")
 	}
 	id := insp.Container.ID
-	created, err := execAPI.ExecCreate(readyCtx, id, client.ExecCreateOptions{
-		User: "10001:10001", AttachStdout: true, AttachStderr: true,
-		Cmd: []string{"/usr/bin/curl", "--noproxy", "*", "--silent", "--show-error", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", probeURL},
-	})
-	if err != nil || created.ID == "" {
-		return errors.New("cannot create proxy readiness probe")
-	}
-	stream, err := execAPI.ExecAttach(readyCtx, created.ID, client.ExecAttachOptions{})
-	if err != nil || stream.Conn == nil {
-		return errors.New("cannot attach proxy readiness probe")
-	}
-	closeStream := sync.OnceFunc(stream.Close)
-	defer closeStream()
-	stopClose := context.AfterFunc(readyCtx, closeStream)
-	defer stopClose()
-	if stream.Reader == nil || !proxyReadyResponse(stream.Reader) {
-		return errors.New("missing council proxy authentication challenge")
-	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		res, err := execAPI.ExecInspect(readyCtx, created.ID, client.ExecInspectOptions{})
-		if err != nil || res.ID != created.ID || res.ContainerID != id {
-			return errors.New("unverified proxy readiness probe")
+		ready, err := probeProxyOnce(readyCtx, execAPI, id, probeURL)
+		if err != nil {
+			return err
 		}
-		if !res.Running {
-			if res.ExitCode != 0 {
-				return errors.New("council proxy readiness probe failed")
-			}
+		if ready {
 			return nil
 		}
+		// The listener may not be bound yet. Retry until the readiness deadline.
 		select {
 		case <-readyCtx.Done():
-			return readyCtx.Err()
+			return errors.New("council proxy did not become ready")
 		case <-ticker.C:
 		}
 	}
 }
 
+// probeProxyOnce reports ready only for the exact authentication challenge and a clean exit.
+// It reports not ready, without an error, when curl could not connect at all.
+func probeProxyOnce(ctx context.Context, execAPI proxyExecAPI, id, probeURL string) (bool, error) {
+	created, err := execAPI.ExecCreate(ctx, id, client.ExecCreateOptions{
+		User: "10001:10001", AttachStdout: true, AttachStderr: true,
+		Cmd: []string{"/usr/bin/curl", "--noproxy", "*", "--silent", "--show-error", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", probeURL},
+	})
+	if err != nil || created.ID == "" {
+		return false, errors.New("cannot create proxy readiness probe")
+	}
+	stream, err := execAPI.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
+	if err != nil || stream.Conn == nil {
+		return false, errors.New("cannot attach proxy readiness probe")
+	}
+	closeStream := sync.OnceFunc(stream.Close)
+	defer closeStream()
+	stopClose := context.AfterFunc(ctx, closeStream)
+	defer stopClose()
+	if stream.Reader == nil {
+		return false, errors.New("missing council proxy authentication challenge")
+	}
+	switch proxyProbeOutcome(stream.Reader) {
+	case probeRefused:
+		return false, nil
+	case probeChallenge:
+	default:
+		return false, errors.New("missing council proxy authentication challenge")
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		res, err := execAPI.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
+		if err != nil || res.ID != created.ID || res.ContainerID != id {
+			return false, errors.New("unverified proxy readiness probe")
+		}
+		if !res.Running {
+			if res.ExitCode != 0 {
+				return false, errors.New("council proxy readiness probe failed")
+			}
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+type probeResult int
+
+const (
+	probeInvalid probeResult = iota
+	probeChallenge
+	probeRefused
+)
+
 // Docker multiplexes the probe's HTTP status and diagnostics on one stream.
-func proxyReadyResponse(reader *bufio.Reader) bool {
+// curl prints status 000 when no HTTP response arrived, such as a refused connection.
+func proxyProbeOutcome(reader *bufio.Reader) probeResult {
 	limited := &io.LimitedReader{R: reader, N: 256}
 	var stdout, stderr bytes.Buffer
-	err := copyDockerStreams(limited, &stdout, &stderr)
-	return err == nil && limited.N > 0 && stdout.String() == "401" && stderr.Len() == 0
+	if err := copyDockerStreams(limited, &stdout, &stderr); err != nil || limited.N <= 0 {
+		return probeInvalid
+	}
+	switch {
+	case stdout.String() == "401" && stderr.Len() == 0:
+		return probeChallenge
+	case stdout.String() == "000":
+		return probeRefused
+	}
+	return probeInvalid
 }
 
 func (a *Adapter) RemoveProxy(ctx context.Context, name string) error {

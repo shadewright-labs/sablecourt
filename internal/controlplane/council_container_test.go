@@ -671,3 +671,29 @@ func TestRecoverRecordedCouncilResultClosesProxy(t *testing.T) {
 		t.Fatal("restart lost recorded output or repeated the turn")
 	}
 }
+
+func TestCouncilContainerCleanupUsesPersistedClassAfterManifestChange(t *testing.T) {
+	r1, st, bundle, pol, first, runner, proxy, task, _ := newCouncilContainerFixture(t, "", 2*time.Minute)
+	runner.releaseCh = make(chan struct{})
+	defer close(runner.releaseCh)
+	reconcile(t, r1)
+	requireState(t, st, task.ID, domain.TaskStateWorking)
+
+	changed := bundle.Workloads["claude"]
+	changed.Spec.Class = domain.ClassLongLivedAgent
+	bundle.Workloads["claude"] = changed
+	fresh := coding.NewAdapter(first.WorktreeRoot)
+	fresh.CouncilRunner = runner
+	fresh.CouncilProxy = proxy
+	fresh.CouncilProxyImage = first.CouncilProxyImage
+	fresh.DaemonListen = first.DaemonListen
+	restarted := NewReconciler(Options{Store: st, Bundle: bundle, Policy: pol, Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: fresh}})
+	_ = restarted.Recover(t.Context())
+	if len(proxy.proxies) != 0 || len(proxy.networks) != 0 {
+		t.Fatal("a manifest class change left the council proxy or network running")
+	}
+	hash := model.HashToken(runner.launches[0].TaskToken)
+	if _, err := st.GetActiveLeaseByTokenHash(t.Context(), hash, time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("lease survived cleanup")
+	}
+}

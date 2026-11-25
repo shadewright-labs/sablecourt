@@ -623,3 +623,59 @@ func TestCouncilHandleRequiresMatchingEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestRestartedExitZeroWithoutRecordedResultFails(t *testing.T) {
+	repo := initTempGitRepo(t)
+	runner := newFakeCouncilRunner()
+	runner.onRun = func(context.Context, scruntime.CouncilLaunch) (string, string, int, error) {
+		return "answer", "", 0, nil
+	}
+	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	a.CouncilRunner = runner
+	a.CouncilProxy = newFakeProxyDocker()
+	a.CouncilProxyImage = "sha256:" + strings.Repeat("c", 64)
+	a.DaemonListen = net.JoinHostPort(net.IPv6loopback.String(), "7432")
+	raw, err := json.Marshal(map[string]string{"conclaveId": "ccl_restart", "role": "claude", "context_packet": "Review.", "checkoutMode": checkoutModeLive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := scruntime.LaunchSpec{
+		TaskID:           "task_restart_exit0",
+		Workload:         domain.Workload{Metadata: domain.ObjectMeta{Name: "claude", Zone: domain.ZoneSandbox}, Spec: domain.WorkloadSpec{Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: "claude", RepoPath: repo, Sandbox: "seatbelt"}}},
+		InputJSON:        string(raw),
+		TaskToken:        "sc_task_secret_lease_value",
+		CouncilContainer: true,
+		CouncilDeadline:  time.Now().Add(2 * time.Minute),
+	}
+	handle, err := a.Start(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskBase, err := a.taskBase(spec.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-a.containerProc(taskBase).done
+	// Simulate a daemon restart that lost the in-memory process and the result.
+	a.containers.Delete(taskBase)
+	state, err := readWorktreeState(taskBase + stateSuffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Result = nil
+	if err := writeWorktreeState(taskBase, state); err != nil {
+		t.Fatal(err)
+	}
+	runner.mu.Lock()
+	cs := runner.containers[handle.ContainerID]
+	cs.exists, cs.running, cs.exited, cs.exitCode = true, false, true, 0
+	runner.mu.Unlock()
+
+	obs, err := a.Observe(t.Context(), handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.State != scruntime.StateFailed || obs.ExitCode == 0 {
+		t.Fatalf("obs = %+v, want failed because the output was never recorded", obs)
+	}
+}
