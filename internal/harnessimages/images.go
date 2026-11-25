@@ -29,6 +29,9 @@ type Definition struct {
 	Volume    string
 	LoginArgv []string
 	Version   string
+	// LoginFiles are credential files inside the volume, as paths under
+	// StateDir. A login exists when any one of them is a non-empty file.
+	LoginFiles []string
 }
 
 // Docker is the only boundary that communicates with the local engine.
@@ -46,16 +49,25 @@ func Lookup(role string) (Definition, error) {
 	switch role {
 	case "claude":
 		d.Version, d.LoginArgv = "2.1.332", []string{"claude", "auth", "login"}
+		d.LoginFiles = []string{StateDir + "/.claude/.credentials.json"}
 	case "codex":
 		d.Version, d.LoginArgv = "0.172.0", []string{"codex", "login", "--device-auth"}
+		d.LoginFiles = []string{StateDir + "/.codex/auth.json"}
 	case "agy":
 		d.Version, d.LoginArgv = "1.5.17", []string{"agy"}
+		d.LoginFiles = []string{StateDir + "/.gemini/oauth_tokens.json", StateDir + "/.gemini/antigravity-cli/oauth_tokens.json"}
 	default:
 		return Definition{}, fmt.Errorf("unknown harness role (choose claude, codex, or agy)")
 	}
 	d.Image = "sablecourt-harness-" + role + ":" + d.Version + "-" + revision()
 	return d, nil
 }
+
+// BuildCommand is the command that creates the local image for role.
+func BuildCommand(role string) string { return "sablectl harness build " + role }
+
+// LoginCommand is the command that stores the subscription login for role.
+func LoginCommand(role string) string { return "sablectl harness login " + role }
 
 // ProxyImage identifies the proxy built from the same image definitions.
 func ProxyImage() string { return "sablecourt-harness-proxy:" + revision() }

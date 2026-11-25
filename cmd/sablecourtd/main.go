@@ -212,6 +212,7 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 		harnesses[role] = docker.CouncilHarness{
 			Image:       def.Image,
 			LoginVolume: def.Volume,
+			LoginFiles:  def.LoginFiles,
 		}
 	}
 	dockerAdapter.CouncilHarnesses = harnesses
@@ -311,6 +312,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
+	var councilDocker *docker.Adapter
 	if cfg.runtimeBackend != "k8s" {
 		if da, err := docker.NewFromEnv(); err == nil {
 			da.SetAttachHub(ctx, attachHub)
@@ -318,6 +320,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
 			if da.CouncilRuntimeConfigured() {
 				wireCouncilContainers(adapters, isCitadel, da, attachHub, dbPath, cfg.branchRetention, listenAddr)
+				if !isCitadel {
+					councilDocker = da
+				}
 			}
 		} else {
 			return fmt.Errorf("configure Docker runtime: %w", err)
@@ -362,7 +367,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
 			var err error
-			b, err = ensureCouncilPanelWorkloads(ctx, st, b)
+			b, err = ensureCouncilPanelWorkloads(ctx, st, b, councilSandbox(councilDocker != nil))
 			if err != nil {
 				return nil, nil, fmt.Errorf("register council panel workloads: %w", err)
 			}
@@ -540,14 +545,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		}
 	}
 
-	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash,
+	hc :=
 		handlerConfig{
 			incidentTemplate:    cfg.incidentTemplate,
 			operatorToken:       operatorToken,
 			councilsDisabled:    isCitadel,
 			councilPrivateDirs:  privateDirs,
-			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters),
-		})
+			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters, councilSandbox(councilDocker != nil)),
+		}
+	if councilDocker != nil {
+		hc.preflightCouncilHarness = councilDocker.CheckCouncilHarness
+	}
+	mux := newHandler(st, secretStore, getBundle, reloadFn, modelGate, dataActionGate, approvalQueue, reconciler, scheduler, conclaveBroker, attachHub, provReg, dash, hc)
 	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca.SupportsCouncilContainers() {
 		ca.CouncilGateHandler, err = cfg.councilGateHandler(mux)
 		if err != nil {
@@ -736,6 +745,11 @@ type handlerConfig struct {
 	// routeSink, when set, is told every route pattern the handler registers.
 	// The HTTP API reference test uses it; routing does not depend on it.
 	routeSink func(pattern string)
+	// preflightCouncilHarness is set in container mode. It replaces the host
+	// executable and sandbox checks with image, volume and login checks.
+	preflightCouncilHarness func(context.Context, string) error
+	// onCouncilCheckout is a test hook that runs once the checkout is verified.
+	onCouncilCheckout func(expire context.CancelFunc)
 }
 
 func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *config.Bundle, reloadFn func() error, modelGate *model.Gate, dataActionGate *mcpgate.Gate, approvals *approval.Queue, reconciler *controlplane.Reconciler, scheduler *controlplane.Scheduler, conclaveBroker *conclave.Broker, attachHub *attach.Hub, provReg *providers.Registry, dash *ui.Dashboard, options ...handlerConfig) http.Handler {
