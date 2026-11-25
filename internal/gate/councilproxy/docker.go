@@ -198,6 +198,11 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 		spec.Args = args
 	}
 
+	if ug != nil {
+		if err := verifyGateSocketMountSource(ug.sockPath); err != nil {
+			return s.rollback(ctx, fmt.Errorf("council gate socket mount source: %w", err))
+		}
+	}
 	if err := docker.CreateProxy(ctx, spec); err != nil {
 		return s.rollback(ctx, fmt.Errorf("create council proxy: %w", err))
 	}

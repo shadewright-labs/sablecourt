@@ -630,10 +630,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 // connection. It does not cut a response that is still streaming.
 const daemonIdleTimeout = 60 * time.Second
 
+// daemonReadTimeout bounds reading a whole request, including the body that
+// net/http drains after a handler rejects a request without reading it, so an
+// unauthenticated stalled upload cannot hold a capped listener slot. It is a
+// variable so tests can shorten it. No write timeout is set, so streaming
+// responses are not cut.
+var daemonReadTimeout = 60 * time.Second
+
 func newDaemonServer(handler http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       daemonReadTimeout,
 		IdleTimeout:       daemonIdleTimeout,
 	}
 }
