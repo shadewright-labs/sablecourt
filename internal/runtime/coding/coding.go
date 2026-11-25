@@ -184,7 +184,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 
 	process, id, err := launchWrapper(cmd, taskBase, scratch, state.TaskID, limit, a.AttachHub)
 	if err != nil {
-		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, cmd.Path, err)
+		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, sandboxTarget(cmd), err)
 	}
 	handle.PID, handle.ProcessStartTime = id.PID, id.Start
 	a.running.Store(taskBase, process)
