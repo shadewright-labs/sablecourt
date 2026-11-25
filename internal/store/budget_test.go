@@ -58,6 +58,9 @@ func TestBudgetReservationAndSettlementStore(t *testing.T) {
 			t.Run("daily_budget_across_children", func(t *testing.T) {
 				testDailyBudgetAcrossChildren(t, st)
 			})
+			t.Run("daily_budget_counts_reservation_across_midnight", func(t *testing.T) {
+				testDailyBudgetReservationAcrossMidnight(t, st)
+			})
 		})
 	}
 }
@@ -322,5 +325,45 @@ func testDailyBudgetAcrossChildren(t *testing.T, st store.Store) {
 	}
 	if err := st.SettleBudgetReservation(ctx, r1.ReservationID, nil); err != nil {
 		t.Fatalf("release r1: %v", err)
+	}
+}
+
+func testDailyBudgetReservationAcrossMidnight(t *testing.T, st store.Store) {
+	ctx := t.Context()
+	const wl = "worker-midnight"
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: wl}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"task-midnight-1", "task-midnight-2"} {
+		if err := st.CreateTask(ctx, domain.Task{ID: id, IdempotencyKey: id, WorkloadName: wl, State: domain.TaskStateWorking}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := domain.Budget{Spec: domain.BudgetSpec{Daily: domain.DailyBudget{MaxCostUSD: 0.000025}}} // 25 microUSD
+	beforeMidnight := time.Date(2026, 11, 25, 23, 59, 0, 0, time.UTC)
+	afterMidnight := time.Date(2026, 11, 26, 0, 5, 0, 0, time.UTC)
+
+	first, err := st.ReserveBudget(ctx, store.BudgetReservationRequest{
+		TaskID: "task-midnight-1", WorkloadName: wl, Budget: budget,
+		Reserve: domain.BudgetTotals{InputTokens: 1, OutputTokens: 1, CostMicroUSD: 15},
+		Now:     beforeMidnight, TTL: 15 * time.Minute,
+	})
+	if err != nil || first.Exceeded {
+		t.Fatalf("first reserve = %+v, err=%v", first, err)
+	}
+	// The first reservation is still live after midnight and settles into the new day.
+	second, err := st.ReserveBudget(ctx, store.BudgetReservationRequest{
+		TaskID: "task-midnight-2", WorkloadName: wl, Budget: budget,
+		Reserve: domain.BudgetTotals{InputTokens: 1, OutputTokens: 1, CostMicroUSD: 15},
+		Now:     afterMidnight, TTL: 15 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Exceeded || second.Reason != "daily_cost_usd" {
+		t.Fatalf("reserve after midnight = %+v, want daily_cost_usd exceeded", second)
+	}
+	if err := st.SettleBudgetReservation(ctx, first.ReservationID, nil); err != nil {
+		t.Fatalf("release first: %v", err)
 	}
 }

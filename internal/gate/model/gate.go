@@ -230,7 +230,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
 	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing)
 
-	reservationID, exceeded, reason, err := g.reserveBudget(ctx, lease.TaskID, lease.WorkloadName, budget, reserve, now)
+	// Take a fresh timestamp: the body read above is not bounded by time, and the
+	// reservation lifetime must start when the reservation is inserted.
+	reservationID, exceeded, reason, err := g.reserveBudget(ctx, lease.TaskID, lease.WorkloadName, budget, reserve, g.now())
 	if errors.Is(err, errInvalidChildBudgetCeiling) {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"invalid_child_budget_ceiling"}`)
 		writeErr(w, http.StatusForbidden, errInvalidChildBudgetCeiling.Error())
@@ -246,7 +248,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	releaseReservation := true
 	defer func() {
 		if releaseReservation {
-			_ = g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, nil)
+			if err := g.settleReservation(ctx, reservationID, nil); err != nil {
+				g.audit(context.WithoutCancel(ctx), lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"budget_release_failed"}`)
+			}
 		}
 	}()
 
@@ -337,6 +341,12 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
 		inTokens := max(usage.InputTokens, 0)
 		outTokens := max(usage.OutputTokens, 0)
+		if inTokens == 0 && outTokens == 0 {
+			// The response carried no usage (for example a stream without a usage
+			// event). Charge the reserved estimate so the call is never free.
+			inTokens = reserve.InputTokens
+			outTokens = reserve.OutputTokens
+		}
 		modelName := usage.Model
 		if modelName == "" {
 			modelName = reqModel
@@ -352,7 +362,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			CostMicroUSD: costMicro,
 			CreatedAt:    g.now(),
 		}
-		if err := g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, &entry); err != nil {
+		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
 			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
 			return
 		}
@@ -427,6 +437,24 @@ func (g *Gate) reserveBudget(ctx context.Context, taskID, workloadName string, b
 		return "", false, "", err
 	}
 	return res.ReservationID, res.Exceeded, res.Reason, nil
+}
+
+// settleReservationAttempts bounds the immediate retries of a failed settlement.
+const settleReservationAttempts = 3
+
+// settleReservation settles or, when actual is nil, releases a reservation. A failed
+// transaction rolls back and leaves the reservation in place, so retrying is safe.
+// A missing or mismatched reservation is final and is returned without retry.
+func (g *Gate) settleReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+	ctx = context.WithoutCancel(ctx)
+	var err error
+	for range settleReservationAttempts {
+		err = g.store.SettleBudgetReservation(ctx, reservationID, actual)
+		if err == nil || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+			return err
+		}
+	}
+	return err
 }
 
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {

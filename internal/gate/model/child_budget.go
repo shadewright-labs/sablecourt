@@ -18,7 +18,7 @@ func estimateRequestReserve(provider, modelName string, body []byte, pricing map
 	var payload map[string]any
 	if len(body) > 0 && json.Unmarshal(body, &payload) == nil && payload != nil {
 		var textBytes int64
-		for _, field := range []string{"messages", "input", "contents", "system", "systemInstruction", "prompt"} {
+		for _, field := range []string{"messages", "input", "contents", "system", "systemInstruction", "prompt", "tools", "functions"} {
 			if val, ok := payload[field]; ok {
 				textBytes += countPromptTextBytes(val)
 			}
@@ -29,6 +29,7 @@ func estimateRequestReserve(provider, modelName string, body []byte, pricing map
 		if requested := extractRequestedOutputTokens(payload); requested > outTokens {
 			outTokens = requested
 		}
+		outTokens = scaleOutputTokensByChoices(outTokens, payload)
 	}
 
 	costMicro := EstimateMicroUSD(provider, modelName, inTokens, outTokens, pricing)
@@ -81,10 +82,30 @@ func extractRequestedOutputTokens(payload map[string]any) int64 {
 	return 0
 }
 
+// scaleOutputTokensByChoices multiplies the output reservation by the requested number
+// of Chat Completions choices, because the provider bills output for every choice.
+func scaleOutputTokensByChoices(outTokens int64, payload map[string]any) int64 {
+	choices, ok := positiveJSONInt64(payload["n"])
+	if !ok || choices <= 1 {
+		return outTokens
+	}
+	if outTokens > maxReservedTokens/choices {
+		return maxReservedTokens
+	}
+	return outTokens * choices
+}
+
+// maxReservedTokens caps a single reservation dimension so that float to integer
+// conversions and cost estimates cannot overflow.
+const maxReservedTokens = int64(1) << 40
+
 func positiveJSONInt64(v any) (int64, bool) {
 	f, ok := v.(float64)
 	if !ok || f <= 0 {
 		return 0, false
+	}
+	if f >= float64(maxReservedTokens) {
+		return maxReservedTokens, true
 	}
 	return int64(f), true
 }
