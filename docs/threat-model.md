@@ -1,82 +1,212 @@
 # Threat model
 
-What Sablecourt protects, where its trust boundaries are, who it defends against, which control each defence rests on, and which threats have no control yet. A control is listed only if it exists in the code; the package that implements it is named. Anything decided but not built is in its own section, and nothing in the table below depends on it.
+What Sablecourt protects, where its trust boundaries are, who it defends against, and for each threat two separate lists: the controls that exist in the code (with the package that implements each one) and the gaps (with the issue that tracks each one). Anything decided but not built is in its own section at the end, and no control below depends on it.
 
-Status: partly built. Local trust (Sanctum) is built; the identity work of [ADR-0014](adr/0014-identity-and-authentication.md) is Proposed and not built; the audit chain has known holes.
+Status: partly built. Local operation (Sanctum) is built. Of the identity work in [ADR-0014](adr/0014-identity-and-authentication.md), which is Proposed, only parts of Stage 0 exist (the logout route, the state directory checks, the sandbox probe). The audit chain has known holes.
 
 ## What is protected
 
-- The provider logins of the three harnesses, each kept in a volume of its own container.
-- Provider API keys, the Git token and the secret store behind the gates.
+- The provider logins of the three harnesses. In container mode each is in a Docker volume of its own.
+- Provider API keys, the Git token and the other entries of the secret store that the gates use.
 - The operator token and the session cookie.
-- Approvals: the pinned payload digest and the decision.
+- Approvals: the payload digest an approval is pinned to, and the decision.
 - The audit chain.
-- The repository checkouts the harnesses read, and the one writer worktree a council writes to.
-- Budgets and the run, round and wall-time ceilings.
+- The repository checkouts the harnesses read, and the writer checkout a council writes to.
+- Budgets, and the council run ceiling, deadline and wall-time limit.
 
 ## Trust boundaries
 
-[![The host holds the daemon and gates, a per-launch internal network with a gate proxy and a harness container, and a host-mode harness; providers, the Git host and integration callers are outside it.](diagrams/trust-boundaries.svg)](diagrams/trust-boundaries.svg "Open full size")
+[![The host holds the daemon and gates, a per-launch internal network with a gate proxy and a harness container, and a host-mode harness; model providers, the Git host, harness provider hosts and integration callers sit outside it.](diagrams/trust-boundaries.svg)](diagrams/trust-boundaries.svg "Open full size")
 
-You, the daemon and the operating system are trusted (ADR-0011). Everything else is not.
+ADR-0011 treats you, the daemon and the operating system as trusted, and everything else as untrusted.
 
-- Host: the trusted zone. A process that runs as your user can read your files, including the operator token, unless it is confined. That is why harnesses are confined.
-- Daemon and gates: `sablecourtd` with the Model Gate (holds provider keys), the MCP Gate and the lease-checked `/gate/*` routes (hold the Git token, run typed actions, serve Conclave rooms), the operator routes, the integration routes and the audit chain. Workloads never receive the keys or tokens these hold.
-- Internal network: one per council launch. It contains the harness container and the gate proxy and nothing else. The proxy is the only member with a route out. The harness has no direct route to the internet or to the daemon: "direct route: never" in the diagram.
-- Gate proxy: checks the lease, forwards only a fixed list of `/gate/` routes to the daemon, and tunnels HTTPS only to the provider hosts of that harness.
-- Host-mode harness: a harness run on the host under the macOS Seatbelt sandbox, with a stripped environment. It reaches the gate over loopback with its lease. ADR-0011 calls this the weaker fallback.
-- Outside the host: model providers (reached by the Model Gate with a key it holds), the Git host (reached by the MCP Gate with a token it holds), the provider hosts the proxy allows, and the integration callers Shadewright and Nightloom, each with a scoped token.
+- Host: a process that runs as your user can read your files, the operator token included, unless something confines it. Harnesses run in a container or under Seatbelt for that reason.
+- Daemon and gates: `sablecourtd` holds the Model Gate (it adds the provider key to each upstream request), the MCP Gate and the other lease-checked `/gate/*` routes (typed actions that use the Git token, Conclave rooms), the operator routes, the integration routes and the audit chain. The gates do not put a provider key or the Git token in a workload's environment or in a request a workload sends. A workload can still receive a credential that an upstream echoes back: the Model Gate passes upstream response headers and bodies through unchanged.
+- Model providers: by default `openai`, `anthropic` and `gemini` are remote, and `local` is `127.0.0.1:11434` on the host itself.
+- Internal network: one Docker `--internal` bridge network per container launch, with isolated gateway mode (launch fails if Docker does not apply it). Sablecourt attaches the harness container and its gate proxy to it. The proxy is also attached to the default bridge network for its outbound tunnels; the harness container is not.
+- Gate proxy: one container per launch. For gate routes it requires the launch's lease and forwards only a fixed list of `/gate/` routes, over a per-launch Unix socket or a pinned TLS 1.3 connection, to a gate in the daemon that checks the lease and the route list again. For provider traffic it accepts HTTPS `CONNECT` to the listed provider host names of that harness on port 443, with no lease.
+- Host-mode harness: a harness run on the host under a macOS Seatbelt profile with an allow-listed environment. The profile allows outbound network connections to any address. The harness gets its lease in the environment and the gate address on loopback. ADR-0011 calls host mode the weaker fallback.
+- Integration callers: Shadewright posts with its own token to its two routes; Nightloom reads three `GET` routes with the observer token.
 
 Container mode is covered in [harness containers](how-it-works/harness-containers.md) and [council](how-it-works/council.md); the credentials are in [identity and access](how-it-works/identity-and-access.md).
 
-## Adversaries and the controls that exist
+## Threats, controls and gaps
 
-| Threat | Control in code | Package |
-| --- | --- | --- |
-| Repository files, logs or a peer harness's text steer a model into an unwanted action (invariants 1 and 3) | Policy default is deny and a manifest with another default is rejected; the action catalog is closed and an unknown action is denied; an action whose effect is `approve` waits for a person to confirm the exact payload digest; secrets and tokens in gate output, Conclave messages, Relics, Court Memory writes and council context are redacted | `internal/policy`, `internal/config`, `internal/gate/mcp`, `internal/approval`, `internal/redact`, `internal/conclave` |
-| A sandbox-zone workload mutates or delegates | The loader rejects a sandbox workload that holds `action:` or delegation grants; the policy engine denies those capabilities for the zone; a sandbox workload's Conclave message to a runtime-zone workload is refused | `internal/config`, `internal/policy`, `internal/conclave` |
-| A compromised harness reads host files or another harness's login | Container turns run as an unprivileged user with a read-only root, all capabilities dropped, `no-new-privileges`, a size-limited scratch tmpfs, CPU, memory and process limits, a wall-time kill, only that harness's own login volume, and a checkout mounted read-only (writable only for the council's writer); a checkout that contains your home directory or the Docker socket is refused. Host mode runs the harness under Seatbelt with an allow-listed environment, and checks at launch that a probe profile really denies reads and writes of a private file | `internal/runtime/docker`, `internal/runtime/coding` |
-| A harness sends data to arbitrary hosts or reaches the daemon directly | Internal bridge network without a route out; the per-launch proxy allows only the harness's provider hosts on port 443 at public addresses, at most 16 tunnels of 15 minutes each, and a fixed list of gate routes; requests that do not match are refused | `internal/runtime/docker`, `internal/gate/councilproxy` |
-| A workload or harness uses another task's lease, or one after the task ended | Leases are random, stored as SHA-256 only, expire after one hour at most, and are revoked on cancel, suspend and completion; a gate checks the lease, then the workload's grants, on every call; the council proxy accepts only the lease it was started for | `internal/gate/model`, `internal/gate/mcp`, `internal/controlplane`, `internal/gate/councilproxy` |
-| A web page or another host reaches the daemon (cross-site writes, DNS rebinding) | Host allow-list (loopback names on the listen port plus `--allow-host`); same-origin checks on writes; `SameSite=Strict`, `Secure`, `HttpOnly` cookie; `X-Frame-Options: DENY`, `nosniff`, a content security policy; request body limits | `cmd/sablecourtd` |
-| Guessing the operator token | 256 bits of randomness, a rate limit on `/login` (10 failures a minute per client, 1024 in all), constant-time comparison | `internal/operatortoken`, `cmd/sablecourtd` |
-| Another local user reads the token | State directory `0700` and token file `0600`, owner checked, symlinks refused, one daemon per directory by lock | `internal/operatortoken` |
-| A rogue local script approves its own request (invariant 1) | An approval needs a native macOS dialog showing the digest, or a signature from a paired device over the approval ID and digest; the dialog fails closed off macOS, on cancel and on timeout; a changed digest is refused. Device enrolment is closed (503) | `internal/approval`, `cmd/sablecourtd` |
-| A leaked integration token is used on operator routes | Each token reaches only its own routes; the Shadewright token is refused elsewhere and operator tokens and leases are refused on it; the observer token is read-only on three routes | `internal/integrations`, `cmd/sablecourtd` |
-| A workload runs up cost | Per-task and daily budgets with a reservation before each call, settled afterwards (the reserved estimate is charged when a response reports no usage); an exhausted budget is a 429 | `internal/gate/model` |
-| A stolen cookie | It lasts 30 minutes and dies on daemon restart and on `POST /logout`, which invalidates every cookie | `cmd/sablecourtd` |
-| Someone edits the audit log | A hash chain that `audit verify` recomputes; it detects edits and deletions of hashed rows that have a successor, and it has holes (below) | `internal/domain`, `internal/store` |
+### Untrusted text steers a model into an unwanted action (invariants 1 and 3)
+
+Controls that exist:
+
+- A policy whose `defaultEffect` is not `deny` is rejected at load (`internal/config`), and the policy engine returns deny when no rule matches (`internal/policy`).
+- An action name that is not registered is refused with 404 and a `denied` audit row (`internal/gate/mcp`).
+- An action whose policy effect is `approve` runs only with the ID of an approval that is `approved` for the same task, capability and payload digest (`internal/gate/mcp`, `internal/approval`).
+- MCP tool output, action results, Conclave messages and Relics, Court Memory writes and council prompts pass through pattern-based redaction (`internal/redact`, `internal/gate/mcp`, `internal/conclave`).
+
+Gaps:
+
+- Redaction matches a fixed list of patterns; other secrets pass. The Model Gate redacts neither requests nor responses. Tracked in issue 8.
+- An approved approval can be presented again, and its expiry is not checked when the action runs. Tracked in issues 9 and 101.
+- An MCP tool whose effect is `approve` cannot complete, and `git.open_pr` does not validate `owner`, `repo` or `base`. Tracked in issue 9.
+- Learnings are reported to reach prompts sent to remote providers, which ADR-0012 forbids. Tracked in issue 99.
+
+### A sandbox-zone workload mutates or delegates
+
+Controls that exist:
+
+- The loader rejects a sandbox-zone workload that holds `action:` or delegation grants, and a Conclave template in which a sandbox workload may message a runtime workload (`internal/config`).
+- The policy engine denies `action:` and `delegate:` capabilities to sandbox-zone workloads (`internal/policy`).
+
+Gaps:
+
+- A sandbox-zone workload may hold mutating `mcp:` tools; the zone rule covers `action:` and `delegate:` only. Tracked in issue 9.
+
+### A compromised harness reads host files or another harness's login
+
+Controls that exist:
+
+- A council container runs as user `10001` with a read-only root file system, all capabilities dropped, `no-new-privileges`, a `noexec` scratch tmpfs sized to the memory limit, CPU, memory and process limits, and a wall-time limit that kills the process (`internal/runtime/docker`).
+- The container mounts only its own harness's login volume, and the launch fails if two harnesses share one (`internal/runtime/docker`).
+- The checkout is mounted read-only, except for the council writer, and a checkout that is the file system root, contains your home directory, or contains the Docker socket is refused (`internal/runtime/docker`).
+- Host mode runs the harness under a Seatbelt profile that denies by default, with an allow-listed environment (`internal/runtime/coding`).
+- At daemon start, and again when a council is opened, a probe checks that a Seatbelt profile denies reading and writing a private file; if the start probe fails, the host coding adapter is not registered (`internal/runtime/coding`, `cmd/sablecourtd`).
+
+Gaps:
+
+- An individual host launch does not run that probe. It only checks that `sandbox-exec` applies the task's profile to `/usr/bin/true`. Tracked in issue 104.
+- Nothing refuses host-mode `codex`. The adapter accepts it and starts it under Seatbelt, although ADR-0011 says host-mode `codex` stays refused until a test shows its own sandbox denies reads of `operator.token` and other logins. Tracked in issue 104.
+- The Seatbelt profile allows outbound network to any address, loopback included, and exposes the shared Git object store and refs and wide system read paths (reported, not reproduced). Tracked in issue 63.
+
+### A harness sends data to arbitrary hosts or reaches the daemon directly
+
+Controls that exist:
+
+- The council container's only network is the internal one, and launch fails unless Docker reports it as an internal bridge with isolated gateway mode (`internal/gate/councilproxy`, `internal/runtime/docker`).
+- The proxy accepts `CONNECT` only to the harness's listed provider host names on port 443, refuses the tunnel if any resolved address is not public, allows at most 16 tunnels at once, and closes each after 15 minutes (`internal/gate/councilproxy`).
+- Every other proxy request must be on the fixed gate route list and carry the launch's lease, or it is refused (`internal/gate/councilproxy`).
+
+Gaps:
+
+- `CONNECT` needs no lease, and the proxy does not inspect what goes through a tunnel, so data can leave to any listed provider host. Tracked in issue 104.
+- Host-mode harnesses have unrestricted outbound network. Tracked in issue 63.
+
+### A workload uses another task's lease, or one after the task ended
+
+Controls that exist:
+
+- A lease is `sc_task_` plus 32 random bytes in hex; only its SHA-256 is stored (`internal/gate/model`).
+- The control plane issues leases with a lifetime of one hour, cut to the council deadline for a council turn, and revokes a task's leases on cancel, suspend, the end of the task, recovery and a failed launch (`internal/controlplane`).
+- The Model Gate and the MCP Gate look the lease up on every call and then check the workload's grants (`internal/gate/model`, `internal/gate/mcp`).
+- The council proxy and its per-launch gate accept on gate routes only the lease the launch was started with (`internal/gate/councilproxy`).
+
+Gaps:
+
+- A lease is not bound to a channel. Host and generic container runs receive it in an environment variable, and a copied lease works from anywhere that reaches a gate route until it expires or is revoked. Tracked in issue 104.
+
+### A web page or another host reaches the daemon (cross-site writes, DNS rebinding)
+
+Controls that exist (all in `cmd/sablecourtd`):
+
+- Requests are served only when the `Host` header is `localhost`, `127.0.0.1` or `::1` on the listen port, an `--allow-host` entry, or (for `/gate/` paths) the container gate host.
+- A write that carries an `Origin` or `Sec-Fetch-Site` header showing another origin is refused with 403, except on `/gate/*`, the GitHub webhook and `/a2a`. A write authenticated by cookie must show it is same origin.
+- The cookie is `SameSite=Strict`, `Secure` and `HttpOnly`. Responses carry `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer` and a content security policy that still allows inline scripts.
+- Write bodies on operator routes are limited to 2 MiB, except the Model Gate and voice transcription, which have their own limits.
+
+Gaps:
+
+- On `localhost`, browsers share cookies across ports, so another local web service you visit can receive the session cookie. Tracked in issue 104.
+
+### Guessing the operator token
+
+Controls that exist:
+
+- The token holds 32 random bytes (`internal/operatortoken`).
+- `POST /login` refuses a client after 10 failed tokens in a minute (per IPv4 address or IPv6 `/64`) and all clients after 1024 failures in a minute (`cmd/sablecourtd`).
+- Tokens are compared as SHA-256 digests with a constant-time comparison (`cmd/sablecourtd`).
+
+Gaps:
+
+- The limiter counts only failures that pass the origin, encoding and size checks, and a bearer token on API routes is not rate limited at all. Tracked in issue 104.
+
+### Another local user reads the token
+
+Controls that exist (all in `internal/operatortoken`):
+
+- The state directory must be owned by you with mode `0700`, must not itself be a symlink, and each parent must be owned by you or root and not writable by group or others unless sticky.
+- The token file must be a regular file owned by you with mode `0600`.
+- A second daemon on the same state directory fails to take the lock and stops.
+
+Gaps: none known for other users. A process running as your user can read the file (see accepted exceptions).
+
+### A local process approves its own request (invariant 1)
+
+Controls that exist:
+
+- Approving through the operator route needs a click on a native macOS dialog that shows the workload, the capability, the task, the first 16 characters of the digest and the first 220 bytes of the payload; off macOS, on Deny, on error and after 60 seconds the approval is not made (`internal/approval`).
+- The other path is a P-256 signature over the approval ID and digest from a paired device (`internal/approval`), and `pair/start` and `pair/complete` return 503, so no new device can be paired (`cmd/sablecourtd`).
+- An expected digest that differs from the stored one is refused (`internal/approval`).
+
+Gaps:
+
+- An empty expected digest is accepted, and the dialog shows only the start of the payload. Tracked in issue 9.
+- `decidedBy` comes from the request body and is written to the audit row as sent. Tracked in issue 104.
+- Device enrolment with independent confirmation does not exist. Tracked in issue 5.
+
+### A leaked integration token is used elsewhere
+
+Controls that exist:
+
+- When the Shadewright token is configured, a request that carries it on any other route is refused with 401, and its two routes refuse a bearer that starts with `op_` or `sc_task_` (`internal/integrations`).
+- The observer token is accepted only on `GET` of the observer snapshot, the observer stream and a task's Scry stream (`cmd/sablecourtd`).
+
+Gaps:
+
+- The A2A secret is compared as a plain string with no prefix check. If the observer secret is reused as the A2A secret, the observer token also submits tasks and reads any task through `/a2a`. Tracked in issues 13 and 104.
+- Integration tokens never expire or rotate; they are plain secrets in the keychain or in an optional `0600` JSON file. Tracked in issue 104.
+
+### A workload runs up cost
+
+Controls that exist (all in `internal/gate/model`):
+
+- Before each upstream call the gate reserves an estimate against the per-task and daily budgets, and an exhausted budget answers 429.
+- After a 2xx answer the reservation is settled with the reported usage, or with the reserved estimate when the answer reports none; otherwise it is released.
+
+Gaps:
+
+- Compressed or very large answers can lose the usage report, and cost uses a flat rate per provider. Tracked in issue 8.
+- Subscription inference by the three council harnesses does not pass the Model Gate and is not counted (see accepted exceptions).
+
+### A stolen cookie
+
+Controls that exist (all in `cmd/sablecourtd`):
+
+- A cookie is valid for 30 minutes and only for the `Host` it was issued to.
+- It stops working when the daemon restarts, and when anyone signed in posts to `/logout`, which replaces the signing key and so ends every session.
+
+Gaps:
+
+- There is no per-session revocation; ending one session ends all of them. Tracked in issue 104.
+- Sign-ins, failures and logouts write no audit row. Tracked in issue 104.
+
+### Someone edits the audit log
+
+Controls that exist:
+
+- Each row stores the hash of the row before it, and `audit verify` recomputes the chain; it detects a changed field in a hashed row (unless every later hash was recomputed) and a row deleted from or inserted into the middle (`internal/domain`, `internal/store`).
+
+Gaps (all tracked in issue 10):
+
+- Verification skips rows with an empty hash, accepts any surviving prefix of the chain, and does not hash the row ID.
+- The hash has no key and no copy of the newest hash is kept elsewhere, so whoever can write the database can rewrite the chain.
+- Almost every writer ignores a failed append.
 
 ## Accepted exceptions
 
-- Invariant 2 has one exception, accepted in ADR-0011: the three Sanctum harnesses (`claude`, `codex`, `agy`) use their own provider subscription login for inference. It covers that login only, kept in the harness's own volume. They get no API key, Git credential, database password or operator token. This inference does not pass the Model Gate, so the gate does not count its tokens or cost; the run, round and wall-time ceilings bound it.
-- The lease crosses plain HTTP between the harness and its proxy, inside a per-launch network that nothing else joins. The amendment that records this is Proposed; the code works this way.
-- Host mode gives weaker isolation than the container. ADR-0011 records that `codex` cannot run inside Seatbelt (its own sandbox is refused), so on the host it would have to rely on its own sandbox, which Sablecourt cannot verify.
+- ADR-0011 accepts one exception to invariant 2: the three Sanctum harnesses (`claude`, `codex`, `agy`) may use their own provider subscription login for inference, kept in the harness's own login volume. In container mode the harness environment holds no API key, Git credential, database password or operator token. That inference goes through the proxy's provider tunnels, not the Model Gate, so the gate does not count its tokens or cost; the council run ceiling, deadline and wall-time limit bound it.
+- The lease crosses plain HTTP between the harness and its proxy inside the per-launch network. The ADR-0011 amendment that records this is Proposed; the code works this way.
 - A process that runs as your user is inside the trust boundary and can read the token file.
-
-## Known gaps
-
-These have no control, or a control with a hole. Each names the tracking issue or ADR.
-
-| Gap | What happens today | Tracked in |
-| --- | --- | --- |
-| Deleting the newest audit rows is not detected | Verification only checks rows that exist; it also skips rows with an empty hash, has no key and no outside copy of the newest hash, and almost every caller ignores a failed append | issue 10 |
-| An approved approval can be reused | The gate does not mark it used or check its expiry when the action runs, so a task may repeat the approved action while its lease lives. The dialog path also accepts an empty expected digest, and the dialog shows only the first 220 characters of the payload | issue 9 |
-| Approver identity is a label | `decidedBy` comes from the request body and is written to the audit row as sent | ADR-0014 |
-| Sandbox-zone workloads may hold mutating `mcp:` tools | The zone rule covers `action:` and `delegate:` only | issue 9 |
-| Device enrolment is closed | `pair/start` and `pair/complete` return 503; the enrolment flow with independent confirmation does not exist | issue 5 |
-| Stolen session cookie cannot be revoked alone, and cookies are shared across ports on `localhost` | The cookie is stateless; only a restart or `POST /logout` ends it, for every browser | ADR-0014 |
-| No authentication events in the audit chain | Sign-ins, failures and logouts leave no row | ADR-0014 |
-| Leases are not bound to a channel and travel in the environment (host and generic container runs) | A copied lease works from anywhere that reaches a gate route until it expires | ADR-0014 |
-| Integration tokens never expire or rotate | They are plain secrets in the keychain or in an optional `0600` JSON file | ADR-0014 |
-| Host-mode sandbox is wider than needed | The Seatbelt profile exposes the shared Git object store and refs and wide read paths (reported, not reproduced) | issue 63 |
-| `codex` in host mode is not refused | ADR-0011 says it stays refused until a test shows its own sandbox denies reads of the token and other logins; no code enforces that | ADR-0011 |
-| Redaction is pattern-based | It covers private keys, `sc_task_` and `op_` tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and `key = value` pairs with names like `password` or `api_key`; other secrets pass. The Model Gate does not redact request or response bodies | issue 8 |
-| Parked endpoints are reachable | The GitHub webhook and A2A routes exist and are registered; they refuse requests unless their secret is set, but have no allow-list or scoping | issue 13 |
 
 ## Not built yet
 
-[ADR-0014](adr/0014-identity-and-authentication.md) is Proposed. Its passkeys, server-side sessions, roles, per-launch channel-bound leases, mutual TLS, OIDC sign-in, signed audit heads and recovery commands close several gaps above if they are built. None of them is a protection today.
+[ADR-0014](adr/0014-identity-and-authentication.md) is Proposed. Its passkeys, server-side sessions, roles, per-launch channel-bound leases, mutual TLS, OIDC sign-in, signed audit heads and recovery commands would close several gaps above if built. None of them is a protection today.
 
 ## In depth
 

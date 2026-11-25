@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 716" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Operator sign-in and session</title>
-  <desc id="d">The browser posts the operator token to sablecourtd. A wrong token is refused with 401, or 429 after too many failures. A correct token makes sablecourtd sign the expiry and host with the session key and answer 303 with a 30 minute cookie. A later request with the cookie makes sablecourtd check the signature against the session key; a write from another origin is refused with 403. Posting to logout makes sablecourtd replace the session key, which invalidates every cookie, and the cookie is cleared.</desc>
+  <desc id="d">The browser posts the operator token to sablecourtd. A wrong token is refused with 401, or 429 after too many failures. A correct token makes sablecourtd sign the expiry and host with the session key and answer 303 with a 30 minute cookie. A later request with the cookie makes sablecourtd check the signature against the session key; a write that does not show it is same origin is refused with 403. A same-origin, signed-in post to logout makes sablecourtd replace the session key, which invalidates every cookie, and the cookie is cleared.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -45,9 +45,9 @@
   <path class="f" d="M500 410H844" marker-end="url(#a)"/>
   <text class="lbl" x="672" y="402" text-anchor="middle">check signature and expiry</text>
   <path class="deny" d="M494 466H156" marker-end="url(#x)"/>
-  <text class="lbl" x="325" y="458" text-anchor="middle">write from another origin refused: 403</text>
+  <text class="lbl" x="325" y="458" text-anchor="middle">write not shown same origin: 403</text>
   <path class="f" d="M150 522H494" marker-end="url(#a)"/>
-  <text class="lbl" x="322" y="514" text-anchor="middle">POST /logout</text>
+  <text class="lbl" x="322" y="514" text-anchor="middle">POST /logout, same origin</text>
   <path class="f" d="M500 578H844" marker-end="url(#a)"/>
   <text class="lbl" x="672" y="570" text-anchor="middle">replace key</text>
   <path class="r" d="M494 634H156" marker-end="url(#m)"/>

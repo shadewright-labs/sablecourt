@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 836" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Sablecourt trust boundaries</title>
-  <desc id="d">The host is trusted and holds the daemon, you, a gate proxy and harness container on an internal network, and a host-mode harness. Model providers, the Git host and the harness provider hosts are outside the host above it, and Shadewright and Nightloom callers are outside below it. Inside the daemon and gates boundary sit the Model Gate, the audit chain, the MCP Gate and routes, the operator routes and the integration routes. The Model Gate sends requests to model providers with a key it holds, and the MCP Gate sends Git actions to the Git host with a token it holds. Both gates record decisions in the audit chain. You reach the operator routes with an operator token or session. Shadewright and Nightloom reach the integration routes with a scoped token. In the internal network the harness container sends its task lease to the gate proxy, the proxy checks the lease and forwards to the MCP Gate and routes, and the proxy alone reaches the allow-listed provider hosts. A direct route from the harness container out of the internal network is never allowed. The host-mode harness reaches the MCP Gate and routes over loopback with its lease, inside a macOS Seatbelt sandbox that is weaker than the container.</desc>
+  <desc id="d">The host is trusted and holds the daemon, you, a gate proxy and harness container on a per-launch internal network, and a host-mode harness. Model providers, the Git host and the harness provider hosts are drawn outside the host above it, and the Shadewright and Nightloom callers outside below it; the default local model provider runs on the host's loopback address. Inside the daemon and gates boundary sit the Model Gate, the audit chain, the MCP Gate and routes, the operator routes and the integration routes. The Model Gate adds a provider key to requests it sends to model providers, and the MCP Gate sends the Git token to the Git host with typed actions. Both gates append hash-chained rows to the audit chain. You reach the operator routes with an operator token or session. Shadewright posts to its routes and Nightloom reads three observer routes, each with its own integration token. In the internal network the harness container sends its task lease to the gate proxy; the proxy checks the lease and forwards gate requests to the MCP Gate and routes. The proxy also opens CONNECT tunnels on port 443 to the harness's listed provider hosts, without a lease. The harness container has no direct route out of the internal network. The host-mode harness runs under a macOS Seatbelt profile that allows outbound network, and reaches the MCP Gate and routes over loopback with its lease.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -28,13 +28,13 @@
   <text class="lanet" x="44" y="54">OUTSIDE THE HOST</text>
   <rect class="ext" x="80" y="72" width="210" height="64" rx="10"/>
   <text class="h" x="96" y="98">Model providers</text>
-  <text class="s" x="96" y="119">keys stay in the gate</text>
+  <text class="s" x="96" y="119">gate adds the key</text>
   <rect class="ext" x="628" y="72" width="210" height="64" rx="10"/>
   <text class="h" x="644" y="98">Git host</text>
-  <text class="s" x="644" y="119">token stays in the gate</text>
+  <text class="s" x="644" y="119">gate sends the token</text>
   <rect class="ext" x="1002" y="72" width="210" height="64" rx="10"/>
   <text class="h" x="1018" y="98">Provider hosts</text>
-  <text class="s" x="1018" y="119">harness traffic only</text>
+  <text class="s" x="1018" y="119">CONNECT, port 443</text>
 
   <rect class="lane" x="24" y="184" width="1232" height="440" rx="14"/>
   <text class="lanet" x="44" y="214">HOST (TRUSTED)</text>
@@ -49,7 +49,7 @@
   <text class="s" x="96" y="327">holds provider keys</text>
   <rect class="box" x="354" y="280" width="210" height="64" rx="10"/>
   <text class="h" x="370" y="306">Audit chain</text>
-  <text class="s" x="370" y="327">one row per decision</text>
+  <text class="s" x="370" y="327">hash-chained rows</text>
   <rect class="key" x="628" y="280" width="210" height="64" rx="12"/>
   <text class="h" x="644" y="306">MCP Gate and routes</text>
   <text class="s" x="644" y="327">tools, actions, room posts</text>
@@ -58,7 +58,7 @@
   <text class="s" x="96" y="455">operator token or session</text>
   <rect class="box" x="354" y="408" width="210" height="64" rx="10"/>
   <text class="h" x="370" y="434">Integration routes</text>
-  <text class="s" x="370" y="455">scoped tokens only</text>
+  <text class="s" x="370" y="455">Shadewright, observer reads</text>
 
   <rect class="box" x="1002" y="280" width="210" height="64" rx="10"/>
   <text class="h" x="1018" y="306">Gate proxy</text>
@@ -72,7 +72,7 @@
   <text class="s" x="96" y="583">sablectl and browser</text>
   <rect class="box" x="1002" y="536" width="210" height="64" rx="10"/>
   <text class="h" x="1018" y="562">Host-mode harness</text>
-  <text class="s" x="1018" y="583">macOS Seatbelt, weaker</text>
+  <text class="s" x="1018" y="583">Seatbelt, open network</text>
 
   <rect class="lane" x="24" y="656" width="1232" height="128" rx="14"/>
   <text class="lanet" x="44" y="686">OUTSIDE THE HOST</text>
@@ -85,7 +85,7 @@
   <path class="f" d="M784 280V136" marker-end="url(#a)"/>
   <text class="lbl" x="796" y="172">Git token</text>
   <path class="f" d="M1180 280V136" marker-end="url(#a)"/>
-  <text class="lbl" x="1168" y="172" text-anchor="end">allow-listed hosts</text>
+  <text class="lbl" x="1168" y="172" text-anchor="end">CONNECT, no lease</text>
   <path class="f" d="M290 312H354" marker-end="url(#a)"/>
   <text class="lbl" x="322" y="304" text-anchor="middle">records</text>
   <path class="f" d="M628 312H564" marker-end="url(#a)"/>
@@ -96,16 +96,16 @@
   <text class="lbl" x="1070" y="382">task lease</text>
   <path class="deny" d="M1002 440H902" marker-end="url(#x)"/>
   <text class="lbl" x="941" y="424" text-anchor="middle">direct route</text>
-  <text class="no" x="941" y="462" text-anchor="middle">never</text>
+  <text class="no" x="941" y="462" text-anchor="middle">none</text>
   <path class="f" d="M185 536V472" marker-end="url(#a)"/>
   <text class="lbl" x="197" y="508">token or session</text>
   <path class="f" d="M459 704V472" marker-end="url(#a)"/>
-  <text class="lbl" x="471" y="644">scoped token</text>
+  <text class="lbl" x="471" y="644">integration token</text>
   <path class="f" d="M1002 568H733V344" marker-end="url(#a)"/>
   <text class="lbl" x="868" y="560" text-anchor="middle">loopback lease</text>
 
   <path class="f" d="M44 808H84"/>
-  <text class="lbl" x="92" y="812">request with a lease or token</text>
+  <text class="lbl" x="92" y="812">allowed request</text>
   <path class="deny" d="M372 808H412"/>
   <text class="lbl" x="420" y="812">refused</text>
   <rect class="ext" x="500" y="800" width="28" height="14" rx="3"/>
