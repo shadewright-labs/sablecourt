@@ -33,7 +33,7 @@ func run(page string, pkgs []string) error {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	args := append([]string{"test", "-count=1", "-run", "^TestRenderCLIBlock$"}, pkgs...)
-	cmd := exec.Command("go", args...)
+	cmd := exec.Command("go", args...) // #nosec G702 -- runs go test on the packages that make docs names
 	cmd.Env = append(os.Environ(), "SABLECOURT_CLI_BLOCK_DIR="+dir)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {

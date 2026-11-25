@@ -214,5 +214,5 @@ func WriteBlocks(path, dir string) error {
 	if bytes.Equal(page, out) {
 		return nil
 	}
-	return os.WriteFile(path, out, 0o600)
+	return os.WriteFile(path, out, 0o600) // #nosec G703 -- the page path that make docs passes, a repository file
 }
