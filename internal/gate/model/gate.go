@@ -224,7 +224,16 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if exceeded, reason, err := g.checkBudget(ctx, lease.TaskID, lease.WorkloadName, budget, now); errors.Is(err, errInvalidChildBudgetCeiling) {
+	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
+	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing)
+
+	reservationID, exceeded, reason, err := g.reserveBudget(ctx, lease.TaskID, lease.WorkloadName, budget, reserve, now)
+	if errors.Is(err, errInvalidChildBudgetCeiling) {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"invalid_child_budget_ceiling"}`)
 		writeErr(w, http.StatusForbidden, errInvalidChildBudgetCeiling.Error())
 		return
@@ -236,6 +245,12 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "budget exceeded: "+reason)
 		return
 	}
+	settled := false
+	defer func() {
+		if !settled {
+			_ = g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, nil)
+		}
+	}()
 
 	upCfg, ok := g.upstreams[provider]
 	if !ok {
@@ -259,13 +274,6 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "upstream provider credential unavailable")
 		return
 	}
-
-	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
 
 	targetURL, err := joinUpstreamURL(upCfg.BaseURL, upstreamPath, r.URL.RawQuery)
 	if err != nil {
@@ -327,24 +335,29 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
 		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
+		inTokens := max(usage.InputTokens, 0)
+		outTokens := max(usage.OutputTokens, 0)
 		modelName := usage.Model
 		if modelName == "" {
 			modelName = reqModel
 		}
-		costMicro := EstimateMicroUSD(activeProvider, modelName, usage.InputTokens, usage.OutputTokens, g.pricing)
-		_ = g.store.RecordBudgetUsage(ctx, domain.BudgetEntry{
+		costMicro := max(EstimateMicroUSD(activeProvider, modelName, inTokens, outTokens, g.pricing), 0)
+		entry := domain.BudgetEntry{
 			TaskID:       lease.TaskID,
 			WorkloadName: lease.WorkloadName,
 			Provider:     activeProvider,
 			Model:        modelName,
-			InputTokens:  usage.InputTokens,
-			OutputTokens: usage.OutputTokens,
+			InputTokens:  inTokens,
+			OutputTokens: outTokens,
 			CostMicroUSD: costMicro,
 			CreatedAt:    g.now(),
-		})
+		}
+		if err := g.store.SettleBudgetReservation(context.WithoutCancel(ctx), reservationID, &entry); err == nil {
+			settled = true
+		}
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
 			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, usage.InputTokens, usage.OutputTokens, costMicro))
+				modelName, inTokens, outTokens, costMicro))
 	}
 }
 
@@ -398,40 +411,21 @@ func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider,
 	return "", nil, errors.New("fallback unavailable")
 }
 
-func (g *Gate) checkBudget(ctx context.Context, taskID, workloadName string, b domain.Budget, now time.Time) (bool, string, error) {
-	taskTotals, err := g.store.TaskBudgetTotals(ctx, taskID)
+func (g *Gate) reserveBudget(ctx context.Context, taskID, workloadName string, b domain.Budget, reserve domain.BudgetTotals, now time.Time) (string, bool, string, error) {
+	if _, err := g.store.GetTask(ctx, taskID); err != nil {
+		return "", false, "", err
+	}
+	res, err := g.store.ReserveBudget(ctx, store.BudgetReservationRequest{
+		TaskID:       taskID,
+		WorkloadName: workloadName,
+		Budget:       b,
+		Reserve:      reserve,
+		Now:          now,
+	})
 	if err != nil {
-		return false, "", err
+		return "", false, "", err
 	}
-	if b.Spec.PerTask.MaxInputTokens > 0 && taskTotals.InputTokens >= b.Spec.PerTask.MaxInputTokens {
-		return true, "per_task_input_tokens", nil
-	}
-	if b.Spec.PerTask.MaxOutputTokens > 0 && taskTotals.OutputTokens >= b.Spec.PerTask.MaxOutputTokens {
-		return true, "per_task_output_tokens", nil
-	}
-	if b.Spec.PerTask.MaxCostUSD > 0 && taskTotals.CostMicroUSD >= int64(b.Spec.PerTask.MaxCostUSD*1_000_000) {
-		return true, "per_task_cost_usd", nil
-	}
-
-	if b.Spec.Daily.MaxCostUSD > 0 {
-		dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		dailyTotals, err := g.store.WorkloadDailyBudgetTotals(ctx, workloadName, dayStart)
-		if err != nil {
-			return false, "", err
-		}
-		if dailyTotals.CostMicroUSD >= int64(b.Spec.Daily.MaxCostUSD*1_000_000) {
-			return true, "daily_cost_usd", nil
-		}
-	}
-	task, err := g.store.GetTask(ctx, taskID)
-	if err != nil {
-		return false, "", err
-	}
-	if task.ParentTaskID == "" {
-		return false, "", nil
-	}
-	reason, err := childBudgetReason(task.BudgetCeilingJSON, taskTotals)
-	return reason != "", reason, err
+	return res.ReservationID, res.Exceeded, res.Reason, nil
 }
 
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
