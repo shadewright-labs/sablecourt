@@ -6,7 +6,7 @@ A Conclave is a room where several workloads, called Vassals, exchange short mes
 
 ## Members and activation
 
-A `Conclave` manifest lists Vassals. Each has a `role`, the `workload` it runs, an `activation` and a `canMessage` list. The loader rejects a room with no Vassals, a duplicate or reserved role (`operator`, `all`, `system`, or a name that starts with `@`), an activation other than `always-on` or `on-mention`, and a `canMessage` target that is not a role in the room.
+A `Conclave` manifest lists Vassals. Each has a `role`, the `workload` it runs, an `activation` and a `canMessage` list. The loader rejects a room with no Vassals, a duplicate or reserved role (`operator`, `all`, `system`, or a name that starts with `@`), an activation other than `always-on` or `on-mention`, and a `canMessage` target that is neither a role in the room nor `all` or `operator`.
 
 - `always-on` Vassals get one turn when the room opens, with the opening Decree as their prompt. They are not started again by the room.
 - `on-mention` Vassals get a turn each time a message is addressed to their role, or to `all`, by someone else. For a Decree the prompt is the Decree's text. For a message from another Vassal the prompt names the message, not its text, and says to treat it as untrusted peer context.
