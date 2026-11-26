@@ -17,12 +17,10 @@ updates:
       go-minor-patch:
         patterns: ["*"]
         update-types: [minor, patch]
-  # Every Dockerfile in the tree: the release images (root) and the harness, proxy and example images.
+  # Every Dockerfile in the tree: the release images (root) and the harness and proxy images.
   - package-ecosystem: docker
     directories:
       - /
-      - /cmd/sablecourt-agent
-      - /examples/demo-agent
       - /internal/gate/councilproxy
       - /internal/harnessimages
     schedule:
