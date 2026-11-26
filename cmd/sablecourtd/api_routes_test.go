@@ -1091,7 +1091,6 @@ func TestAPIConclaveLifecycle(t *testing.T) {
 }
 
 func TestAPIApproveRefusesMalformedBody(t *testing.T) {
-	t.Skip("defect: POST /api/v1/approvals/{id}/approve ignores a JSON decode error and approves without the pinned digest")
 	env := newAPIEnv(t, apiEnvConfig{approver: daemonApprover{}})
 	apr := env.seedApproval(t)
 	// The client pins a digest that does not match, but the body is cut short.
