@@ -255,12 +255,20 @@ def job_env(job_text):
 
 
 def steps(job_text):
-    """Maps each step name of a job to its text, in order."""
+    """Maps each step name of a job to its text, in order. See named_steps for steps this map cannot hold."""
     out = {}
     for part in re.split(r"^      - name: ", job_text, flags=re.M)[1:]:
         name, _, body = part.partition("\n")
         out[name.strip()] = body
     return out
+
+
+def named_steps(job_text):
+    """True when every step of a job starts with its name and no name repeats: steps() drops a step without a name
+    before the first named one, folds one between two named steps into the step above, and keeps one name of two."""
+    starts = re.findall(r"^      - (.*)$", job_text, re.M)
+    names = [s[len("name: "):].strip() for s in starts if s.startswith("name: ")]
+    return len(names) == len(starts) and len(set(names)) == len(names)
 
 
 def in_order(text, *parts):
@@ -337,7 +345,8 @@ def release_checks(text):
     for name, want in RELEASE_NEEDS.items():
         out.append((f"{name}: needs {', '.join(sorted(want)) or 'nothing'}", needs(j.get(name, "")) == want))
     for name, want in EXACT_STEPS.items():
-        out.append((f"{name}: exactly the pinned steps in order", list(s.get(name, {})) == want))
+        out.append((f"{name}: exactly the pinned steps in order",
+                    list(s.get(name, {})) == want and named_steps(j.get(name, ""))))
     signers = [n for n, t in j.items() if "id-token: write" in t or "cosign " in t and "cosign verify" not in t
                or "attest-build-provenance@" in t]
     writers = [n for n, t in j.items()
@@ -739,6 +748,18 @@ MUTATIONS = [
      "      - name: Clean up\n        run: hack/release-state.sh \"${TAG}\" | xargs -r -I{} gh api --method DELETE \"repos/${GH_REPO}/releases/{}\"\n\n"
      "      - name: Refuse to move a version image tag\n"),
     ("publish: exactly the pinned steps in order", drafts_first),
+    # A step with no name before the first named one, one between two named steps, and a second step with the
+    # name of the next one: none of them changes the list of names that steps() gives.
+    ("publish: exactly the pinned steps in order",
+     in_job("publish", "    steps:\n      - name: Clone the code\n",
+            "    steps:\n      - run: gh api --method DELETE \"repos/${GH_REPO}/releases/1\"\n\n      - name: Clone the code\n")),
+    ("publish: exactly the pinned steps in order",
+     "      - name: Decide whether this release moves latest\n",
+     "      - run: gh api --method DELETE \"repos/${GH_REPO}/releases/1\"\n\n      - name: Decide whether this release moves latest\n"),
+    ("publish: exactly the pinned steps in order",
+     "      - name: Refuse to move a version image tag\n",
+     "      - name: Refuse to move a version image tag\n        run: gh api --method DELETE \"repos/${GH_REPO}/releases/1\"\n\n"
+     "      - name: Refuse to move a version image tag\n"),
     ("publish: exactly the pinned steps in order", "      - name: Check the published assets byte for byte\n        run: hack/release-assets.sh \"${TAG}\" \"${RUNNER_TEMP}/dist\"\n", ""),
     ("sign-images: exactly the pinned steps in order",
      in_job("sign-images", "      - name: Install cosign\n", "      - name: Sign by tag\n        run: echo\n\n      - name: Install cosign\n")),
