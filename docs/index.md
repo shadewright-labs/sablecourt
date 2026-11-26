@@ -1,6 +1,27 @@
-# Sablecourt
+---
+title: Local control plane for running agents and programs under limits
+hide:
+  - navigation
+  - toc
+---
 
-Sablecourt runs coding agents and deterministic programs on one machine under limits you set. Workloads get no raw provider keys. Model calls, tool calls and approvals go through gates that check a short-lived lease and the workload's grants, then policy or budget where they apply, and most decisions are written to an audit chain. The one exception is the council harnesses, which use their own subscription login. Today it is built for a local council in which `claude`, `codex` and `agy` answer one question in rounds, and for the Shadewright incident contract.
+<div class="sc-hero" markdown>
+
+<h1 class="sc-visually-hidden">Sablecourt</h1>
+
+![Sablecourt](assets/brand/sablecourt-horizontal-nolabs-dark.png){ width="520" height="144" }
+
+<p class="sc-lore">The Court is three hooded councilors under a sable banner, and every agent or program that comes before them. Each keeps to its own seat and may only ask. The councilors answer from one written law: what it allows goes ahead, what it does not name is refused, and the gravest matters wait for a person's seal. <a href="https://github.com/shadewright-labs/sablecourt#the-name">The name</a></p>
+
+<p class="sc-tagline">Sablecourt runs coding agents and deterministic programs on one machine under limits you set.</p>
+
+[Run a council](how-to/run-a-council.md){ .md-button .md-button--primary }
+[How it works](how-it-works/index.md){ .md-button }
+[GitHub](https://github.com/shadewright-labs/sablecourt){ .md-button }
+
+</div>
+
+Workloads get no raw provider keys. Model calls, tool calls and approvals go through gates that check a short-lived lease and the workload's grants, then policy or budget where they apply, and most decisions are written to an audit chain. The one exception is the council harnesses, which use their own subscription login. Today it is built for a local council in which `claude`, `codex` and `agy` answer one question in rounds, and for the Shadewright incident contract.
 
 ## What it refuses to do
 
