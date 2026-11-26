@@ -37,7 +37,7 @@ func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // stop only releases the signal handler, which exiting releases too
 	}
 }
 
@@ -1284,8 +1284,8 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r)
 }
 
-func streamScry(ctx context.Context, client *http.Client, url string, out io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func streamScry(ctx context.Context, client *http.Client, target string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
 	}

@@ -121,14 +121,14 @@ func main() {
 		history = append([]chatMessage{{Role: "user", Content: in.ContextPacket}}, history...)
 	}
 
-	for turn := 0; turn < maxAgentTurns; turn++ {
+	for turn := range maxAgentTurns {
 		reply, err := callModelGate(modelGate, token, provider, model, history)
 		if err != nil {
 			if gateRoot != "" {
 				_ = postThreadMessage(gateRoot+"/gate/task/messages", token, "agent", fmt.Sprintf("Model Gate call (%s/%s) failed: %v", provider, model, err))
 			}
 			fmt.Fprintf(os.Stderr, "model gate error: %v\n", err)
-			os.Exit(1)
+			os.Exit(1) //nolint:gocritic // exiting with a failure; the MCP session ends with the process
 		}
 
 		if dir, ok := parseToolDirective(reply); ok && turn < maxAgentTurns-1 {

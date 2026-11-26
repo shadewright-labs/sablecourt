@@ -133,7 +133,7 @@ func TestSC06_ConcurrentBudgetEnforcement(t *testing.T) {
 	gate := New(Options{Store: st, Bundle: bundle, Client: cli})
 
 	// Fire 2 sequential requests first to exceed 100 input tokens (60 + 60 = 120), then verify concurrent burst gets 429.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		req := httptest.NewRequest(http.MethodPost, "/local/v1/chat/completions", strings.NewReader(`{"model":"qwen3:8b"}`))
 		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
@@ -145,7 +145,7 @@ func TestSC06_ConcurrentBudgetEnforcement(t *testing.T) {
 
 	var denied atomic.Int32
 	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -479,10 +479,8 @@ func TestCouncilAnswerVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	panel := CouncilSnapshot{Question: snap.Question}
-	for _, m := range snap.Members {
-		panel.Members = append(panel.Members, CouncilMember(m))
-	}
-	turns := turnsByRound{1: {"reviewer": CouncilTurn(snap.Turns[0])}}
+	panel.Members = append(panel.Members, snap.Members...)
+	turns := turnsByRound{1: {"reviewer": snap.Turns[0]}}
 	for _, m := range panel.Members {
 		p, err := panel.packet(2, m, turns)
 		want := m.Vassal.Role == "one" || m.Vassal.Role == "two"

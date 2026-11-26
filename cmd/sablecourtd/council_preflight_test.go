@@ -42,7 +42,8 @@ func TestCouncilHarnessRefusal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			role := "claude"
-			if he, ok := tc.err.(*docker.HarnessError); ok {
+			he := &docker.HarnessError{}
+			if errors.As(tc.err, &he) {
 				role = he.Harness
 			}
 			status, msg := councilHarnessRefusal(role, tc.err)

@@ -42,7 +42,7 @@ func (d *fakeDocker) Run(_ context.Context, args []string, input io.Reader) erro
 	tr := tar.NewReader(input)
 	for {
 		h, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -500,7 +500,7 @@ func (a *Adapter) verifyPrimaryRepo(ctx context.Context, repo, expectedID string
 			return "", gitRepo{}, errors.New("configured repository is unavailable")
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino)) != expectedID {
+		if !ok || fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino)) != expectedID { //nolint:unconvert // Stat_t field types differ between darwin and linux
 			return "", gitRepo{}, errors.New("configured repository directory identity changed")
 		}
 	}
@@ -1216,7 +1216,6 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 					_ = writeCouncilState(root, key, cur)
 				}
 				rel()
-				existingWriterWT = nil
 				needCreateWriter = true
 				forceBranch = true
 			} else {

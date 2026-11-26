@@ -124,7 +124,7 @@ func TestPacketLimitPreservesRequiredSectionsAndNewestContext(t *testing.T) {
 			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				body := fmt.Sprintf("context-%d: %s", i, strings.Repeat("context ", maxPacketBytes/24))
 				if _, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: "room", FromRole: "operator", Kind: "decree", Body: body}); err != nil {
 					t.Fatal(err)

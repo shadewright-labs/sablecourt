@@ -3,11 +3,12 @@ package docker
 import (
 	"context"
 	"errors"
-	"github.com/moby/moby/api/types/image"
-	"github.com/moby/moby/api/types/network"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"

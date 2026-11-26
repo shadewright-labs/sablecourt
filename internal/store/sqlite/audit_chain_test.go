@@ -21,7 +21,7 @@ func TestAuditHashChainDetectsTampering(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := st.AppendAudit(ctx, domain.AuditRecord{
 			Category:     "policy",
 			WorkloadName: "triage-agent",

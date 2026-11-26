@@ -24,16 +24,14 @@ func (s *fakeSession) Workload() councilproxy.WorkloadEndpoint {
 func (s *fakeSession) Close(context.Context) error { s.closed = true; return nil }
 
 type fakeLogin struct {
-	checks                []error // consumed one per CheckCouncilHarness call
-	ensureErr, proxyErr   error
-	imageErr, runErr      error
-	calls                 []string
-	session               *fakeSession
-	launch                rt.CouncilLaunch
-	terminalIn            string
-	terminalOut           string
-	proxyConfig           councilproxy.Config
-	sawOutput, sawRawEcho string
+	checks              []error // consumed one per CheckCouncilHarness call
+	ensureErr, proxyErr error
+	imageErr, runErr    error
+	calls               []string
+	session             *fakeSession
+	launch              rt.CouncilLaunch
+	proxyConfig         councilproxy.Config
+	sawRawEcho          string
 }
 
 func (f *fakeLogin) CheckCouncilHarness(context.Context, string) error {

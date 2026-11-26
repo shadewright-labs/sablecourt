@@ -863,7 +863,8 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		}
 		if r.claimLaunch(task.ID) {
 			activeWorking++
-			go r.launchTask(ctx, task, wl, adapter)
+			// launchTask records its own failure (failTask and launchErrors) before it returns.
+			go func() { _ = r.launchTask(ctx, task, wl, adapter) }()
 		}
 	}
 	return passErr
@@ -1156,7 +1157,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		}
 		r.mu.Lock()
 		if reservation := r.launching[task.ID]; reservation != nil {
-			if launchErr != nil && launchErr != store.ErrConflict {
+			if launchErr != nil && launchErr != store.ErrConflict { //nolint:errorlint // exact match kept: errors.Is would also drop joined errors that carry a conflict
 				r.launchErrors = errors.Join(r.launchErrors, launchErr)
 			}
 			delete(r.launching, task.ID)

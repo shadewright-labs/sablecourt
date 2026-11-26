@@ -232,9 +232,9 @@ func TestProxyRejectsReplacedNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	net := e.nets[spec.Name]
-	net.ID = "replacement"
-	e.nets[spec.Name] = net
+	replaced := e.nets[spec.Name]
+	replaced.ID = "replacement"
+	e.nets[spec.Name] = replaced
 	err = a.CreateProxy(t.Context(), councilproxy.ProxyContainer{Name: "proxy", ImageID: e.imageID, InternalNetwork: spec.Name, InternalNetworkID: info.ID})
 	if err == nil || len(e.containers) != 0 {
 		t.Fatal("proxy joined a replacement network")

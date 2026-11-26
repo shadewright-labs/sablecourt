@@ -53,12 +53,12 @@ func TestHostAllowlistBeforeRouting(t *testing.T) {
 		})
 	}
 	for _, unixSocket := range []bool{false, true} {
-		guard, err := hostAllowlistMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }), net.JoinHostPort(loopback, port), nil, unixSocket)
+		guard, err := hostAllowlistMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }), net.JoinHostPort(loopback, port), nil, unixSocket)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, authority := range []string{"unix", net.JoinHostPort(untrusted, port)} {
-			r := httptest.NewRequest("GET", "/healthz", nil)
+			r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 			r.Host = authority
 			w := httptest.NewRecorder()
 			guard.ServeHTTP(w, r)
@@ -125,7 +125,7 @@ func TestHostAllowlistConfiguration(t *testing.T) {
 func TestContainerGateAuthority(t *testing.T) {
 	for _, host := range []string{"", net.JoinHostPort("gate", "8888")} {
 		cfg := daemonConfig{listenAddr: net.JoinHostPort(net.IPv4(127, 0, 0, 1).String(), "7432"), gateHost: host}
-		h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }), false)
+		h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,7 +133,7 @@ func TestContainerGateAuthority(t *testing.T) {
 			path string
 			want int
 		}{{"/gate/mcp", 204}, {"/api/v1/tasks", 403}} {
-			r := httptest.NewRequest("GET", tc.path, nil)
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			r.Host = cfg.containerGateHost()
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -183,7 +183,7 @@ func TestHostGateURLIsAdmittedOnGateRoutes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := daemonConfig{listenAddr: tc.listen, gateHost: tc.gateHost}
-			h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }), false)
+			h, err := cfg.hostHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), false)
 			if err != nil {
 				t.Fatal(err)
 			}
