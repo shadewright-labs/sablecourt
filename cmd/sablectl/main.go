@@ -862,6 +862,10 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 				return err
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				_, err := readBoundedHTTPResponse(resp)
+				return err
+			}
 			sc := bufio.NewScanner(resp.Body)
 			for sc.Scan() {
 				if strings.HasPrefix(sc.Text(), "data: ") {
