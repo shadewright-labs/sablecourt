@@ -57,7 +57,7 @@ The epics behind the open work are #1 (scope and local trust), #15 (a CLI harnes
 - Run it: [install and start](how-to/install-and-start.md), then [write manifests](how-to/write-manifests.md) or [run a council](how-to/run-a-council.md).
 - Understand it: [how it works](how-it-works/index.md) and the [threat model](threat-model.md).
 - Look something up: [reference](reference/index.md) and [troubleshooting](troubleshooting.md).
-- Change it: [design](design/index.md) and the [decision records](adr/README.md).
+- Change it: [design](design/index.md) and the [decision records](adr/README.md); [CI and releases](ci-and-releases.md) for the checks and the release steps.
 
 ## Map of the docs
 
