@@ -4,20 +4,24 @@ name: Release assets
 # pre-release tag vX.Y.Z-rc.N pushed by hand (docs/ci-and-releases.md). It completes the draft GitHub release of
 # the tag and publishes it:
 #
-# - build: checks the tag is on main (hack/require-on-main.sh), then builds sablecourtd and sablectl for darwin
+# - gate: checks the tag is on main (hack/require-on-main.sh) and is a tag the release process makes
+#   (hack/check-release-tag.sh), and stops the run when the release is already published (hack/release-state.sh),
+#   so a full rerun after publication skips every other job, ends green and changes nothing.
+# - build: builds sablecourtd and sablectl for darwin
 #   and linux, amd64 and arm64 (hack/package-binaries.sh: sablecourt_<version>_<os>_<arch>.tar.gz and
 #   checksums.txt). No permission beyond contents: read, no Go cache.
 # - sign: signs checksums.txt keyless with cosign (checksums.txt.sigstore.json, GitHub OIDC, no key to store),
 #   records a GitHub build provenance attestation per archive, and verifies both against the identity of this
-#   workflow on a v* tag. The only job with id-token and attestations: write; it sees only the built files.
-# - images: resolves the tag's sablecourt and sablecourt-agent images and verifies their signatures and SBOMs
-#   against images.yml on this tag (hack/resolve-image-digests.sh), waiting up to 30 minutes for the Images run.
+#   workflow at exactly this tag and commit. The only job with id-token and attestations: write; it sees only the built files.
+# - images: resolves the tag's sablecourt and sablecourt-agent images and verifies their signatures, SBOMs and
+#   build provenance against images.yml on this tag (hack/resolve-image-digests.sh), waiting up to 30 minutes for the Images run.
 # - upload: uploads the archives, checksums.txt and the bundle to the draft release (waits up to five minutes for
 #   it, refuses a published release, re-uploads with --clobber on a rerun).
 # - release-notes: appends the image digests and the verify commands to the release body, between markers
 #   (hack/release-verify-notes.sh), so a rerun replaces the section.
-# - publish-release: publishes the draft only when that exact section and all six assets are present
-#   (hack/publish-release.sh); otherwise it fails and leaves the draft unpublished.
+# - publish-release: publishes the draft only when it has a boolean draft state, its pre-release flag matches the
+#   tag, the exact section is present and all six assets are uploaded with the digests of the files the build and
+#   sign jobs made (hack/publish-release.sh); otherwise it fails and leaves the draft unpublished.
 #
 # No `release: published` trigger anywhere: creating a draft emits no such event, and a release published with
 # GITHUB_TOKEN does not trigger other workflows. Only upload, release-notes and publish-release have
@@ -33,15 +37,17 @@ env:
   GOWORK: off
 
 jobs:
-  build:
-    name: Build the archives
+  gate:
+    name: Check the tag
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      published: ${{ steps.state.outputs.published }}
     steps:
-      # A release tag must point at a commit on main: the signature identity only says "this workflow on a v*
-      # tag", so the history of main is fetched for the check below.
+      # The history of main is fetched for the on-main check.
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +56,34 @@ jobs:
 
       - name: Require the tag to be on main
         run: hack/require-on-main.sh HEAD origin/main
+
+      - name: Require a release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: hack/check-release-tag.sh "${TAG}"
+
+      # With this read-only token a draft is not visible, so a draft reads as not published; that is the case
+      # in which the run should go on.
+      - name: Check whether the release is already published
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: hack/release-state.sh "${REPOSITORY}" "${TAG}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build the archives
+    needs: [gate]
+    if: needs.gate.outputs.published == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
@@ -99,8 +133,8 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/dist/sablecourt_*.tar.gz
 
-      # The identity is this workflow file on a release tag (also a pre-release tag, v[0-9].*) of this repository,
-      # issued by GitHub's OIDC provider. Anything else (another workflow, another repository, a branch) fails the run.
+      # The identity is this workflow file of this repository at exactly this tag, issued by GitHub's OIDC
+      # provider, and the provenance must name this tag and commit. Anything else fails the run.
       - name: Verify the signature, the checksums and the provenance
         env:
           DIST: ${{ runner.temp }}/dist
@@ -108,17 +142,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release\.yml@refs/tags/v[0-9].*$"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           cosign verify-blob \
             --bundle "${DIST}/checksums.txt.sigstore.json" \
-            --certificate-identity-regexp "${identity}" \
+            --certificate-identity "${identity}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${DIST}/checksums.txt"
           (cd "${DIST}" && sha256sum --check --strict checksums.txt)
           for archive in "${DIST}"/sablecourt_*.tar.gz; do
             gh attestation verify "${archive}" \
               --repo "${REPOSITORY}" \
-              --signer-workflow "${REPOSITORY}/.github/workflows/release.yml"
+              --signer-workflow "${REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "${GITHUB_REF}" --source-digest "${GITHUB_SHA}"
           done
 
       - name: Keep the signature bundle
@@ -129,11 +164,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Resolves the image pair of the tag once, verified (signature and SBOM attestation against the Images workflow
-  # on this tag). packages: read only for private packages; no write, no OIDC token.
+  # Resolves the image pair of the tag once, verified (signature, SBOM attestations and build provenance against
+  # the Images workflow on this tag). packages: read only for private packages; attestations: read for the
+  # provenance; no write, no OIDC token.
   images:
     name: Resolve and verify the image digests
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [gate]
+    if: needs.gate.outputs.published == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Digests only, not secrets.
@@ -143,6 +180,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      attestations: read
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -164,6 +202,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" | tee "${RUNNER_TEMP}/digests.txt" >> "${GITHUB_OUTPUT}"
@@ -267,6 +306,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The files this run built and signed: each uploaded asset must have the same sha256 digest.
+      - name: Download the archives and the signature
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/dist
+
       - name: Require all artifacts and publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -274,4 +321,5 @@ jobs:
           TAG: ${{ github.ref_name }}
           DAEMON: ${{ needs.images.outputs.daemon }}
           AGENT: ${{ needs.images.outputs.agent }}
-        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}"
+          DIST: ${{ runner.temp }}/dist
+        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" "${DIST}"

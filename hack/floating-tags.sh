@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Decides whether the images of a release tag may take the floating tags `latest` and `X.Y`. Prints
+# `latest=true|false` and `minor=true|false` (the format of $GITHUB_OUTPUT). A floating tag never moves to an
+# older version: `latest` only when no stable tag in the repository is newer than this one, `X.Y` only when no
+# stable tag with the same X.Y has a higher patch. Release candidates and branch pushes take neither. Reads the
+# tags of the checkout (actions/checkout with fetch-depth: 0 fetches them). Usage:
+#   hack/floating-tags.sh <git ref name>      (a tag such as v0.2.0, or a branch name)
+# Tests: hack/test/release-scripts_test.sh.
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 <ref name>" >&2
+  exit 2
+fi
+ref="$1"
+num='(0|[1-9][0-9]*)'
+stable_re="^v${num}\.${num}\.${num}$"
+if ! [[ "${ref}" =~ ${stable_re} ]]; then
+  printf 'latest=false\nminor=false\n'
+  exit 0
+fi
+major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+
+latest=true same_minor=true
+tags="$(git tag -l 'v*')"
+while IFS= read -r t; do
+  [ -n "${t}" ] || continue
+  [[ "${t}" =~ ${stable_re} ]] || continue
+  M="${BASH_REMATCH[1]}" m="${BASH_REMATCH[2]}" p="${BASH_REMATCH[3]}"
+  if (( M > major || (M == major && m > minor) || (M == major && m == minor && p > patch) )); then
+    latest=false
+  fi
+  if (( M == major && m == minor && p > patch )); then
+    same_minor=false
+  fi
+done <<< "${tags}"
+printf 'latest=%s\nminor=%s\n' "${latest}" "${same_minor}"

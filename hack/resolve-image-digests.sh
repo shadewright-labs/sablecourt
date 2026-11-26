@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Resolves the digests of the sablecourt and sablecourt-agent images of a release tag and verifies each one
-# (cosign signature, and the SPDX SBOM attestation of each platform image) against the identity of the Images
-# workflow on that very tag. Prints `daemon=<digest>` and `agent=<digest>` on stdout (the format of
+# (cosign signature, the SPDX SBOM attestation of each platform image, and the GitHub build provenance
+# attestation of the index) against the identity of the Images workflow on that very tag. The Images job records
+# provenance last, so an image counts as ready only when all three verify. Prints `daemon=<digest>` and `agent=<digest>` on stdout (the format of
 # $GITHUB_OUTPUT); progress goes to stderr. The images job of .github/workflows/release.yml runs this once and
 # hands the digests to the release notes, so the release lists the images that were verified. Usage:
 #   hack/resolve-image-digests.sh <tag, with v> <owner/repository> <owner>
 # The Images workflow of the same tag runs in parallel, so this waits for each image and for a signature that
 # verifies: every POLL_SECONDS (30), at most WAIT_SECONDS (1800) in all, then fails naming the image it waited for.
-# Needs docker (buildx imagetools), jq and cosign, logged in to ghcr.io where the packages are private.
+# Needs docker (buildx imagetools), jq, cosign and gh (GH_TOKEN), logged in to ghcr.io where the packages are
+# private.
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -34,6 +36,13 @@ sboms_verify() { # image reference, index digest
   done
 }
 
+# The provenance must come from images.yml of this repository, built from this tag.
+provenance_verify() { # image reference, index digest
+  gh attestation verify "oci://$1@$2" --repo "${repository}" \
+    --signer-workflow "${repository}/.github/workflows/images.yml" \
+    --source-ref "refs/tags/${tag}" > /dev/null 2>&1
+}
+
 found_daemon="" found_agent=""
 for pair in daemon:sablecourt agent:sablecourt-agent; do
   key="${pair%%:*}" ref="ghcr.io/${owner}/${pair#*:}"
@@ -42,10 +51,11 @@ for pair in daemon:sablecourt agent:sablecourt-agent; do
     got="$(docker buildx imagetools inspect "${ref}:${tag#v}" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
     if printf '%s' "${got}" | grep -Eq '^sha256:[a-f0-9]{64}$' && cosign verify \
         --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" \
-        "${ref}@${got}" > /dev/null 2>&1 && sboms_verify "${ref}" "${got}"; then
+        "${ref}@${got}" > /dev/null 2>&1 && sboms_verify "${ref}" "${got}" \
+        && provenance_verify "${ref}" "${got}"; then
       d="${got}"
     elif [ "$(date +%s)" -ge "${deadline}" ]; then
-      echo "no image ${ref}:${tag#v} signed and attested by ${identity} after $((wait_for / 60)) minutes; re-run this job once the Images workflow of ${tag} has finished" >&2
+      echo "no image ${ref}:${tag#v} signed, SBOM-attested and with provenance from ${identity} after $((wait_for / 60)) minutes; re-run this job once the Images workflow of ${tag} has finished" >&2
       exit 1
     else
       echo "waiting for ${ref}:${tag#v} and its signature" >&2

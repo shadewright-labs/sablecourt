@@ -44,7 +44,7 @@ ${pre}| Artifact | Reference |
 | Agent image | \`ghcr.io/${owner}/sablecourt-agent@${agent}\` |
 | Binaries | \`sablecourt_${version}_<os>_<arch>.tar.gz\` (darwin and linux, amd64 and arm64), \`checksums.txt\`, \`checksums.txt.sigstore.json\` |
 
-The release workflow checked the keyless cosign signature of both images and the signed SPDX SBOM of each platform image (linux/amd64 and linux/arm64). The Images workflow also records a GitHub build provenance attestation on each image. \`checksums.txt\` lists every archive and is signed keyless; each archive has a build provenance attestation. Verify by digest, never by tag. You need [Docker](https://docs.docker.com/engine/install/), jq, [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://github.com/${repo}/blob/main/docs/ci-and-releases.md#verify-a-release).
+Before this section was written, the release workflow verified, for both images and against the Images workflow on this tag, the keyless cosign signature, the signed SPDX SBOM of each platform image (linux/amd64 and linux/arm64) and the GitHub build provenance attestation. \`checksums.txt\` lists every archive and is signed keyless; each archive has a build provenance attestation. Verify by digest, never by tag. You need [Docker](https://docs.docker.com/engine/install/), jq, [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://github.com/${repo}/blob/main/docs/ci-and-releases.md#verify-a-release).
 
 \`\`\`bash
 ISSUER=https://token.actions.githubusercontent.com
@@ -63,7 +63,7 @@ for ref in \\
       --certificate-oidc-issuer "\$ISSUER" "\${ref%@*}@\$child" > /dev/null
   done
   gh attestation verify "oci://\$ref" --repo ${repo} \\
-    --signer-workflow ${repo}/.github/workflows/images.yml
+    --signer-workflow ${repo}/.github/workflows/images.yml --source-ref refs/tags/${tag}
 done
 
 # Binaries: download the archives, checksums.txt and checksums.txt.sigstore.json of this release first.
@@ -72,7 +72,8 @@ cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-r
   --certificate-oidc-issuer "\$ISSUER" checksums.txt
 sha256sum --check --strict checksums.txt
 for archive in sablecourt_${version}_*.tar.gz; do
-  gh attestation verify "\$archive" --repo ${repo} --signer-workflow ${repo}/.github/workflows/release.yml
+  gh attestation verify "\$archive" --repo ${repo} --signer-workflow ${repo}/.github/workflows/release.yml \\
+    --source-ref refs/tags/${tag}
 done
 \`\`\`
 ${end}
@@ -81,11 +82,14 @@ TEXT
 
 body="$(cat)"
 # Drop an earlier copy of the section (markers included), then append the current one.
+# An opening marker without a closing one drops nothing: the lines after it are kept as they were.
 body="$(printf '%s\n' "${body}" | awk -v s="${start}" -v e="${end}" '
   { line = $0; sub(/\r$/, "", line) }
-  line == s { skip = 1; next }
-  skip && line == e { skip = 0; next }
-  !skip { print }
+  !skip && line == s { skip = 1; held = $0; next }
+  skip && line == e { skip = 0; held = ""; next }
+  skip { held = held "\n" $0; next }
+  { print }
+  END { if (skip) print held }
 ')"
 # Trim trailing blank lines.
 body="$(printf '%s' "${body}" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')"

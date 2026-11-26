@@ -10,9 +10,14 @@ name: Images
 # attestation, records a GitHub build provenance attestation on the index, and verifies all of them against the
 # identity of this workflow, so a mismatch fails the run. The id-token and attestations permissions exist only on
 # the publish job, which never runs for a pull request (forks included). Tags are cut by release-please or, for a
-# pre-release, by hand (see docs/ci-and-releases.md). A tag must point at a commit on main (checked before
-# anything is pushed). On a tag docker/metadata-action adds no sha tag; a release gets X.Y.Z, X.Y and latest, a
-# pre-release only the full version (0.2.0-rc.1): no X.Y, no latest, so it never moves a floating tag.
+# pre-release, by hand (see docs/ci-and-releases.md). The gate job runs before anything is pushed: a tag must
+# point at a commit on main (hack/require-on-main.sh) and be one the release process makes
+# (hack/check-release-tag.sh: a stable tag equals the version in .release-please-manifest.json, a candidate is
+# vX.Y.Z-rc.N for a newer version); a tag whose release is already published pushes nothing, so a rerun cannot
+# replace published images (hack/release-state.sh). On a tag docker/metadata-action adds no sha tag; a release
+# gets X.Y.Z, plus X.Y and latest only when no newer stable tag exists in that line or at all
+# (hack/floating-tags.sh), so a floating tag never moves to an older version; a pre-release gets only the full
+# version (0.2.0-rc.1).
 on:
   push:
     branches: [main]
@@ -21,9 +26,53 @@ on:
 permissions: {}
 
 jobs:
+  gate:
+    name: Check the ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      published: ${{ steps.state.outputs.published || 'false' }}
+      latest: ${{ steps.floating.outputs.latest }}
+      minor: ${{ steps.floating.outputs.minor }}
+    steps:
+      # The history of main and all tags are fetched for the checks below.
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require the tag to be on main
+        if: github.ref_type == 'tag'
+        run: hack/require-on-main.sh HEAD origin/main
+
+      - name: Require a release tag
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: hack/check-release-tag.sh "${TAG}"
+
+      - name: Check whether the release is already published
+        id: state
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: hack/release-state.sh "${REPOSITORY}" "${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Decide the floating tags
+        id: floating
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: hack/floating-tags.sh "${REF_NAME}" >> "$GITHUB_OUTPUT"
+
   publish:
     name: Publish ${{ matrix.image }}
-    if: github.event_name == 'push'
+    needs: gate
+    if: github.event_name == 'push' && needs.gate.outputs.published == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,17 +88,10 @@ jobs:
           - image: sablecourt-agent
             target: agent
     steps:
-      # A release tag must point at a commit on main: the signature identity only says "this workflow on a v*
-      # tag", so the history of main is fetched for the check below.
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: ${{ github.ref_type == 'tag' && '0' || '1' }}
-
-      - name: Require the tag to be on main
-        if: github.ref_type == 'tag'
-        run: hack/require-on-main.sh HEAD origin/main
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -66,11 +108,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
           tags: |
             type=ref,event=branch
             type=sha,enable=${{ github.ref_type != 'tag' }}
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.gate.outputs.minor == 'true' }}
+            type=raw,value=latest,enable=${{ needs.gate.outputs.latest == 'true' }}
 
       # The builder stage runs on the build host and cross-compiles (CGO is off), and the final stages only copy
       # the binary, so the arm64 image needs no emulation.
@@ -112,6 +156,7 @@ jobs:
           output-file: ${{ runner.temp }}/sbom-amd64.spdx.json
           upload-artifact: false
           upload-release-assets: false
+          syft-version: v1.54.0
 
       - name: Generate the SPDX SBOM (linux/arm64)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -121,6 +166,7 @@ jobs:
           output-file: ${{ runner.temp }}/sbom-arm64.spdx.json
           upload-artifact: false
           upload-release-assets: false
+          syft-version: v1.54.0
 
       - name: Attest the SBOMs
         env:
@@ -140,8 +186,8 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      # The identity is this workflow file on main or on a release tag of this repository, issued by GitHub's
-      # OIDC provider. Anything else (another workflow, another repository, a branch) fails the run.
+      # The identity is this workflow file of this repository at exactly the ref of this run, issued by GitHub's
+      # OIDC provider, and the provenance must name this ref and commit. Anything else fails the run.
       - name: Verify signature, SBOMs and provenance
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
@@ -152,21 +198,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/images\.yml@refs/(heads/main|tags/v[0-9].*)$"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/images.yml@${GITHUB_REF}"
           issuer="https://token.actions.githubusercontent.com"
           cosign verify \
-            --certificate-identity-regexp "${identity}" \
+            --certificate-identity "${identity}" \
             --certificate-oidc-issuer "${issuer}" \
             "${IMAGE}@${DIGEST}" > /dev/null
           for child in "${AMD64}" "${ARM64}"; do
             cosign verify-attestation --type spdxjson \
-              --certificate-identity-regexp "${identity}" \
+              --certificate-identity "${identity}" \
               --certificate-oidc-issuer "${issuer}" \
               "${IMAGE}@${child}" > /dev/null
           done
           gh attestation verify "oci://${IMAGE}@${DIGEST}" \
             --repo "${REPOSITORY}" \
-            --signer-workflow "${REPOSITORY}/.github/workflows/images.yml"
+            --signer-workflow "${REPOSITORY}/.github/workflows/images.yml" \
+            --source-ref "${GITHUB_REF}" --source-digest "${GITHUB_SHA}"
 
       - name: Show the digest
         env:
