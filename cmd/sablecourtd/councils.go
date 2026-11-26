@@ -602,6 +602,14 @@ func councilHarnessRefusal(role string, err error) (int, string) {
 		return http.StatusPreconditionFailed, "council image for " + role + " is missing: run " + harnessimages.BuildCommand(role)
 	case docker.FaultVolumeMissing, docker.FaultLoginMissing:
 		return http.StatusPreconditionFailed, "council login for " + role + " is missing: run " + harnessimages.LoginCommand(role)
+	case docker.FaultToolMissing:
+		return http.StatusPreconditionFailed, "council tool for " + role + " is not installed: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolVersion:
+		return http.StatusPreconditionFailed, "council tool for " + role + " is not the pinned version: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolChecksum:
+		return http.StatusPreconditionFailed, "council tool for " + role + " does not match its pinned SHA-256: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolInvalid:
+		return http.StatusConflict, "council tool volume for " + role + " exists but is not a local Sablecourt tool volume for this harness (driver, options or labels differ): remove it by hand, then run " + harnessimages.InstallCommand(role)
 	case docker.FaultVolumeInvalid:
 		return http.StatusConflict, "council login volume for " + role + " exists but is not a local Sablecourt volume for this harness (driver, options or labels differ): remove it by hand, then run " + harnessimages.LoginCommand(role)
 	default:
