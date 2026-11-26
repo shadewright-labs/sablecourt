@@ -26,10 +26,12 @@ linters:
     - whitespace
   settings:
     errcheck:
-      # Writes to a terminal or a response writer, and cleanup calls whose error has nowhere to go: closing a
-      # read side (a query result, a response body, a reader), rolling back a transaction that already failed,
-      # and removing a temporary path. A Close that finalizes a write ((*os.File).Close, a writer, a listener,
-      # a database handle) is still checked; test files get the rule under exclusions below.
+      # Excluded everywhere, whatever the receiver: fmt.Fprint, Fprintf and Fprintln to any io.Writer (used for
+      # terminal output and HTTP responses, but a write through them to a file is not checked either), closing a
+      # query result or an io.ReadCloser, rolling back a transaction, and os.Remove and os.RemoveAll on any path
+      # (mostly temporary and stale paths; a removal that must succeed has to check the error itself, and
+      # (*os.Root).Remove is not excluded). A Close that finalizes a write ((*os.File).Close, a writer, a
+      # listener, a database handle) is still checked; test files get the rule under exclusions below.
       exclude-functions:
         - fmt.Fprint
         - fmt.Fprintf
@@ -45,7 +47,8 @@ linters:
       errorf: false
     gocritic:
       disabled-checks:
-        # Style rewrites only; they find no faults.
+        # Style rewrites (an if-else chain to a switch, else { if } to else if, a wrapper func to the function
+        # itself); off as a style choice. Their findings were not reviewed one by one.
         - ifElseChain
         - elseif
         - unlambda
@@ -96,11 +99,13 @@ formatters:
 # - gosec: the Security job runs the pinned standalone gosec with its own exclusions and load-error check;
 #   a second copy here, at another version, would need a second set of exclusions kept in step.
 # - lll (1,523), goconst (933), gocyclo (63), modernize (78), prealloc (15): style and size rules the code
-#   base was never written to; they find no faults.
-# - noctx (213 on darwin and linux, 189 in tests): exec.Command, http.NewRequest, net.Listen, net.Dial and
-#   net.DialTimeout without a context. The 24 outside tests are in cmd/sablectl (8), cmd/sablecourt-agent (5),
-#   cmd/sablecourtd (2), internal/gate/councilproxy (3), internal/runtime/coding (3), examples/demo-agent,
-#   internal/clidoc and internal/store/sqlite (1 each).
+#   base was never written to. Their findings were counted, not reviewed one by one; gocyclo and prealloc in
+#   particular can point at functions worth splitting and slices worth sizing.
+# - noctx (213 on darwin and linux, 189 in tests): calls without a context. The 24 outside tests are
+#   exec.Command, http.NewRequest, net.Listen, net.DialTimeout and (*sql.DB).Exec, in cmd/sablectl (8),
+#   cmd/sablecourt-agent (5), cmd/sablecourtd (2), internal/gate/councilproxy (3), internal/runtime/coding (3),
+#   examples/demo-agent, internal/clidoc and internal/store/sqlite (1 each). The tests add
+#   httptest.NewRequest, net.Dial, (*http.Client).Get and Post, and (*sql.DB).QueryRow to the same kinds.
 # - unparam (18, 15 in tests): test helpers with fixed arguments; newLoginLimiter always gets a one-minute
 #   window; (*tlsGate).close always returns nil; removeSharedWorktree always gets verifySaved=false, so its
 #   verification branch is unreachable. Removing that parameter changes council worktree code and belongs in
