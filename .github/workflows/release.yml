@@ -62,14 +62,19 @@ jobs:
           done
           (cd dist && sha256sum -- *.tar.gz > checksums.txt)
 
+      # Creates the release with generated notes, or adds the files to a release that already exists for the
+      # tag, so a rerun replaces the assets instead of failing.
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            dist/*.tar.gz
-            dist/checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
+          else
+            gh release create "${TAG}" --generate-notes dist/*.tar.gz dist/checksums.txt
+          fi
 
   containers:
     runs-on: ubuntu-latest
