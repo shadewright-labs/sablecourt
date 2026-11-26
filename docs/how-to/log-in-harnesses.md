@@ -33,7 +33,7 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
 
 ## Check it worked
 
-When it succeeds, the login command ends with `Login for <role> is stored in volume sablecourt-harness-<role>`. Then run a [council](run-a-council.md): in container mode, the daemon's preflight checks the image, the login volume and the credential file before it creates the council, and for `claude` and `agy` also the tool volume and the tool. The preflight does not ask the provider whether the login is still valid.
+When it succeeds, the login command prints `Login for <role> is stored in volume sablecourt-harness-<role>`. Then run a [council](run-a-council.md): in container mode, the daemon's preflight checks the image, the login volume and the credential file before it creates the council, and for `claude` and `agy` also the tool volume and the tool. The preflight does not ask the provider whether the login is still valid.
 
 ## In depth
 

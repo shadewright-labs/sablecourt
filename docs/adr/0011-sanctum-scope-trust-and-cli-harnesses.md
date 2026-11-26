@@ -94,14 +94,14 @@ Stated limit: the hop from the harness to the proxy is plain HTTP inside the per
 
 ## Amendment (2026-11-26): harness tool volume and published images
 
-Status of this amendment: Proposed.
+Status of this amendment: Accepted (2026-11-26).
 
 Two lines above change. "The only mounts are..." gains one mount, and "keep them local" no longer holds for every image.
 
 - A harness whose vendor tool Sablecourt treats as not redistributable (`claude`, `agy`) gets one more mount: a Sablecourt-labelled tool volume, read-only, that holds the vendor's binary. Its image holds no vendor software.
 - Among the containers Sablecourt creates, only an install container writes the tool volume. It runs from the harness image as the harness's non-root uid (10001), with no network, no capabilities, a read-only root filesystem and no login volume. A new volume's root takes that uid by copy-up from the image's empty `/opt/harness-tool`. `sablectl` downloads the pinned file on the machine that runs it, from the vendor's own download host, follows no redirect, and checks it against values pinned in this repository before the install container sees it: size and SHA-256 of the binary for `claude`; size and SHA-512 of the archive, then size and SHA-256 of the extracted executable, for `agy`.
 - For `claude` and `agy`, every run checks the tool's version and pinned SHA-256 before the harness starts, and so does the login probe, which mounts the tool volume read-only next to the login volume. If the guard finds the tool missing, reads another version in `VERSION` or computes another SHA-256, it exits with status 125 before the harness starts. The guard and the start of the tool each resolve the path, so an install that finishes between the two can put a different file there. The install container renames a file into place only after it matches the SHA-256 pinned in the `sablectl` that ran the install, so that file is the daemon's pinned binary when both come from the same release, and the binary another release pins otherwise. The `codex` tool is in its image, which the build checks, so it has no such run-time check.
-- Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE; its build checks the release archive against a pinned SHA-256 before extracting it. The `claude` and `agy` images hold the base only.
+- Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE; its build checks the release archive against a pinned SHA-256 before extracting it. The `claude` and `agy` images hold the base software, an empty `/opt/harness-tool` directory and a licence note, and no vendor tool.
 
 What this does not change: one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
 

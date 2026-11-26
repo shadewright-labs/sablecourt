@@ -65,7 +65,7 @@ The messages with which the daemon refuses a new container-mode council include 
 
 A `claude` or `agy` turn whose own tool check fails ends with exit status 125 and a message such as `council tool claude is not the pinned version 2.1.332: run sablectl harness install claude`. Run the command it names.
 
-`sablectl harness install` stops with `volume sablecourt-harness-<role>-tool exists but is not a local Sablecourt tool volume for <role> (...): remove it by hand and run this command again` for a volume Sablecourt did not create, and with a message ending `exists and is not a regular file: remove the tool volume and install again` when the tool or `VERSION` path in the volume is a directory or a symlink. In both cases remove the volume with `docker volume rm` and run the install again.
+`sablectl harness install` stops with `volume sablecourt-harness-<role>-tool exists but is not a local Sablecourt tool volume for <role> (...): remove it by hand and run this command again` for a volume of that name whose driver, options or labels are not the ones Sablecourt sets. When the tool or `VERSION` path in the volume is a directory or a symlink, the install fails, and its error usually ends `exists and is not a regular file: remove the tool volume and install again`. In both cases remove the volume with `docker volume rm` and run the install again.
 
 For `codex`, the launch check covers the image tag and its configuration, not the binary inside the image (#151).
 
