@@ -53,7 +53,8 @@ func (s *Scheduler) Reload(ctx context.Context, bundle *config.Bundle) error {
 		}
 		captured := sc
 		if _, err := c.AddFunc(captured.Spec.Cron, func() {
-			s.Fire(ctx, captured)
+			// A scheduled fire has no caller to return its error to, and the scheduler has no logger yet.
+			_ = s.Fire(ctx, captured)
 		}); err != nil {
 			c.Stop()
 			return fmt.Errorf("register schedule %q: %w", captured.Metadata.Name, err)

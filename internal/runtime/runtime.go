@@ -47,11 +47,18 @@ const (
 	StateUnknown   ObservedState = "unknown"
 )
 
+// ExitCodeLogClose is recorded by a runtime wrapper when a harness exited 0
+// (so its side effects already occurred) but closing or finalizing its output
+// log failed. Normal POSIX exits are 0 to 255 and signalled, timed-out,
+// stopped, or output-capture failures use -1, so a harness cannot return -2.
+const ExitCodeLogClose = -2
+
 type Observation struct {
-	State      ObservedState
-	ExitCode   int
-	ObservedAt time.Time
-	Message    string
+	State          ObservedState
+	ExitCode       int
+	ObservedAt     time.Time
+	Message        string
+	LogCloseFailed bool
 }
 
 type CheckpointRef struct {

@@ -1,0 +1,49 @@
+name: Docs check
+
+# Checks that the reference pages under docs/reference match the code, builds the Zensical docs site with the
+# hash-locked requirements, and checks the built site's internal links, anchors, images and assets
+# (make docs-check). The Markdown link check runs on every pull request in repo-checks.yml; external links are
+# reported weekly by docs-links.yml.
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
+jobs:
+  docs-check:
+    if: ${{ inputs.run }}
+    name: docs check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Install docs requirements
+        run: make -f Makefile docs-venv
+
+      - name: Check the reference pages and build the docs site
+        run: make -f Makefile docs-check

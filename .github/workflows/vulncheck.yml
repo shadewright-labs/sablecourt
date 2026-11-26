@@ -1,0 +1,52 @@
+name: Vulncheck
+
+# govulncheck (pinned in the Makefile) over the module, with the Go release of go.mod, which is the release the
+# binaries and the images are built with. Fails on any known vulnerability the code reaches.
+# Called by ci.yml on pull requests and pushes to main, which decides from the changed files whether it runs.
+# A scheduled run always runs; a manual run of this workflow has its own `run` input, true by default. (Without
+# it, a missing input would compare equal to false and the job would skip itself.)
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+  # New advisories can affect an unchanged main, so scan weekly too (Monday 06:17 UTC).
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      run:
+        description: Run govulncheck.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
+jobs:
+  vulncheck:
+    if: ${{ github.event_name == 'schedule' || inputs.run }}
+    permissions:
+      contents: read
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run govulncheck
+        env:
+          GOTOOLCHAIN: local
+        run: make -f Makefile vulncheck

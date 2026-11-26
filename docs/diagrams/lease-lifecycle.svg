@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 344" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Task lease lifecycle</title>
+  <desc id="d">Flow of a task lease. The reconciler mints a bearer token of sc_task_ plus 64 hex characters valid for one hour and stores only its SHA-256 hash in leases. On launch, the workload carries only the task token via environment variable or standard input, with no raw provider keys. When the workload sends the bearer token to the Model Gate or MCP Gate, the gate hashes it and looks up an active lease in the store. An active lease allows the call to proceed to grant, policy or budget checks; a missing, expired or revoked token is denied with 401. While the task is observed running, each heartbeat pass renews the lease for one hour, capped at any council deadline. When the task ends or is suspended, or after one hour unrenewed, the lease is revoked or expires and subsequent calls are denied with 401. A note states that council harness subscription logins stay in their own container volume as the one exception.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="344" rx="18" fill="#08060e"/>
+
+  <rect class="box" x="24" y="36" width="216" height="72" rx="10"/>
+  <text class="h" x="40" y="62">Reconciler mints</text>
+  <text class="s" x="40" y="83">sc_task_ + 64 hex, 1 h</text>
+  <text class="s" x="40" y="100">stores SHA-256 hash only</text>
+
+  <rect class="box" x="312" y="36" width="208" height="72" rx="10"/>
+  <text class="h" x="328" y="62">Workload carries</text>
+  <text class="s" x="328" y="83">env var (stdin for councils)</text>
+  <text class="s" x="328" y="100">no raw provider keys</text>
+
+  <rect class="key" x="592" y="36" width="224" height="72" rx="12"/>
+  <text class="h" x="608" y="62">Gates verify</text>
+  <text class="s" x="608" y="83">Model Gate and MCP Gate</text>
+  <text class="s" x="608" y="100">active hash lookup in store</text>
+
+  <rect class="box" x="888" y="36" width="208" height="72" rx="10"/>
+  <text class="h" x="904" y="62">Call proceeds</text>
+  <text class="s" x="904" y="83">grant, policy or budget</text>
+  <text class="s" x="904" y="100">checked next</text>
+
+  <rect class="box" x="24" y="212" width="216" height="72" rx="10"/>
+  <text class="h" x="40" y="238">Heartbeat renews</text>
+  <text class="s" x="40" y="259">+1 h on each fresh heartbeat</text>
+  <text class="s" x="40" y="276">council: revoked at deadline</text>
+
+  <rect class="box" x="312" y="212" width="208" height="72" rx="10"/>
+  <text class="h" x="328" y="238">Revoked or expires</text>
+  <text class="s" x="328" y="259">task ends, suspends,</text>
+  <text class="s" x="328" y="276">or 1 h passes unrenewed</text>
+
+  <rect class="bad" x="592" y="212" width="224" height="72" rx="10"/>
+  <text class="no" x="608" y="238">Denied (401)</text>
+  <text class="s" x="608" y="259">missing, expired or</text>
+  <text class="s" x="608" y="276">revoked lease token</text>
+
+  <path class="f" d="M240 72H306" marker-end="url(#a)"/>
+  <text class="lbl" x="273" y="64" text-anchor="middle">launch</text>
+  <path class="f" d="M520 72H586" marker-end="url(#a)"/>
+  <text class="lbl" x="553" y="64" text-anchor="middle">bearer</text>
+  <path class="f" d="M816 72H882" marker-end="url(#a)"/>
+  <text class="lbl" x="849" y="64" text-anchor="middle">active</text>
+  <path class="f" d="M132 108V206" marker-end="url(#a)"/>
+  <text class="lbl" x="144" y="162">running pass</text>
+  <path class="f" d="M240 248H306" marker-end="url(#a)"/>
+  <text class="lbl" x="273" y="240" text-anchor="middle">ends / 1 h</text>
+  <path class="deny" d="M520 248H586" marker-end="url(#x)"/>
+  <text class="no" x="553" y="240" text-anchor="middle">denied</text>
+  <path class="deny" d="M704 108V206" marker-end="url(#x)"/>
+  <text class="no" x="716" y="162">invalid or expired</text>
+
+  <text class="cap" x="24" y="320">In harness containers, council subscription logins stay in their own volume: the one exception to no raw secrets.</text>
+</svg>

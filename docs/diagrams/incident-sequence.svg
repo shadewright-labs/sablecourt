@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 660" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Incident and verification calls</title>
+  <desc id="d">Shadewright posts an incident with the integration token. The daemon opens the room, stores the redacted evidence Relic and writes an audit row, then starts the always-on Vassals with a prompt that names the Relic, posts the opening report, wakes the on-mention Vassals and replies 201 with the room and the Relic. A Vassal may read the Relic from its context packet and post findings. Later Shadewright posts a verification report with the same token. The daemon stores the report Relic, posts a message to the operator role (no notification is sent, no Vassal is woken) and replies 201 recorded. Two calls are not built yet, inside a dashed frame: reading incident status and reading learnings.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="660" rx="18" fill="#08060e"/>
+  <rect class="box" x="60" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="150" y="58" text-anchor="middle">Shadewright</text>
+  <rect class="key" x="470" y="24" width="180" height="56" rx="12"/>
+  <text class="h" x="560" y="58" text-anchor="middle">Daemon</text>
+  <rect class="box" x="880" y="24" width="180" height="56" rx="10"/>
+  <text class="h" x="970" y="58" text-anchor="middle">Vassal</text>
+
+  <path class="life" d="M150 80V640"/>
+  <path class="life" d="M560 80V640"/>
+  <path class="life" d="M970 80V640"/>
+
+  <path class="f" d="M150 132H554" marker-end="url(#a)"/>
+  <text class="lbl" x="352" y="124" text-anchor="middle">POST incident, bearer token</text>
+  <text class="cap" x="572" y="156">open room, store Relic, audit</text>
+  <path class="f" d="M560 192H964" marker-end="url(#a)"/>
+  <text class="lbl" x="762" y="184" text-anchor="middle">start always-on Vassals, prompt names Relic</text>
+  <path class="r" d="M554 252H156" marker-end="url(#m)"/>
+  <text class="lbl" x="355" y="244" text-anchor="middle">201 with room and Relic</text>
+  <path class="f" d="M970 312H566" marker-end="url(#a)"/>
+  <text class="lbl" x="768" y="304" text-anchor="middle">Vassal may read Relic, may post findings</text>
+  <path class="f" d="M150 372H554" marker-end="url(#a)"/>
+  <text class="lbl" x="352" y="364" text-anchor="middle">POST report, same token</text>
+  <text class="cap" x="572" y="396">store report Relic, post to operator</text>
+  <path class="r" d="M554 432H156" marker-end="url(#m)"/>
+  <text class="lbl" x="355" y="424" text-anchor="middle">201 recorded</text>
+
+  <rect class="frame" x="40" y="476" width="1040" height="152" rx="12"/>
+  <text class="idt" x="56" y="500">NOT BUILT YET</text>
+  <path class="r" d="M150 548H554" marker-end="url(#m)"/>
+  <text class="lbl" x="352" y="540" text-anchor="middle">GET incident status</text>
+  <path class="r" d="M150 608H554" marker-end="url(#m)"/>
+  <text class="lbl" x="352" y="600" text-anchor="middle">GET learnings</text>
+</svg>

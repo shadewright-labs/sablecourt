@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue #41 extends the scoped learnings in ADR-0010. The context assembler derives repository identity from the checkout basename, and the matcher pulls `learning:*` entries from Court Memory. A workload granted `memory.put` can supply a learning namespace, and the legacy learning API accepts an author label from the request body. A matching row therefore supplies no reliable record of operator acceptance. [ADR-0010](0010-agentic-context-learnings-and-verification-pipeline.md), [assembler](../../internal/contextpack/assembler.go), [matcher](../../internal/contextpack/learnings.go), [memory tool](../../internal/gate/mcp/memory.go), [daemon routes](../../cmd/sablecourtd/main.go).
+Issue #41 extends the scoped learnings in ADR-0010. The context assembler derives repository identity from the checkout basename, and the matcher pulls `learning:*` entries from Court Memory. A workload granted `memory.put` can supply a learning namespace, and the legacy learning API accepts an author label from the request body. A matching row therefore supplies no reliable record of operator acceptance. [ADR-0010](0010-agentic-context-learnings-and-verification-pipeline.md), [assembler](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/assembler.go), [matcher](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/learnings.go), [memory tool](https://github.com/shadewright-labs/sablecourt/blob/main/internal/gate/mcp/memory.go), [daemon routes](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/main.go).
 
 ## Decision
 
@@ -17,7 +17,7 @@ Acceptance starts a 90-day clock. Link subsequent outcomes to the specific learn
 
 Match global scope, a canonical credential-free repository remote URL, repository-relative path globs, and incident selectors for cluster, namespace, workload kind, and symptom. Require every specified selector to match. Treat missing or ambiguous selectors as a failed match for that scope. Select the most specific eligible statements first and break ties deterministically. A packet may carry up to ten statements in a redacted advisory section of at most 4 KiB. Omit overflow and count each learning once per confirmed packet delivery, keyed by packet ID.
 
-Keep learnings out of remote model prompts, including subscription CLI prompts, and withhold injection when the destination is unknown. The only off-machine export is a redacted read of matching, accepted, unexpired advice over a scoped Shadewright Contract 3 learning route. The analyzer can supply repository and incident selectors. Grant the integration credential access to that exact read route. The daemon currently implements the incident and verification POST routes under that contract. [Daemon routes](../../cmd/sablecourtd/main.go).
+Keep learnings out of remote model prompts, including subscription CLI prompts, and withhold injection when the destination is unknown. The only off-machine export is a redacted read of matching, accepted, unexpired advice over a scoped Shadewright Contract 3 learning route. The analyzer can supply repository and incident selectors. Grant the integration credential access to that exact read route. The daemon currently implements the incident and verification POST routes under that contract. [Daemon routes](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/main.go).
 
 ## Alternatives considered
 

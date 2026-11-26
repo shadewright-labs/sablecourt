@@ -177,7 +177,7 @@ func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
 			name: "deliberately bad a-star-z pattern",
 			run: func(size int) {
 				input := strings.Repeat("a", size)
-				for start := 0; start < len(input); start++ {
+				for start := range len(input) {
 					for end := start; end < len(input); end++ {
 						if input[end] == 'z' {
 							break

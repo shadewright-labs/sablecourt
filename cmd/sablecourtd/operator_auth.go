@@ -44,6 +44,8 @@ type operatorAuth struct {
 	tokenHash [sha256.Size]byte
 	signKey   [32]byte
 	limiter   *loginLimiter
+	// onRoute, when set, is told every pattern registered here (tests only).
+	onRoute func(pattern string)
 }
 
 func newOperatorAuth(token string) *operatorAuth {
@@ -92,7 +94,7 @@ func isCanonicalPath(p string) bool {
 
 func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler, secrets secret.SecretStore) http.Handler {
 	routes := http.NewServeMux()
-	routes.HandleFunc("POST /logout", a.logout)
+	recordingMux{routes, a.onRoute}.HandleFunc("POST /logout", a.logout)
 	routes.Handle("/", next)
 	scoped := integrations.RejectShadewrightTokenOnOtherRoutes(routes, secrets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +420,10 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// maxOperatorWriteBody caps the body of every write outside the Model Gate
+// and the voice transcribe route.
+const maxOperatorWriteBody = 2 << 20
+
 func guardOperatorRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWrite(r.Method) {
@@ -429,7 +435,7 @@ func guardOperatorRequest(next http.Handler) http.Handler {
 			}
 			// The Model Gate and voice transcribe endpoint enforce their own larger limits.
 			if !strings.HasPrefix(p, "/gate/model/") && p != "/api/v1/voice/transcribe" {
-				r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+				r.Body = http.MaxBytesReader(w, r.Body, maxOperatorWriteBody)
 			}
 		}
 		next.ServeHTTP(w, r)

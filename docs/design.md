@@ -43,7 +43,7 @@ spec:
   class: long-lived-agent # coding-agent | long-lived-agent | deterministic-controller
   runtime:
     type: docker # docker | worktree-cli
-    image: ghcr.io/shadewright-labs/triage-agent:0.1.0
+    image: registry.example/triage-agent:0.1.0
     readOnlyRootfs: true
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
@@ -132,7 +132,7 @@ Core tables in v0.1:
 - `tasks`: `id`, `parent_task_id`, `idempotency_key` (unique), `workload_name`, `state`, `input_json`, `artifacts_json`, `budget_ceiling_json`, `last_heartbeat_at`, `created_at`, `updated_at`.
 - `task_events`: append-only state transitions and observed runtime facts.
 - `leases`: active short-lived gate tokens (stored as SHA-256 hash, never plaintext), bound to `(task_id, workload_name, expires_at, revoked_at)`.
-- `budget_ledger`: immutable usage rows (`task_id`, `workload_name`, `provider`, `model`, `input_tokens`, `output_tokens`, `cost_microusd`, `created_at`) aggregated inside transactions before granting new requests.
+- `budget_ledger`: immutable usage rows (`task_id`, `workload_name`, `provider`, `model`, `input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`, `cost_microusd`, `created_at`) aggregated inside transactions before granting new requests.
 - `approvals`: `id`, `task_id`, `workload_name`, `capability`, `payload_canonical_json`, `payload_sha256`, `status` (`pending`, `approved`, `denied`, `expired`), `decided_by`, `proof_json`, `expires_at`.
 - `checkpoints`: opaque JSON or blob references persisted by long-lived AI agents before suspend and restored on resume.
 - `audit_log`: append-only structured records covering policy evaluations, gate denials, budget trips, approvals, and redaction hits.
@@ -186,7 +186,7 @@ type Adapter interface {
 Used for long-lived AI agents, sandbox workloads, and deterministic controllers. Built on `github.com/docker/docker/client`:
 
 - Creates a dedicated Docker bridge network with `Internal: true` (no internet egress).
-- Council turns launched in containers reach the gate only through the per-launch council proxy in `internal/gate/councilproxy` (a fixed gate route allow-list over a per-launch Unix socket or pinned TLS, with no route from the internal network to the host). The coding adapter provisions the proxy and checks its readiness before it starts the harness, and it fails the launch if either step fails. The harness receives only the proxy endpoint, and its lease is read from private scratch. Stop, retry, and daemon restart remove the container, the proxy, and the network. See the proxy to daemon hop in [ADR-0011](adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
+- Council turns launched in containers reach the gate only through the per-launch council proxy in `internal/gate/councilproxy` (a fixed gate route allow-list over a per-launch Unix socket or pinned TLS, with no route from the internal network to the host). The coding adapter provisions the proxy and checks its readiness before it starts the harness, and it fails the launch if either step fails. The harness receives only the proxy endpoint, and its lease is read from private scratch. Stop, retry, and daemon restart remove the container, the proxy, and the network. Before a council is created, the daemon checks that each role has a local image, a labelled login volume and a credential file in it, and refuses with the command to run otherwise ([council harnesses](council-harnesses.md)). See the proxy to daemon hop in [ADR-0011](adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
 - Starts containers with `--cap-drop=ALL`, `no-new-privileges`, read-only root filesystem where supported by the workload image, and a single bind mount scoped to the task's working directory.
 - Long-lived agents persist state via a mounted checkpoint directory or control-plane checkpoint endpoint before `Suspend`.
 

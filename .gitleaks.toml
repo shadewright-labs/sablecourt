@@ -1,27 +1,131 @@
-# Tests malformed PEM boundaries with synthetic key contents.
-[[allowlists]]
-paths = ['''^internal/conclave/council_results_test\.go$''']
+# gitleaks configuration: the default rules plus the allowlists below. Without [extend] useDefault this file
+# would replace the default rules and detect nothing.
+#
+# The test fixtures in the tree hold no secret-shaped literal: they are joined from split strings, so stock
+# gitleaks finds nothing in them and they need no allowlist. The history still holds the earlier literals, so
+# each entry below allows one exact value (anchored at both ends), in one file, and only in the commits that
+# hold it (condition = "AND"). The same value in any other commit, and any other secret in the same commits or
+# files, is reported. The one entry without commits is for a file this change does not edit; it allows one exact
+# token there and nothing else. secret-scan.yml also scans the changes that only a merge commit introduces.
+# Tests: hack/test/gitleaks_test.sh.
+[extend]
+useDefault = true
 
-# Exercises URL validation using deliberately fake credential values.
+# Upstream response redaction with a fake GitHub token. The file is not changed here, so the value is still in
+# the tree; split it like the others, then scope this entry by commit.
 [[allowlists]]
-paths = ['''^internal/store/sqlite/learning_test\.go$''']
-
-# Covers parsing synthetic task metadata that resembles a generic API key.
-[[allowlists]]
-paths = ['''^cmd/sablectl/council_test\.go$''']
-
-# Tests chunked redaction with placeholder PEM and token strings.
-[[allowlists]]
-paths = ['''^internal/attach/hub_test\.go$''']
-
-# Uses fixed hash-shaped values to test worktree state validation.
-[[allowlists]]
-paths = ['''^internal/runtime/coding/hardening_test\.go$''']
-
-# Tests rendering and redaction of synthetic credentials in UI data.
-[[allowlists]]
-paths = ['''^internal/ui/ui_test\.go$''']
-
-# Tests upstream response redaction with a fake GitHub token.
-[[allowlists]]
+condition = "AND"
 paths = ['''^internal/gate/mcp/upstream_test\.go$''']
+regexes = ['''^ghp_1234567890abcdefghijklmnop1234567890$''']
+
+# History only: A council title redaction test: a bare PEM header followed by test code, no key body.
+[[allowlists]]
+condition = "AND"
+commits = ["930a41ba565e9d432e9a304bb5e8a8f47c596cd4", "bfaf52594cec602b594ad7b1b6e2e7c903d42d13"]
+paths = ['''^cmd/sablecourtd/councils_test\.go$''']
+regexes = ['''^-----BEGIN PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 \* time\.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head\},\n\t\t\{name: "embedded credential", bodyExtra: fmt\.Sprintf\(`,"title":%q`, "prefix"\+token\+"suffix"\), rounds: 2, starts: 6, duration: 15 \* time\.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head\},\n\t\} \{\n\t\tt\.Run\(tc\.name, func\(t \*testing\.T\) \{\n\t\t\tst := daemonTestStore\(t\)\n\t\t\th := councilTestHandler\(st, nil, councilTestOptions\(token\)\)\n\t\t\tquestion := "Review this"\n\t\t\tif tc\.name == "redaction" \{\n\t\t\t\tquestion \+= " -----BEGIN PRIVATE KEY-----$''']
+
+# History only: Synthetic provider tokens in task metadata parsing tests.
+[[allowlists]]
+condition = "AND"
+commits = ["35c3b43f01ecdd0f76a73c1eb3b7327d6a090dc9", "52fda8975c6e8c8a5936e213b88190e6e7ad8ddc", "a1645507c94abdd6b5af41e6e3fcc8fc2af463ce", "eb6198c966aba1e9900fca86823c427668ac4c36"]
+paths = ['''^cmd/sablectl/council_test\.go$''']
+regexes = ['''^ghp_SYNTHETIC1234567890abcdefghij$''']
+
+# History only: Synthetic provider tokens in task metadata parsing tests.
+[[allowlists]]
+condition = "AND"
+commits = ["35c3b43f01ecdd0f76a73c1eb3b7327d6a090dc9", "52fda8975c6e8c8a5936e213b88190e6e7ad8ddc", "a1645507c94abdd6b5af41e6e3fcc8fc2af463ce", "eb6198c966aba1e9900fca86823c427668ac4c36"]
+paths = ['''^cmd/sablectl/council_test\.go$''']
+regexes = ['''^sk-proj-SYNTHETIC1234567890abcdefghij$''']
+
+# History only: Chunked redaction across PEM headers and footers split over literals, no key body.
+[[allowlists]]
+condition = "AND"
+commits = ["03da7432a48fe6c18a6bea402ea3cac9461144cd", "7258486eb5bb98d5f2b65f68be21ff20b19b5301", "ed3dcadcc3b2157f64499ade865b9bc7c10d9723"]
+paths = ['''^internal/attach/hub_test\.go$''']
+regexes = ['''^-----BEGIN PRIVATE KEY-----\\nMIIE"\),\n\t\t\t\t\[\]byte\("owIBAAK\\n"\),\n\t\t\t\t\[\]byte\("-----END PRIVATE KEY-----$''']
+
+# History only: Chunked redaction across PEM headers and footers split over literals, no key body.
+[[allowlists]]
+condition = "AND"
+commits = ["03da7432a48fe6c18a6bea402ea3cac9461144cd", "5920962cd9408b27edde9421f252b79f65d2ce11", "ed3dcadcc3b2157f64499ade865b9bc7c10d9723"]
+paths = ['''^internal/attach/hub_test\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\n"\n\t\tpemFooter = "-----END RSA PRIVATE KEY-----"\n\t\tpemMarker = "\[REDACTED:private_key\]"\n\t\)\n\tlongBody := strings\.Repeat\("synthetic body\\n", limit/14\+1\)\n\tlongToken := strings\.Repeat\("x", limit\)\n\tcases := \[\]struct \{\n\t\tname      string\n\t\tchunks    \[\]string\n\t\twantLive  \[\]string\n\t\twantClose string\n\t\}\{\n\t\t\{\n\t\t\tname:     "complete PEM at EOF",\n\t\t\tchunks:   \[\]string\{pemHeader \+ "synthetic body\\n-----END RSA ", "PRIVATE KEY-----$''']
+
+# History only: Malformed and unclosed PEM boundaries in result replay tests, no key body.
+[[allowlists]]
+condition = "AND"
+commits = ["2bc00f6bec75e1f7cd433e236fc0aa12dd3fbc15", "3203fd6a0c2b9afdd51cd4d0ce8ec949e1752629"]
+paths = ['''^internal/conclave/council_results_test\.go$''']
+regexes = ['''^-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\nkeep\\n-----BEGIN OPENSSH PRIVATE KEY-----$''']
+
+# History only: Malformed and unclosed PEM boundaries in result replay tests, no key body.
+[[allowlists]]
+condition = "AND"
+commits = ["2bc00f6bec75e1f7cd433e236fc0aa12dd3fbc15", "3203fd6a0c2b9afdd51cd4d0ce8ec949e1752629"]
+paths = ['''^internal/conclave/council_results_test\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\nfixture\\ntrailer"\), want: "Before\\n\[REDACTED:private_key\]"\},\n\t\t\{name: "mismatched key footer", artifacts: resultArtifact\("Before\\n-----BEGIN RSA PRIVATE KEY-----$''']
+
+# History only: A fixed JSON secret in redaction structure tests.
+[[allowlists]]
+condition = "AND"
+commits = ["e207eb8da03c3bc09d081f3bfbceaf745717f261"]
+paths = ['''^internal/redact/json_structure_test\.go$''']
+regexes = ['''^Qv7hTzP2mWx9LkR4nB6c$''']
+
+# History only: Redaction of a key block built from literals (the file was removed).
+[[allowlists]]
+condition = "AND"
+commits = ["8ffbf3d0d735f4c96beacec1f78cb737a0c31988"]
+paths = ['''^internal/redact/linear_test\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\nAAAA\\n"\},\n\t\t\{"key headers with stray footers", "-----BEGIN EC PRIVATE KEY-----$''']
+
+# History only: Redaction corpus: key blocks built from literals (the file was removed).
+[[allowlists]]
+condition = "AND"
+commits = ["6a36e5fa3584ebdcb51cda101d93d6f83fc905fe"]
+paths = ['''^internal/redact/redacttest/corpus\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n", \[\]string\{pem\}\},\n\t\t\{"key header after api_key label", "api_key: -----BEGIN OPENSSH PRIVATE KEY-----$''']
+
+# History only: Redaction corpus: key blocks built from literals (the file was removed).
+[[allowlists]]
+condition = "AND"
+commits = ["6a36e5fa3584ebdcb51cda101d93d6f83fc905fe"]
+paths = ['''^internal/redact/redacttest/corpus\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n-----END EC PRIVATE KEY-----\\n" \+ pem2 \+ "\\n-----END RSA PRIVATE KEY-----$''']
+
+# History only: Redaction corpus: key blocks built from literals (the file was removed).
+[[allowlists]]
+condition = "AND"
+commits = ["8ffbf3d0d735f4c96beacec1f78cb737a0c31988"]
+paths = ['''^internal/redact/redacttest/corpus\.go$''']
+regexes = ['''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n-----END RSA PRIVATE KEY-----"\n\tescaped := strings\.ReplaceAll\(block, "\\n", `\\n`\)\n\tcases = append\(cases,\n\t\tCase\{"private_key/plain", "key follows\\n" \+ block \+ "\\ndone\\n", \[\]string\{pem\}\},\n\t\tCase\{"private_key/json", `\{"key":"` \+ escaped \+ `"\}` \+ "\\n", \[\]string\{pem\}\},\n\t\tCase\{"private_key/env", `SSH_KEY="` \+ escaped \+ `"` \+ "\\n", \[\]string\{pem\}\},\n\t\)\n\treturn cases\n\}\n\n// UnterminatedKey returns text whose private key block has no END marker, as\n// left by a cut, and the key body\.\nfunc UnterminatedKey\(prefix int\) \(string, string\) \{\n\tpem := body\(14, 1600, alnum\)\n\treturn strings\.Repeat\("p", prefix\) \+ "\\n-----BEGIN OPENSSH PRIVATE KEY-----$''']
+
+# History only: A deterministic council key in reconcile tests.
+[[allowlists]]
+condition = "AND"
+commits = ["b9797d3d47168ae869277d999a8e3ef9f4145550", "e08aa1c76918043477c46f10b75ae81d1d9ffd2d", "e5f60c2e6cb7329d0a6c1804a40ae9d8415e8e84"]
+paths = ['''^internal/runtime/coding/council_reconcile_test\.go$''']
+regexes = ['''^ccl-reconcile-0123456789abcdef$''']
+
+# History only: Redaction of a private key split around a fixture word.
+[[allowlists]]
+condition = "AND"
+commits = ["2575d2f246631add66117daca9dca8b9d75ac1c6", "2cf605e2e5e6698f0135a841955df032a898cda8", "896ec284f6a2c422720963eec9daf06731cd666a", "8bda982ff33f16839fe911f8d0b439e1b71f61da", "eecdbf8d424f537a52a8ae051bace0a38641026f"]
+paths = ['''^internal/runtime/coding/hardening_test\.go$''']
+regexes = ['''^-----BEGIN PRIVATE KEY-----fixture", " body-----END PRIVATE KEY----- after\\n"\}, want: "before \[REDACTED:private_key\] after\\n"\},\n\t\t\{name: "oversized line", chunks: \[\]string\{strings\.Repeat\("x", maxSessionLine\), "-----BEGIN PRIVATE KEY-----$''']
+
+# History only: URL validation with a fake credential.
+[[allowlists]]
+condition = "AND"
+commits = ["32eb08289903d5f12c1d7ea6ecc90e9753cfda18", "7cbccb2100fe5ca5674eafc2a6d619886854e72d"]
+paths = ['''^internal/store/sqlite/learning_test\.go$''']
+regexes = ['''^ghp_1234567890abcdefghij1234$''']
+
+# History only: A message key in UI tests that the generic rule takes for an API key.
+[[allowlists]]
+condition = "AND"
+commits = ["6c84e80144b561771716a71aa900ca0ea3858ae1", "ed3dcadcc3b2157f64499ade865b9bc7c10d9723", "f502630336564990d330281935ae41d8b82a8015"]
+paths = ['''^internal/ui/ui_test\.go$''']
+regexes = ['''^conclave-msg-1$''']

@@ -994,7 +994,7 @@ func TestGateListenerLimitsWithFakeListener(t *testing.T) {
 					t.Fatal(err)
 				}
 				_ = res.Body.Close()
-				<-errCh
+				<-errCh //nolint:errcheck // waits for the write to end; the status code is what this case checks
 				if res.StatusCode != tc.want {
 					t.Fatalf("status=%d, want %d", res.StatusCode, tc.want)
 				}

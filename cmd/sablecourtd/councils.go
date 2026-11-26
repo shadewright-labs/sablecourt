@@ -22,9 +22,11 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -284,11 +286,13 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 				return
 			}
 		}
-		for _, role := range councilPanel {
-			bin, err := exec.LookPath(role)
-			if err != nil || !filepath.IsAbs(bin) {
-				fail(http.StatusServiceUnavailable, "required council executable unavailable: "+role)
-				return
+		if cfg.preflightCouncilHarness == nil {
+			for _, role := range councilPanel {
+				bin, err := exec.LookPath(role)
+				if err != nil || !filepath.IsAbs(bin) {
+					fail(http.StatusServiceUnavailable, "required council executable unavailable: "+role)
+					return
+				}
 			}
 		}
 
@@ -303,13 +307,33 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 			fail(http.StatusBadRequest, err.Error())
 			return
 		}
-		checkSandbox := cfg.checkCouncilSandbox
-		if checkSandbox == nil {
-			checkSandbox = coding.CheckSandbox
+		if cfg.onCouncilCheckout != nil {
+			cfg.onCouncilCheckout(cancel)
 		}
-		if checkSandbox(ctx) != nil {
-			fail(http.StatusServiceUnavailable, "council checkout confinement is unavailable")
-			return
+		if cfg.preflightCouncilHarness != nil {
+			// Container mode: the container is the confinement. Each role is
+			// checked in order, and the first failure refuses the request before
+			// anything is reserved.
+			// Admission gets its own deadline, independent of the checkout one.
+			admit, acancel := context.WithTimeout(r.Context(), 45*time.Second)
+			defer acancel()
+			ctx = admit
+			for _, role := range councilPanel {
+				if err := cfg.preflightCouncilHarness(ctx, role); err != nil {
+					status, message := councilHarnessRefusal(role, err)
+					fail(status, message)
+					return
+				}
+			}
+		} else {
+			checkSandbox := cfg.checkCouncilSandbox
+			if checkSandbox == nil {
+				checkSandbox = coding.CheckSandbox
+			}
+			if checkSandbox(ctx) != nil {
+				fail(http.StatusServiceUnavailable, "council checkout confinement is unavailable")
+				return
+			}
 		}
 		// The dispatcher must be able to launch this pinned, confined panel.
 		if cfg.checkCouncilRuntime == nil || cfg.checkCouncilRuntime(ctx, req.spec.Checkout) != nil || ctx.Err() != nil {
@@ -374,7 +398,7 @@ func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool
 	if !ok || stat.Uid != euid {
 		return 0, 0, false
 	}
-	return uint64(stat.Dev), uint64(stat.Ino), true
+	return uint64(stat.Dev), stat.Ino, true
 }
 
 func resolveExistingPath(path string) (string, error) {
@@ -554,7 +578,46 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 	return store.CouncilCheckout{Source: source, SourceDev: sourceDev, SourceIno: sourceIno, Ref: ref, Commit: commit, WriterRole: writer}, nil
 }
 
-func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.Bundle) (*config.Bundle, error) {
+// councilSandbox is the sandbox kind recorded on the built-in panel workloads.
+func councilSandbox(container bool) string {
+	if container {
+		return "container"
+	}
+	return "seatbelt"
+}
+
+// councilHarnessRefusal turns a harness preflight failure into an HTTP status
+// and a message that names the missing piece and the command that fixes it.
+// A backend failure never suggests a command: nothing is known to be missing.
+func councilHarnessRefusal(role string, err error) (int, string) {
+	var he *docker.HarnessError
+	if ctxErr := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled); ctxErr {
+		return http.StatusServiceUnavailable, "council harness preflight timed out or was cancelled: " + role
+	}
+	if !errors.As(err, &he) {
+		return http.StatusServiceUnavailable, "council harness preflight failed: " + role
+	}
+	switch he.Fault {
+	case docker.FaultImageMissing:
+		return http.StatusPreconditionFailed, "council image for " + role + " is missing: run " + harnessimages.BuildCommand(role)
+	case docker.FaultVolumeMissing, docker.FaultLoginMissing:
+		return http.StatusPreconditionFailed, "council login for " + role + " is missing: run " + harnessimages.LoginCommand(role)
+	case docker.FaultToolMissing:
+		return http.StatusPreconditionFailed, "council tool for " + role + " is not installed: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolVersion:
+		return http.StatusPreconditionFailed, "council tool for " + role + " is not the pinned version: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolChecksum:
+		return http.StatusPreconditionFailed, "council tool for " + role + " does not match its pinned SHA-256: run " + harnessimages.InstallCommand(role)
+	case docker.FaultToolInvalid:
+		return http.StatusConflict, "council tool volume for " + role + " exists but is not a local Sablecourt tool volume for this harness (driver, options or labels differ): remove it by hand, then run " + harnessimages.InstallCommand(role)
+	case docker.FaultVolumeInvalid:
+		return http.StatusConflict, "council login volume for " + role + " exists but is not a local Sablecourt volume for this harness (driver, options or labels differ): remove it by hand, then run " + harnessimages.LoginCommand(role)
+	default:
+		return http.StatusServiceUnavailable, "council harness runtime failed for " + role + ": Docker or the harness configuration is unavailable"
+	}
+}
+
+func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.Bundle, sandbox string) (*config.Bundle, error) {
 	if b == nil {
 		b = &config.Bundle{}
 	}
@@ -569,7 +632,7 @@ func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.
 			Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox},
 			Spec: domain.WorkloadSpec{
 				Class:  domain.ClassCodingAgent,
-				Coding: &domain.CodingConfig{Harness: role, Sandbox: "seatbelt"},
+				Coding: &domain.CodingConfig{Harness: role, Sandbox: sandbox},
 			},
 		}
 		if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
@@ -584,7 +647,7 @@ func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.
 	return b, nil
 }
 
-func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.WorkloadClass]scruntime.Adapter) func(context.Context, store.CouncilCheckout) error {
+func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.WorkloadClass]scruntime.Adapter, sandbox string) func(context.Context, store.CouncilCheckout) error {
 	return func(_ context.Context, checkout store.CouncilCheckout) error {
 		if adapters == nil || adapters[domain.ClassCodingAgent] == nil {
 			return errors.New("coding adapter unavailable")
@@ -599,7 +662,7 @@ func councilRuntimeChecker(getBundle func() *config.Bundle, adapters map[domain.
 		for _, role := range councilPanel {
 			wl, ok := b.Workloads[role]
 			if !ok || wl.Metadata.Zone != domain.ZoneSandbox || wl.Spec.Class != domain.ClassCodingAgent ||
-				wl.Spec.Coding == nil || wl.Spec.Coding.Harness != role || wl.Spec.Coding.Sandbox != "seatbelt" ||
+				wl.Spec.Coding == nil || wl.Spec.Coding.Harness != role || wl.Spec.Coding.Sandbox != sandbox ||
 				wl.Spec.Grants.ModelGate.Allowed || len(wl.Spec.Grants.MCPTools) > 0 ||
 				len(wl.Spec.Grants.MCPServers) > 0 || len(wl.Spec.Grants.Actions) > 0 ||
 				len(wl.Spec.Grants.DelegateTo) > 0 {

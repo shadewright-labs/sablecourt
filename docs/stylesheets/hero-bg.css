@@ -1,0 +1,190 @@
+/*
+ * Home page hero background: blueprint grid with teal glow behind the logo, and the five
+ * product steps (manifest, lease, gate, approval, audit chain) as outlined icon tiles snapped to
+ * grid cells in the outer flanks, joined by grid-following arrows with one slow travelling dash.
+ *
+ * Grid and icon flow share one unit, --sc-cell, scaled continuously with viewport width via clamp()
+ * so the 40x14-cell SVG stays aligned to the grid at every width from 1280px up:
+ *   outer tile edge: 19 * --sc-cell from center -> >= 32px viewport margin at 1280px and wider
+ *   inner arrow tip: 13 * --sc-cell from center -> >= 36px clear of the 38rem tagline at 1280px,
+ *                    >= 107px at 1600px (137.5% root font), >= 168px at 2000px+ (150% root font)
+ * Below 80em (1280px), the tiles are omitted and only the grid and glow remain.
+ *
+ * Contrast against the brightest pixel behind the hero text (major grid intersection plus wide
+ * teal wash covered by the 92% #08060e central veil -> #0b0d14; at the 78% veil edge -> #101a1f;
+ * behind the logo under the 72% logo veil plus 14% teal glow -> #143639):
+ *   logo wordmark / heading #efe9dc on #143639: 10.67:1 (on #0b0d14: 16.02:1, on #101a1f: 14.56:1)
+ *   lore and tagline #bbb4c5 on #0b0d14: 9.65:1 (on #101a1f: 8.80:1)
+ *   lore link #2dd4bf on #0b0d14: 10.42:1 (on #101a1f: 9.50:1; hover #7fd6b4: 11.24:1 / 10.25:1)
+ *   buttons: primary #08060e on #2dd4bf (10.82:1), secondary #2dd4bf on #14111c (10.01:1)
+ * All text pairs exceed 7:1 against the brightest pixel behind them.
+ */
+
+.md-main:has(.sc-hero) {
+  overflow-x: clip;
+}
+.md-main__inner:has(.sc-hero) {
+  margin-top: 0;
+}
+.md-content__inner:has(.sc-hero) {
+  position: relative;
+  padding-top: 0;
+}
+.md-content__inner:has(.sc-hero)::before {
+  display: none;
+}
+.md-content__inner:has(.sc-hero) > .md-content__button {
+  position: absolute;
+  top: 0.9rem;
+  right: 0;
+  z-index: 3;
+  margin-top: 0;
+}
+
+.sc-hero {
+  --sc-cell: clamp(32px, calc((100vw - 64px) / 38), 48px);
+  position: relative;
+  box-sizing: border-box;
+  width: 100vw;
+  margin: 0 calc(50% - 50vw) 2.5rem;
+  padding: 4.1rem 1.5rem 3.8rem;
+  border-radius: 0;
+  background-color: var(--sc-canvas);
+  /* Full-width blueprint grid (every 4th line stronger), aligned to the 40x14-cell SVG. */
+  background-image:
+    linear-gradient(to right, rgba(45, 212, 191, 0.16) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(45, 212, 191, 0.16) 1px, transparent 1px),
+    linear-gradient(to right, rgba(239, 230, 210, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(239, 230, 210, 0.08) 1px, transparent 1px);
+  background-size:
+    calc(var(--sc-cell) * 4) calc(var(--sc-cell) * 4),
+    calc(var(--sc-cell) * 4) calc(var(--sc-cell) * 4),
+    var(--sc-cell) var(--sc-cell),
+    var(--sc-cell) var(--sc-cell);
+  background-position:
+    calc(50% + var(--sc-cell) * 2) calc(50% + var(--sc-cell)),
+    calc(50% + var(--sc-cell) * 2) calc(50% + var(--sc-cell)),
+    calc(50% + var(--sc-cell) * 0.5) calc(50% + var(--sc-cell) * 0.5),
+    calc(50% + var(--sc-cell) * 0.5) calc(50% + var(--sc-cell) * 0.5);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Keep the visually hidden h1 below the sticky header threshold at scroll top. */
+.sc-hero h1.sc-visually-hidden {
+  top: 6rem;
+}
+
+/* Blend the opaque #07060d logo canvas cleanly onto the soft teal glow. */
+.sc-hero img {
+  mix-blend-mode: lighten;
+}
+
+/* Five-step icon flow snapped to the blueprint grid cells in the outer flanks. */
+.sc-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: url("../assets/hero/hero-flow.svg") center center / calc(var(--sc-cell) * 40) calc(var(--sc-cell) * 14) no-repeat;
+}
+
+/* Calm central veil behind text, soft teal glow behind the logo, and bottom/outer-edge fade to #08060e. */
+.sc-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse 22.5rem 13.5rem at 50% 63%,
+      rgba(8, 6, 14, 0.94) 0%,
+      rgba(8, 6, 14, 0.92) 70%,
+      rgba(8, 6, 14, 0.78) 86%,
+      rgba(8, 6, 14, 0) 100%
+    ),
+    radial-gradient(
+      ellipse 24rem 10rem at 50% 27%,
+      rgba(45, 212, 191, 0.14) 0%,
+      rgba(45, 212, 191, 0.055) 48%,
+      rgba(8, 6, 14, 0) 76%
+    ),
+    radial-gradient(
+      ellipse 21rem 7rem at 50% 27%,
+      rgba(8, 6, 14, 0.72) 0%,
+      rgba(8, 6, 14, 0.56) 58%,
+      rgba(8, 6, 14, 0) 100%
+    ),
+    radial-gradient(
+      ellipse 72% 28% at 50% 46%,
+      rgba(45, 212, 191, 0.04) 0%,
+      rgba(8, 6, 14, 0) 100%
+    ),
+    linear-gradient(
+      to bottom,
+      rgba(8, 6, 14, 0.46) 0%,
+      rgba(8, 6, 14, 0.03) 20%,
+      rgba(8, 6, 14, 0.03) 76%,
+      rgba(8, 6, 14, 0.76) 91%,
+      #08060e 100%
+    ),
+    linear-gradient(
+      to right,
+      #08060e 0,
+      rgba(8, 6, 14, 0.4) 10px,
+      rgba(8, 6, 14, 0) 24px,
+      rgba(8, 6, 14, 0) calc(100% - 24px),
+      rgba(8, 6, 14, 0.4) calc(100% - 10px),
+      #08060e 100%
+    );
+}
+
+/* Narrower screens where outer flanks cannot hold tiles beside the text column with clearance: keep grid and glow only. */
+@media (max-width: 79.9375em) {
+  .sc-hero::before {
+    display: none;
+  }
+}
+
+/* Mobile (including 360px): simplify to a faint grid and soft teal glow behind the logo. */
+@media (max-width: 44.9375em) {
+  .sc-hero {
+    padding: 2.35rem 1rem 2.1rem;
+    background-image:
+      linear-gradient(to right, rgba(45, 212, 191, 0.09) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(45, 212, 191, 0.09) 1px, transparent 1px),
+      linear-gradient(to right, rgba(239, 230, 210, 0.04) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(239, 230, 210, 0.04) 1px, transparent 1px);
+  }
+  .sc-hero::before {
+    display: none;
+  }
+  .sc-hero::after {
+    background:
+      radial-gradient(
+        ellipse 96% 50% at 50% 62%,
+        rgba(8, 6, 14, 0.95) 0%,
+        rgba(8, 6, 14, 0.88) 66%,
+        rgba(8, 6, 14, 0) 100%
+      ),
+      radial-gradient(
+        ellipse 14rem 5.5rem at 50% 18%,
+        rgba(45, 212, 191, 0.11) 0%,
+        rgba(8, 6, 14, 0) 78%
+      ),
+      radial-gradient(
+        ellipse 12rem 4.5rem at 50% 18%,
+        rgba(8, 6, 14, 0.72) 0%,
+        rgba(8, 6, 14, 0) 100%
+      ),
+      linear-gradient(
+        to bottom,
+        rgba(8, 6, 14, 0.45) 0%,
+        rgba(8, 6, 14, 0) 30%,
+        rgba(8, 6, 14, 0.74) 86%,
+        #08060e 100%
+      );
+  }
+}

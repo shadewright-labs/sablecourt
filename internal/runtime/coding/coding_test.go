@@ -85,7 +85,6 @@ func TestCodingAdapterCreatesWorktreeAndStripsEnv(t *testing.T) {
 			t.Fatalf("unexpected raw secret env %s in stripped env", forbidden)
 		}
 	}
-
 }
 
 func codingFixture(t *testing.T) (*Adapter, scruntime.LaunchSpec) {
@@ -524,7 +523,7 @@ func TestCheckWrappedTargetSkipsNonRegularFile(t *testing.T) {
 			_ = w.Close()
 		}
 		select {
-		case <-done:
+		case <-done: //nolint:errcheck // only waits for the stuck call before failing the test
 		case <-time.After(time.Second):
 		}
 		t.Fatal("checkWrappedTarget blocked opening a FIFO")

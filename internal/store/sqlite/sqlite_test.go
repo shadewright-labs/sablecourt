@@ -109,13 +109,15 @@ func TestWorkloadTaskApprovalBudgetAndAuditFlow(t *testing.T) {
 	}
 
 	if err := st.RecordBudgetUsage(ctx, domain.BudgetEntry{
-		TaskID:       "task-1",
-		WorkloadName: "triage-agent",
-		Provider:     "gemini",
-		Model:        "gemini-2.5-pro",
-		InputTokens:  1200,
-		OutputTokens: 300,
-		CostMicroUSD: 4500,
+		TaskID:           "task-1",
+		WorkloadName:     "triage-agent",
+		Provider:         "gemini",
+		Model:            "gemini-2.5-pro",
+		InputTokens:      1200,
+		CacheWriteTokens: 200,
+		CacheReadTokens:  600,
+		OutputTokens:     300,
+		CostMicroUSD:     4500,
 	}); err != nil {
 		t.Fatalf("RecordBudgetUsage: %v", err)
 	}
@@ -124,8 +126,15 @@ func TestWorkloadTaskApprovalBudgetAndAuditFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskBudgetTotals: %v", err)
 	}
-	if totals.InputTokens != 1200 || totals.OutputTokens != 300 || totals.CostMicroUSD != 4500 {
+	if totals.InputTokens != 1200 || totals.CacheWriteTokens != 200 || totals.CacheReadTokens != 600 || totals.OutputTokens != 300 || totals.CostMicroUSD != 4500 {
 		t.Fatalf("unexpected totals: %+v", totals)
+	}
+	allTotals, err := st.TotalBudgetTotals(ctx)
+	if err != nil {
+		t.Fatalf("TotalBudgetTotals: %v", err)
+	}
+	if allTotals != totals {
+		t.Fatalf("TotalBudgetTotals = %+v, want %+v", allTotals, totals)
 	}
 
 	if err := st.AppendAudit(ctx, domain.AuditRecord{
