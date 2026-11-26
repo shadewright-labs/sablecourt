@@ -1412,7 +1412,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DeviceID       string `json:"deviceId"`
 			Signature      string `json:"signature"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		// An empty body approves without a pin; a malformed one must not drop the pin silently.
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid approval body"})
+			return
+		}
 		if body.DeviceID != "" && body.Signature != "" {
 			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
 			if err != nil {
