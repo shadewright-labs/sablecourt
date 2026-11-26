@@ -91,6 +91,8 @@ nav = [
 [project.theme]
 language = "en"
 custom_dir = "overrides"
+logo = "assets/brand/sablecourt-glyph.svg"
+favicon = "assets/brand/sablecourt-favicon.svg"
 # false: no Google Fonts request; text and code use the system font stacks set in brand.css.
 font = false
 features = [
