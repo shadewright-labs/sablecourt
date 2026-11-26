@@ -31,7 +31,7 @@ sablectl harness install <role>    # claude and agy
 sablectl harness login <role>
 ```
 
-- `codex`: the build puts the Codex CLI into the image. There is nothing to install: `sablectl harness install codex` stops with `the codex image carries its tool; nothing to install`.
+- `codex`: the build puts the Codex CLI into the image. There is nothing to install: `sablectl harness install codex` installs nothing and, once it has a Docker client, stops with `the codex image carries its tool; nothing to install`.
 - `claude` and `agy`: `sablectl harness install <role>` downloads the pinned tool on the machine that runs `sablectl`, checks it, and installs it into the volume `sablecourt-harness-<role>-tool`. It does not check what is already installed before it downloads. On success it prints `Installed <tool> <version> (SHA-256 checked) into volume sablecourt-harness-<role>-tool`.
 - `claude` and `agy`: `sablectl harness login <role>` runs the same install first when the login volume does not exist yet, or when its check finds the tool volume or the tool missing, of another version or not matching its digest. The login itself is described in [log in to harnesses](log-in-harnesses.md).
 
@@ -65,7 +65,7 @@ The messages with which the daemon refuses a new container-mode council include 
 
 A `claude` or `agy` turn whose own tool check fails ends with exit status 125 and a message such as `council tool claude is not the pinned version 2.1.332: run sablectl harness install claude`. Run the command it names.
 
-`sablectl harness install` stops with `volume sablecourt-harness-<role>-tool exists but is not a local Sablecourt tool volume for <role> (...): remove it by hand and run this command again` for a volume of that name whose driver, options or labels are not the ones Sablecourt sets. When the tool or `VERSION` path in the volume is a directory or a symlink, the install fails, and its error usually ends `exists and is not a regular file: remove the tool volume and install again`. In both cases remove the volume with `docker volume rm` and run the install again.
+`sablectl harness install` stops with `volume sablecourt-harness-<role>-tool exists but is not a local Sablecourt tool volume for <role> (...): remove it by hand and run this command again` for a volume of that name whose driver, options or labels are not the ones Sablecourt sets. When the tool or `VERSION` path in the volume is a directory or a symlink, the install fails. The install script reports `exists and is not a regular file: remove the tool volume and install again`, which the command shows unless the container stream fails first. In both cases remove the volume with `docker volume rm` and run the install again.
 
 For `codex`, the launch check covers the image tag and its configuration, not the binary inside the image (#151).
 
