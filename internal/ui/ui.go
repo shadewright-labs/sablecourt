@@ -347,7 +347,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ActiveTasks:      active,
 		TotalTasks:       len(tasks),
 		TotalCostUSD:     fmt.Sprintf("%.4f", float64(totals.CostMicroUSD)/1_000_000.0),
-		TotalTokens:      totals.InputTokens + totals.OutputTokens,
+		TotalTokens:      totals.TotalInputTokens() + totals.OutputTokens,
 		Workloads:        workloads,
 		Approvals:        approvals,
 		Tasks:            rows,

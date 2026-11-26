@@ -57,6 +57,7 @@ var limitConstants = []string{
 	"internal/gate/model.maxCapturedResponseBytes",
 	"internal/gate/model.maxRequestBodyBytes",
 	"internal/gate/model.maxReservedTokens",
+	"internal/gate/model.maxUsageLineBytes",
 	"internal/gate/model.settleReservationAttempts",
 	"internal/gate/model.settleReservationTimeout",
 	"internal/gate/model.upstreamReadChunkBytes",

@@ -22,7 +22,10 @@ func estimateRequestReserve(provider, modelName string, body []byte, pricing map
 	var payload map[string]any
 	if len(body) > 0 && json.Unmarshal(body, &payload) == nil && payload != nil {
 		var textBytes int64
-		for _, field := range []string{"messages", "input", "contents", "system", "systemInstruction", "prompt", "tools", "functions"} {
+		for _, field := range []string{
+			"messages", "input", "contents", "system", "systemInstruction", "system_instruction",
+			"instructions", "prompt", "tools", "functions", "response_format", "text", "tool_config", "toolConfig",
+		} {
 			if val, ok := payload[field]; ok {
 				textBytes += countPromptTextBytes(val)
 			}
@@ -36,9 +39,9 @@ func estimateRequestReserve(provider, modelName string, body []byte, pricing map
 		outTokens = scaleOutputTokensByChoices(outTokens, payload)
 	}
 
-	costMicro := EstimateMicroUSD(provider, modelName, inTokens, outTokens, pricing)
+	costMicro := estimateReserveMicroUSD(provider, modelName, inTokens, outTokens, pricing)
 	for _, fb := range fallbackProviders {
-		if fbCost := EstimateMicroUSD(fb, modelName, inTokens, outTokens, pricing); fbCost > costMicro {
+		if fbCost := estimateReserveMicroUSD(fb, modelName, inTokens, outTokens, pricing); fbCost > costMicro {
 			costMicro = fbCost
 		}
 	}

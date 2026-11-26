@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -255,21 +256,40 @@ type Lease struct {
 }
 
 type BudgetEntry struct {
-	ID           int64
-	TaskID       string
-	WorkloadName string
-	Provider     string
-	Model        string
-	InputTokens  int64
-	OutputTokens int64
-	CostMicroUSD int64
-	CreatedAt    time.Time
+	ID               int64
+	TaskID           string
+	WorkloadName     string
+	Provider         string
+	Model            string
+	InputTokens      int64
+	CacheWriteTokens int64
+	CacheReadTokens  int64
+	OutputTokens     int64
+	CostMicroUSD     int64
+	CreatedAt        time.Time
 }
 
 type BudgetTotals struct {
-	InputTokens  int64
-	OutputTokens int64
-	CostMicroUSD int64
+	InputTokens      int64
+	CacheWriteTokens int64
+	CacheReadTokens  int64
+	OutputTokens     int64
+	CostMicroUSD     int64
+}
+
+// TotalInputTokens returns all input tokens counted against input budgets:
+// uncached input plus cache writes and cache reads, saturating at math.MaxInt64
+// on overflow.
+func (t BudgetTotals) TotalInputTokens() int64 {
+	sum := satAddInt64(max(t.InputTokens, 0), max(t.CacheWriteTokens, 0))
+	return satAddInt64(sum, max(t.CacheReadTokens, 0))
+}
+
+func satAddInt64(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 type Approval struct {

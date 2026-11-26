@@ -54,9 +54,17 @@ func MetricsHandler(st store.Store) http.Handler {
 		fmt.Fprintf(w, "sablecourt_approvals_pending %d\n", len(pendingApprovals))
 
 		// Model budget totals
-		fmt.Fprintln(w, "# HELP sablecourt_budget_input_tokens_total Observed model input tokens.")
+		fmt.Fprintln(w, "# HELP sablecourt_budget_input_tokens_total Observed model uncached input tokens.")
 		fmt.Fprintln(w, "# TYPE sablecourt_budget_input_tokens_total counter")
 		fmt.Fprintf(w, "sablecourt_budget_input_tokens_total %d\n", budget.InputTokens)
+
+		fmt.Fprintln(w, "# HELP sablecourt_budget_cache_write_tokens_total Observed model cache write input tokens.")
+		fmt.Fprintln(w, "# TYPE sablecourt_budget_cache_write_tokens_total counter")
+		fmt.Fprintf(w, "sablecourt_budget_cache_write_tokens_total %d\n", budget.CacheWriteTokens)
+
+		fmt.Fprintln(w, "# HELP sablecourt_budget_cache_read_tokens_total Observed model cache read input tokens.")
+		fmt.Fprintln(w, "# TYPE sablecourt_budget_cache_read_tokens_total counter")
+		fmt.Fprintf(w, "sablecourt_budget_cache_read_tokens_total %d\n", budget.CacheReadTokens)
 
 		fmt.Fprintln(w, "# HELP sablecourt_budget_output_tokens_total Observed model output tokens.")
 		fmt.Fprintln(w, "# TYPE sablecourt_budget_output_tokens_total counter")
