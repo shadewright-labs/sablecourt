@@ -5,16 +5,21 @@ Usage:
   python3 -I hack/docs-links.py check      internal links: fail on a link to a missing file or heading
   python3 -I hack/docs-links.py external   external links: report the ones that do not answer, never fail
 
-"check" reads every tracked *.md file and follows each relative link outside fenced code blocks and code
-spans: inline links (also the <angle bracket> form), full and collapsed reference links ([text][ref], [text][]),
-reference definitions, and HTML href and src attributes. It fails when a target file does not exist, when a
+"check" reads every tracked *.md file paragraph by paragraph (so a link may wrap over lines) and follows each
+relative link outside fenced code blocks and code spans: inline links (also the <angle bracket> form, with a
+title in double quotes, single quotes or parentheses), full and collapsed reference links ([text][ref],
+[text][]), reference definitions, and HTML href and src attributes (double-quoted, single-quoted or unquoted).
+Headings are ATX (# Title) and Setext (a line underlined with === or ---). Shortcut reference links ([text]
+alone) and links inside raw HTML blocks other than <a> and <img> are not followed. It fails when a target file does not exist, when a
 link to a Markdown file names a #fragment that no heading of that file has (GitHub's anchor rules, inline code
 in headings included), or when a reference link has no definition.
 
 Links to pages or headings that are not written yet are listed in hack/docs-pages-pending.txt, one per line as
-"<source file> -> <target>[#fragment]" (paths from the repository root). An entry allows exactly that link from
-that source; a link from another file, or to another fragment, still fails. An entry whose target now exists, or
-that no link uses any more, fails the check, so the list cannot go stale.
+"<source file> -> <target>[#fragment]" (paths from the repository root). Each line allows one occurrence of
+exactly that link from that source: two links to the same pending target in one file need two lines, so a second,
+broken link cannot hide behind the first one's entry. A link from another file, or to another fragment, still
+fails. An entry whose target now exists, or a line that no link uses any more, fails the check, so the list
+cannot go stale.
 
 "external" sends one request per distinct http(s) URL and prints a warning for each one that fails. It is run
 weekly by docs-links.yml, never on pull requests. DOCS_ROOT overrides the repository root (tests).
@@ -33,15 +38,21 @@ ROOT = os.environ.get("DOCS_ROOT") or os.path.dirname(os.path.dirname(os.path.ab
 PENDING = os.path.join(ROOT, "hack", "docs-pages-pending.txt")
 
 FENCE = re.compile(r"^\s*(```|~~~)")
-# [text](<target with spaces>) or [text](target "title")
-INLINE = re.compile(r"!?\[(?:[^\[\]]|\[[^\]]*\])*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)")
+# [text](<target with spaces>) or [text](target "title"), with the title in double or single quotes or in
+# parentheses. Text, target and title may run over several lines of one paragraph.
+INLINE = re.compile(
+    r"!?\[(?:[^\[\]]|\[[^\]]*\])*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)"
+)
 # [text][ref] and [text][]
 REFLINK = re.compile(r"\[((?:[^\[\]]|\[[^\]]*\])+)\]\[([^\]]*)\]")
-REFDEF = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]*)>|(\S+))")
-HTML_LINK = re.compile(r"<(?:a|img)\s[^>]*?(?:href|src)=\"([^\"]+)\"", re.IGNORECASE)
-CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
+REFDEF = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]*)>|(\S+))", re.MULTILINE)
+# href and src in double quotes, single quotes or unquoted.
+HTML_LINK = re.compile(r"<(?:a|img)\s[^>]*?(?:href|src)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))", re.IGNORECASE)
+CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1", re.DOTALL)
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
-EXPLICIT_ANCHOR = re.compile(r"<a\s+(?:name|id)=\"([^\"]+)\"", re.IGNORECASE)
+SETEXT = re.compile(r"^\s{0,3}(=+|-+)\s*$")
+EXPLICIT_ANCHOR = re.compile(r"<a\s+(?:name|id)\s*=\s*(?:\"([^\"]+)\"|'([^']+)')", re.IGNORECASE)
 
 
 def tracked_markdown():
@@ -65,27 +76,58 @@ def lines_outside_fences(path):
                 yield n, line.rstrip("\n")
 
 
+def paragraphs(path):
+    """Yields (first line number, text) for each run of non-blank lines outside fences, joined with newlines, so
+    a link that wraps over lines is seen whole. A fence or a blank line ends a paragraph."""
+    start, buf, last = None, [], None
+    for n, line in lines_outside_fences(path):
+        if not line.strip() or (last is not None and n != last + 1):
+            if buf:
+                yield start, "\n".join(buf)
+            start, buf = None, []
+        if line.strip():
+            if start is None:
+                start = n
+            buf.append(line)
+        last = n
+    if buf:
+        yield start, "\n".join(buf)
+
+
+def blank_code_spans(text):
+    """Replaces each code span by spaces (newlines kept), so offsets and line numbers stay right."""
+    return CODE_SPAN.sub(lambda m: "".join(c if c == "\n" else " " for c in m.group(0)), text)
+
+
 def norm_label(label):
     return " ".join(label.lower().split())
+
+
+def first(*groups):
+    return next(g for g in groups if g is not None)
 
 
 def scan(path):
     """Returns (links, reference uses, definitions): links as (line, target)."""
     links, uses, defs = [], [], {}
-    for n, raw in lines_outside_fences(path):
-        line = CODE_SPAN.sub("", raw)
-        m = REFDEF.match(line)
-        if m:
+    for start, raw in paragraphs(path):
+        text = blank_code_spans(raw)
+
+        def line_of(offset):
+            return start + text.count("\n", 0, offset)
+
+        for m in REFDEF.finditer(text):
             defs[norm_label(m.group(1))] = True
-            links.append((n, m.group(2) if m.group(2) is not None else m.group(3)))
-            continue
-        for m in INLINE.finditer(line):
-            links.append((n, m.group(1) if m.group(1) is not None else m.group(2)))
-        for m in HTML_LINK.finditer(line):
-            links.append((n, m.group(1)))
-        for m in REFLINK.finditer(INLINE.sub("", line)):
+            links.append((line_of(m.start()), first(m.group(2), m.group(3))))
+        rest = REFDEF.sub(lambda m: " " * len(m.group(0)), text)
+        for m in INLINE.finditer(rest):
+            links.append((line_of(m.start()), first(m.group(1), m.group(2))))
+        for m in HTML_LINK.finditer(rest):
+            links.append((line_of(m.start()), first(m.group(1), m.group(2), m.group(3))))
+        no_inline = INLINE.sub(lambda m: "".join(c if c == "\n" else " " for c in m.group(0)), rest)
+        for m in REFLINK.finditer(no_inline):
             label = m.group(2) or m.group(1)
-            uses.append((n, norm_label(label)))
+            uses.append((line_of(m.start()), norm_label(label)))
     return links, uses, defs
 
 
@@ -104,13 +146,23 @@ _anchors = {}
 def anchors(path):
     if path not in _anchors:
         found, seen = set(), {}
-        for _, raw in lines_outside_fences(path):
+        prev, prev_n = None, None  # the previous line, when it is ordinary paragraph text
+        for n, raw in lines_outside_fences(path):
             for m in EXPLICIT_ANCHOR.finditer(raw):
-                found.add(m.group(1))
+                found.add(first(m.group(1), m.group(2)))
             m = HEADING.match(raw)
-            if not m:
+            text = None
+            if m:
+                text = m.group(1)
+            elif prev is not None and prev_n == n - 1 and SETEXT.match(raw):
+                # A Setext heading: a text line underlined with = or -. After a blank line, --- is a rule.
+                text = prev.strip()
+            if text is None:
+                plain = raw.strip() and not raw.lstrip().startswith(("|", ">", "<", "-", "*", "+")) and not SETEXT.match(raw)
+                prev, prev_n = (raw, n) if plain else (None, None)
                 continue
-            base = slug(m.group(1))
+            prev, prev_n = None, None
+            base = slug(text)
             count = seen.get(base, 0)
             seen[base] = count + 1
             found.add(base if count == 0 else f"{base}-{count}")
@@ -131,7 +183,8 @@ def read_pending():
             if not sep or not source or not target:
                 entries[("", f"line {n}")] = f"malformed entry on line {n}: {s!r}"
                 continue
-            entries[(source, target)] = None
+            key = (source, target)
+            entries[key] = (entries.get(key) or 0) + 1
     return entries
 
 
@@ -145,8 +198,16 @@ def target_exists(target):
 
 def check():
     pending = read_pending()
-    used = set()
-    errors = [msg for msg in pending.values() if msg]
+    used = {}
+    errors = [msg for msg in pending.values() if isinstance(msg, str)]
+
+    def exempt(key):
+        """True when a pending entry is left for this occurrence of the link; each entry line covers one."""
+        if isinstance(pending.get(key), int) and used.get(key, 0) < pending[key]:
+            used[key] = used.get(key, 0) + 1
+            return True
+        return False
+
     for path in tracked_markdown():
         base_dir = os.path.dirname(path)
         links, uses, defs = scan(path)
@@ -171,24 +232,25 @@ def check():
             key = (path, rel + (f"#{fragment}" if fragment else ""))
             full = os.path.join(ROOT, rel)
             if not os.path.exists(full):
-                if key in pending:
-                    used.add(key)
+                if exempt(key):
                     continue
                 errors.append(f"{path}:{n}: {target}: no such file {rel}")
                 continue
             if fragment and rel.endswith(".md") and os.path.isfile(full) and fragment not in anchors(rel):
-                if key in pending:
-                    used.add(key)
+                if exempt(key):
                     continue
                 errors.append(f"{path}:{n}: {target}: {rel} has no heading with the anchor #{fragment}")
-    for key, msg in sorted(pending.items()):
-        if msg:
+    for key, count in sorted(pending.items()):
+        if isinstance(count, str):
             continue
         source, target = key
         if target_exists(target):
             errors.append(f"hack/docs-pages-pending.txt: {source} -> {target} exists now; remove the entry")
-        elif key not in used:
-            errors.append(f"hack/docs-pages-pending.txt: no link from {source} to {target}; remove the entry")
+        elif used.get(key, 0) < count:
+            errors.append(
+                f"hack/docs-pages-pending.txt: {source} -> {target} is listed {count} time(s) but "
+                f"{used.get(key, 0)} link(s) use it; remove the unused line(s)"
+            )
     for e in errors:
         print(e, file=sys.stderr)
     if errors:

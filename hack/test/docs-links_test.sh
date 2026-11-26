@@ -61,6 +61,49 @@ case_ "unused entry" 1 "docs/a.md -> docs/absent.md
 case_ "malformed entry" 1 "docs/absent.md
 " docs/a.md 'no links'
 
+# Syntax the earlier line-by-line parser missed (each broken one passed).
+case_ "single-quoted title, missing target" 1 "" docs/a.md "[t](absent.md 'Title')"
+case_ "single-quoted title, existing target" 0 "" docs/a.md "[t](target.md#plain-heading 'Title')"
+case_ "parenthesised title, missing target" 1 "" docs/a.md '[t](absent.md (Title))'
+case_ "single-quoted HTML href, missing target" 1 "" docs/a.md "<a href='absent.md'>t</a>"
+case_ "single-quoted HTML src, existing target" 0 "" docs/a.md "<img src='target.md' alt='x'>"
+case_ "unquoted HTML href, missing target" 1 "" docs/a.md '<a href=absent.md>t</a>'
+case_ "link text over two lines, missing target" 1 "" docs/a.md 'see [the
+page](absent.md) here'
+case_ "target on the next line, missing target" 1 "" docs/a.md 'see [the page](
+absent.md "Title") here'
+case_ "link over two lines, existing anchor" 0 "" docs/a.md 'see [the
+page](target.md#plain-heading)'
+case_ "link after a wrapped code span is still checked" 1 "" docs/a.md 'x `code
+span` and [t](absent.md)'
+case_ "link inside a wrapped code span is ignored" 0 "" docs/a.md 'x `code [t](absent.md)
+span` y'
+case_ "Setext heading level 1" 0 "" docs/s.md 'Setext Title
+============' docs/a.md '[t](s.md#setext-title)'
+case_ "Setext heading level 2" 0 "" docs/s.md 'Intro
+
+Second Part
+-----------' docs/a.md '[t](s.md#second-part)'
+case_ "a rule after a blank line is not a heading" 1 "" docs/s.md 'Intro
+
+---' docs/a.md '[t](s.md#intro)'
+case_ "a table separator is not a heading" 1 "" docs/s.md '| Col |
+| --- |' docs/a.md '[t](s.md#col)'
+
+# A pending line covers one occurrence.
+case_ "two links to one pending target, one line" 1 "docs/a.md -> docs/absent.md
+" docs/a.md '[t](absent.md) and [u](absent.md)'
+case_ "two links to one pending target, two lines" 0 "docs/a.md -> docs/absent.md
+docs/a.md -> docs/absent.md
+" docs/a.md '[t](absent.md) and [u](absent.md)'
+case_ "two lines, one link" 1 "docs/a.md -> docs/absent.md
+docs/a.md -> docs/absent.md
+" docs/a.md '[t](absent.md)'
+case_ "pending fragment used twice, one line" 1 "docs/a.md -> docs/target.md#later
+" docs/a.md '[t](target.md#later)
+
+[u](target.md#later)'
+
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2
   exit 1

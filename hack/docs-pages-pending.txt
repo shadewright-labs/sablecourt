@@ -1,6 +1,7 @@
 # Links to pages and headings that are not written yet, one per line as "<source> -> <target>[#fragment]",
-# paths from the repository root. hack/docs-links.py allows exactly that link from that source, and fails when
-# the target exists or the link is gone, so remove the line in the pull request that adds the page or heading.
+# paths from the repository root. hack/docs-links.py allows exactly that link from that source, one occurrence
+# per line (a page that links the same pending target twice has two lines), and fails when the target exists or
+# a line is no longer used, so remove the lines in the pull request that adds the page or heading.
 docs/concepts.md -> docs/how-it-works/audit.md
 docs/glossary.md -> docs/how-it-works/audit.md
 docs/glossary.md -> docs/how-it-works/identity-and-access.md
@@ -17,11 +18,15 @@ docs/how-to/retry-with-handoff.md -> docs/how-to/find-why-refused.md
 docs/how-to/run-a-council.md -> docs/how-to/install-and-start.md
 docs/how-to/watch-and-steer.md -> docs/how-to/write-manifests.md
 docs/index.md -> docs/how-it-works/audit.md
+docs/index.md -> docs/how-it-works/audit.md
+docs/index.md -> docs/how-it-works/identity-and-access.md
 docs/index.md -> docs/how-it-works/identity-and-access.md
 docs/index.md -> docs/how-to/install-and-start.md
 docs/index.md -> docs/how-to/write-manifests.md
 docs/index.md -> docs/threat-model.md
+docs/index.md -> docs/threat-model.md
 docs/index.md -> docs/troubleshooting.md
+docs/index.md -> docs/design/index.md
 docs/index.md -> docs/design/index.md
 docs/index.md -> docs/how-to/index.md
 docs/index.md -> docs/design/architecture.md
