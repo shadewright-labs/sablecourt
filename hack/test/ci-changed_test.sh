@@ -111,6 +111,39 @@ expect "called workflow" true true true true
 new_repo; mkdir -p .github/workflows; echo 'on: push' > .github/workflows/scorecard.yml; commit
 expect "standalone workflow" false false false true
 
+# Every input of the pull request image build selects the images group: what the root Dockerfile and its build
+# context read (Go code and embedded files, the module and workspace files, vendor/, the Dockerfile and both
+# forms of its ignore file) and what images-build.yml runs before the build. The second list is read from those
+# two files, so a new COPY source or a new script there needs a path in the images group.
+images_only() { # name path
+  local got
+  new_repo
+  mkdir -p "$(dirname "$2")"
+  echo change >> "$2"
+  commit
+  got="$(EVENT_NAME=pull_request BASE_SHA="${base}" "${detector}" 2>/dev/null | grep '^images=')" || got=""
+  if [ "${got}" = "images=true" ]; then
+    echo "ok   image input ${2} selects the image build"
+  else
+    echo "FAIL image input ${2} selects the image build: got '${got}'"
+    fails=$((fails + 1))
+  fi
+  cd "${root}"
+}
+for input in Dockerfile .dockerignore Dockerfile.dockerignore vendor/modules.txt vendor/example.invalid/m/m.go \
+  go.mod go.sum go.work go.work.sum main.go cmd/sablecourtd/main.go internal/ui/templates/page.html \
+  internal/store/sqlite/migrations/0001.sql examples/demo-agent/main.go hack/setup-buildx.sh LICENSE; do
+  images_only "${input}" "${input}"
+done
+derived="$( {
+  grep -oE 'hack/[A-Za-z0-9_./-]+' "${root}/.github/workflows/images-build.yml"
+  awk 'toupper($1) == "COPY" && $0 !~ /--from=/ { for (i = 2; i < NF; i++) if ($i !~ /^--/ && $i != ".") print $i }' "${root}/Dockerfile"
+} | LC_ALL=C sort -u)"
+[ -n "${derived}" ] || { echo "FAIL no inputs read from images-build.yml and the Dockerfile"; fails=$((fails + 1)); }
+while IFS= read -r input; do
+  [ -n "${input}" ] && images_only "${input}" "${input}"
+done <<< "${derived}"
+
 new_repo; echo x >> notes.txt; commit
 got="$(cd "${repo}" && TMPDIR="${work}/no/such/dir" EVENT_NAME=pull_request BASE_SHA="${base}" "${detector}" 2>/dev/null)"
 if [ "${got}" = "$(printf 'go=true\nimages=true\ndocs=true\ncodeql=true')" ]; then

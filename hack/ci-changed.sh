@@ -31,13 +31,16 @@ trap 'fail_open "$LINENO"' ERR
 # What the binaries and the images are built from; each group below that builds or runs them includes it. The
 # workspace files go.work and go.work.sum count too: CI and the root Dockerfile build with GOWORK=off, but a
 # change to them still runs the Go checks and the image build, so nothing that can change a build is skipped.
-build_paths='.*\.go|go\.mod|go\.sum|go\.work|go\.work\.sum|cmd/.*|internal/.*|examples/.*|Dockerfile|\.dockerignore'
+# vendor/ counts because the Dockerfile's go build uses it as soon as vendor/modules.txt exists, and both forms
+# of the ignore file count because they decide what the build context holds.
+build_paths='.*\.go|go\.mod|go\.sum|go\.work|go\.work\.sum|vendor/.*|cmd/.*|internal/.*|examples/.*|Dockerfile|\.dockerignore|Dockerfile\.dockerignore'
 # The reference pages under docs/reference are checked against the code by go test, so they are Go inputs too.
 go_paths="${build_paths}|Makefile|hack/.*|\.golangci\.yml|docs/reference/.*"
 # Go workflows that ci.yml does not call; a change to one runs the Go checks.
 go_workflows='\.github/workflows/(fuzz|release)\.yml'
 go_re="^(${go_paths}|${go_workflows})$"
-images_re="^(${build_paths}|LICENSE)$"
+# The image build also runs hack/setup-buildx.sh (images-build.yml); hack/test/ci-changed_test.sh lists every input.
+images_re="^(${build_paths}|LICENSE|hack/setup-buildx\.sh)$"
 # The reference pages and what renders or checks them.
 docs_re='^(docs/reference/.*|cmd/.*|internal/.*|Makefile)$'
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.

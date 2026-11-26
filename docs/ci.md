@@ -8,8 +8,8 @@ This page describes the checks under `.github/workflows/` that run on pull reque
 
 | Group | Runs when these change | Jobs |
 | --- | --- | --- |
-| go | Go code, `go.mod`, `go.sum`, `go.work`, `go.work.sum`, `cmd/`, `internal/`, `examples/`, the root `Dockerfile`, `.dockerignore`, `Makefile`, `hack/`, `.golangci.yml`, `docs/reference/`, and the workflows that build Go outside `ci.yml` (`fuzz.yml`, `release.yml`) | lint, test, govulncheck, gosec |
-| images | the inputs of the root `Dockerfile` build (Go code, `go.mod`, `go.sum`, `go.work`, `go.work.sum`, `cmd/`, `internal/`, `examples/`, the `Dockerfile`, `.dockerignore`), `LICENSE` | image build (pull requests only) |
+| go | Go code, `go.mod`, `go.sum`, `go.work`, `go.work.sum`, `vendor/`, `cmd/`, `internal/`, `examples/`, the root `Dockerfile`, `.dockerignore`, `Dockerfile.dockerignore`, `Makefile`, `hack/`, `.golangci.yml`, `docs/reference/`, and the workflows that build Go outside `ci.yml` (`fuzz.yml`, `release.yml`) | lint, test, govulncheck, gosec |
+| images | the inputs of the root `Dockerfile` build (Go code, `go.mod`, `go.sum`, `go.work`, `go.work.sum`, `vendor/`, `cmd/`, `internal/`, `examples/`, the `Dockerfile`, `.dockerignore`, `Dockerfile.dockerignore`), `LICENSE` and `hack/setup-buildx.sh`, which the build job runs; `hack/test/ci-changed_test.sh` lists each input, including the scripts of `images-build.yml` and the `COPY` sources of the `Dockerfile` | image build (pull requests only) |
 | docs | `docs/reference/` and what renders or checks it (`cmd/`, `internal/`, `Makefile`) | reference pages check |
 | codeql | Go code, `go.mod`, `go.sum`, workflows, composite actions under `.github/actions/`, CodeQL configuration under `.github/codeql/` | CodeQL (pull requests only) |
 
