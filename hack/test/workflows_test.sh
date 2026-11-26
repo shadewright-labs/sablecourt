@@ -134,7 +134,8 @@ EXACT_STEPS = {
                       "Keep checksums.txt, its signature and the provenance"],
     "verify": ["Download the files and the signature bundle", "Install cosign", "Log in to GHCR", "Check the set of files",
                "Verify the archives", "Verify the images", "Run the stamped sablectl"],
-    "publish": ["Clone the code", "Download the verified files", "Refuse a moved tag or a published release",
+    "publish": ["Clone the code", "Download the verified files", "Compare the files with what verify checked",
+                "Refuse a moved tag or a published release",
                 "Set up Buildx and BuildKit (pinned)", "Log in to GHCR", "Refuse to move a version image tag",
                 "Decide whether this release moves latest", "Remove the drafts of earlier runs", "Create the draft release",
                 "Check the draft's assets byte for byte", "Tag the verified image digests", "Publish the release",
@@ -261,6 +262,8 @@ def release_checks(text):
     varch = st("verify", "Verify the archives")
     vimg = st("verify", "Verify the images")
     refuse = st("publish", "Refuse a moved tag or a published release")
+    compare = st("publish", "Compare the files with what verify checked")
+    sablectl = st("verify", "Run the stamped sablectl")
     keep_tag = st("publish", "Refuse to move a version image tag")
     latest = st("publish", "Decide whether this release moves latest")
     tagging = st("publish", "Tag the verified image digests")
@@ -286,6 +289,10 @@ def release_checks(text):
          and all(v == "${{ needs.check.outputs.version }}" for v in re.findall(r"^\s+VERSION: (.*)$", text, re.M))
          and len(re.findall(r"^\s+TAG: .*$", text, re.M)) == 3
          and all(v == "${{ github.ref_name }}" for v in re.findall(r"^\s+TAG: (.*)$", text, re.M))),
+        # A command substitution inside a test or an argument hides the command's failure from set -e; on its own
+        # line as an assignment, a failure (of any part of a pipe, with pipefail) stops the step.
+        ("every command whose output is used runs on its own line, as an assignment",
+         all(re.match(r'^\s+[a-z_]+="\$\(', l) for l in text.splitlines() if "$(" in l)),
         ("every checkout keeps no credentials",
          len(checkouts) == 6 and all("persist-credentials: false" in b and "persist-credentials: true" not in b
                                      for _, b in checkouts)),
@@ -397,24 +404,27 @@ def release_checks(text):
                   '            --certificate-identity "${identity}" \\\n            --certificate-oidc-issuer "${issuer}" \\\n'
                   '            "${DIST}/checksums.txt"\n', '(cd "${DIST}" && sha256sum --check --strict checksums.txt)')),
         ("verify: checksums.txt lists exactly nine files",
-         'if [ "$(wc -l < "${DIST}/checksums.txt")" -ne 9 ]; then' in varch),
+         in_order(varch, 'lines="$(wc -l < "${DIST}/checksums.txt")"', 'if [ "${lines}" -ne 9 ]; then', "exit 1")),
         ("verify: provenance of every file from the API and from the release bundle, bound to this tag and commit",
          in_order(varch, 'for file in "${DIST}"/sablecourt_*.tar.gz "${DIST}"/sablecourt_*.spdx.json "${DIST}/checksums.txt"; do',
                   'gh attestation verify "${file}" \\\n              --repo',
                   'gh attestation verify "${file}" \\\n              --bundle "${DIST}/sablecourt_${VERSION}_provenance.intoto.jsonl"')
          and len(ATTEST.findall(varch)) == 2),
-        ("verify: the stamped sablectl prints exactly the version",
-         in_order(st("verify", "Run the stamped sablectl"), "set -euo pipefail",
+        ("verify: the stamped sablectl prints exactly the version and a newline, and nothing on standard error",
+         in_order(sablectl, "set -euo pipefail",
                   'tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl',
-                  'got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version)"',
-                  'if [ "${got}" != "sablectl ${VERSION}" ]; then', "exit 1")
-         and "grep" not in st("verify", "Run the stamped sablectl")),
+                  """printf 'sablectl %s\\n' "${VERSION}" > "${RUNNER_TEMP}/version.want"\n""",
+                  'env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version \\\n'
+                  '            > "${RUNNER_TEMP}/version.out" 2> "${RUNNER_TEMP}/version.err"\n',
+                  'if ! cmp -s "${RUNNER_TEMP}/version.want" "${RUNNER_TEMP}/version.out"; then', "exit 1",
+                  'if [ -s "${RUNNER_TEMP}/version.err" ]; then', "exit 1")
+         and "grep" not in sablectl and "got=" not in sablectl),
         ("verify: no token where the built sablectl runs",
          "GH_TOKEN" not in job_env(j.get("verify", ""))
          and [n for n, b in s.get("verify", {}).items() if "GH_TOKEN" in b] == ["Verify the archives", "Verify the images"]
          and all("GH_TOKEN: ${{ github.token }}" in st("verify", n) for n in ("Verify the archives", "Verify the images"))
-         and in_order(st("verify", "Run the stamped sablectl"), "docker logout ghcr.io", 'mkdir "${RUNNER_TEMP}/empty-home"',
-                      "env -i PATH=/usr/bin:/bin HOME=")
+         and in_order(sablectl, "docker logout ghcr.io", 'mkdir "${RUNNER_TEMP}/empty-home"',
+                      'env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version')
          and list(s.get("verify", {}))[-1:] == ["Run the stamped sablectl"]),
         ("verify: image signatures and SBOM attestations against this tag's exact identity",
          in_order(vimg, "set -euo pipefail", IDENTITY, ISSUER, REFS,
@@ -425,11 +435,41 @@ def release_checks(text):
                   '                --certificate-oidc-issuer "${issuer}" \\\n                "${image}@${child}" > ')),
         ("verify: every release SBOM of an image is a verified attestation's predicate",
          in_order(vimg, 'sbom="${DIST}/sablecourt_${VERSION}_image_${image##*/}_linux_${arch}.spdx.json"',
-                  """jq -se --slurpfile want "${sbom}" 'map(.payload | @base64d | fromjson | .predicate) | any(. == $want[0])'""")),
+                  """jq -se --slurpfile want "${sbom}" 'map(.payload | @base64d | fromjson | .predicate) | any([.] == $want)'""")
+         and "$want[" not in text),
         ("verify: image provenance from the registry and from the release bundle, bound to this tag and commit",
          in_order(vimg, 'gh attestation verify "oci://${ref}" \\\n              --repo',
                   'gh attestation verify "oci://${ref}" \\\n              --bundle "${DIST}/sablecourt_${VERSION}_image_${image##*/}.intoto.jsonl"')
          and len(ATTEST.findall(vimg)) == 2),
+        ("verify: reports the SHA-256 of every file it checked, before the checks and before sablectl runs",
+         "      files-sha256: ${{ steps.files.outputs.files-sha256 }}\n" in j.get("verify", "")
+         and files.startswith("        id: files\n")
+         and in_order(files, 'if [ "${found}" != "${expected}" ]; then', "exit 1",
+                      'sums="$(cd "${DIST}" && LC_ALL=C sha256sum -- *)"', 'echo "files-sha256<<EOF_FILES_SHA256"',
+                      'echo "${sums}"', 'echo "EOF_FILES_SHA256"', '} >> "$GITHUB_OUTPUT"')),
+        ("verify: reports the image digests it checked",
+         "      daemon-digest: ${{ steps.images.outputs.daemon-digest }}\n" in j.get("verify", "")
+         and "      agent-digest: ${{ steps.images.outputs.agent-digest }}\n" in j.get("verify", "")
+         and vimg.startswith("        id: images\n")
+         and in_order(vimg, 'echo "verified ${ref}" >> "$GITHUB_STEP_SUMMARY"\n          done\n',
+                      'echo "daemon-digest=${DAEMON_DIGEST}" >> "$GITHUB_OUTPUT"',
+                      'echo "agent-digest=${AGENT_DIGEST}" >> "$GITHUB_OUTPUT"')),
+        ("publish: compares the downloaded files with verify's hashes before any write",
+         "VERIFIED: ${{ needs.verify.outputs.files-sha256 }}" in compare
+         and in_order(compare, "set -euo pipefail",
+                      """printf '%s\\n' "${VERIFIED%$'\\n'}" > "${RUNNER_TEMP}/verified.sha256""",
+                      'sums="$(cd "${DIST}" && LC_ALL=C sha256sum -- *)"',
+                      """printf '%s\\n' "${sums}" > "${RUNNER_TEMP}/downloaded.sha256""",
+                      'if ! cmp -s "${RUNNER_TEMP}/verified.sha256" "${RUNNER_TEMP}/downloaded.sha256"; then', "exit 1")
+         and step_order("Download the verified files", "Compare the files with what verify checked",
+                        "Refuse a moved tag or a published release")),
+        ("publish: tags and lists the image digests verify reported",
+         "      DAEMON_DIGEST: ${{ needs.verify.outputs.daemon-digest }}\n" in job_env(j.get("publish", ""))
+         and "      AGENT_DIGEST: ${{ needs.verify.outputs.agent-digest }}\n" in job_env(j.get("publish", ""))
+         and "needs.images" not in j.get("publish", "")),
+        ("scan-images: the summary fails on a missing, null or empty database UpdatedAt",
+         in_order(scan, """updated="$(jq -er '.UpdatedAt | select(type == "string" and length > 0)' "${RUNNER_TEMP}/trivy-cache/db/metadata.json")""",
+                  'echo "Trivy database ${TRIVY_DB}, UpdatedAt ${updated}" >> "$GITHUB_STEP_SUMMARY"')),
         ("verify: exact identities only, no regular expression or signer-workflow prefix",
          not re.search(r"identity-regexp|cert-identity-regex|--signer-workflow|--signer-repo", text)),
         ("publish: refuses a moved tag and a published release before writing",
@@ -576,8 +616,28 @@ MUTATIONS = [
     ("verify: the checksums signature against this tag's exact identity", "sha256sum --check --strict checksums.txt", "true"),
     ("verify: the checksums signature against this tag's exact identity", in_step(*VA, "--certificate-identity", "--certificate-identity-regexp")),
     ("verify: checksums.txt lists exactly nine files",
-     '          if [ "$(wc -l < "${DIST}/checksums.txt")" -ne 9 ]; then\n'
+     '          if [ "${lines}" -ne 9 ]; then\n'
      '            echo "checksums.txt does not list the four archives and the five SBOMs" >&2\n            exit 1\n          fi\n', ""),
+    ("every command whose output is used runs on its own line, as an assignment",
+     '          lines="$(wc -l < "${DIST}/checksums.txt")"\n          if [ "${lines}" -ne 9 ]; then',
+     '          if [ "$(wc -l < "${DIST}/checksums.txt")" -ne 9 ]; then'),
+    ("every command whose output is used runs on its own line, as an assignment",
+     'echo "go-version=${go_version}"', 'echo "go-version=$(go env GOVERSION)"'),
+    ("verify: reports the SHA-256 of every file it checked, before the checks and before sablectl runs",
+     '            echo "${sums}"\n', '            echo\n'),
+    ("verify: reports the SHA-256 of every file it checked, before the checks and before sablectl runs",
+     "      files-sha256: ${{ steps.files.outputs.files-sha256 }}\n", "      files-sha256: ${{ steps.images.outputs.files-sha256 }}\n"),
+    ("verify: reports the image digests it checked",
+     'echo "daemon-digest=${DAEMON_DIGEST}" >> "$GITHUB_OUTPUT"', 'echo "daemon-digest=${{ needs.images.outputs.daemon-digest }}" >> "$GITHUB_OUTPUT"'),
+    ("publish: compares the downloaded files with verify's hashes before any write",
+     'if ! cmp -s "${RUNNER_TEMP}/verified.sha256" "${RUNNER_TEMP}/downloaded.sha256"; then',
+     'if ! cmp -s "${RUNNER_TEMP}/downloaded.sha256" "${RUNNER_TEMP}/downloaded.sha256"; then'),
+    ("publish: compares the downloaded files with verify's hashes before any write",
+     "VERIFIED: ${{ needs.verify.outputs.files-sha256 }}", "VERIFIED: ${{ needs.images.outputs.files-sha256 }}"),
+    ("publish: tags and lists the image digests verify reported",
+     "      DAEMON_DIGEST: ${{ needs.verify.outputs.daemon-digest }}\n", "      DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}\n"),
+    ("scan-images: the summary fails on a missing, null or empty database UpdatedAt",
+     """jq -er '.UpdatedAt | select(type == "string" and length > 0)'""", "jq -r '.UpdatedAt'"),
     ("verify: provenance of every file from the API and from the release bundle, bound to this tag and commit",
      'for file in "${DIST}"/sablecourt_*.tar.gz "${DIST}"/sablecourt_*.spdx.json "${DIST}/checksums.txt"; do',
      'for file in "${DIST}/checksums.txt"; do'),
@@ -587,13 +647,17 @@ MUTATIONS = [
      in_step(*VA, '--source-digest "${GITHUB_SHA}"', '--source-digest "${GITHUB_SHA:0:7}"')),
     ("verify: provenance of every file from the API and from the release bundle, bound to this tag and commit",
      in_step(*VA, '              --bundle "${DIST}/sablecourt_${VERSION}_provenance.intoto.jsonl" \\\n', "")),
-    ("verify: the stamped sablectl prints exactly the version",
-     'if [ "${got}" != "sablectl ${VERSION}" ]; then', 'if ! printf \'%s\\n\' "${got}" | grep -F -- "${VERSION}"; then'),
-    ("verify: the stamped sablectl prints exactly the version",
-     'if [ "${got}" != "sablectl ${VERSION}" ]; then', 'if [[ "${got}" != *"${VERSION}"* ]]; then'),
+    ("verify: the stamped sablectl prints exactly the version and a newline, and nothing on standard error",
+     'if ! cmp -s "${RUNNER_TEMP}/version.want" "${RUNNER_TEMP}/version.out"; then',
+     'if ! grep -qF -- "${VERSION}" "${RUNNER_TEMP}/version.out"; then'),
+    ("verify: the stamped sablectl prints exactly the version and a newline, and nothing on standard error",
+     '          if [ -s "${RUNNER_TEMP}/version.err" ]; then\n            echo "sablectl version wrote to standard error" >&2\n            exit 1\n          fi\n', ""),
+    ("verify: the stamped sablectl prints exactly the version and a newline, and nothing on standard error",
+     """printf 'sablectl %s\\n' "${VERSION}" > "${RUNNER_TEMP}/version.want""",
+     """printf 'sablectl %s\\n\\n' "${VERSION}" > "${RUNNER_TEMP}/version.want"""),
     ("verify: no token where the built sablectl runs",
      "      REPOSITORY: ${{ github.repository }}\n      TAG:", "      GH_TOKEN: ${{ github.token }}\n      REPOSITORY: ${{ github.repository }}\n      TAG:"),
-    ("verify: no token where the built sablectl runs", 'got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl"', 'got="$("${RUNNER_TEMP}/sablectl"'),
+    ("verify: no token where the built sablectl runs", 'env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version', '"${RUNNER_TEMP}/sablectl" version'),
     ("verify: no token where the built sablectl runs", "          docker logout ghcr.io\n", ""),
     ("verify: no token where the built sablectl runs", in_step("verify", "Run the stamped sablectl", "        env:\n", "        env:\n          GH_TOKEN: ${{ github.token }}\n")),
     ("scan-images: the Trivy database pinned by digest", in_job("scan-images", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db@sha256:", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db:2 #")),
@@ -645,7 +709,8 @@ MUTATIONS = [
     ("verify: image signatures and SBOM attestations against this tag's exact identity",
      in_step(*VI, "| if length == 1 then .[0] else error(\"not one \\($a) image\") end", "| .[0]")),
     ("verify: image signatures and SBOM attestations against this tag's exact identity", "cosign verify-attestation --type spdxjson", "echo"),
-    ("verify: every release SBOM of an image is a verified attestation's predicate", "any(. == $want[0])", "true"),
+    ("verify: every release SBOM of an image is a verified attestation's predicate", "any([.] == $want)", "true"),
+    ("verify: every release SBOM of an image is a verified attestation's predicate", "any([.] == $want)", "any(. == $want[0])"),
     ("verify: image provenance from the registry and from the release bundle, bound to this tag and commit",
      'gh attestation verify "oci://${ref}" \\\n              --repo', 'echo "oci://${ref}" \\\n              --repo'),
     ("verify: image provenance from the registry and from the release bundle, bound to this tag and commit",
@@ -712,8 +777,8 @@ doc_code = "".join(re.findall(r"^```bash\n(.*?)^```$", verify_doc, re.M | re.S))
 check("verify-a-release.md: the exact identity of release.yml on this tag, and a GitHub-hosted runner",
       'IDENTITY="https://github.com/shadewright-labs/sablecourt/.github/workflows/release.yml@refs/tags/v$VERSION"' in doc_code
       and doc_code.count('--certificate-identity "$IDENTITY"') == doc_code.count("cosign verify") == 3
-      and doc_code.count('--cert-identity "$IDENTITY"') == doc_code.count("gh attestation verify") == 3
-      and doc_code.count("--deny-self-hosted-runners") == 3
+      and doc_code.count('--cert-identity "$IDENTITY"') == doc_code.count("gh attestation verify") == 4
+      and doc_code.count("--deny-self-hosted-runners") == 4
       and not re.search(r"identity-regexp|--signer-workflow|cert-identity-regex", verify_doc))
 
 if fails:

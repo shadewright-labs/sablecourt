@@ -128,9 +128,11 @@ jobs:
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
-          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" hack/package-binaries.sh "${VERSION}" "${RUNNER_TEMP}/out"
-          echo "go-version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-          echo "Built with $(go env GOVERSION), SOURCE_DATE_EPOCH $(git log -1 --format=%ct HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          epoch="$(git log -1 --format=%ct HEAD)"
+          go_version="$(go env GOVERSION)"
+          SOURCE_DATE_EPOCH="${epoch}" hack/package-binaries.sh "${VERSION}" "${RUNNER_TEMP}/out"
+          echo "go-version=${go_version}" >> "$GITHUB_OUTPUT"
+          echo "Built with ${go_version}, SOURCE_DATE_EPOCH ${epoch}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install syft (pinned)
         run: hack/install-syft.sh "${RUNNER_TEMP}/syft"
@@ -247,7 +249,9 @@ jobs:
               echo "scanned ${image}@${child} (linux/${arch})" >> "$GITHUB_STEP_SUMMARY"
             done
           done
-          jq -r '"Trivy database \(env.TRIVY_DB), built \(.UpdatedAt)"' "${RUNNER_TEMP}/trivy-cache/db/metadata.json" >> "$GITHUB_STEP_SUMMARY"
+          # A missing, null or empty UpdatedAt fails the step.
+          updated="$(jq -er '.UpdatedAt | select(type == "string" and length > 0)' "${RUNNER_TEMP}/trivy-cache/db/metadata.json")"
+          echo "Trivy database ${TRIVY_DB}, UpdatedAt ${updated}" >> "$GITHUB_STEP_SUMMARY"
 
   sign-images:
     name: Sign and attest the images
@@ -413,6 +417,11 @@ jobs:
       contents: read
       packages: read # read the images and their signatures from GHCR
       attestations: read
+    # What this job verified, for publish to compare with what it downloads and tags.
+    outputs:
+      files-sha256: ${{ steps.files.outputs.files-sha256 }}
+      daemon-digest: ${{ steps.images.outputs.daemon-digest }}
+      agent-digest: ${{ steps.images.outputs.agent-digest }}
     # GH_TOKEN is set only on the two steps that call gh, not on the step that runs the built sablectl.
     env:
       REPOSITORY: ${{ github.repository }}
@@ -441,6 +450,7 @@ jobs:
           password: ${{ github.token }}
 
       - name: Check the set of files
+        id: files
         env:
           DIST: ${{ runner.temp }}/dist
         run: |
@@ -450,10 +460,18 @@ jobs:
             "sablecourt_${VERSION}_"{darwin,linux}_{amd64,arm64}.tar.gz \
             "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}_linux_{amd64,arm64}.spdx.json \
             "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}.intoto.jsonl | LC_ALL=C sort)"
-          if [ "$(find "${DIST}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" != "${expected}" ]; then
+          found="$(find "${DIST}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          if [ "${found}" != "${expected}" ]; then
             echo "the files to release are not exactly: ${expected}" >&2
             exit 1
           fi
+          # The SHA-256 of each file, taken before the checks below read the files and before sablectl runs.
+          sums="$(cd "${DIST}" && LC_ALL=C sha256sum -- *)"
+          {
+            echo "files-sha256<<EOF_FILES_SHA256"
+            echo "${sums}"
+            echo "EOF_FILES_SHA256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify the archives
         env:
@@ -469,7 +487,8 @@ jobs:
             --certificate-oidc-issuer "${issuer}" \
             "${DIST}/checksums.txt"
           (cd "${DIST}" && sha256sum --check --strict checksums.txt)
-          if [ "$(wc -l < "${DIST}/checksums.txt")" -ne 9 ]; then
+          lines="$(wc -l < "${DIST}/checksums.txt")"
+          if [ "${lines}" -ne 9 ]; then
             echo "checksums.txt does not list the four archives and the five SBOMs" >&2
             exit 1
           fi
@@ -492,6 +511,7 @@ jobs:
           done
 
       - name: Verify the images
+        id: images
         env:
           GH_TOKEN: ${{ github.token }}
           DIST: ${{ runner.temp }}/dist
@@ -512,9 +532,10 @@ jobs:
                 --certificate-identity "${identity}" \
                 --certificate-oidc-issuer "${issuer}" \
                 "${image}@${child}" > "${RUNNER_TEMP}/attestations.json"
-              # The SBOM file of the release must be the predicate of a verified attestation on this image.
+              # The SBOM file of the release must hold one JSON value, equal to the predicate of a verified
+              # attestation on this image: [.] == $want compares the whole file, not its first value.
               sbom="${DIST}/sablecourt_${VERSION}_image_${image##*/}_linux_${arch}.spdx.json"
-              jq -se --slurpfile want "${sbom}" 'map(.payload | @base64d | fromjson | .predicate) | any(. == $want[0])' \
+              jq -se --slurpfile want "${sbom}" 'map(.payload | @base64d | fromjson | .predicate) | any([.] == $want)' \
                 "${RUNNER_TEMP}/attestations.json" > /dev/null
             done
             gh attestation verify "oci://${ref}" \
@@ -534,10 +555,12 @@ jobs:
               --deny-self-hosted-runners > /dev/null
             echo "verified ${ref}" >> "$GITHUB_STEP_SUMMARY"
           done
+          echo "daemon-digest=${DAEMON_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "agent-digest=${AGENT_DIGEST}" >> "$GITHUB_OUTPUT"
 
       # The freshly built binary runs last: after the GHCR login is removed, in an empty environment with an empty
-      # home, so no token is in its reach through the environment or the Docker config. It must print exactly
-      # "sablectl <version>".
+      # home, so no token is in its reach through the environment or the Docker config. Its standard output must
+      # be "sablectl <version>" and one newline, byte for byte, and its standard error empty.
       - name: Run the stamped sablectl
         env:
           DIST: ${{ runner.temp }}/dist
@@ -546,13 +569,20 @@ jobs:
           docker logout ghcr.io
           mkdir "${RUNNER_TEMP}/empty-home"
           tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl
-          got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version)"
-          if [ "${got}" != "sablectl ${VERSION}" ]; then
-            echo "sablectl version printed '${got}', not 'sablectl ${VERSION}'" >&2
+          printf 'sablectl %s\n' "${VERSION}" > "${RUNNER_TEMP}/version.want"
+          env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version \
+            > "${RUNNER_TEMP}/version.out" 2> "${RUNNER_TEMP}/version.err"
+          if ! cmp -s "${RUNNER_TEMP}/version.want" "${RUNNER_TEMP}/version.out"; then
+            echo "sablectl version did not print exactly 'sablectl ${VERSION}' and one newline" >&2
+            exit 1
+          fi
+          if [ -s "${RUNNER_TEMP}/version.err" ]; then
+            echo "sablectl version wrote to standard error" >&2
             exit 1
           fi
 
-  # The only job with contents: write. It builds and signs nothing: it publishes what verify checked. The
+  # The only job with contents: write. It builds and signs nothing. It takes the file hashes and image digests
+  # from verify's outputs, compares the downloaded files with them before any write, and tags those digests. The
   # environment lets a maintainer require a reviewer before it starts; it has no protection until one is set.
   publish:
     name: Publish the release
@@ -569,8 +599,8 @@ jobs:
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.check.outputs.version }}
       PRERELEASE: ${{ needs.check.outputs.prerelease }}
-      DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}
-      AGENT_DIGEST: ${{ needs.images.outputs.agent-digest }}
+      DAEMON_DIGEST: ${{ needs.verify.outputs.daemon-digest }}
+      AGENT_DIGEST: ${{ needs.verify.outputs.agent-digest }}
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -583,6 +613,22 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: ${{ runner.temp }}/dist
+
+      # download-artifact takes the newest artifact of each name in the run, which a later attempt can have
+      # replaced. Any difference from the hashes verify reported stops the job before it writes anything.
+      - name: Compare the files with what verify checked
+        env:
+          VERIFIED: ${{ needs.verify.outputs.files-sha256 }}
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${VERIFIED%$'\n'}" > "${RUNNER_TEMP}/verified.sha256"
+          sums="$(cd "${DIST}" && LC_ALL=C sha256sum -- *)"
+          printf '%s\n' "${sums}" > "${RUNNER_TEMP}/downloaded.sha256"
+          if ! cmp -s "${RUNNER_TEMP}/verified.sha256" "${RUNNER_TEMP}/downloaded.sha256"; then
+            echo "the downloaded files differ from the files verify checked; refusing to publish" >&2
+            exit 1
+          fi
 
       # Every refusal comes before the first write. A published release is never touched again; drafts of an
       # earlier run are listed here and deleted only after all the checks below passed.
@@ -677,7 +723,7 @@ jobs:
                 hack/release-image-tag.sh "${image}" "${tag}" "${digest}"
               fi
               docker buildx imagetools create --tag "${image}:${tag}" "${ref}"
-              got="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{json .Manifest}}' | jq -r .digest)"
+              got="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{json .Manifest}}' | jq -er .digest)"
               if [ "${got}" != "${digest}" ]; then
                 echo "${image}:${tag} is ${got}, not the verified ${digest}" >&2
                 exit 1
