@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -129,8 +130,88 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	return out.HTMLURL, nil
 }
 
-// RegisterBuiltinGitOps registers the closed catalog of GitOps typed actions and a read-only MCP tool.
-func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
+// RepoBinding holds the GitHub repository the GitOps actions may target: the
+// origin remote of the repo root, read once when the catalog is registered at
+// daemon start. Nothing changes the pin afterwards: a reload only compares the
+// origin with it, so pointing the checkout at another repository needs a
+// daemon restart.
+type RepoBinding struct {
+	gate     *Gate
+	repoRoot string
+
+	once   sync.Once
+	pin    string // "owner/repo", or "" when the start read failed
+	pinErr error
+
+	mu sync.Mutex
+	// drift is the origin a reload last found differing from the pin (or the
+	// read error), "" while the origin matches. A drift audit row is written
+	// only when this changes, not on every reload.
+	drift string
+}
+
+// pinOnce reads the origin and pins it on the gate. Only the first call reads;
+// later calls return the first result.
+func (b *RepoBinding) pinOnce(ctx context.Context) error {
+	b.once.Do(func() {
+		owner, repo, err := readGitHubOrigin(ctx, b.repoRoot)
+		if err != nil {
+			b.pinErr = err
+			b.gate.SetAllowedRepo("")
+			return
+		}
+		b.pin = owner + "/" + repo
+		b.gate.SetAllowedRepo(b.pin)
+	})
+	return b.pinErr
+}
+
+// Pinned returns the repository pinned at start, or the error that left none
+// pinned (every git.open_pr is then refused until a restart).
+func (b *RepoBinding) Pinned() (string, error) {
+	_ = b.pinOnce(context.Background())
+	return b.pin, b.pinErr
+}
+
+// Recheck runs on every reload. It never changes the pin: it reads the origin
+// and, when the origin cannot be read or names another repository, returns an
+// error for the daemon to log. A denied audit row records the drift once per
+// change of the observed origin. git.open_pr stays refused while the origin
+// differs, because each call compares the origin with the pin again.
+func (b *RepoBinding) Recheck(ctx context.Context) error {
+	if err := b.pinOnce(ctx); err != nil {
+		return fmt.Errorf("no repository was pinned at start (%v); git.open_pr is refused until the daemon restarts", err)
+	}
+	detail := map[string]string{"allowed_repo": b.pin}
+	var observed string
+	owner, repo, err := readGitHubOrigin(ctx, b.repoRoot)
+	switch {
+	case err != nil:
+		observed = "unreadable: " + err.Error()
+		detail["reason"] = "repo_origin_unreadable"
+		detail["error"] = err.Error()
+		err = fmt.Errorf("origin of the repo root cannot be read at reload (%v); git.open_pr stays refused, pinned to %s", err, b.pin)
+	case !strings.EqualFold(owner+"/"+repo, b.pin):
+		observed = owner + "/" + repo
+		detail["reason"] = "repo_origin_changed"
+		detail["origin"] = observed
+		err = fmt.Errorf("origin of the repo root is %s but %s was pinned at start; git.open_pr stays refused, restart the daemon to change the repository", observed, b.pin)
+	}
+	b.mu.Lock()
+	changed := observed != b.drift
+	b.drift = observed
+	b.mu.Unlock()
+	if err != nil && changed {
+		raw, _ := json.Marshal(detail)
+		b.gate.audit(ctx, "", "", "action:git.open_pr", "denied", string(raw))
+	}
+	return err
+}
+
+// RegisterBuiltinGitOps registers the closed catalog of GitOps typed actions
+// and a read-only MCP tool, and pins the repository git.open_pr may target.
+// The pin is final; the returned binding only checks the origin against it.
+func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) *RepoBinding {
 	g.RegisterTool(ToolDef{
 		Name:        "sablecourt.list_workloads",
 		Description: "List declared workloads in the current Sablecourt bundle",
@@ -157,7 +238,7 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 	})
 
 	RegisterTypedAction(g, "git.open_pr", validateOpenPR, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
-		if err := checkOpenPRTarget(ctx, repoRoot, in.Owner, in.Repo); err != nil {
+		if err := checkOpenPRTarget(ctx, repoRoot, g.snapshotFromContext(ctx).allowedRepo, in.Owner, in.Repo); err != nil {
 			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
 		}
 		if prOpener == nil {
@@ -189,6 +270,10 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 			"next":     "open PR to change metadata.zone from sandbox to runtime",
 		}, nil
 	})
+
+	binding := &RepoBinding{gate: g, repoRoot: repoRoot}
+	_ = binding.pinOnce(context.Background()) // an unresolved origin refuses every git.open_pr
+	return binding
 }
 
 func validateCreateBranch(in CreateBranchInput) error {
@@ -239,31 +324,48 @@ func validateRepoName(field, name string) error {
 }
 
 // checkOpenPRTarget allows a pull request only against the GitHub repository
-// that the gate's GitOps actions work in: the origin remote of repoRoot, where
-// git.create_branch makes the head branch. Workload grants name actions, not
-// repositories, so this is the narrowest target the manifests can bind today.
-func checkOpenPRTarget(ctx context.Context, repoRoot, owner, repo string) error {
+// pinned when the daemon started (allowed, "owner/repo"): the origin remote of
+// repoRoot, where git.create_branch makes the head branch. Workload grants
+// name actions, not repositories, so this is the narrowest target the
+// manifests can bind today. If the origin read now differs from the pin, the
+// checkout changed under the daemon and the call is refused.
+func checkOpenPRTarget(ctx context.Context, repoRoot, allowed, owner, repo string) error {
 	if err := validateRepoName("owner", owner); err != nil {
 		return err
 	}
 	if err := validateRepoName("repo", repo); err != nil {
 		return err
 	}
-	if repoRoot == "" {
-		return errors.New("repo root not configured for git.open_pr")
+	if allowed == "" {
+		return errors.New("no GitHub repository was pinned for git.open_pr at start")
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
+	curOwner, curRepo, err := readGitHubOrigin(ctx, repoRoot)
 	if err != nil {
-		return errors.New("repo root has no origin remote for git.open_pr")
+		return err
 	}
-	allowedOwner, allowedRepo, ok := parseGitHubRemote(strings.TrimSpace(string(out)))
-	if !ok {
-		return errors.New("origin remote of the repo root is not a GitHub repository")
+	if !strings.EqualFold(curOwner+"/"+curRepo, allowed) {
+		return fmt.Errorf("origin of the repo root changed to %s/%s but %s was pinned at start; restart the daemon to change the repository", curOwner, curRepo, allowed)
 	}
-	if !strings.EqualFold(owner, allowedOwner) || !strings.EqualFold(repo, allowedRepo) {
+	if !strings.EqualFold(owner+"/"+repo, allowed) {
 		return fmt.Errorf("git.open_pr target %s/%s is not the configured repository", owner, repo)
 	}
 	return nil
+}
+
+// readGitHubOrigin reads owner and repository from the origin remote of repoRoot.
+func readGitHubOrigin(ctx context.Context, repoRoot string) (owner, repo string, err error) {
+	if repoRoot == "" {
+		return "", "", errors.New("repo root not configured for git.open_pr")
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return "", "", errors.New("repo root has no origin remote for git.open_pr")
+	}
+	owner, repo, ok := parseGitHubRemote(strings.TrimSpace(string(out)))
+	if !ok {
+		return "", "", errors.New("origin remote of the repo root is not a GitHub repository")
+	}
+	return owner, repo, nil
 }
 
 // parseGitHubRemote reads owner and repository from a github.com remote URL in

@@ -393,7 +393,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		Breaker:   breaker,
 		Approvals: approvalQueue,
 	})
-	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	// The repository git.open_pr may target is read from the repo root's origin
+	// once, here. A reload only compares the origin with it (reloadGitOps);
+	// changing the repository needs a restart.
+	repoBinding := mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	if pinned, err := repoBinding.Pinned(); err != nil {
+		logger.Warn("git.open_pr has no target repository; every call is refused until a restart", "error", err)
+	} else {
+		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
+	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
 	registerUpstreamMCP := func(b *config.Bundle) {
@@ -470,7 +478,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		bundle = b
 		bundleMu.Unlock()
 		modelGate.SetBundle(b)
-		dataActionGate.Reload(b, pol)
+		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
 		registerUpstreamMCP(b)
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)
@@ -1915,4 +1923,17 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// reloadGitOps applies a reloaded bundle and policy to the action gate and
+// checks the repo root's origin against the repository pinned at start. Every
+// reload trigger (POST /api/v1/reload, the dashboard and the manifests git
+// sync) runs it through the daemon's one reload function. It never re-pins: a
+// changed or unreadable origin keeps git.open_pr refused, is logged here, and
+// Recheck writes it to the audit log once per change of the observed origin.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
+	gate.Reload(b, pol)
+	if err := binding.Recheck(ctx); err != nil {
+		logger.Warn("git.open_pr refused after reload", "error", err)
+	}
 }

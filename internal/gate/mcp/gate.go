@@ -60,9 +60,10 @@ type Gate struct {
 	approvals *approval.Queue
 	now       func() time.Time
 
-	mu      sync.RWMutex
-	tools   map[string]ToolDef
-	actions map[string]actionDef
+	mu          sync.RWMutex
+	tools       map[string]ToolDef
+	actions     map[string]actionDef
+	allowedRepo string
 }
 
 func New(opts Options) *Gate {
@@ -90,8 +91,9 @@ func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) {
 }
 
 type gateSnapshot struct {
-	bundle *config.Bundle
-	policy *policy.Engine
+	bundle      *config.Bundle
+	policy      *policy.Engine
+	allowedRepo string
 }
 
 type snapshotCtxKey struct{}
@@ -100,8 +102,9 @@ func (g *Gate) snapshot() gateSnapshot {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return gateSnapshot{
-		bundle: g.bundle,
-		policy: g.policy,
+		bundle:      g.bundle,
+		policy:      g.policy,
+		allowedRepo: g.allowedRepo,
 	}
 }
 
@@ -170,6 +173,15 @@ func (g *Gate) registerAction(name string, def actionDef) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.actions[name] = def
+}
+
+// SetAllowedRepo records the repository the GitOps actions are bound to, as
+// "owner/repo", or "" when none is resolved. Requests started after the call
+// use the new value, and each action's audit row names it.
+func (g *Gate) SetAllowedRepo(repo string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.allowedRepo = repo
 }
 
 type authCtxKey struct{}
@@ -339,6 +351,9 @@ func (g *Gate) ActionHandler() http.Handler {
 		capability := "action:" + actionName
 		wlName := ac.Workload.Metadata.Name
 		auditAction := func(outcome string, detail map[string]any) {
+			if snap.allowedRepo != "" {
+				detail["allowed_repo"] = snap.allowedRepo
+			}
 			raw, _ := json.Marshal(detail)
 			g.audit(ctx, ac.Lease.TaskID, wlName, capability, outcome, string(raw))
 		}
@@ -414,13 +429,18 @@ func (g *Gate) ActionHandler() http.Handler {
 			// closed: the approval is spent first, and the action runs only once
 			// the record of that use is written. A failed write stops here and
 			// the approval stays spent.
+			consumed := map[string]string{"approval_id": req.ApprovalID, "payload_sha256": digest}
+			if snap.allowedRepo != "" {
+				consumed["allowed_repo"] = snap.allowedRepo
+			}
+			consumedJSON, _ := json.Marshal(consumed)
 			if err := g.store.AppendAudit(ctx, domain.AuditRecord{
 				Category:     "approval",
 				TaskID:       ac.Lease.TaskID,
 				WorkloadName: wlName,
 				Action:       capability,
 				Outcome:      "consumed",
-				DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"payload_sha256":%q}`, req.ApprovalID, digest),
+				DetailJSON:   string(consumedJSON),
 				CreatedAt:    g.now(),
 			}); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording the approval use failed; the approval is spent and the action did not run, request a new approval"})

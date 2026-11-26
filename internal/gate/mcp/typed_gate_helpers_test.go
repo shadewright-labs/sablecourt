@@ -83,6 +83,9 @@ type typedGate struct {
 	pr       *recordingPROpener
 	repo     string
 	tokens   map[string]string
+	binding  *RepoBinding
+	bundle   *config.Bundle
+	policy   *policy.Engine
 }
 
 // setupTypedGate wires the real GitOps catalog against a SQLite store, a repo
@@ -149,14 +152,15 @@ func setupTypedGate(t *testing.T, opts typedGateOptions) *typedGate {
 	if opts.clock != nil {
 		now = func() time.Time { return *opts.clock.Load() }
 	}
-	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: policy.NewEngine([]domain.Policy{pol}, nil), Approvals: queue, Now: now})
+	engine := policy.NewEngine([]domain.Policy{pol}, nil)
+	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue, Now: now})
 	pr := &recordingPROpener{}
 	var opener PROpener = pr
 	if opts.opener != nil {
 		opener = opts.opener
 	}
-	RegisterBuiltinGitOps(gate, repo, opener)
-	return &typedGate{gate: gate, st: st, dbPath: dbPath, queue: queue, approver: approver, pr: pr, repo: repo, tokens: tokens}
+	binding := RegisterBuiltinGitOps(gate, repo, opener)
+	return &typedGate{gate: gate, st: st, dbPath: dbPath, queue: queue, approver: approver, pr: pr, repo: repo, tokens: tokens, binding: binding, bundle: bundle, policy: engine}
 }
 
 func (tg *typedGate) post(workload, action, body string) *httptest.ResponseRecorder {
