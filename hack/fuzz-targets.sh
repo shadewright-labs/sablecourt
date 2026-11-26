@@ -19,7 +19,8 @@ fi
 # go test prints a package's matching names, then "ok  <import path>  <time>" for that package.
 targets=() names=()
 while IFS= read -r line; do
-  if [[ "${line}" =~ ^Fuzz[A-Za-z0-9_]*$ ]]; then
+  # A Go identifier may hold any Unicode letter or digit (FuzzŁódź), so a name is any word that starts with Fuzz.
+  if [[ "${line}" =~ ^Fuzz[^[:space:]]*$ ]]; then
     names+=("${line}")
   elif [[ "${line}" =~ ^ok[[:space:]]+([^[:space:]]+) ]]; then
     pkg="${BASH_REMATCH[1]}"
