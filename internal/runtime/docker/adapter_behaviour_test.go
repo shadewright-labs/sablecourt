@@ -517,7 +517,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 	})
 
 	t.Run("councilCommand and preparePrompt refusals", func(t *testing.T) {
-		if _, err := councilCommand(scruntime.CouncilLaunch{Harness: "unknown"}, false); err == nil {
+		if _, err := councilCommand(scruntime.CouncilLaunch{Harness: "unknown"}, false, nil); err == nil {
 			t.Fatal("accepted unknown harness")
 		}
 		badPrompt := "here is -----BEGIN " + "PRIVATE KEY-----\nsecret"
