@@ -8,25 +8,25 @@ Sablecourt runs today in Sanctum, the single-machine mode: one daemon on a works
 
 ## What exists today
 
-Some Kubernetes code is in the tree. It is parked, has two unit tests against a fake client, and has never run against a cluster in CI. Every sentence in this section describes code on `main`.
+Some Kubernetes code is in the tree. It is parked, is covered only by unit tests against a fake client, and has never run against a cluster in CI. Every sentence in this section describes code on `main`.
 
 ### The daemon in Citadel mode
 
-`sablecourtd --mode=citadel` (alias `enterprise`) changes these things in [cmd/sablecourtd/main.go](../../cmd/sablecourtd/main.go):
+`sablecourtd --mode=citadel` (alias `enterprise`) changes these things in [cmd/sablecourtd/main.go](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/main.go):
 
 - It selects the Kubernetes runtime when `--runtime` is empty or `docker`, and listens on `0.0.0.0:7432` instead of `127.0.0.1:7432` when the listen address was left at its default.
 - It registers no host coding adapter and disables councils, so `claude`, `codex` and `agy` cannot run in Citadel at all.
-- It configures no out-of-band approver. `Queue.Approve` then fails with "no out-of-band approver configured", and device pairing returns 503, so no approval can be granted in Citadel today: every `approve`-gated action stays blocked. This fails closed, but it also means Citadel cannot run a workflow that needs an approval.
+- It configures no out-of-band approver (Sanctum wires the macOS dialog approver). `Queue.Approve` then fails with "no out-of-band approver configured". Device pairing also returns 503 in every mode today, so no new device can be enrolled through the API; without a pre-existing paired device record in the store, no approval can be granted in Citadel and every `approve`-gated action stays blocked. This fails closed, and it also means Citadel cannot run a workflow that needs an approval.
 - It logs a warning when it runs on SQLite instead of PostgreSQL.
 - Operator authentication is always required in every mode; the `--operator-auth-required` flag is deprecated and ignored.
 
 With `--runtime=k8s` the Kubernetes adapter handles the `long-lived-agent` class and, wrapped by the controller adapter, the `deterministic-controller` class. It reads `--kubeconfig`, or the in-cluster configuration, or the default kubeconfig rules. If it cannot build a client it logs a warning and those classes have no adapter.
 
-The Model Gate takes `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`). When it is set, [internal/gate/model/gate.go](../../internal/gate/model/gate.go) replaces the base URL of every provider with that one URL and stops requiring a provider key; it still attaches a key when one is in its secret store. The provider prefix is dropped from the forwarded path, so the gateway receives `/v1/messages`, `/v1/responses` or `/v1beta/models/...` with no other hint of which provider was meant.
+The Model Gate takes `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`). When it is set, [internal/gate/model/gate.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/gate/model/gate.go) replaces the base URL of every provider with that one URL and stops requiring a provider key; it still attaches a key when one is in its secret store. The provider prefix is dropped from the forwarded path, so the gateway receives `/v1/messages`, `/v1/chat/completions`, `/v1/responses` or `/v1beta/models/...` without the provider prefix (Anthropic requests still receive an `anthropic-version` header if absent).
 
 ### The Kubernetes adapter
 
-[internal/runtime/k8s/k8s.go](../../internal/runtime/k8s/k8s.go) turns a launch into a `batch/v1` Job named `sc-<task id>` in one namespace (`--k8s-namespace`, default `default`):
+[internal/runtime/k8s/k8s.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/k8s/k8s.go) turns a launch into a `batch/v1` Job named `sc-<task id>` in one namespace (`--k8s-namespace`, default `default`):
 
 | Area | What the adapter sets |
 | --- | --- |
@@ -46,7 +46,7 @@ The lease travels as an environment variable, so it is stored in the Job object 
 
 ### The manifests in `deploy/k8s`
 
-- `base/`: a `sablecourt` namespace with Pod Security `restricted` enforced; a `sablecourtd` service account with a Role over Jobs, pods, `pods/log` and `pods/attach` and no access to Secrets; one Deployment replica with the `Recreate` strategy, SQLite on a 1 GiB `ReadWriteOnce` claim, the secret file mounted `0400`, an optional PostgreSQL DSN, and the image `ghcr.io/shadewright-labs/sablecourtd:0.1.0`; a NetworkPolicy `workloads-gate-only-egress` that lets pods labelled `managed-by: sablecourt` send only to the daemon on TCP 7432 and to cluster DNS on UDP 53, with no ingress allowed.
+- `base/`: a `sablecourt` namespace with Pod Security `restricted` enforced; a `sablecourtd` service account with a Role over Jobs, pods, `pods/log` and `pods/attach` and no access to Secrets; one Deployment replica with the `Recreate` strategy, SQLite on a 1 GiB `ReadWriteOnce` claim, the secret file mounted `0400`, an optional PostgreSQL DSN, and the published `ghcr.io/shadewright-labs/sablecourt` image (pinned to a release tag in `deploy/k8s/base/deployment.yaml`); a NetworkPolicy `workloads-gate-only-egress` that lets pods labelled `managed-by: sablecourt` send only to the daemon on TCP 7432 and to cluster DNS on UDP 53, with no ingress allowed.
 - `overlays/tailscale` and `overlays/public` expose the daemon through the Tailscale operator or a public ingress with cert-manager.
 - `overlays/citadel` adds `--mode=citadel`, `--k8s-runtime-class=gvisor`, `--model-gateway-url=http://agentgateway.sablecourt.svc:3000`, a PodDisruptionBudget and an `agentgateway` Deployment.
 
@@ -57,13 +57,13 @@ Defects a Citadel slice would have to fix first:
 - The NetworkPolicy does not select the daemon pod, so the daemon's egress is open. It also leaves DNS over TCP blocked, which breaks large DNS answers.
 - Run pods reach the daemon on the same listener that serves operator routes (`/api/v1/*`, `/login`); the NetworkPolicy cannot tell them apart.
 - One replica only: the session signing key is random per process, there is no leader election, and SQLite sits on a `ReadWriteOnce` volume.
-- The PostgreSQL store has migrations up to `0010_budget_reservations.sql` but none of the council and learning migrations that SQLite has (`0010` to `0013`).
+- The PostgreSQL store includes the budget reservation and cache-token migrations, but none of the council or learning migrations that the SQLite store has.
 
 ## Goals and non-goals
 
 Goals:
 
-- Run the council and coding tasks for a team in a cluster, with every invariant in [AGENTS.md](../../AGENTS.md) intact and no exception that Sanctum does not already have.
+- Run the council and coding tasks for a team in a cluster, with every invariant in [AGENTS.md](https://github.com/shadewright-labs/sablecourt/blob/main/AGENTS.md) intact and no exception that Sanctum does not already have.
 - Treat a harness pod as hostile: a sandbox runtime between it and the node, no route to the internet, no provider or Git credential, one short lease.
 - Use what the ecosystem ships for routing, provider keys, sandboxing and telemetry, and keep in Sablecourt only the checks a generic component cannot make.
 - Emit usage with labels that let another tool compute cost per team.
@@ -91,11 +91,11 @@ The picture has four namespaces, each its own trust zone:
 
 Recommendation: no Sablecourt CRDs for tasks, leases, budgets, approvals or audit. They stay in PostgreSQL.
 
-- Today the lease check, the budget reservation and the audit append are three separate store calls, and the reservation itself is one database transaction ([internal/store](../../internal/store)). Spread over CRDs, the reservation would become several objects with optimistic concurrency and no transaction.
+- Today the lease check, the budget reservation and the audit append are three separate store calls, and the reservation itself is one database transaction ([internal/store](https://github.com/shadewright-labs/sablecourt/tree/main/internal/store)). Spread over CRDs, the reservation would become several objects with optimistic concurrency and no transaction.
 - Leases are stored as hashes and checked online on every gate call (ADR-0014 rejects self-contained tokens for this reason). etcd is a poor place for a credential table that every cluster administrator with read access to the CRD can list.
 - Task and audit rows are high churn and append-only. CRDs would add watch traffic and object-count pressure on the API server for no reader that needs them.
 
-Declared intent (`Workload`, `Policy`, `Budget`, `Conclave`) stays as files from Git, mounted from a ConfigMap that Flux or Argo CD applies, as `deploy/k8s` does today. The alternative is to publish those kinds as CRDs, so `kubectl apply` and GitOps health checks work on them directly. That costs a controller-runtime dependency, admission validation, and a second source of truth during migration. It is listed as an open decision; nothing in this design depends on it.
+Declared intent (`Workload`, `Policy`, `Budget`, `Workflow`, `Schedule`, `Conclave`) stays as files from Git, mounted from a ConfigMap that Flux or Argo CD applies, as `deploy/k8s` does today. The alternative is to publish those kinds as CRDs, so `kubectl apply` and GitOps health checks work on them directly. That costs a controller-runtime dependency, admission validation, and a second source of truth during migration. It is listed as an open decision; nothing in this design depends on it.
 
 Runtime objects are another matter. Using someone else's CRD for the sandbox (agent-sandbox `Sandbox`) is fine: Sablecourt creates and deletes them as it creates Jobs now.
 
@@ -108,13 +108,13 @@ Recommendation: one binary and one Deployment in the first stages, with one acti
 
 ### The store
 
-PostgreSQL is required in Citadel; SQLite on a `ReadWriteOnce` volume cannot move between nodes without downtime and cannot serve two replicas. The PostgreSQL store needs the council and learning migrations before councils can run (stage C3). Whether to run it with an operator such as CloudNativePG or as a managed database is the installer's choice and out of scope here. The audit chain head needs a serialized append (a row lock or advisory lock), which ADR-0014 Stage 0 asks for on SQLite as well.
+PostgreSQL is required in Citadel; SQLite on a `ReadWriteOnce` volume cannot move between nodes without downtime and cannot serve two replicas. The PostgreSQL store needs the council and learning migrations before councils can run (stage C3). Whether to run it with an operator such as CloudNativePG or as a managed database is the installer's choice and out of scope here. The PostgreSQL store already serializes audit chain appends with a table lock on `audit_log` ([internal/store/postgres/postgres.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/store/postgres/postgres.go)); SQLite still needs serialized chain-head appends (ADR-0014 Stage 0).
 
 ## Harness pods
 
 ### Image per harness
 
-One image per harness (`claude`, `codex`, `agy`), built from a pinned base, referenced by digest, never by tag. In Sanctum the images are built locally by `sablectl harness build` ([internal/harnessimages](../../internal/harnessimages)). In a cluster they must come from a registry, which raises a licensing question for the CLI binaries inside: the recommendation is that Sablecourt publishes the Dockerfiles and a build command, and each installation builds and pushes the images to its own registry. Each image states in a label what it can reach (network, loopback, Docker, Git metadata), because the [harness notes](../harnesses.md) and later runs showed that the same task succeeds or silently degrades depending on that.
+One image per harness (`claude`, `codex`, `agy`), built from a pinned base, referenced by digest, never by tag. In Sanctum the images are built locally by `sablectl harness build` ([internal/harnessimages](https://github.com/shadewright-labs/sablecourt/tree/main/internal/harnessimages)): the `codex` image bundles the Codex CLI, while the `claude` and `agy` images carry no vendor binary and receive their pinned tool from a separate read-only tool volume (ADR-0011, 2026-11-26 amendment). In a cluster the images must come from a registry, which raises licensing questions for non-redistributable CLI binaries: the recommendation is that Sablecourt publishes the Dockerfiles, build command and redistributable images, while each installation builds and pushes images holding non-redistributable CLIs to its own registry (or supplies the pinned tool through a read-only volume). Each image states in a label what it can reach (network, loopback, Docker, Git metadata), because the [harness notes](../harnesses.md) and later runs showed that the same task succeeds or silently degrades depending on that.
 
 ### The login problem
 
@@ -144,18 +144,18 @@ Each of these is a stage C1 acceptance check, and a CLI that fails one runs only
 | Kata Containers | 4.4.0 (2026-11-17), needs nested virtualisation or bare metal. AKS Pod Sandboxing `kata-vm-isolation` is GA; v2 is in preview. | A VM per pod. Higher memory overhead (AKS lists 600 MiB fixed for v1, 32 MiB for v2). The choice where no managed gVisor option is documented, such as AKS (the AKS pod sandboxing page, checked 2026-11-25, documents Kata only). |
 | runc with seccomp only | Always available. | No kernel boundary between untrusted code and the node. Not acceptable for harness pods. |
 
-RuntimeClass itself is stable since Kubernetes 1.20 and its pod overhead field since 1.24; its `scheduling` field is still beta. The daemon should refuse to launch a harness when the configured RuntimeClass does not exist or is empty. Today the flag is optional and an empty value runs the pod under the default runtime.
+RuntimeClass itself is stable since Kubernetes 1.20 and its pod overhead field since 1.24; its `scheduling` field is still beta. Checking only that a named `RuntimeClass` object exists is not enough, because a `RuntimeClass` selects a CRI handler on each node and a class mapped to `runc` would still pass an existence check. Before launching any harness, the daemon should read the configured `RuntimeClass` (requiring read RBAC on `runtimeclasses` in `node.k8s.io`), refuse an empty value, verify that its `handler` is on an explicit allowlist of approved sandbox handlers defined once [open decision 7](#open-decisions) is resolved (for example `runsc` or `kata`), and rely on the preflight canary to prove sandbox isolation on eligible nodes rather than assuming it from object metadata. The daemon refuses the launch when either handler verification or the canary fails. Today `--k8s-runtime-class` is optional and an empty value runs the pod under the node's default runtime.
 
 kubernetes-sigs `agent-sandbox` adds `Sandbox`, `SandboxTemplate`, `SandboxClaim` and `SandboxWarmPool` on top of a RuntimeClass. Version 1.0.12 shipped on 2026-11-20, but the API is `v1beta1`: the 1.x number does not mean a stable API. Recommendation: plain Jobs through the existing adapter in stages C1 to C3, and agent-sandbox in C4 if warm pools are needed to cut start latency, once its API reaches `v1`. Its cost is one more controller to install and trust.
 
 ### What each CLI needs
 
-The workspace notes record what each CLI needed in real runs. In a pod:
+Based on the [harness notes](../harnesses.md) and host sandbox testing, each CLI's needs map to a pod as follows:
 
 | Need | In the pod |
 | --- | --- |
-| Network | Only the daemon's gate listener. No internet, no DNS (see [Network model](#network-model)). |
-| Loopback sockets | Available: gVisor gives each pod its own network stack with loopback, so tests that open a local listener run. This is better than the host sandboxes of `codex` and `agy`, which blocked loopback. |
+| Network | Only the daemon's gate listener over server-authenticated TLS. No internet, no DNS (see [Network model](#network-model)). |
+| Loopback sockets | Available: gVisor gives each pod its own network stack with loopback, so tests that open a local listener run, unlike restrictive host Seatbelt profiles that do not permit binding local sockets. |
 | Docker | Not available. Running Docker inside gVisor needs privileges the pod does not get. Tests that need Docker or a cluster (envtest, kind) run in a separate deterministic workload class with its own image, never in the harness pod. |
 | Git writes | The harness commits to its own clone in the pod's scratch volume. It cannot push: the daemon fetches the result and creates the branch through the typed Git actions, so no Git credential reaches the pod. |
 | Quotas | No subscription quota to watch. Every call is metered by the Model Gate against a `Budget`. |
@@ -190,17 +190,17 @@ What it gives for free:
 
 ### Placement: behind the Model Gate
 
-Recommendation: the gateway sits behind the Model Gate. The harness pod calls the Model Gate; the Model Gate checks, reserves and forwards to the gateway; the gateway adds the key and calls the provider. The forwarding exists today as `--model-gateway-url`. The strategy notes already describe the Model Gate "fronting" agentgateway.
+Recommendation: the gateway sits behind the Model Gate. The harness pod calls the Model Gate; the Model Gate checks, reserves and forwards to the gateway; the gateway adds the key and calls the provider. The forwarding exists today as `--model-gateway-url`. [Sablecourt technical architecture](../architecture.md) already describes the Model Gate "fronting" agentgateway.
 
-[![Planned model request: the harness pod sends a leased request to the Model Gate, which checks the lease, grant and budget in PostgreSQL, forwards to agentgateway with task labels over mutual TLS, and settles and audits after the provider's streamed answer.](../diagrams/kubernetes-model-request.svg)](../diagrams/kubernetes-model-request.svg "Open full size")
+[![Planned model request: the harness pod sends a leased request over server-authenticated TLS to the Model Gate, which checks the lease, grant and budget in PostgreSQL, forwards to agentgateway with task labels and its projected JWT over TLS, streams the provider's answer back to the pod, and settles and audits usage.](../diagrams/kubernetes-model-request.svg)](../diagrams/kubernetes-model-request.svg "Open full size")
 
 The checks at each hop of one request:
 
-1. Harness pod to Model Gate. NetworkPolicy lets the pod reach only the gate listener. The pod sends its lease as the API key.
+1. Harness pod to Model Gate. NetworkPolicy lets the pod reach only the gate listener. The pod connects over server-authenticated TLS, verifies the gate's server certificate against a mounted CA bundle (no pod client certificate is required), and sends its lease as the API key.
 2. Model Gate. It checks the lease (hash lookup, not revoked, not expired), that the task row exists, the workload's model grant and provider, and reserves budget in PostgreSQL. A missing, invalid, expired or revoked lease returns 401, a missing grant, provider or budget definition returns 403, and an exceeded budget returns 429. Nothing leaves the daemon on any of these. All of this is built.
-3. Model Gate to gateway. The Model Gate forwards with headers that name the team, workload, zone and task, and proves its own identity (see [Identity](#identity)). The gateway's NetworkPolicy admits only the daemon.
+3. Model Gate to gateway. The Model Gate forwards over TLS with headers that name the team, workload, zone and task, and proves its own identity with its projected JWT (see [Identity](#identity)). The gateway's NetworkPolicy admits only the daemon.
 4. Gateway to provider. The gateway checks its route allowlist and rate limit, adds the provider key and calls the provider. Its egress reaches only the provider hosts.
-5. Back. The provider streams the answer with usage. The gateway records its token metric and streams to the Model Gate, which parses usage as it does today, settles the reservation, writes the audit record and streams to the pod.
+5. Back. The provider streams the answer with usage. The gateway records its token metric and streams to the Model Gate, which forwards chunks to the pod while capturing usage, then parses usage as it does today, settles the reservation and writes the audit record.
 
 The alternative puts the gateway in front: pods call agentgateway directly, and agentgateway asks Sablecourt through external authorization whether to admit each request. That takes streaming traffic off the daemon, but the external authorization docs show the check before the request is forwarded and describe no check on the response. The Model Gate would see the reservation and never the actual usage, so settlement would depend on reading the gateway's logs or metrics afterwards, and a budget could overrun by whatever was in flight. It would also need a gRPC external authorization server in Sablecourt (new dependencies) and would put the lease in front of a component that does not store it. The gateway's own token limits do not close the gap: its documentation says a streamed response cannot be stopped mid-stream, so a token limit applies only to later requests. This alternative is an open decision for when traffic volume makes the daemon a bottleneck.
 
@@ -224,17 +224,22 @@ A generic gateway cannot make these checks, because the facts they need live onl
 
 | From | To | Rule |
 | --- | --- | --- |
-| Run pod | Daemon gate listener (TCP) | Allowed, by a namespace NetworkPolicy |
+| Run pod | Daemon gate listener (TCP, TLS) | Allowed, by a namespace NetworkPolicy; pod verifies the gate's server certificate |
 | Run pod | Cluster DNS | Denied. The gate address is passed as a Service IP, because a resolver that forwards external names is a channel out of the pod. |
-| Run pod | Anything else, including other run pods, the Kubernetes API and the internet | Denied (default deny for ingress and egress) |
+| Run pod | Other run pods, the Kubernetes API, the host node and the internet | Denied: default-deny NetworkPolicy for TCP, UDP and SCTP to non-node targets, paired with host or CNI controls blocking host-node traffic, link-local metadata and non-TCP/UDP/SCTP protocols including ICMP |
 | Daemon | PostgreSQL, Kubernetes API, gateway, Git host, identity provider | Allowed, by a NetworkPolicy on the daemon (today the daemon has none) |
 | Gateway | Provider hosts on 443 | Allowed only from the gateway pods |
 | Metrics store | Gateway and daemon metrics ports | Allowed |
 
+Core Kubernetes `NetworkPolicy` does not isolate a pod from its own host node, and a deny-all policy only guarantees blocking TCP, UDP and SCTP (leaving ICMP and other protocols undefined and CNI-dependent). To close both paths, the cluster installation must add host or CNI controls alongside the namespace `NetworkPolicy`:
+
+- Node traffic: host firewall rules (`nftables` or `iptables`) or a CNI host/cluster policy (such as Cilium host firewall or `CiliumClusterwideNetworkPolicy`, or Calico `GlobalNetworkPolicy` and `HostEndpoint`) blocking egress from run pods to node IPs and link-local metadata endpoints while permitting traffic to the daemon's gate listener Service.
+- Non-TCP/UDP/SCTP protocols (including ICMP): a CNI egress policy or node `nftables` drop rule blocking non-TCP/UDP/SCTP traffic from the run namespace.
+
 Two changes on the daemon side make this enforceable:
 
-- A separate gate listener in Citadel serving only `/gate/*` and the checkout bundle routes, on its own port. The NetworkPolicy then admits run pods to that port only, and the operator routes are unreachable from a run pod even with a stolen session.
-- A preflight canary: before the first launch, and periodically, the daemon starts a pod in the run namespace that tries to reach an outside address and a second run pod. If either succeeds, it refuses harness launches. Kubernetes accepts NetworkPolicy objects even when the CNI does not enforce them, so the objects alone prove nothing (invariant 5).
+- A separate gate listener in Citadel serving only `/gate/*` and the checkout bundle routes over server-authenticated TLS, on its own port. The NetworkPolicy then admits run pods to that port only, operator routes are unreachable from a run pod even with a stolen session, and every lease exchange or lease-carrying call is encrypted and authenticated to the gate.
+- A preflight canary: before the first launch, and periodically, the daemon starts a pod in the run namespace that verifies sandbox runtime confinement and probes four blocked paths: an outside address, a second run pod, its host node IP (outside the gate listener) and an ICMP egress probe. If any probe succeeds or sandbox verification fails, the daemon refuses harness launches. Kubernetes accepts NetworkPolicy objects even when the CNI does not enforce them, so the objects alone prove nothing (invariant 5).
 
 Per-launch egress allowlists. Core NetworkPolicy matches IPs and labels, not names; the Kubernetes documentation for 1.37 lists no FQDN support. Name-based egress needs a specific CNI or mesh:
 
@@ -257,7 +262,8 @@ ADR-0014 Stage 3: one `sablecourtd` per team, OIDC sign-in (Microsoft Entra ID f
 
 ### Machines
 
-- Run pods get a lease through an exchange instead of an environment variable. The pod has a projected service account token with audience `sablecourt` and a short lifetime, mounted only into an init container. The init container sends it to a gate route; the daemon validates it with the TokenReview API at an endpoint and CA from its own configuration, checks the returned audience, the service account and the pod name and UID (the service accounts administration docs list them as claims of a pod-bound token), checks that the pod belongs to the Job it created for this task attempt, refuses a second exchange for the same pod, and returns the lease into the memory-backed lease volume. The harness container never mounts the service account token and receives no environment variable with a secret. The run service account has no RBAC. The daemon needs permission to create TokenReviews, which is a cluster-scoped grant and must be stated in the install. Which built-in role to bind is an install detail to confirm.
+- Run pods get a lease through an exchange instead of an environment variable. The pod has a projected service account token with audience `sablecourt` and a short lifetime, mounted only into an init container. The init container sends it to the gate exchange route over server-authenticated TLS, verifying the gate listener's server certificate against a mounted CA bundle (no mutual TLS client certificate is required for run pods in C1); every later lease-carrying call from the harness uses the same server-authenticated TLS verification so neither the service account token nor the lease crosses the cluster network in cleartext. The daemon validates the token with the TokenReview API at an endpoint and CA from its own configuration, checks the returned audience, the service account and the pod name and UID (the service accounts administration docs list them as claims of a pod-bound token), checks that the pod belongs to the Job it created for this task attempt, refuses a second exchange for the same pod, and returns the lease into the memory-backed lease volume. The harness container never mounts the service account token and receives no environment variable with a secret. The run service account has no RBAC. The daemon needs permission to create TokenReviews, which is a cluster-scoped grant and must be stated in the install. Which built-in role to bind is an install detail to confirm.
+- Lost lease-exchange responses: the Job keeps `backoffLimit: 0` and `restartPolicy: Never`, so Kubernetes does not silently restart a failed init container inside the same Job. If the daemon issues a lease and the response is lost before the init container writes the lease file, the init container exits non-zero and the Job fails. The reconciler observes the failed Job, revokes any lease issued for that task attempt (including the undelivered lease), and records the attempt as failed. Any retry follows Sablecourt's task retry policy and starts a new task attempt with a new Job, a new pod UID and a fresh lease exchange.
 - Leases are those of ADR-0014: `sc_task_` tokens stored as hashes, a 15-minute rolling window renewed on heartbeats (this is ADR-0014's plan; the code today uses a one-hour lifetime that the reconciler renews on each pass while a task is running), revoked on stop, retry, failure or a tripped breaker, and bound to a channel. In the cluster the channel is the pod UID verified at exchange plus the NetworkPolicy that admits only run pods to the gate listener. A copied lease used from another pod in the run namespace is still accepted in this first version; closing that needs a per-call proof (next item).
 - Channel binding, later. Kubernetes 1.37 made pod certificates (`PodCertificateRequest`, KEP-4317) and `ClusterTrustBundle` GA. A pod could then present a kubelet-issued certificate on every gate call, and the daemon would bind the lease to it. That replaces ADR-0014 Stage 2's daemon-run CA inside a cluster, at the cost of writing a signer and requiring Kubernetes 1.37. Open decision.
 - The daemon toward the gateway presents its own projected token (audience `agentgateway`) as a JWT; agentgateway's JWT authentication validates it against the cluster issuer's keys, and the gateway NetworkPolicy admits only the daemon. No shared secret. Whether agentgateway's JWT provider works with the cluster issuer's discovery document is a stage C2 check.
@@ -301,20 +307,20 @@ agentgateway 1.7 exports `agentgateway_gen_ai_client_token_usage` (a histogram),
 - Whether the gateway's metrics can carry the team and workload labels is a stage C2 check. If they cannot, the Model Gate emits its own labelled counters. It already parses usage for settlement, so this is the more reliable source in any case; the gateway metrics then serve as a cross-check, and their totals must match the Model Gate's settled usage over a test run.
 - The OpenTelemetry names are moving. The GenAI conventions left the main repository and had their first release in their own repository, semantic-conventions-genai 0.1.0, on 2026-11-21, still at Development status. That release replaces `gen_ai.client.token.usage` and `gen_ai.token.type` with `gen_ai.client.inference.operation.input_tokens` and `...output_tokens` histograms and `gen_ai.client.inference.usage.*` counters, and core conventions v1.37.0 renamed `gen_ai.system` to `gen_ai.provider.name`. agentgateway's names follow the older convention. Sablecourt should pin the convention version it emits, publish the label contract above as a versioned document Nightloom reads, and expect a rename.
 
-The current Sablecourt metrics (`sablecourt_budget_input_tokens_total` and the like, from [internal/telemetry/metrics.go](../../internal/telemetry/metrics.go)) are unlabelled counters for the budget totals; the other metrics in that file carry only `zone`, `state` or `outcome` labels. None has the team, workload or provider labels above, so this contract is new work.
+The current Sablecourt metrics (`sablecourt_budget_input_tokens_total` and the like, from [internal/telemetry/metrics.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/telemetry/metrics.go)) are unlabelled counters for the budget totals; the other metrics in that file carry only `zone`, `state` or `outcome` labels. None has the team, workload or provider labels above, so this contract is new work.
 
-## The six security laws in the cluster
+## The hard invariants in the cluster
 
-The organisation's six security laws, and where the cluster model keeps each one:
+How the cluster model keeps each of the six hard invariants in [AGENTS.md](https://github.com/shadewright-labs/sablecourt/blob/main/AGENTS.md):
 
-| Law | How the cluster model keeps it |
+| Invariant | How the cluster model keeps it |
 | --- | --- |
-| 1. Model output is never authorization | Unchanged. Harness output is a proposal. The MCP Gate's policy and the approval queue stay in Sablecourt, and an approval needs out-of-band proof over the payload digest. A gateway authorization rule never replaces Sablecourt policy. |
-| 2. Evidence over inference | `Observe` gains pod facts (phase, container exit codes, the heartbeat behind lease renewal) instead of Job status alone. The NetworkPolicy and RuntimeClass are proven by the preflight canary and by refusing launches without the RuntimeClass, never assumed from objects existing. |
-| 3. Zero raw credentials in untrusted contexts | Provider keys live only in the gateway's Secret, Git credentials only in the daemon (later the Git executor). Run pods hold one lease in a memory volume, obtained by exchange; the service account token never reaches the harness container. Subscription logins stay in Sanctum. |
-| 4. Linear-time boundary redaction | Unchanged and still in Sablecourt: tool results, Conclave messages, Relics and Scry streams pass through `internal/redact`. The Model Gate does not redact model request or response bodies today, and the gateway does not change that. |
-| 5. Out-of-band confirmation | No macOS dialog exists in a cluster. Approval requires a passkey assertion or a paired device signature (ADR-0014 Stages 1 and 3). Until then approvals fail closed in Citadel, as they do today. |
-| 6. Tamper-evident audit and identity separation | The audit chain in PostgreSQL with signed heads exported outside it. Distinct identities: people (OIDC), the daemon's service account, the run service account (no RBAC), the gateway, and later a Git executor with its own service account. |
+| 1. Model output is never authorization | Unchanged. Harness output is a proposal. The MCP Gate's policy and the approval queue stay in Sablecourt, and an approval needs out-of-band proof over the payload digest from a passkey assertion or paired device signature (ADR-0014 Stages 1 and 3, because no macOS dialog exists in a cluster; until then approvals fail closed in Citadel). A gateway authorization rule never replaces Sablecourt policy. |
+| 2. Workloads hold no raw secrets | Provider keys live only in the gateway's Secret, Git credentials only in the daemon (later the Git executor). Run pods hold one lease in a memory volume, obtained by exchange over server-authenticated TLS; the service account token never reaches the harness container. Subscription logins stay in Sanctum. |
+| 3. All external input is untrusted | Unchanged and still in Sablecourt: tool results, Conclave messages, Relics and Scry streams pass through linear-time boundary redaction (`internal/redact`), and external content never widens policies or the action catalog. The Model Gate does not redact model request or response bodies today, and the gateway does not change that. |
+| 4. Separate identities and fail-closed defaults | Distinct identities: people (OIDC), the daemon's service account, the run service account (no RBAC), the gateway, and later a Git executor with its own service account. Policy failures, exhausted budgets, missing or unapproved RuntimeClass handlers, failed canaries and unconfigured approvers all stop execution instead of failing open. |
+| 5. Evidence over inference | `Observe` gains pod facts (phase, container exit codes, the heartbeat behind lease renewal) instead of Job status alone. The NetworkPolicy, host/CNI node and non-TCP controls, and RuntimeClass sandbox isolation are proven by handler verification and the preflight canary, never assumed from objects existing. The tamper-evident audit chain stays in PostgreSQL with signed heads exported outside it (ADR-0014 Stage 3). |
+| 6. Idempotent reconciliation | Deterministic task IDs, Job names (`sc-<task id>`), single-use pod lease exchanges, and leader election in multi-replica setups (stage C4) ensure daemon restarts and retries neither drop active runs nor duplicate launches or Git pushes. |
 
 ## Threat sketch: a compromised harness pod
 
@@ -332,12 +338,12 @@ What it cannot reach, and what stops it:
 
 - provider keys: in the gateway's namespace, never in the pod or the daemon;
 - Git credentials: in the daemon;
-- the internet, other pods, the Kubernetes API, cluster DNS: default-deny NetworkPolicy, proven by the canary;
+- the internet, other pods, the Kubernetes API, cluster DNS, the host node and non-TCP/UDP/SCTP paths: default-deny NetworkPolicy paired with node/CNI host and protocol controls, proven by the canary;
 - operator routes: served on another listener;
-- the node: the gVisor sandbox, then the pod security context;
-- another task's lease: leases are per attempt, and exchange refuses pods the daemon did not create for that attempt.
+- the node: the verified sandbox RuntimeClass (gVisor by default), then the pod security context;
+- another task's lease or a spoofed gate: server-authenticated TLS on the pod-to-gate hop, per-attempt leases, and an exchange that refuses pods the daemon did not create for that attempt.
 
-Residual risks: a sandbox escape in gVisor or the kernel; a CNI that silently stops enforcing policy between two canary runs; a stolen lease reused from another run pod in the same namespace until channel binding exists; budget spent on garbage until the per-task budget stops it; a compromised daemon or gateway, which hold everything this page keeps out of pods.
+Residual risks: a sandbox escape in gVisor or the kernel; a CNI or node firewall that silently stops enforcing policy between two canary runs; a stolen lease reused from another run pod in the same namespace until channel binding exists; budget spent on garbage until the per-task budget stops it; a compromised daemon or gateway, which hold everything this page keeps out of pods.
 
 ## Stages
 
@@ -345,8 +351,8 @@ Residual risks: a sandbox escape in gVisor or the kernel; a CNI that silently st
 
 | Stage | Size | Work | Acceptance checks |
 | --- | --- | --- | --- |
-| C0 Decide and tidy | S | Accept the ADRs below. Fix the existing manifests: pin or remove `agentgateway`, drop the PodDisruptionBudget or add a second replica, add a NetworkPolicy for the daemon, add a gate-only listener, require a RuntimeClass in Citadel, remove the unreachable Deployment branch. | A kind cluster test in CI creates a Job, sees it complete, and finds no lease in `kubectl get job -o yaml`. The daemon refuses to start in Citadel without a RuntimeClass. |
-| C1 Sandboxed run pods | M | Harness images, lease exchange with TokenReview, bundle checkout, default-deny run namespace with the canary, resource limits and deadlines, option A inference through the Model Gate. | `claude`, `codex` and `agy` each finish a headless coding task in gVisor through the Model Gate, or are recorded as Sanctum-only with the reason. A budget refusal returns 429 and a bad lease returns 401, and the task stops. The canary pod cannot resolve names or reach the internet or another run pod. A second lease exchange for the same pod is refused. Stopping a task deletes its Job and revokes its lease. |
+| C0 Decide and tidy | S | Accept the ADRs below (including open decision 7's approved sandbox handler list). Fix the existing manifests: pin or remove `agentgateway`, drop the PodDisruptionBudget or add a second replica, add a NetworkPolicy for the daemon, add a gate-only TLS listener, require and verify an approved RuntimeClass handler in Citadel, remove the unreachable Deployment branch. | A kind cluster test in CI creates a Job with a verified RuntimeClass and sees it complete. The daemon refuses to start or launch in Citadel without an approved RuntimeClass handler. The unreachable Deployment branch is removed. |
+| C1 Sandboxed run pods | M | Harness images, lease exchange with TokenReview over server-authenticated TLS (replacing `SABLECOURT_TASK_TOKEN` in the Job environment), bundle checkout, default-deny run namespace plus host/CNI node and non-TCP/UDP/SCTP controls with the canary, resource limits and deadlines, option A inference through the Model Gate. | `kubectl get job -o yaml` contains no lease. `claude`, `codex` and `agy` each finish a headless coding task in gVisor through the Model Gate, or are recorded as Sanctum-only with the reason. Every lease exchange and gate call verifies the gate's TLS certificate; cleartext or untrusted-certificate calls fail. A budget refusal returns 429 and a bad lease returns 401, and the task stops. The canary pod proves sandbox isolation and cannot resolve names or reach the internet, another run pod, its host node IP (outside the gate listener) or ICMP egress. A second lease exchange for the same pod is refused, and a failed exchange causes the reconciler to revoke any issued lease before retry. Stopping a task deletes its Job and revokes its lease. |
 | C2 Gateway behind the Model Gate | M | agentgateway installed and pinned, provider keys moved to its Secret, the daemon's JWT toward it, provider-preserving paths, the label headers and Sablecourt's labelled counters. | The daemon's secret store holds no provider key and calls still succeed. The gateway refuses a call without the daemon's token. Token totals from the gateway and from Model Gate settlement agree over a test run. Nightloom reads usage by team from the metrics store. |
 | C3 Councils in the cluster | M | The council driver launches three run pods per round with the barrier, the writer bundle upload and the daemon's push, PostgreSQL council migrations. | A two-round council with three harnesses completes. Restarting the daemon mid-round neither drops nor duplicates a start. Only the daemon pushes the writer's branch. |
 | C4 Shared installation | L | ADR-0014 Stage 3 in the cluster (OIDC, roles, passkey approvals, `TrustPolicy`), server-side sessions, leader election and gate replicas, the Git executor split, signed audit heads exported, and agent-sandbox warm pools if start latency needs them. | Killing the active replica hands over without a duplicate launch. An approval with a passkey runs once and a replay is refused. Deleting the last audit rows is detected against the exported heads. |
@@ -361,11 +367,11 @@ C2 and C3 can run in parallel after C1.
 4. Source of the cost numbers. Gateway metrics with labels, if agentgateway can carry them, or the Model Gate's own counters with the gateway as cross-check (recommended). Also where the `team` field lives: on `Budget`, on `Workload`, or on the installation.
 5. CRDs for declared manifests. Keep Git files in a ConfigMap (recommended) or publish `Workload`, `Policy` and `Budget` as CRDs.
 6. Egress. Require Cilium for any name-based allowlist, or support only the no-internet model plus an in-cluster cache (recommended to start).
-7. Sandbox runtime. gVisor as the default with Kata as the supported alternative, and runc refused for harness pods (recommended), or allow runc with a warning.
+7. Sandbox runtime and approved handler list. Resolve whether `runc` is refused for harness pods (recommended) or allowed with a warning, and define the approved `RuntimeClass` handler allowlist (`gvisor`/`runsc` as default, Kata as supported alternative) that the daemon verifies before launching harnesses.
 8. agent-sandbox. Adopt when its API is `v1` and warm pools are needed (recommended), or adopt the `v1beta1` API now.
 9. Channel binding in the cluster. Pod UID at exchange plus NetworkPolicy first (recommended), then pod certificates, or the daemon CA of ADR-0014 Stage 2.
 10. Minimum Kubernetes version. bound service account tokens have been stable since 1.22, and the node metadata on pod-bound tokens has been stable since 1.32, so the floor is set by agentgateway 1.7, which supports 1.32 to 1.37; 1.37 adds pod certificates.
-11. Harness images. Installations build them from published Dockerfiles (recommended), or Sablecourt publishes images, which needs the CLI licences checked.
+11. Harness images. ADR-0011's 2026-11-26 amendment allows publishing the `codex` image and tool-free base images for `claude` and `agy`; decide whether cluster installations build full images for non-redistributable CLIs from published Dockerfiles (recommended) or deliver pinned vendor binaries into tool-free images through a read-only volume or init step.
 12. Splitting the daemon. A separate Git executor and gate replicas in C4 (recommended), earlier, or never.
 
 ## New ADRs this would need
@@ -373,12 +379,12 @@ C2 and C3 can run in parallel after C1.
 None are written here. Each would come before code depends on it:
 
 - Citadel scope: unparks Citadel and the Kubernetes runtime (amends ADR-0011's parked list), confirms subscription logins as Sanctum-only, and states the namespace layout and the one-installation-per-team rule.
-- Harness pods in Kubernetes: required RuntimeClass and the refusal without it, the pod spec, bundle checkout and return, resource limits, image build and distribution. Extends the evolution options of ADR-0003.
+- Harness pods in Kubernetes: required RuntimeClass with handler allowlist and canary verification and the refusal without it, the pod spec, bundle checkout and return, resource limits, image build and distribution. Extends the evolution options of ADR-0003.
 - Agent gateway behind the Model Gate: adds agentgateway as an external dependency (ADR-0004 lists it as an evolution option), states which checks stay in Sablecourt, the provider-preserving paths, and the refusal to hold provider keys in Citadel.
-- Cluster network model: default deny, the separate gate listener, no DNS for run pods, the canary and its failure mode, per-launch policies and the optional FQDN capability.
-- Workload identity in the cluster: projected token exchange through TokenReview, the cluster-scoped grant it needs, and the later channel binding. Extends ADR-0014 Stage 3.
+- Cluster network model: default deny, the separate TLS gate listener, no DNS for run pods, host/CNI controls for node and non-TCP/UDP/SCTP traffic, the canary and its failure mode, per-launch policies and the optional FQDN capability.
+- Workload identity in the cluster: projected token exchange over server-authenticated TLS through TokenReview, the cluster-scoped grant it needs, failed-exchange cleanup and retry rules, and the later channel binding. Extends ADR-0014 Stage 3.
 - Usage telemetry contract: metric names, the label set, the pinned OpenTelemetry convention version, and what Nightloom may read. It sits on the boundary of ADR-0007, so both products agree on it.
-- Store in Citadel: PostgreSQL required, migration parity with SQLite, serialized audit head, leader election.
+- Store in Citadel: PostgreSQL required, migration parity with SQLite, leader election, and exported signed audit heads.
 
 ## Sources
 
@@ -396,4 +402,4 @@ Outside projects, read on 2026-11-25:
 - OpenTelemetry: [GenAI metrics page (moved notice)](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/), [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) and its [changelog](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/CHANGELOG.md), [core v1.37.0 release](https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.37.0).
 - OpenCost: [1.121.5 release page](https://github.com/opencost/opencost/releases/tag/v1.121.5), [CNCF project page](https://www.cncf.io/projects/opencost/), [plugins](https://www.opencost.io/docs/integrations/plugins), [API](https://www.opencost.io/docs/integrations/api).
 
-In this repository: [ADR-0001](../adr/0001-local-first-control-plane-with-k8s-adapters.md), [ADR-0003](../adr/0003-hybrid-workload-isolation.md), [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md), [ADR-0009](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md), [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md), [ADR-0014](../adr/0014-identity-and-authentication.md); [harness containers](../how-it-works/harness-containers.md), [Model Gate](../how-it-works/model-gate.md), [identity and access](../how-it-works/identity-and-access.md), [threat model](../threat-model.md); code in [internal/runtime/k8s](../../internal/runtime/k8s), [internal/gate/model](../../internal/gate/model), [cmd/sablecourtd](../../cmd/sablecourtd) and [deploy/k8s](../../deploy/k8s).
+In this repository: [ADR-0001](../adr/0001-local-first-control-plane-with-k8s-adapters.md), [ADR-0003](../adr/0003-hybrid-workload-isolation.md), [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md), [ADR-0009](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md), [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md), [ADR-0014](../adr/0014-identity-and-authentication.md); [harness containers](../how-it-works/harness-containers.md), [Model Gate](../how-it-works/model-gate.md); code in [internal/runtime/k8s](https://github.com/shadewright-labs/sablecourt/tree/main/internal/runtime/k8s), [internal/gate/model](https://github.com/shadewright-labs/sablecourt/tree/main/internal/gate/model), [cmd/sablecourtd](https://github.com/shadewright-labs/sablecourt/tree/main/cmd/sablecourtd) and [deploy/k8s](https://github.com/shadewright-labs/sablecourt/tree/main/deploy/k8s).
