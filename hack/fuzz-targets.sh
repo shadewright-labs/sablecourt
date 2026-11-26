@@ -1,38 +1,44 @@
 #!/usr/bin/env bash
-# Prints every Go fuzz target of the repository as one line of JSON, ["<package dir>:<FuzzName>", ...], for the
-# matrix of .github/workflows/fuzz.yml. The list is read from the tree: every top-level `func FuzzX(<name>
-# *testing.F)` in a _test.go file under cmd/, internal/ and examples/, whatever the parameter is called, so a new
-# fuzz test is fuzzed without a list to keep in step. Fails when the search fails or finds nothing, so a broken
-# search cannot pass by fuzzing nothing. Usage: hack/fuzz-targets.sh [repository root]
+# Prints every Go fuzz target of the module as one line of JSON, ["<package dir>:<FuzzName>", ...], for the
+# matrix of .github/workflows/fuzz.yml. The list comes from Go's own discovery, `go test -list '^Fuzz' ./...`,
+# so whatever the go command fuzzes is listed (an unnamed parameter, a signature over several lines, an import
+# alias of testing, build constraints), with no list to keep in step. It compiles the test binaries, so it needs
+# the module's Go toolchain. Fails when go test fails (a package that does not build) or finds nothing, so a
+# broken search cannot pass by fuzzing nothing. Usage: hack/fuzz-targets.sh [module root]
 # Tests: hack/test/fuzz-targets_test.sh.
 set -euo pipefail
 
 cd "${1:-.}"
-dirs=()
-for d in cmd internal examples; do
-  if [ -d "${d}" ]; then dirs+=("${d}"); fi
-done
-if [ "${#dirs[@]}" -eq 0 ]; then
-  echo "no fuzz targets found: no cmd/, internal/ or examples/ directory" >&2
+module="$(GOWORK=off go list -m)" || { echo "cannot read the module path" >&2; exit 1; }
+out="$(mktemp "${TMPDIR:-/tmp}/fuzz-targets.XXXXXX")"
+trap 'rm -f "${out}"' EXIT
+if ! GOWORK=off go test -list '^Fuzz' ./... > "${out}"; then
+  echo "go test -list failed; no fuzz target list" >&2
   exit 1
 fi
-hits="$(mktemp "${TMPDIR:-/tmp}/fuzz-targets.XXXXXX")"
-trap 'rm -f "${hits}"' EXIT
-rc=0
-grep -rEH --include='*_test.go' \
-  '^func Fuzz[A-Za-z0-9_]*\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]+\*testing\.F[[:space:]]*\)' \
-  "${dirs[@]}" > "${hits}" || rc=$?
-if [ "${rc}" -gt 1 ]; then
-  echo "searching for fuzz targets failed (grep exit ${rc})" >&2
-  exit 1
-fi
-targets=()
+# go test prints a package's matching names, then "ok  <import path>  <time>" for that package.
+targets=() names=()
 while IFS= read -r line; do
-  file="${line%%:*}" rest="${line#*:}"
-  name="${rest#func }"
-  name="${name%%(*}"
-  targets+=("$(dirname "${file}"):${name}")
-done < "${hits}"
+  if [[ "${line}" =~ ^Fuzz[A-Za-z0-9_]*$ ]]; then
+    names+=("${line}")
+  elif [[ "${line}" =~ ^ok[[:space:]]+([^[:space:]]+) ]]; then
+    pkg="${BASH_REMATCH[1]}"
+    if [ "${pkg}" = "${module}" ]; then
+      dir=.
+    elif [ "${pkg#"${module}/"}" != "${pkg}" ]; then
+      dir="${pkg#"${module}/"}"
+    else
+      echo "package ${pkg} is outside module ${module}" >&2
+      exit 1
+    fi
+    for name in ${names[@]+"${names[@]}"}; do targets+=("${dir}:${name}"); done
+    names=()
+  fi
+done < "${out}"
+if [ "${#names[@]}" -ne 0 ]; then
+  echo "fuzz targets with no package line: ${names[*]}" >&2
+  exit 1
+fi
 if [ "${#targets[@]}" -eq 0 ]; then
   echo "no fuzz targets found" >&2
   exit 1

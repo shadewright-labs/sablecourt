@@ -1,8 +1,8 @@
 name: Fuzz
 
 # Runs every Go fuzz target of the repository for a few minutes each, one matrix job per target, weekly and by
-# hand. The list comes from the tree (hack/fuzz-targets.sh: every `func FuzzX(f *testing.F)` in a _test.go file),
-# so a new target is fuzzed without being listed anywhere. Pull requests run each target's seed corpus inside
+# hand. The list comes from Go's own discovery (hack/fuzz-targets.sh: `go test -list '^Fuzz' ./...`), so a new
+# target is fuzzed without being listed anywhere. Pull requests run each target's seed corpus inside
 # `go test`, and the Model Gate SSRF target for ten seconds (test.yml). Not part of the pull request graph of
 # ci.yml, so a finding here never blocks a pull request: it fails this run and leaves the failing input as an
 # artifact. Reproduce one with `go test -run '<FuzzName>/<file>' ./<package>` after copying the file to the
@@ -23,7 +23,8 @@ jobs:
   targets:
     name: list targets
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Listing compiles the test binary of every package.
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -33,6 +34,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
 
       - name: List the fuzz targets
         id: list
