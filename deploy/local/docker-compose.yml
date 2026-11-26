@@ -1,6 +1,6 @@
 services:
   sablecourtd:
-    image: ghcr.io/shadewright-labs/sablecourt:0.1.0
+    image: ghcr.io/shadewright-labs/sablecourt:0.1.0 # x-release-please-version
     restart: unless-stopped
     network_mode: service:tailscale
     depends_on:

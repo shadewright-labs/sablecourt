@@ -371,10 +371,10 @@ def release_checks(text):
         ("check: a published release or a failed lookup stops the run",
          line(meta, 'hack/release-state.sh "${TAG}" > /dev/null') and "set -euo pipefail" in meta),
         ("check: ci-ok passed on main for the tagged commit",
-         in_order(ciok, "set -euo pipefail",
-                  'gh api "repos/${GH_REPO}/actions/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=100" > "${RUNNER_TEMP}/runs.json"',
-                  'gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-runs?check_name=ci-ok&per_page=100" > "${RUNNER_TEMP}/checks.json"')
-         and line(ciok, 'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json"')),
+         "timeout-minutes: 30\n" in j.get("check", "")
+         and line(ciok, 'run: hack/release-ci-ok.sh --wait "${GH_REPO}" "${GITHUB_SHA}" 1500 30')
+         and 'repos/${repo}/actions/runs?head_sha=${sha}&event=push&branch=main&per_page=100' in read("hack/release-ci-ok.sh")
+         and 'repos/${repo}/commits/${sha}/check-runs?check_name=ci-ok&per_page=100' in read("hack/release-ci-ok.sh")),
         ("binaries: the pinned package script, no setup-go cache, no target override",
          'hack/package-binaries.sh "${VERSION}"' in st("binaries", "Build and pack the archives")
          and "cache: false" in st("binaries", "Set up Go") and "RELEASE_TARGETS" not in text),
@@ -552,9 +552,17 @@ def release_checks(text):
         ("publish: a release candidate stays a pre-release",
          'if [ "${PRERELEASE}" = true ]; then\n            flags+=(--prerelease)' in st("publish", "Create the draft release")
          and 'if [ "${PRERELEASE}" = true ]; then\n            gh release edit "${TAG}" --draft=false --prerelease\n' in publish),
-        ("publish: runs in the release environment, the only job that does",
-         re.search(r"^    environment: release$", j.get("publish", ""), re.M) is not None
-         and len(re.findall(r"^\s+environment:", text, re.M)) == 1),
+        ("publish: uses CHANGELOG.md for stable releases and generated notes for pre-releases",
+         in_order(st("publish", "Create the draft release"),
+                  'if [ "${PRERELEASE}" = true ]; then',
+                  "flags+=(--generate-notes)",
+                  'elif bash hack/release-notes.sh "${VERSION}" CHANGELOG.md > "${RUNNER_TEMP}/changelog-section.md"; then',
+                  'cat "${RUNNER_TEMP}/changelog-section.md" >> "${notes}"',
+                  "else",
+                  "flags+=(--generate-notes)")),
+        ("no job runs in an environment",
+         not any(re.search(r"^\s+environment:", body, re.M) for body in j.values())
+         and re.search(r"^\s+environment:", text, re.M) is None),
         ("only publish writes releases", all(
             not re.search(r"gh release (create|edit|upload|delete)|--method DELETE", t)
             for n, t in j.items() if n != "publish")),
@@ -631,7 +639,7 @@ MUTATIONS = [
     ("check: a published release or a failed lookup stops the run",
      'hack/release-state.sh "${TAG}" > /dev/null',
      'if state="$(gh release view "${TAG}" --json isDraft --jq .isDraft 2> /dev/null)" && [ "${state}" = false ]; then exit 1; fi'),
-    ("check: ci-ok passed on main for the tagged commit", "check-runs?check_name=ci-ok&", "check-runs?"),
+    ("check: ci-ok passed on main for the tagged commit", "timeout-minutes: 30\n", "timeout-minutes: 10\n"),
     ("binaries: the pinned package script, no setup-go cache, no target override", "cache: false #", "cache: true #"),
     ("binaries: SBOM of the binaries from the pinned syft", 'syft" scan "dir:${out}/bin"', 'syft" scan "dir:${out}/dist"'),
     ("images: both pushed by digest, with no tag", "push-by-digest=true,name-canonical=true,push=true\n\n  # A gate",
@@ -719,9 +727,9 @@ MUTATIONS = [
     ("verify: no token where the built sablectl runs", in_step("verify", "Run the stamped sablectl", "        env:\n", "        env:\n          GH_TOKEN: ${{ github.token }}\n")),
     ("scan-images: the Trivy database pinned by digest", in_job("scan-images", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db@sha256:", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db:2 #")),
     ("scan-images: the Trivy database pinned by digest", ' --db-repository "${TRIVY_DB}"', ""),
-    ("check: ci-ok passed on main for the tagged commit", "event=push&branch=main&", ""),
-    ("check: ci-ok passed on main for the tagged commit", 'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json"',
-     'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json" || true'),
+    ("check: ci-ok passed on main for the tagged commit",
+     'run: hack/release-ci-ok.sh --wait "${GH_REPO}" "${GITHUB_SHA}" 1500 30',
+     'run: hack/release-ci-ok.sh --wait "${GH_REPO}" "${GITHUB_SHA}" 1500 30 || true'),
     # Each signing job loses scan-images from its needs: it would sign a digest that failed the scan.
     ("every signing job needs scan-images itself", in_job("sign-images", "needs: [check, binaries, images, scan-images]", "needs: [check, binaries, images]")),
     ("nothing is signed unless check, both builds and the scan passed",
@@ -808,7 +816,11 @@ MUTATIONS = [
     ("publish: version tags before latest, each read back against the verified digest",
      '"${got}" != "${digest}"', '"${got}" = ""'),
     ("publish: a release candidate stays a pre-release", "--draft=false --prerelease\n", "--draft=false\n"),
-    ("publish: runs in the release environment, the only job that does", "    environment: release\n", ""),
+    ("publish: uses CHANGELOG.md for stable releases and generated notes for pre-releases",
+     'elif bash hack/release-notes.sh "${VERSION}" CHANGELOG.md > "${RUNNER_TEMP}/changelog-section.md"; then',
+     "elif false; then"),
+    ("no job runs in an environment", in_job("publish", "    permissions:\n", "    environment: release\n    permissions:\n")),
+    ("no job runs in an environment", in_job("check", "    permissions:\n", "    environment: release-publish\n    permissions:\n")),
     ("only publish writes releases", "      - name: Install syft (pinned)\n        run: hack/install-syft.sh \"${RUNNER_TEMP}/syft\"\n\n      - name: Write the SBOM",
      "      - name: Early release\n        run: gh release create x\n\n      - name: Write the SBOM"),
     ("no asset replacement, tag deletion or git tag write", '"${flags[@]}" "${DIST}"/*', '"${flags[@]}" --clobber "${DIST}"/*'),
@@ -863,6 +875,82 @@ for name, old, new in DOC_MUTATIONS:
     check(f"docs/ci.md with {new.splitlines()[0][:50]!r}: {name} fails", CI_DOC != true_doc and results.get(name) is False)
 CI_DOC = true_doc
 print(f"{len(DOC_MUTATIONS)} docs table mutation cases")
+
+
+def rp_env(text):
+    m = re.search(r"^    environment:\s*(\S+)\s*$", text, re.M)
+    return m.group(1) if m else ""
+
+
+def release_please_checks(rp_text, rel_text):
+    rpj = jobs(rp_text)
+    rp_job = rpj.get("release-please", "")
+    key_env = rp_env(rp_job)
+    return [
+        ("permissions: {} at the top", re.search(r"^permissions: \{\}$", rp_text, re.M) is not None),
+        ("runs only on push to main",
+         re.search(r"^on:\n  push:\n    branches: \[main\]\n\n", rp_text, re.M) is not None
+         and not re.search(r"workflow_dispatch|pull_request|workflow_run|schedule:|workflow_call|tags:", rp_text)),
+        ("concurrency group release-please, never cancelled",
+         re.search(r"^concurrency:\n  group: release-please\n  cancel-in-progress: false\n", rp_text, re.M) is not None),
+        ("exactly one job granting only contents: read",
+         set(rpj) == {"release-please"} and grants(rp_job) == {"contents: read"}),
+        ("runs in the release environment", key_env == "release" and len(re.findall(r"^\s+environment:", rp_text, re.M)) == 1),
+        ("App token scoped to sablecourt with only contents, pull-requests and issues write",
+         "actions/create-github-app-token@" in rp_job
+         and "client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}" in rp_job
+         and "private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}" in rp_job
+         and re.search(r"^          repositories: sablecourt$", rp_job, re.M) is not None
+         and re.findall(r"^\s+(permission-[a-z-]+: \S+)$", rp_job, re.M)
+             == ["permission-contents: write", "permission-pull-requests: write", "permission-issues: write"]),
+        ("no inline run steps", re.search(r"^\s+run:", rp_text, re.M) is None),
+        ("release.yml uses no environment and does not read the App key",
+         bool(key_env)
+         and not any(re.search(r"^\s+environment:", body, re.M) for body in jobs(rel_text).values())
+         and re.search(r"^\s+environment:", rel_text, re.M) is None
+         and "RELEASE_APP_PRIVATE_KEY" not in rel_text),
+    ]
+
+
+RP_MUTATIONS = [
+    ("permissions: {} at the top", "rp", "permissions: {}\n", ""),
+    ("runs only on push to main", "rp", "    branches: [main]\n", "    branches: [main]\n  workflow_dispatch:\n"),
+    ("runs only on push to main", "rp", "    branches: [main]\n", "    tags: [\"v*\"]\n"),
+    ("concurrency group release-please, never cancelled", "rp", "concurrency:\n  group: release-please\n  cancel-in-progress: false\n", ""),
+    ("concurrency group release-please, never cancelled", "rp", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
+    ("exactly one job granting only contents: read", "rp", "      contents: read\n", "      contents: write\n"),
+    ("runs in the release environment", "rp", "    environment: release\n", ""),
+    ("App token scoped to sablecourt with only contents, pull-requests and issues write", "rp", "          repositories: sablecourt\n", ""),
+    ("App token scoped to sablecourt with only contents, pull-requests and issues write", "rp",
+     "          permission-issues: write\n", "          permission-issues: write\n          permission-workflows: write\n"),
+    ("no inline run steps", "rp", "          manifest-file: .release-please-manifest.json\n",
+     "          manifest-file: .release-please-manifest.json\n      - name: Shell\n        run: echo hi\n"),
+    ("release.yml uses no environment and does not read the App key", "rel",
+     "  publish:\n    name: Publish the release\n",
+     "  publish:\n    name: Publish the release\n    environment: release\n"),
+    ("release.yml uses no environment and does not read the App key", "rel",
+     "  check:\n    name: Check the tag\n",
+     "  check:\n    name: Check the tag\n    environment: release\n"),
+    ("release.yml uses no environment and does not read the App key", "rel",
+     "  publish:\n    name: Publish the release\n",
+     "  publish:\n    name: Publish the release\n    environment: release-publish\n"),
+    ("release.yml uses no environment and does not read the App key", "rel",
+     "      GH_TOKEN: ${{ github.token }}\n",
+     "      KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n"),
+]
+
+rp_wf = read(".github/workflows/release-please.yml")
+for name, ok in release_please_checks(rp_wf, release):
+    check(f"release-please.yml: {name}", ok)
+rp_names = {name for name, _ in release_please_checks(rp_wf, release)}
+for name, target, old, new in RP_MUTATIONS:
+    m_rp = rp_wf.replace(old, new, 1) if target == "rp" else rp_wf
+    m_rel = release.replace(old, new, 1) if target == "rel" else release
+    results = dict(release_please_checks(m_rp, m_rel))
+    changed = (m_rp != rp_wf) if target == "rp" else (m_rel != release)
+    check(f"release-please.yml without it: {name} fails", name in rp_names and changed and results.get(name) is False)
+check("release-please.yml: every check has a mutation that breaks it", rp_names == {m[0] for m in RP_MUTATIONS})
+print(f"{len(RP_MUTATIONS)} release-please mutation cases")
 for wf in sorted(os.listdir(os.path.join(root, ".github/workflows"))):
     for use in re.findall(r"^\s+(?:- )?uses: (.+)$", read(".github/workflows/" + wf), re.M):
         check(f"{wf}: {use.split('@')[0].split(' ')[0]} pinned by commit with its version",

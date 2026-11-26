@@ -17,6 +17,7 @@ case_() { # name want content
 }
 reg="ghcr.io/shadewright-labs"
 case_ "published daemon image and version" 0 "image: ${reg}/sablecourt:0.1.0"
+case_ "published daemon image with x-release-please-version comment" 0 "image: ${reg}/sablecourt:0.1.0 # x-release-please-version"
 case_ "published agent image, candidate tag" 0 "image: ${reg}/sablecourt-agent:0.2.0-rc.1"
 case_ "digest reference" 0 "image: ${reg}/sablecourt@sha256:$(printf 'a%.0s' $(seq 64))"
 case_ "no tag" 0 "see ${reg}/sablecourt-agent for details"

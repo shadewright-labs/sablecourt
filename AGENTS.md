@@ -21,3 +21,11 @@ Weakening any invariant below requires an accepted ADR in `docs/adr/` first.
 - No emails, personal paths, host names, IPs, or real credentials in tracked files or tests.
 - Go standard library first; justify every third-party dependency in an ADR or commit message.
 - Every parser, redaction rule, policy boundary, and refusal path ships with table-driven tests passing under `go test -race ./...`.
+
+## Releases
+
+- Stable releases (`vX.Y.Z`) are managed by `release-please` (`.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json`) from Conventional Commits on `main`. While on 0.x, `feat` and breaking changes (`!` or `BREAKING CHANGE:`) bump minor, `fix`, `perf`, and `revert` bump patch, and `refactor`, `test`, `docs`, `build`, `ci`, and `chore` stay out of `CHANGELOG.md`.
+- `release-please.yml` keeps one release pull request open using the `shadewright-release` GitHub App token from the `release` environment (used only by `release-please.yml`, holding the App key, and restricted to `main`). Never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request, and never create a plain `vX.Y.Z` tag by hand.
+- The release pull request carries the edits to `CHANGELOG.md`, `.release-please-manifest.json`, `deploy/k8s/base/deployment.yaml`, and `deploy/local/docker-compose.yml`. When a maintainer merges it, `release-please.yml` runs on the merge push to create a draft GitHub release and push the `vX.Y.Z` tag through the App token so `.github/workflows/release.yml` runs to build, scan, sign, verify, and publish the release (with no `environment:`) and container images.
+- For a pre-release (`vX.Y.Z-rc.N`), a maintainer tags a commit on `main` whose `ci-ok` check passed and pushes the tag by hand; `release.yml` publishes it as a pre-release without moving `latest`, and `release-please` ignores it.
+- See `docs/ci.md` ("Releases") and `docs/how-to/verify-a-release.md` for workflow details and verification commands.

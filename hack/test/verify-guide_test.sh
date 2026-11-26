@@ -60,6 +60,11 @@ def jobs(text):
 
 WF = read(".github/workflows/release.yml")
 J = jobs(WF)
+RP_WF = read(".github/workflows/release-please.yml")
+RP_J = jobs(RP_WF)
+RP_CFG = json.loads(read("release-please-config.json"))
+RP_PKG = RP_CFG.get("packages", {}).get(".", {})
+RP_MANIFEST = json.loads(read(".release-please-manifest.json"))
 GUIDE = read("docs/how-to/verify-a-release.md")
 CI = read("docs/ci.md")
 TRIVYIGNORE = read(".trivyignore.yaml")
@@ -131,13 +136,11 @@ GH_FLAGS = ['--repo shadewright-labs/sablecourt', '--cert-identity "$IDENTITY"',
 COSIGN_FLAGS = ['--certificate-identity "$IDENTITY"', '--certificate-oidc-issuer "$ISSUER"']
 # The pages of GitHub's documentation that the prose cites for GitHub's own behaviour, each read for the sentence
 # that cites it: the registry login for oci:// images, jobs skipped after a failed need, pending runs of a
-# concurrency group, deployment protection rules, environments created without protection rules, and what an
-# immutable release locks.
+# concurrency group, and what an immutable release locks.
 GH_DOCS = "https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax"
 DOC_URLS = {
     "https://cli.github.com/manual/gh_attestation_verify",
-    GH_DOCS + "#jobsjob_idneeds", GH_DOCS + "#concurrency", GH_DOCS + "#jobsjob_idenvironment",
-    "https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments",
+    GH_DOCS + "#jobsjob_idneeds", GH_DOCS + "#concurrency",
     "https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases",
 }
 ABSOLUTE = re.compile(r"\b(only|always|never|every|any|nothing|cannot|exactly)\b", re.I)
@@ -372,16 +375,70 @@ GUIDE_CLAIMS = {
 }
 CI_CLAIMS = {
     "## Releases": lambda c: True,
-    "`release.yml` runs on a pushed `v*` tag. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.":
-        lambda c: re.search(r"^on:\n  push:\n    tags: \[\"v\*\"\]\n\n", WF, re.M) is not None
+    "Two workflows handle releases: `release-please.yml` cuts stable releases from Conventional Commits on `main`, and `release.yml` builds, scans, signs, verifies and publishes the release and container images when a `v*` tag is pushed. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.":
+        lambda c: re.search(r"^on:\n  push:\n    branches: \[main\]\n\n", RP_WF, re.M) is not None
+        and "googleapis/release-please-action@" in RP_WF
+        and re.search(r"^on:\n  push:\n    tags: \[\"v\*\"\]\n\n", WF, re.M) is not None
         and os.path.exists(os.path.join(root, "docs/how-to/verify-a-release.md")),
+    "### Cutting a release": lambda c: True,
+    "`release-please.yml` runs on pushes to `main` under concurrency group `release-please` (`cancel-in-progress: false`), in the `release` environment, with job-level `contents: read` and a short-lived token minted from the `shadewright-release` GitHub App (`vars.RELEASE_APP_CLIENT_ID` and `secrets.RELEASE_APP_PRIVATE_KEY`) with `contents: write`, `pull-requests: write` and `issues: write` scoped to `sablecourt`.":
+        lambda c: re.search(r"^on:\n  push:\n    branches: \[main\]\n\n", RP_WF, re.M) is not None
+        and re.search(r"^permissions: \{\}$", RP_WF, re.M) is not None
+        and re.search(r"^concurrency:\n  group: release-please\n  cancel-in-progress: false\n\n", RP_WF, re.M) is not None
+        and re.search(r"^    environment: release$", RP_J.get("release-please", ""), re.M) is not None
+        and re.search(r"^    permissions:\n      contents: read\n    steps:", RP_J.get("release-please", ""), re.M) is not None
+        and "actions/create-github-app-token@" in RP_WF
+        and "client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}" in RP_WF
+        and "private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}" in RP_WF
+        and "repositories: sablecourt" in RP_WF
+        and "permission-contents: write" in RP_WF
+        and "permission-pull-requests: write" in RP_WF
+        and "permission-issues: write" in RP_WF,
+    "Configured by `release-please-config.json` and `.release-please-manifest.json`, it keeps one open release pull request (`chore: release ${version}`). On 0.x versions, `feat` and breaking changes bump minor (`bump-minor-pre-major: true`, `bump-patch-for-minor-pre-major: false`), while `fix`, `perf` and `revert` bump patch; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay hidden from `CHANGELOG.md`.":
+        lambda c: "config-file: release-please-config.json" in RP_WF
+        and "manifest-file: .release-please-manifest.json" in RP_WF
+        and RP_CFG.get("pull-request-title-pattern") == "chore: release ${version}"
+        and RP_PKG.get("bump-minor-pre-major") is True
+        and RP_PKG.get("bump-patch-for-minor-pre-major") is False
+        and "." in RP_MANIFEST
+        and {s["type"] for s in RP_PKG.get("changelog-sections", []) if not s.get("hidden")} == {"feat", "fix", "perf", "revert"}
+        and {s["type"] for s in RP_PKG.get("changelog-sections", []) if s.get("hidden")} == {"refactor", "test", "docs", "build", "ci", "chore"}
+        and os.path.exists(os.path.join(root, "CHANGELOG.md")),
+    "The release pull request carries the edits to `CHANGELOG.md`, `.release-please-manifest.json`, `deploy/k8s/base/deployment.yaml` and `deploy/local/docker-compose.yml`. When a maintainer merges that pull request, the push to `main` triggers `release-please.yml` to create a draft GitHub release and push a plain `vX.Y.Z` tag (`draft: true`, `force-tag-creation: true`) through the App token so the tag push starts `release.yml`. Do not push plain `vX.Y.Z` tags by hand, and do not edit `CHANGELOG.md` or `.release-please-manifest.json` outside the release pull request.":
+        lambda c: RP_CFG.get("include-component-in-tag") is False
+        and RP_PKG.get("draft") is True
+        and RP_PKG.get("force-tag-creation") is True
+        and {"type": "generic", "path": "deploy/k8s/base/deployment.yaml"} in RP_PKG.get("extra-files", [])
+        and {"type": "generic", "path": "deploy/local/docker-compose.yml"} in RP_PKG.get("extra-files", [])
+        and re.search(r"ghcr\.io/shadewright-labs/sablecourt:[0-9.]+ # x-release-please-version$", read("deploy/k8s/base/deployment.yaml"), re.M) is not None
+        and re.search(r"ghcr\.io/shadewright-labs/sablecourt:[0-9.]+ # x-release-please-version$", read("deploy/local/docker-compose.yml"), re.M) is not None
+        and "token: ${{ steps.app-token.outputs.token }}" in RP_WF,
+    "For a pre-release (`vX.Y.Z-rc.N`), a maintainer tags a commit on `main` whose `ci-ok` check passed and pushes the tag by hand. `release.yml` builds, scans, signs, verifies and publishes it as a pre-release without moving `latest`. Because `release-please` tracks the last release from `.release-please-manifest.json`, hand-cut release candidate tags stay separate from `release-please`.":
+        lambda c: r"(-rc\.[1-9][0-9]*)?$ ]]" in J.get("check", "")
+        and "hack/release-ci-ok.sh" in J.get("check", "")
+        and 'if [ "${PRERELEASE}" = true ]; then\n            gh release edit "${TAG}" --draft=false --prerelease\n' in J.get("publish", "")
+        and "manifest-file: .release-please-manifest.json" in RP_WF,
+    "### Building and publishing a tag": lambda c: True,
+    "`release.yml` runs on a pushed `v*` tag. In `check`, `hack/release-ci-ok.sh --wait` polls `ci.yml` on `main` for the tagged commit at 30-second intervals for up to 25 minutes while CI is in progress; it fails immediately if the newest run concluded with a failure, or at the 25-minute bound (after which a maintainer can rerun `release.yml` once `ci-ok` passes).":
+        lambda c: re.search(r"^on:\n  push:\n    tags: \[\"v\*\"\]\n\n", WF, re.M) is not None
+        and 'hack/release-ci-ok.sh --wait "${GH_REPO}" "${GITHUB_SHA}" 1500 30' in J.get("check", "")
+        and "timeout-minutes: 30" in J.get("check", "")
+        and "Wait for the CI run on main to pass, then rerun this workflow." in read("hack/release-ci-ok.sh"),
+    "In `publish`, `release.yml` deletes existing drafts for the tag (including the draft created by `release-please`), creates a fresh draft with the fourteen verified files, image digests, build details and release notes (from the matching section of `CHANGELOG.md` via `hack/release-notes.sh` for a plain `vX.Y.Z` tag when present, or `--generate-notes` for pre-releases and as a fallback), checks the assets byte for byte, tags the verified image digests, publishes the release and checks the published assets again.":
+        lambda c: 'gh api --method DELETE "repos/${GH_REPO}/releases/${id}"' in wf_step("publish", "Remove the drafts of earlier runs")
+        and 'gh release create "${TAG}" "${flags[@]}" "${DIST}"/*' in wf_step("publish", "Create the draft release")
+        and 'bash hack/release-notes.sh "${VERSION}" CHANGELOG.md' in wf_step("publish", "Create the draft release")
+        and "--generate-notes" in wf_step("publish", "Create the draft release")
+        and 'hack/release-assets.sh "${TAG}" "${RUNNER_TEMP}/dist"' in wf_step("publish", "Check the draft's assets byte for byte")
+        and 'hack/release-assets.sh "${TAG}" "${RUNNER_TEMP}/dist"' in wf_step("publish", "Check the published assets byte for byte")
+        and "docker buildx imagetools create" in wf_step("publish", "Tag the verified image digests")
+        and 'gh release edit "${TAG}" --draft=false' in wf_step("publish", "Publish the release"),
     "No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.":
         lambda c: not re.search(r"^\s+(?:- )?(?:if|continue-on-error):", WF, re.M),
-    "A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress, and a newer run of the group cancels a pending one and waits in its place ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).":
+    "A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress, and a newer run of the group cancels a pending one and waits in its place ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)).":
         lambda c: re.search(r"^concurrency:\n  group: release\n  cancel-in-progress: false\n\n", WF, re.M) is not None
         and "queue:" not in WF
-        and re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None
-        and [j for j in J if re.search(r"^    environment:", J[j], re.M)] == ["publish"],
+        and not any(re.search(r"^\s+environment:", J[j], re.M) for j in J),
     "The `needs` of each job:":
         lambda c: "the needs table of docs/ci.md is the one of the workflow" in WORKFLOWS_TEST,
     "What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml`. It reads the rows whose first cell is a job name in backticks, and fails when they differ from what it derived or name a job twice.":
@@ -401,29 +458,42 @@ CI_CLAIMS = {
     "- When a tag fails, fix the cause on `main`, cut the next release candidate from the new commit, and do not reuse the tag.":
         lambda c: "git merge-base --is-ancestor" in J.get("check", "") and "hack/release-state.sh" in J.get("check", ""),
     "### Repository settings": lambda c: True,
-    "`release.yml` does not set these repository settings, and no file in this repository holds their values:":
+    "`release.yml` and `release-please.yml` do not set these repository settings, and no file in this repository holds their values:":
         lambda c: not any(os.path.exists(os.path.join(root, ".github", f)) for f in ("rulesets", "settings.yml"))
-        and re.search(r"rulesets|environments/|immutable", WF, re.I) is None,
-    "- A tag ruleset that limits who may create `v*` tags. No step of `release.yml` checks who pushed the tag.":
+        and re.search(r"rulesets|environments/|immutable", WF + RP_WF, re.I) is None,
+    "- The `shadewright-release` GitHub App installed on this repository, with `RELEASE_APP_CLIENT_ID` set as a variable and `RELEASE_APP_PRIVATE_KEY` set as a secret in the `release` environment, which `release-please.yml` uses alone (`release.yml` names no `environment:`). Restrict `release` to the `main` branch so tag runs do not have access to the App key, and leave required reviewers unset so pushes to `main` are not paused.":
+        lambda c: "vars.RELEASE_APP_CLIENT_ID" in RP_WF and "secrets.RELEASE_APP_PRIVATE_KEY" in RP_WF
+        and re.search(r"^    environment: release$", RP_J.get("release-please", ""), re.M) is not None
+        and re.search(r"^\s+environment:", WF, re.M) is None
+        and "RELEASE_APP_PRIVATE_KEY" not in WF
+        and re.search(r"^\s+(?:reviewers|required_reviewers|wait_timer):", WF + RP_WF, re.M) is None,
+    "- A tag ruleset that limits who may create `v*` tags. Add the `shadewright-release` App as a bypass actor on tag creation while keeping tag updates and deletions blocked. No step of `release.yml` checks who pushed the tag.":
         lambda c: actor_unused(),
     "- Immutable releases. GitHub's documentation says that the assets of a published immutable release are protected from modification and deletion, and that its tag is locked to its commit ([immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)). `publish` attaches the files to a draft before it publishes it.":
         lambda c: "gh release upload" not in WF and "--clobber" not in WF
         and 'flags=(--verify-tag --draft ' in wf_step("publish", "Create the draft release")
         and 'gh release create "${TAG}" "${flags[@]}" "${DIST}"/*' in wf_step("publish", "Create the draft release")
         and WF.find("- name: Create the draft release") < WF.find("--draft=false"),
-    "- Required reviewers on the `release` environment, if wanted. `publish` names the environment and `release.yml` sets no reviewers. A workflow that names an environment that does not exist creates it with no protection rules ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)).":
-        lambda c: re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None
-        and re.search(r"^\s+(?:reviewers|required_reviewers|wait_timer):", WF, re.M) is None,
+    "### When a release goes wrong": lambda c: True,
+    "- A release pull request fails `repo-checks` because a commit subject added to `CHANGELOG.md` trips `hack/docs-links.py` (such as an undefined `[a][b]` reference) or `hack/check-image-refs.sh`. Direct edits to `CHANGELOG.md` on the bot's branch are overwritten on the next push to `main`, so fix it either by using a `release-please` release-notes override in the pull request body (untested locally, as the action's docs are not vendored here) or by updating the checker's allowance on `main` before merging.":
+        lambda c: os.path.exists(os.path.join(root, "hack/docs-links.py"))
+        and os.path.exists(os.path.join(root, "hack/check-image-refs.sh"))
+        and "hack/docs-links.py check" in read(".github/workflows/repo-checks.yml")
+        and "hack/check-image-refs.sh" in read(".github/workflows/repo-checks.yml"),
+    "- `release-please` pushes the `vX.Y.Z` tag and `release.yml` publishes the immutable release, yet `release-please` fails before creating its draft release. Later pushes to `main` then fail trying to create a draft for a tag that already has a published release; relabel the merged release pull request from `autorelease: pending` to `autorelease: tagged` by hand to clear the retry loop.":
+        lambda c: RP_PKG.get("draft") is True and RP_PKG.get("force-tag-creation") is True,
     "### Known limits": lambda c: True,
     "- Not pinned by a checksum in this repository: the Go toolchain that `actions/setup-go` installs from `go.mod`, and the runner's `gh`, `jq`, Docker and preinstalled Buildx.":
         lambda c: "go-version-file: go.mod" in J.get("binaries", "")
         and not any("hack/setup-buildx.sh" in J.get(j, "") for j in ("scan-images", "sign-images", "verify"))
         and not re.search(r"install[^\n]*\b(gh|jq)\b", WF),
-    "- The tests read the text of `release.yml` and run the release scripts under `hack/` on fixtures and stub commands. No test runs `release.yml`.":
-        lambda c: release_scripts_tested() and 'read(".github/workflows/release.yml")' in WORKFLOWS_TEST,
-    "- No step of `release.yml` creates a Git tag: a run starts from a pushed tag.":
+    "- The tests read the text of `release.yml`, `release-please.yml`, `release-please-config.json` and `.release-please-manifest.json` and run the release scripts under `hack/` on fixtures and stub commands. No test runs `release.yml` or `release-please.yml`.":
+        lambda c: release_scripts_tested() and 'read(".github/workflows/release.yml")' in WORKFLOWS_TEST
+        and 'read(".github/workflows/release-please.yml")' in read("hack/test/verify-guide_test.sh"),
+    "- No step of `release.yml` creates a Git tag: a run starts from a pushed tag (created by `release-please.yml` for `vX.Y.Z`, or pushed by hand for `vX.Y.Z-rc.N`).":
         lambda c: re.search(r"git tag|git push|/git/refs|--method POST", WF) is None and "--verify-tag" in WF
-        and re.search(r"^on:\n  push:\n    tags:", WF, re.M) is not None,
+        and re.search(r"^on:\n  push:\n    tags:", WF, re.M) is not None
+        and RP_PKG.get("force-tag-creation") is True,
     "- `publish` writes the image tags before it publishes the draft release, and no step removes them, so a failure in between can leave image tags next to a draft release.":
         lambda c: 0 < WF.find("- name: Tag the verified image digests") < WF.find("- name: Publish the release")
         and re.search(r"imagetools rm|/packages/|--method DELETE \"repos/\$\{GH_REPO\}/(?!releases/)", WF) is None,

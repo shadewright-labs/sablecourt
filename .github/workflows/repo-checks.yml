@@ -82,3 +82,6 @@ jobs:
 
       - name: Test the latest rule of a release
         run: hack/test/release-latest_test.sh
+
+      - name: Test the release notes extractor
+        run: bash hack/test/release-notes_test.sh
