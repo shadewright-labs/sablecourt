@@ -25,7 +25,7 @@
 2. **Gates** model calls: for a call through the Model Gate it checks the lease, the provider grant and the budget, then forwards the request to the configured upstream (OpenAI, Anthropic, Gemini, a local OpenAI-compatible server, or one gateway set with `--model-gateway-url`), adding the provider key when one is configured. Deterministic controllers are refused there.
 3. **Checks** tools and actions: the MCP Gate serves the tools a workload is granted and a closed set of typed actions. Deterministic policy decides each call: `allow`, `approve` or `deny`, and no matching rule means deny.
 4. **Queues** an action whose effect is `approve`, pinned by the SHA-256 digest of its payload. In Sanctum mode you confirm it in a native macOS dialog. The API also accepts a signature from a device enrolled earlier, but enrolling a device answers `503` today, so on a fresh install outside macOS you can only deny.
-5. **Convenes** councils: one question to `claude`, `codex` and `agy`, which answer in rounds on your checkout. The room posts a seat's final message after a verified successful exit; a writer's turn also needs matching diff evidence. With a Docker engine configured, each turn runs in its own container; without one, turns run on the host under macOS Seatbelt.
+5. **Convenes** councils: one question about your checkout goes to `claude`, `codex` and `agy` in rounds. With a Docker engine configured, each turn runs in its own container and the seat uses its saved login; without one, turns start on the host under macOS Seatbelt with an empty home directory. The room posts a valid final message after a verified successful exit.
 6. **Records** task submission and cancellation, approval requests and approve or deny decisions, the common Model Gate denials and settled successful calls in an audit chain that `sablectl audit verify` checks. Not everything is recorded: a forwarded upstream error status and an expired approval leave no row, and council inference does not pass the Model Gate at all.
 
 A model's answer is never authorization: only deterministic policy, or a person confirming a pinned digest, lets an action run.
@@ -44,7 +44,7 @@ The [docs home page](docs/index.md#status) has a longer status table with issue 
 | Model Gate, MCP Gate, typed actions, policy | Built | The upstream MCP bridge is parked |
 | Approvals | Partly built | Pairing a device answers `503`, so a fresh install approves only through the macOS dialog; a device enrolled earlier can still sign |
 | Conclaves | Built | Voice and live Takeover are parked |
-| Council | Built | The room posts a turn's final message after a verified successful exit, and needs diff evidence from a writer; an empty or missing final message gives no answer. Container seats use their own logins and are not counted by the Model Gate |
+| Council | Built | The room posts a turn's final message after a verified successful exit, and checks any writer diff against the copy stored for that attempt; an empty or missing final message gives no answer. Container seats use their own logins and are not counted by the Model Gate |
 | Learning | Partly built | Matching legacy `learning:` entries still reach context packets. SQLite stores reviewed learning records, but acceptance has no operator interface and packets do not use those records |
 | Audit chain | Built | Misses deletion of the last rows; not anchored outside the database |
 | Shadewright incident intake | Partly built | Both POST routes return a result; there is no GET for an incident's later status |
