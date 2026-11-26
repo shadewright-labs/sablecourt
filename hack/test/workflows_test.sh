@@ -560,6 +560,10 @@ def release_checks(text):
             for n, t in j.items() if n != "publish")),
         ("no asset replacement, tag deletion or git tag write",
          not re.search(r"--clobber|--cleanup-tag|git push|git tag|gh release upload|gh release delete", text)),
+        # A failed publish is rerun from the same run's artifacts; GitHub allows a rerun for 30 days.
+        ("the release files are kept as run artifacts for the 30 days a run can be rerun",
+         text.count("actions/upload-artifact@") == 3
+         and re.findall(r"^\s+retention-days: (.*)$", text, re.M) == ["30"] * 3),
         ("cosign is installed at a pinned release",
          text.count("sigstore/cosign-installer@") == text.count("cosign-release: v3.1.4") == 3),
     ]
@@ -808,6 +812,10 @@ MUTATIONS = [
     ("only publish writes releases", "      - name: Install syft (pinned)\n        run: hack/install-syft.sh \"${RUNNER_TEMP}/syft\"\n\n      - name: Write the SBOM",
      "      - name: Early release\n        run: gh release create x\n\n      - name: Write the SBOM"),
     ("no asset replacement, tag deletion or git tag write", '"${flags[@]}" "${DIST}"/*', '"${flags[@]}" --clobber "${DIST}"/*'),
+    ("the release files are kept as run artifacts for the 30 days a run can be rerun",
+     "          retention-days: 30\n", "          retention-days: 7\n"),
+    ("the release files are kept as run artifacts for the 30 days a run can be rerun",
+     in_job("sign-binaries", "          retention-days: 30\n", "")),
     ("cosign is installed at a pinned release", "          cosign-release: v3.1.4\n\n      - name: Sign checksums",
      "\n      - name: Sign checksums"),
 ]

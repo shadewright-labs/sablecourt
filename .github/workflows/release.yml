@@ -146,13 +146,15 @@ jobs:
           "${RUNNER_TEMP}/syft/syft" scan "dir:${out}/bin" --source-name sablecourt --source-version "${VERSION}" \
             -o "spdx-json=${out}/dist/sablecourt_${VERSION}_sbom.spdx.json"
 
+      # The three release artifacts are kept 30 days, as long as GitHub allows a rerun, so a failed publish can be
+      # rerun with the files and digests verify checked.
       - name: Keep the files for the next jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-dist
           path: ${{ runner.temp }}/out/dist/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   images:
     name: Build and push the images by digest
@@ -339,7 +341,7 @@ jobs:
           name: release-images
           path: ${{ runner.temp }}/images-out/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   sign-binaries:
     name: Sign and attest the release files
@@ -403,7 +405,7 @@ jobs:
           name: release-signed
           path: ${{ runner.temp }}/signed/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   # The checks of docs/how-to/verify-a-release.md on the run's artifacts and digests, with the exact identity of
   # this tag and the provenance bound to this commit. No write permission: a failure here leaves no release and no
