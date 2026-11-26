@@ -1,6 +1,6 @@
 # Harness images and tool install
 
-Status: built for local images. Publishing the images to a registry is not built yet (#146 leaves it to the release workflow).
+Status: built for local images. Publishing the images to a registry is not built yet.
 
 In container mode, each council turn runs in its own container from an image named `sablecourt-harness-<role>`, next to a per-turn proxy container from the image `sablecourt-harness-proxy`. The images are defined in one Dockerfile embedded in `sablectl` (`internal/harnessimages/Dockerfile`). What each image may contain follows how Sablecourt classifies the licence of the vendor tool (the notes are in `internal/harnessimages/licenses/image/`). That classification is not legal advice.
 
@@ -16,12 +16,11 @@ In container mode, each council turn runs in its own container from an image nam
 The base in every image is the digest-pinned Debian `bookworm-slim` with packages from the snapshot.debian.org archive of 2026-11-23. The build removes the apt package lists after installing the packages. Every image has a `/licenses/README` that lists what it contains, and four OCI labels:
 
 - `org.opencontainers.image.title`: the image name, for example `sablecourt-harness-claude`.
-
 - `org.opencontainers.image.description`: for `codex`, ends with "Contains the OpenAI Codex CLI 0.172.0, unmodified."; for `claude` and `agy`, ends with "Contains no vendor software; the tool is installed at login."
 - `org.opencontainers.image.licenses`: `Apache-2.0` for `codex`, `Apache-2.0 AND BSD-3-Clause` for the proxy, `NOASSERTION` for `claude` and `agy`.
 - `org.opencontainers.image.source`: the Sablecourt repository.
 
-Why: Apache-2.0 lets the Codex CLI be passed on with its licence and notice. Sablecourt treats Claude Code and the Antigravity CLI as proprietary software that gives no such permission, so an image meant for a registry carries neither, and the install downloads the tool from the vendor.
+Why: Apache-2.0 lets the Codex CLI be passed on with its licence and notice. Sablecourt treats Claude Code and the Antigravity CLI as proprietary software that gives no such permission, so their images carry no vendor software and the install downloads the tool from the vendor.
 
 ## Install the tool at login
 
@@ -30,28 +29,36 @@ sablectl harness build claude      # or codex, agy
 sablectl harness login claude
 ```
 
-For `claude` and `agy`, `sablectl harness login` first installs the pinned tool when the tool is missing, of another version or does not match its digest, or when the login volume does not exist yet. Then it starts the login. `sablectl harness install <role>` runs only the install step, for example after an upgrade changes the pinned version. `codex` needs no install: `sablectl harness install codex` refuses with "the codex image carries its tool".
+For `claude` and `agy`, `sablectl harness login` first installs the pinned tool when the tool is missing, of another version or does not match its digest, or when the login volume does not exist yet. Then it starts the login. `sablectl harness install <role>` runs only the install step. `codex` needs no install: `sablectl harness install codex` refuses with "the codex image carries its tool".
 
 The install:
 
-1. Downloads one file over HTTPS from the vendor's host, on the machine that runs `sablectl`, with no cookies, no vendor credentials and no redirect followed. The URL is fixed in `internal/harnessimages/images.go`; only `downloads.claude.ai` and `storage.googleapis.com` are accepted. The host name `storage.googleapis.com` is shared by many buckets, so the host check alone does not pick Google's file. The constant URL selects the bucket and object, and the pinned digest in step 2 identifies the bytes Sablecourt accepts. Neither proves who published them. The download honours `HTTPS_PROXY` so that it works behind a corporate proxy, and Go can send proxy credentials to an authenticated proxy set in the environment. Go checks the TLS certificate for the vendor's host against the trusted roots of the machine that runs `sablectl`, so a proxy that machine trusts can inspect the traffic. The checksum check applies whatever the proxy does.
+1. Downloads one file over HTTPS from the vendor's host, on the machine that runs `sablectl`, with no cookies, no vendor credentials and no redirect followed. The URL is fixed in `internal/harnessimages/images.go`; only `downloads.claude.ai` and `storage.googleapis.com` are accepted. The host name `storage.googleapis.com` is shared by many buckets, so the host check alone does not pick Google's file. The constant URL selects the bucket and object, and the pinned digest in step 2 identifies the bytes Sablecourt accepts. Neither proves who published them. The download honours `HTTPS_PROXY` so that it works behind a corporate proxy, and Go can send proxy credentials to an authenticated proxy set in the environment. Go checks the TLS certificate for the vendor's host against the trusted roots of the machine that runs `sablectl`, so a proxy that machine trusts can inspect the traffic. The checks in step 2 are the same with or without a proxy.
    - `claude`: `https://downloads.claude.ai/claude-code-releases/2.1.332/linux-arm64/claude`, the binary itself.
    - `agy`: `https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-arm/cli_linux_arm64.tar.gz`.
-2. Checks it on that machine before Docker sees it. `claude`: SHA-256 and size of the binary. `agy`: SHA-512 and size of the archive, then SHA-256 and size of the one member `antigravity`. `sablectl` reads at most one byte more than the pinned size, so a server that sends more cannot make it write much more than the artefact; that extra byte counts as a mismatch.
-3. Creates the volume `sablecourt-harness-<role>-tool` with the labels `app.kubernetes.io/managed-by=sablecourt` and `sablecourt.io/harness-tool=<role>` if it does not exist. It refuses a volume whose labels are not exactly these two, and a volume with another driver or with driver options. Labels of a local volume cannot be changed through Docker's volume API after creation, and Sablecourt creates the volume with a name and exactly these two labels. An extra label is enough reason to refuse the volume.
-4. Streams the binary into a short install container from the harness image: user `10001:10001`, no network, all capabilities dropped, `no-new-privileges`, read-only root filesystem, the environment variables `PATH`, `HOME` and `TMPDIR` set by Sablecourt (Docker adds its usual runtime variables), and one requested mount, the writable tool volume at `/opt/harness-tool` (Docker adds its usual runtime mounts such as `/proc`). The login volume is not mounted. The container checks the SHA-256 again, then renames the file into place as mode 0555 and writes `VERSION`.
+2. Checks it on that machine before the file is passed to Docker. `claude`: SHA-256 and size of the binary. `agy`: SHA-512 and size of the archive, then SHA-256 and size of the one member `antigravity`. `sablectl` reads at most one byte more than the pinned size, so a server that sends more makes it write at most that one extra byte, which counts as a mismatch.
+3. Creates the volume `sablecourt-harness-<role>-tool` with the labels `app.kubernetes.io/managed-by=sablecourt` and `sablecourt.io/harness-tool=<role>` if it does not exist. It refuses a volume whose labels are not exactly these two, and a volume with another driver or with driver options. Labels of a local volume cannot be changed through Docker's volume API after creation, and Sablecourt creates the volume with exactly these two labels, so an extra label is enough reason to refuse the volume.
+4. Streams the binary into a short-lived install container from the harness image: user `10001:10001`, no network, all capabilities dropped, `no-new-privileges`, read-only root filesystem, the environment variables `PATH`, `HOME` and `TMPDIR` set by Sablecourt (Docker adds its usual runtime variables), and one requested mount, the writable tool volume at `/opt/harness-tool` (Docker adds its usual runtime mounts such as `/proc`). The login volume is not mounted. The container writes the binary to a temporary file of its own, checks its SHA-256 again, sets mode 0555, renames it into place, and then renames a new `VERSION` file into place.
 
-What is verified for `claude`: the bytes equal the SHA-256 and size pinned in `images.go` for version 2.1.332. What is not verified: the release manifest's own signature (`manifest.json.sig`), because Sablecourt does not fetch the manifest at install time. Sablecourt does not run Anthropic's `install.sh` either. It downloads the pinned binary directly. The install container writes it to a temporary name of its own and renames that file into place only after its SHA-256 matches the pin.
+What is verified for `claude`: the bytes equal the SHA-256 and size pinned in `images.go` for version 2.1.332. What is not verified: the release manifest's own signature (`manifest.json.sig`), because Sablecourt does not fetch the manifest at install time. Sablecourt does not run Anthropic's `install.sh` either. It downloads the pinned binary directly.
 
 For `codex`, the image build checks the release archive against the SHA-256 pinned in the Dockerfile and in `images.go` for the asset of `rust-v0.172.0` (the Dockerfile comment records that it was read from GitHub's release data on 2026-11-26). Only `linux/arm64` is pinned; a build of the `codex` target for another architecture fails. The build does not verify a Sigstore bundle.
 
-The installed tool is on a read-only volume in the login container and in every turn, so the harness cannot overwrite it. Sablecourt also sets `DISABLE_UPDATES=1` for `claude`, to turn off Claude Code's own updater. The harness home and scratch space stay writable. `sablectl` and `sablecourtd` each carry the pins compiled into them: `sablectl harness install` installs the version pinned in `sablectl`, and the daemon admits and launches councils against its own pins. Use both binaries from the same release. To move to a new version, run the new `sablecourtd` and `sablectl`, build the role image again with `sablectl harness build <role>`, then run `sablectl harness install <role>`.
+The installed tool is on a read-only volume in the login container and in every turn, so the harness cannot overwrite it through that mount. The harness home and scratch space stay writable. Sablecourt also sets `DISABLE_UPDATES=1` for `claude`; Claude Code's [environment variable reference](https://code.claude.com/docs/en/env-vars) says this setting blocks all updates, including manual `claude update` and `claude install`.
+
+## Upgrade
+
+`sablectl` and `sablecourtd` each carry the pins compiled into them: `sablectl harness install` installs the version pinned in `sablectl`, and the daemon admits and launches councils against its own pins. Use both binaries from the same release. To move to a new release:
+
+1. Run the new `sablecourtd` and `sablectl`.
+2. For `codex`, run `sablectl harness build codex`. The build puts the Codex CLI of the new pin into the image. There is nothing to install: `sablectl harness install codex` is refused.
+3. For `claude` and `agy`, run `sablectl harness build <role>`, then `sablectl harness install <role>`. Build first: the install starts its container from the role image, and if the image of the new tag is not present it stops with `image for <role> is missing: run sablectl harness build <role>`. Instead of the install, `sablectl harness login <role>` also installs a tool of another version before it starts a new login.
 
 ## What a turn checks
 
-For `claude` and `agy`, the tool volume is mounted read-only (and with `volume-nocopy`) at `/opt/harness-tool` in the login container and in every turn. `codex` has no tool volume and no such check. Before the tool starts, a guard in the container checks that `/opt/harness-tool/<tool>` is a regular executable file and not a symlink, that `VERSION` names the pinned version, and that the file's SHA-256 is the pinned one. A failure stops the turn with exit status 125 and a message such as `council tool claude is not the pinned version 2.1.332: run sablectl harness install claude`. The guard runs after the lease and question are read from standard input and before the lease file is written.
+For `claude` and `agy`, the tool volume is mounted read-only (and with `volume-nocopy`) at `/opt/harness-tool` in the login container and in every turn. `codex` has no tool volume and no such check. Before the tool starts, a guard in the container checks that `/opt/harness-tool/<tool>` is a regular executable file and not a symlink, that `VERSION` names the pinned version, and that the file's SHA-256 is the pinned one. A failure stops the container with exit status 125 and a message such as `council tool claude is not the pinned version 2.1.332: run sablectl harness install claude`. In a turn, the guard runs after the lease and question are read from standard input and before the lease file is written. The guard and the start of the tool each resolve the path, so an install that finishes between the two can replace the file; that file matched the pin of the `sablectl` that ran the install (see the 2026-11-26 amendment of [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)).
 
-Before a container-mode council is created, the daemon's preflight runs the same check for `claude` and `agy` in its probe container and refuses the request with the install command:
+Before a new container-mode council is created, the daemon's preflight runs the same check for `claude` and `agy` in its probe container and refuses the request as follows:
 
 | Case | HTTP status | Message names |
 | --- | --- | --- |
@@ -60,15 +67,15 @@ Before a container-mode council is created, the daemon's preflight runs the same
 | SHA-256 differs from the pin | 412 | `sablectl harness install <role>` |
 | Tool volume has other labels, driver or options | 409 | remove it by hand, then `sablectl harness install <role>` |
 
-The preflight checks the role image and the login volume first. After an upgrade that changes the pinned version the image tag changes too, so a missing image is reported first, with `sablectl harness build <role>`. A stale tool is reported with the install command only once the image and login volume pass.
+Preflight checks the roles in the order `claude`, `codex`, `agy` and stops at the first refusal. For each role it checks the image, then the login volume, then the tool volume and the tool, then the login file. The image tag contains the pinned version, so after an upgrade that changes it, a role whose image of the new tag is not present on the daemon's Docker engine is refused with `sablectl harness build <role>`, before its tool is checked.
 
 ## Fully local build
 
-`sablectl harness build <role>` compiles the proxy on the machine that runs `sablectl`, builds the role and proxy images on the Docker engine your Docker settings select (`DOCKER_HOST`, `DOCKER_CONTEXT`), and never pushes them. For `claude` and `agy` it builds the image without the tool, and `sablectl harness login` installs the tool as above. There is one path for the tool whether the image was built locally or pulled, so the runtime check is the same in both cases.
+`sablectl harness build <role>` compiles the proxy on the machine that runs `sablectl`, builds the role and proxy images on the Docker engine your Docker settings select (`DOCKER_HOST`, `DOCKER_CONTEXT`), and does not push them. For `claude` and `agy` it builds the image without the tool, and `sablectl harness login` installs the tool as above. The daemon looks the image up by its tag in the local Docker engine and does not check how it got there, so the tool path and the guard are the same for a built image and for one that was pulled or loaded under that tag.
 
 ## Antigravity terms
 
-Sablecourt assumes that Google's terms for the Antigravity CLI restrict third-party tools that access the service, and it does not check them. Running `agy` as a council seat launches the CLI and routes its traffic through the Sablecourt proxy. Sablecourt treats that as such a use, however the CLI is packaged. Whether to use that seat is your decision under your own agreement with Google.
+Sablecourt assumes that Google's terms for the Antigravity CLI restrict third-party tools that access the service, and it does not check them. Running `agy` as a council seat launches the CLI and routes its traffic through the Sablecourt proxy. Sablecourt treats that as such a use, however the CLI is packaged. Every council has an `agy` seat (the panel is fixed to `claude`, `codex` and `agy`), so what you decide, under your own agreement with Google, is whether to run councils.
 
 ## In depth
 
