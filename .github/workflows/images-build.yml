@@ -29,8 +29,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Set up Buildx and BuildKit (pinned)
+        run: hack/setup-buildx.sh
 
       # amd64 only to keep pull requests quick; main and tags build both architectures (images.yml).
       - name: Build linux/amd64
