@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Tests of hack/package-binaries.sh (needs go and python3): two builds of the same commit give the same bytes, the
-# archive entries are fixed (names, owner, mode, time), sablectl prints the stamped version, and bad input is
-# refused. It builds for the host only (RELEASE_TARGETS), so the built sablectl can run.
+# Tests of hack/package-binaries.sh (needs go, git and python3 for the checks): two builds of the same commit give
+# the same bytes, a clean copy of the tree and the same tree with an untracked file give the same bytes, packing
+# needs no python3 (the archive bytes may not depend on a zlib build), the archive entries are fixed (names,
+# owner, mode, time), sablectl prints the stamped version, and bad input is refused. It builds for the host only
+# (RELEASE_TARGETS), so the built sablectl can run.
 # Usage: hack/test/package-binaries_test.sh
 set -euo pipefail
 
@@ -26,6 +28,33 @@ check "one archive per target, named sablecourt_<version>_<os>_<arch>.tar.gz" \
   "$([ "$(ls "${work}/a/dist")" = "${name}" ] && echo ok)"
 check "two builds give the same archive bytes" \
   "$(cmp -s "${work}/a/dist/${name}" "${work}/b/dist/${name}" && echo ok)"
+# A clean copy of the tree (tracked files, plus the two scripts under test) in a new Git repository, built once
+# clean and once with an untracked file: the binaries must not record the state of the tree.
+copy="${work}/copy"
+mkdir -p "${copy}"
+git ls-files -z | while IFS= read -r -d '' f; do
+  if [ -f "${f}" ]; then mkdir -p "${copy}/$(dirname "${f}")" && cp -p "${f}" "${copy}/${f}"; fi
+done
+cp -p hack/package-binaries.sh hack/targz.go "${copy}/hack/"
+git -C "${copy}" init -q
+git -C "${copy}" add -A
+git -C "${copy}" -c user.name=test -c user.email=test -c commit.gpgsign=false commit -qm copy
+(cd "${copy}" && hack/package-binaries.sh 9.8.7-rc.6 "${work}/clean" > /dev/null)
+printf 'not tracked\n' > "${copy}/untracked.txt"
+(cd "${copy}" && hack/package-binaries.sh 9.8.7-rc.6 "${work}/dirty" > /dev/null)
+check "a clean tree and the same tree with an untracked file give the same archive bytes" \
+  "$(cmp -s "${work}/clean/dist/${name}" "${work}/dirty/dist/${name}" && echo ok)"
+check "a copy of the tree gives the same archive bytes as the checkout" \
+  "$(cmp -s "${work}/a/dist/${name}" "${work}/clean/dist/${name}" && echo ok)"
+
+# Packing must not call python3: a python3 that fails comes first in PATH.
+mkdir -p "${work}/nopy"
+printf '#!/bin/sh\necho "python3 must not be used" >&2\nexit 1\n' > "${work}/nopy/python3"
+chmod +x "${work}/nopy/python3"
+check "packing works without python3 and gives the same bytes" \
+  "$(PATH="${work}/nopy:${PATH}" "${script}" 9.8.7-rc.6 "${work}/nopy-out" > /dev/null 2>&1 \
+     && cmp -s "${work}/a/dist/${name}" "${work}/nopy-out/dist/${name}" && echo ok)"
+
 check "archive entries: sorted names, owner 0:0, mode 0755, the fixed time, no name or time in gzip" "$(
   python3 -I - "${work}/a/dist/${name}" <<'PY'
 import sys, tarfile
