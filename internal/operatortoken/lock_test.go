@@ -99,6 +99,9 @@ func TestLockStateDirRepairsModeAndRefusesUnsafeFiles(t *testing.T) {
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := LockStateDir(dir); err == nil || !strings.Contains(err.Error(), "mode 0700") {
 			t.Fatalf("LockStateDir = %v, want mode refusal", err)
 		}

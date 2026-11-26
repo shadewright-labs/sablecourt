@@ -13,14 +13,15 @@ import (
 
 func TestResolveCheckoutRef(t *testing.T) {
 	repo := initTempGitRepo(t)
+	testGit(t, repo, "branch", "-M", "base")
 	first := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
-	testGit(t, repo, "tag", "v1")
+	testGit(t, repo, "tag", "--no-sign", "v1")
 	testGit(t, repo, "branch", "same")
-	testGit(t, repo, "tag", "same")
+	testGit(t, repo, "tag", "--no-sign", "same")
 	testGit(t, repo, "commit", "--allow-empty", "-q", "-m", "second")
 	second := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
 	testGit(t, repo, "branch", "feature")
-	testGit(t, repo, "tag", "split", first)
+	testGit(t, repo, "tag", "--no-sign", "split", first)
 	testGit(t, repo, "branch", "split", second)
 	owner, err := sourceGit(repo)
 	if err != nil {

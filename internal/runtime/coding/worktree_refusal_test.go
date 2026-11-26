@@ -111,7 +111,7 @@ func TestBoundedLogMarkerDroppedWhenNoRoom(t *testing.T) {
 	if _, err := l.WriteString("too long\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.WriteString("more\n"); err != nil {
+	if _, err := l.WriteString("abc\n"); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(file.Name()); err != nil || len(data) != 0 {

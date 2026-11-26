@@ -179,6 +179,11 @@ func TestSessionOutputRedactionAndSuppression(t *testing.T) {
 		hub := attach.NewHub()
 		hub.Register("t-out", nil)
 		t.Cleanup(func() { hub.Close("t-out") })
+		history, subCh, closed, unsub, err := hub.Subscribe("t-out")
+		if err != nil || history != "" || closed {
+			t.Fatalf("Subscribe = %q, closed=%t, err=%v", history, closed, err)
+		}
+		t.Cleanup(unsub)
 
 		out := &sessionOutput{file: &fileBuf, tail: tail, hub: hub, taskID: "t-out"}
 		tok := "sk-" + strings.Repeat("a", 28)
@@ -201,17 +206,27 @@ func TestSessionOutputRedactionAndSuppression(t *testing.T) {
 		if err := out.Flush(); err != nil {
 			t.Fatalf("Flush: %v", err)
 		}
-		got := fileBuf.String()
-		for _, forbidden := range []string{"secret-body-line", tok} {
-			if strings.Contains(got, forbidden) {
-				t.Errorf("output leaked %q: %q", forbidden, got)
+		hub.Close("t-out")
+		var hubBuf strings.Builder
+		for chunk := range subCh {
+			hubBuf.WriteString(chunk)
+		}
+		for _, target := range []struct {
+			name string
+			got  string
+		}{
+			{"file", fileBuf.String()},
+			{"diagnostic tail", tail.text},
+			{"attach hub", hubBuf.String()},
+		} {
+			for _, forbidden := range []string{"secret-body-line", tok} {
+				if strings.Contains(target.got, forbidden) {
+					t.Errorf("%s leaked %q: %q", target.name, forbidden, target.got)
+				}
 			}
-		}
-		if !strings.Contains(got, "[REDACTED:private_key]") || !strings.Contains(got, "safe tail\n") {
-			t.Errorf("unexpected sanitized output: %q", got)
-		}
-		if !strings.Contains(tail.text, "safe tail\n") {
-			t.Errorf("diagnostic tail missed output: %q", tail.text)
+			if !strings.Contains(target.got, "[REDACTED:private_key]") || !strings.Contains(target.got, "safe tail\n") {
+				t.Errorf("unexpected sanitized %s output: %q", target.name, target.got)
+			}
 		}
 	})
 

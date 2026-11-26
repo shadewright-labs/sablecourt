@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // recoveryFixture is a council root with a real primary repository, laid
@@ -96,8 +97,13 @@ func TestReconcileInterruptedWriterLaunch(t *testing.T) {
 			branch := councilWriterBranch(f.key)
 			writerDir := filepath.Join(f.councilDir, "writer")
 			testGit(t, f.repo, "worktree", "add", "--quiet", "-b", branch, writerDir, f.base)
+			var wantTip string
 			if advanced {
 				testGit(t, writerDir, "commit", "--allow-empty", "--quiet", "-m", "writer work")
+				wantTip = strings.TrimSpace(testGit(t, writerDir, "rev-parse", "HEAD"))
+				if wantTip == f.base {
+					t.Fatal("writer commit did not advance branch")
+				}
 			}
 			cs := f.state(task, "reviewer-1")
 			cs.ActiveWriterTaskID = task
@@ -132,6 +138,11 @@ func TestReconcileInterruptedWriterLaunch(t *testing.T) {
 				// A branch that moved past the base holds work and must survive.
 				if got := f.branchExists(t, branch); got != advanced {
 					t.Errorf("round %d: writer branch exists = %t, want %t", round, got, advanced)
+				}
+				if advanced {
+					if tip := strings.TrimSpace(testGit(t, f.repo, "rev-parse", "--verify", "refs/heads/"+branch)); tip != wantTip {
+						t.Errorf("round %d: writer branch tip = %q, want %q", round, tip, wantTip)
+					}
 				}
 				got, err := readCouncilState(councilStatePath(f.root, f.key))
 				if err != nil {
@@ -389,9 +400,17 @@ func TestRemoveOrphanedWorktree(t *testing.T) {
 	if f.worktreeListed(t, registered) {
 		t.Error("registered worktree still listed")
 	}
-	// Empty arguments are a no-op, never a removal of the working directory.
-	if err := removeOrphanedWorktree(context.Background(), "", plain); err != nil {
+	// Empty arguments are a no-op, never a removal of the target or working directory.
+	keep := filepath.Join(f.councilDir, "keep")
+	if err := os.MkdirAll(keep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testWrite(t, keep, "sentinel", "keep-me", 0o600)
+	if err := removeOrphanedWorktree(context.Background(), "", keep); err != nil {
 		t.Error(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(keep, "sentinel")); err != nil || string(data) != "keep-me" {
+		t.Errorf("sentinel after blank commonDir = %q, %v; want untouched", data, err)
 	}
 	if err := removeOrphanedWorktree(context.Background(), f.common, ""); err != nil {
 		t.Error(err)
@@ -409,13 +428,21 @@ func TestLockCouncilContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Another adapter (another daemon process in production) sees the file lock.
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := second.lockCouncil(cancelled, root, "k1"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("contended lock = %v, want context.Canceled", err)
+	timed, cancelTimed := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelTimed()
+	if rel, err := second.lockCouncil(timed, root, "k1"); !errors.Is(err, context.DeadlineExceeded) {
+		if rel != nil {
+			rel()
+		}
+		t.Fatalf("contended lock = %v, want context.DeadlineExceeded", err)
 	}
 	// The same adapter waits on its in-memory gate.
-	if _, err := first.lockCouncil(cancelled, root, "k1"); !errors.Is(err, context.Canceled) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if rel, err := first.lockCouncil(cancelled, root, "k1"); !errors.Is(err, context.Canceled) {
+		if rel != nil {
+			rel()
+		}
 		t.Fatalf("re-entrant lock = %v, want context.Canceled", err)
 	}
 	// A different council key is independent.

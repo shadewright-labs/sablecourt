@@ -237,6 +237,7 @@ func TestSpeakBehavioursAndFallbacks(t *testing.T) {
 	tok := "sk-" + strings.Repeat("b", 28)
 
 	t.Run("HTTP TTS redacts secrets, truncates at 4000 chars, handles voice and content-type defaults", func(t *testing.T) {
+		t.Setenv("SABLECOURT_TTS_VOICE", "")
 		var gotPayload map[string]string
 		var respCT string
 		var respStatus int

@@ -748,7 +748,6 @@ func TestProviderFormsWithRegistry(t *testing.T) {
 		{"connect unknown provider", "/ui/providers/nope/connect", url.Values{"api_key": {"k"}}, `unknown API provider "nope"`, ""},
 		{"disconnect unknown provider", "/ui/providers/nope/disconnect", nil, `unknown API provider "nope"`, ""},
 		{"save models unknown provider", "/ui/providers/nope/models", url.Values{"default_model": {"m"}}, `unknown provider "nope"`, ""},
-		{"save models", "/ui/providers/local/models", url.Values{"default_model": {" big "}, "enabled_models": {"small"}, "custom_model": {"x1, ,x2"}}, "", "Saved model selection for local (default: big)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, notice, errMsg := redirectTarget(t, postForm(t, mux, tc.path, tc.form))
@@ -757,25 +756,35 @@ func TestProviderFormsWithRegistry(t *testing.T) {
 			}
 		})
 	}
-	found := false
-	for _, p := range reg.List(context.Background()) {
-		if p.ID != "local" {
-			continue
+	t.Run("save models", func(t *testing.T) {
+		path, notice, errMsg := redirectTarget(t, postForm(t, mux, "/ui/providers/local/models", url.Values{
+			"default_model":  {" big "},
+			"enabled_models": {"small"},
+			"custom_model":   {"x1, ,x2"},
+		}))
+		if path != "/providers" || errMsg != "" || notice != "Saved model selection for local (default: big)" {
+			t.Fatalf("%s notice=%q err=%q", path, notice, errMsg)
 		}
-		found = true
-		var enabled []string
-		for _, m := range p.Models {
-			if m.Enabled {
-				enabled = append(enabled, m.ID)
+		found := false
+		for _, p := range reg.List(context.Background()) {
+			if p.ID != "local" {
+				continue
+			}
+			found = true
+			var enabled []string
+			for _, m := range p.Models {
+				if m.Enabled {
+					enabled = append(enabled, m.ID)
+				}
+			}
+			if p.DefaultModel != "big" || strings.Join(enabled, ",") != "big,small,x1,x2" {
+				t.Fatalf("local prefs default=%q enabled=%v", p.DefaultModel, enabled)
 			}
 		}
-		if p.DefaultModel != "big" || strings.Join(enabled, ",") != "big,small,x1,x2" {
-			t.Fatalf("local prefs default=%q enabled=%v", p.DefaultModel, enabled)
+		if !found {
+			t.Fatal("local provider not listed")
 		}
-	}
-	if !found {
-		t.Fatal("local provider not listed")
-	}
+	})
 }
 
 func TestProviderTiersFormAndPage(t *testing.T) {
