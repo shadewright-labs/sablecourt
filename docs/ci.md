@@ -73,7 +73,7 @@ The pull request that brings this layout removes the jobs `verify` and `security
 `release.yml` runs on a pushed `v*` tag. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.
 
 No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.
-A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).
+A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress, and a newer run of the group cancels a pending one and waits in its place ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).
 The `needs` of each job:
 
 | Job | Needs |

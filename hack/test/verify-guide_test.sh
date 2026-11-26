@@ -121,6 +121,8 @@ SETUP_LINES = {
     "cd sablecourt-${version}",
     "gh release download ${tag} --repo ${repository}",
     "test ${names} = ${want}",
+    "found=$(find . -mindepth 1 -maxdepth 1 -exec basename {} \\; | LC_ALL=C sort)",
+    "test ${found} = ${expected}",
     "image=ghcr.io/shadewright-labs/sablecourt",
     "digest=sha256:" + "0" * 64,
 }
@@ -220,6 +222,28 @@ def sums_ok(script):
             and not sums_pass(script, RELEASE_FILES[:-1]))
 
 
+FOURTEEN = (RELEASE_FILES + ["checksums.txt", "checksums.txt.sigstore.json", "sablecourt_0.1.0_provenance.intoto.jsonl"]
+            + [f"sablecourt_0.1.0_image_{i}.intoto.jsonl" for i in ("sablecourt", "sablecourt-agent")])
+
+
+def folder_pass(script, names):
+    """Runs the guide's download block, without mkdir, cd and the download, in a folder with the given files."""
+    lines = [l for l in script.splitlines(keepends=True) if not re.match(r"^(mkdir|cd|gh release download) ", l)]
+    with tempfile.TemporaryDirectory() as d:
+        for n in names:
+            open(os.path.join(d, n), "w").close()
+        env = {"PATH": os.environ["PATH"], "VERSION": "0.1.0"}
+        return subprocess.run(["bash", "-c", "set -euo pipefail\n" + "".join(lines)], cwd=d, env=env,
+                              capture_output=True).returncode == 0
+
+
+@functools.lru_cache(maxsize=None)
+def folder_ok(script):
+    """Passes for the fourteen release files; fails for an extra file, a hidden extra file and a missing file."""
+    return (bool(script) and folder_pass(script, FOURTEEN) and not folder_pass(script, FOURTEEN + ["other.tar.gz"])
+            and not folder_pass(script, FOURTEEN + [".x"]) and not folder_pass(script, FOURTEEN[1:]))
+
+
 def guide_sums(page):
     """The guide's block that runs sha256sum --check."""
     return next((b for b in blocks(page) if "sha256sum --check" in b), "")
@@ -303,8 +327,10 @@ GUIDE_CLAIMS = {
             'IDENTITY="https://github.com/shadewright-labs/sablecourt/.github/workflows/release.yml@refs/tags/v$VERSION"',
             'ISSUER="https://token.actions.githubusercontent.com"'] and blk(p, "A pass sets ").startswith(
             "set -euo pipefail\nVERSION=0.1.0\nSHA="),
-    "A pass puts the release's files in the folder `sablecourt-$VERSION`.":
-        lambda p: blk(p, "A pass puts ") == 'mkdir "sablecourt-$VERSION"\ncd "sablecourt-$VERSION"\ngh release download "v$VERSION" --repo shadewright-labs/sablecourt\n',
+    "A pass puts the release's files in the folder `sablecourt-$VERSION` and shows that the folder holds the fourteen files the release workflow attaches and no others.":
+        lambda p: blk(p, "A pass puts ").startswith('mkdir "sablecourt-$VERSION"\ncd "sablecourt-$VERSION"\ngh release download "v$VERSION" --repo shadewright-labs/sablecourt\n')
+        and folder_ok(blk(p, "A pass puts ")) and '"${DIST}"/*' in wf_step("publish", "Create the draft release")
+        and "'%s\\n' checksums.txt checksums.txt.sigstore.json" in wf_step("verify", "Check the set of files"),
     "A pass shows that `checksums.txt` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`.":
         lambda p: "cosign verify-blob " in blk(p, "A pass shows that `checksums.txt` carries")
         and "--bundle checksums.txt.sigstore.json" in blk(p, "A pass shows that `checksums.txt` carries")
@@ -314,6 +340,7 @@ GUIDE_CLAIMS = {
         and sums_ok(blk(p, "A pass shows that each file listed")),
     "A pass shows that each archive and SBOM in the folder and `checksums.txt` has an SLSA build provenance attestation signed with a certificate for `release.yml` at the tag `v$VERSION`, with the source ref `refs/tags/v$VERSION`, the source repository digest `$SHA` and no self-hosted runner, once as fetched from GitHub's API and once from `sablecourt_${VERSION}_provenance.intoto.jsonl`.":
         lambda p: blk(p, "A pass shows that each archive").startswith("for FILE in sablecourt_*.tar.gz sablecourt_*.spdx.json checksums.txt; do\n")
+        and folder_ok(blk(p, "A pass puts ")) and len([n for n in FOURTEEN if re.match(r"sablecourt_.*\.(tar\.gz|spdx\.json)$", n)]) == 9
         and gh_ok(blk(p, "A pass shows that each archive"), 2)
         and blk(p, "A pass shows that each archive").count('--bundle "sablecourt_${VERSION}_provenance.intoto.jsonl"') == 1,
     "The next three blocks check the daemon image. To check the agent image too, add them to the end of the file a second time, with `IMAGE=ghcr.io/shadewright-labs/sablecourt-agent` and the agent's digest.":
@@ -334,7 +361,7 @@ GUIDE_CLAIMS = {
         and gh_ok(blk(p, "A pass shows that the image index has"), 2) and "--bundle-from-oci" not in p
         and blk(p, "A pass shows that the image index has").count('--bundle "sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl"') == 1,
     "## What this does not prove": lambda p: True,
-    "- Who created the tag `v$VERSION`. A tag ruleset limits who may create a tag; it does not show who created this one.":
+    "- Who created the tag `v$VERSION`. An active tag ruleset with a creation restriction that matches the tag limits who may create it, but `release.yml` does not check for one, and a ruleset does not show who created this tag.":
         lambda p: "git " not in guide_code(p) and actor_unused(),
     "- Which checks the release workflow ran. The commands check the certificate's identity, issuer, source ref and source repository digest; they do not read `release.yml` at `$SHA`.":
         lambda p: cmds_ok(p) and re.search(r"\bgit |curl|gh api|release\.yml[^@]", guide_code(p)) is None,
@@ -350,8 +377,9 @@ CI_CLAIMS = {
         and os.path.exists(os.path.join(root, "docs/how-to/verify-a-release.md")),
     "No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.":
         lambda c: not re.search(r"^\s+(?:- )?(?:if|continue-on-error):", WF, re.M),
-    "A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).":
-        lambda c: re.search(r"^concurrency:\n  group: release\n", WF, re.M) is not None
+    "A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress, and a newer run of the group cancels a pending one and waits in its place ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).":
+        lambda c: re.search(r"^concurrency:\n  group: release\n  cancel-in-progress: false\n\n", WF, re.M) is not None
+        and "queue:" not in WF
         and re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None
         and [j for j in J if re.search(r"^    environment:", J[j], re.M)] == ["publish"],
     "The `needs` of each job:":
@@ -490,6 +518,8 @@ MUTATIONS = [
     sub("    --deny-self-hosted-runners > /dev/null\n", "    > /dev/null\n"),
     sub("any([.] == $want)'", "any(. == $want[0])'"),
     sub('| LC_ALL=C sort)\nNAMES', '| LC_ALL=C sort -u)\nNAMES'),
+    sub('-maxdepth 1 -exec basename', "-maxdepth 1 -name 'sablecourt_*' -exec basename"),
+    sub('test "$FOUND" = "$EXPECTED"\n', ''),
     sub('NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort)', 'NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort -u)'),
     sub('_linux_{amd64,arm64}.spdx.json | LC_ALL=C sort)\nNAMES', '_linux_amd64.spdx.json | LC_ALL=C sort)\nNAMES'),
     sub("| .predicate) | any", ") | any"),

@@ -21,9 +21,16 @@ A pass sets the certificate identity and issuer that the cosign and gh commands 
 mkdir "sablecourt-$VERSION"
 cd "sablecourt-$VERSION"
 gh release download "v$VERSION" --repo shadewright-labs/sablecourt
+EXPECTED=$(printf '%s\n' checksums.txt checksums.txt.sigstore.json \
+  "sablecourt_${VERSION}_sbom.spdx.json" "sablecourt_${VERSION}_provenance.intoto.jsonl" \
+  "sablecourt_${VERSION}_"{darwin,linux}_{amd64,arm64}.tar.gz \
+  "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}_linux_{amd64,arm64}.spdx.json \
+  "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}.intoto.jsonl | LC_ALL=C sort)
+FOUND=$(find . -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
+test "$FOUND" = "$EXPECTED"
 ```
 
-A pass puts the release's files in the folder `sablecourt-$VERSION`.
+A pass puts the release's files in the folder `sablecourt-$VERSION` and shows that the folder holds the fourteen files the release workflow attaches and no others.
 
 ```bash
 cosign verify-blob \
@@ -119,7 +126,7 @@ A pass shows that the image index has an SLSA build provenance attestation signe
 
 ## What this does not prove
 
-- Who created the tag `v$VERSION`. A tag ruleset limits who may create a tag; it does not show who created this one.
+- Who created the tag `v$VERSION`. An active tag ruleset with a creation restriction that matches the tag limits who may create it, but `release.yml` does not check for one, and a ruleset does not show who created this tag.
 - Which checks the release workflow ran. The commands check the certificate's identity, issuer, source ref and source repository digest; they do not read `release.yml` at `$SHA`.
 - That the commit `$SHA` is on `main`.
 - That an image tag such as `$VERSION` points at `$DIGEST`: deploy by digest.
