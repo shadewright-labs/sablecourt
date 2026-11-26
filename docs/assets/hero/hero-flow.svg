@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 672" width="1920" height="672" aria-hidden="true">
+  <defs>
+    <linearGradient id="fade-left-out" gradientUnits="userSpaceOnUse" x1="288" y1="0" x2="336" y2="0">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fade-right-in" gradientUnits="userSpaceOnUse" x1="1584" y1="0" x2="1632" y2="0">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0.32"/>
+    </linearGradient>
+    <linearGradient id="mask-fade-out" gradientUnits="userSpaceOnUse" x1="288" y1="0" x2="336" y2="0">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="mask-fade-in" gradientUnits="userSpaceOnUse" x1="1584" y1="0" x2="1632" y2="0">
+      <stop offset="0%" stop-color="#000000"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <mask id="dash-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1920" height="672">
+      <rect x="0" y="0" width="1920" height="672" fill="#000000"/>
+      <!-- Arrow 1 -> 2 -->
+      <rect x="88" y="192" width="16" height="96" fill="#ffffff"/>
+      <!-- Arrow 2 -> 3 -->
+      <rect x="88" y="384" width="104" height="104" fill="#ffffff"/>
+      <!-- Bridge out from 3 (fades out before text column) -->
+      <rect x="288" y="472" width="48" height="16" fill="url(#mask-fade-out)"/>
+      <!-- Bridge in to 4 (fades in after text column) -->
+      <rect x="1584" y="184" width="48" height="16" fill="url(#mask-fade-in)"/>
+      <!-- Arrow 4 -> 5 -->
+      <rect x="1728" y="184" width="104" height="200" fill="#ffffff"/>
+    </mask>
+    <style>
+      .tile {
+        fill: #14111c;
+        fill-opacity: 0.62;
+        stroke: #2dd4bf;
+        stroke-opacity: 0.34;
+        stroke-width: 1.5;
+      }
+      .icon {
+        fill: none;
+        stroke: #efe9dc;
+        stroke-opacity: 0.46;
+        stroke-width: 1.85;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .flow {
+        fill: none;
+        stroke: #2dd4bf;
+        stroke-opacity: 0.32;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .head {
+        fill: none;
+        stroke: #2dd4bf;
+        stroke-opacity: 0.46;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .joint {
+        fill: #2dd4bf;
+        fill-opacity: 0.46;
+      }
+      .travel {
+        fill: none;
+        stroke: #2dd4bf;
+        stroke-opacity: 0.88;
+        stroke-width: 2.4;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 44 1396;
+        stroke-dashoffset: 48;
+        animation: sc-hero-dash 24s linear infinite;
+      }
+      .travel--left {
+        animation-delay: -4.5s;
+      }
+      .travel--right {
+        animation-delay: -17.3s;
+      }
+      @keyframes sc-hero-dash {
+        from { stroke-dashoffset: 48; }
+        to { stroke-dashoffset: -1392; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .travel {
+          animation: none;
+          opacity: 0;
+        }
+      }
+    </style>
+  </defs>
+
+  <!-- Flow arrows snapped to 48px blueprint grid lines -->
+  <!-- 1 -> 2 (x = 96) -->
+  <path class="flow" d="M 96 192 V 285"/>
+  <path class="head" d="M 90 277 L 96 286 L 102 277"/>
+
+  <!-- 2 -> 3 (x = 96, y = 480) -->
+  <path class="flow" d="M 96 384 V 480 H 189"/>
+  <circle class="joint" cx="96" cy="480" r="2.2"/>
+  <path class="head" d="M 181 474 L 190 480 L 181 486"/>
+
+  <!-- 3 -> center fade (y = 480) -->
+  <path fill="none" stroke="url(#fade-left-out)" stroke-width="1.5" stroke-linecap="round" d="M 288 480 H 336"/>
+
+  <!-- center fade -> 4 (y = 192) -->
+  <path fill="none" stroke="url(#fade-right-in)" stroke-width="1.5" stroke-linecap="round" d="M 1584 192 H 1629"/>
+  <path class="head" d="M 1621 186 L 1630 192 L 1621 198"/>
+
+  <!-- 4 -> 5 (y = 192, x = 1824) -->
+  <path class="flow" d="M 1728 192 H 1824 V 381"/>
+  <circle class="joint" cx="1824" cy="192" r="2.2"/>
+  <path class="head" d="M 1818 373 L 1824 382 L 1830 373"/>
+
+  <!-- Single slow dash travelling along the left arrows first, then the right arrows -->
+  <g mask="url(#dash-mask)">
+    <path class="travel travel--left" d="M 96 192 V 480 H 336"/>
+    <path class="travel travel--right" d="M 1584 192 H 1824 V 384"/>
+  </g>
+
+  <!-- Step 1: Manifest (document with lines), snapped to x=48..144, y=96..192 -->
+  <g transform="translate(48, 96)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <path class="icon" d="M 30 22 H 54 L 66 34 V 74 H 30 Z"/>
+    <path class="icon" d="M 54 22 V 34 H 66"/>
+    <path class="icon" d="M 38 45 H 58 M 38 54 H 58 M 38 63 H 50"/>
+  </g>
+
+  <!-- Step 2: Lease (key with clock mark), snapped to x=48..144, y=288..384 -->
+  <g transform="translate(48, 288)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <circle class="icon" cx="35" cy="48" r="14"/>
+    <path class="icon" d="M 35 40 V 48 L 40.5 51"/>
+    <path class="icon" d="M 49 48 H 76 M 64 48 V 57 M 72 48 V 55"/>
+  </g>
+
+  <!-- Step 3: Gate (arch with horizontal bar), snapped to x=192..288, y=432..528 -->
+  <g transform="translate(192, 432)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <path class="icon" d="M 28 49 V 44 A 20 20 0 0 1 68 44 V 49"/>
+    <path class="icon" d="M 36 49 V 44 A 12 12 0 0 1 60 44 V 49"/>
+    <rect class="icon" x="23" y="49" width="50" height="8" rx="2"/>
+    <path class="icon" d="M 28 57 V 72 M 36 57 V 72 M 60 57 V 72 M 68 57 V 72 M 22 72 H 74"/>
+  </g>
+
+  <!-- Step 4: Approval by a person (person with tick), snapped to x=1632..1728, y=144..240 -->
+  <g transform="translate(1632, 144)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <circle class="icon" cx="42" cy="34" r="9"/>
+    <path class="icon" d="M 24 68 C 24 55 32 49 42 49 C 47 49 51 50.5 54 53"/>
+    <path class="icon" d="M 54 61 L 60 67 L 73 53"/>
+  </g>
+
+  <!-- Step 5: Audit chain (three linked rings), snapped to x=1776..1872, y=384..480 -->
+  <g transform="translate(1776, 384)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <g transform="translate(48, 48) rotate(-45)">
+      <rect class="icon" x="-31" y="-8" width="25" height="16" rx="8"/>
+      <rect class="icon" x="-12.5" y="-8" width="25" height="16" rx="8"/>
+      <rect class="icon" x="6" y="-8" width="25" height="16" rx="8"/>
+    </g>
+  </g>
+</svg>
