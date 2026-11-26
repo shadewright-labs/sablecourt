@@ -62,13 +62,13 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, limit time.Duration, live 
 	if err != nil {
 		return nil, err
 	}
-	defer stdoutChild.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
+	defer stdoutChild.Close() //nolint:errcheck // acknowledged dropped error: the parent's copy of the child's write end, closed on every return (after a failed Start too); the parent never writes to it, so no data depends on the result
 	stderr, stderrChild, err := os.Pipe()
 	if err != nil {
 		_ = stdout.Close()
 		return nil, err
 	}
-	defer stderrChild.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
+	defer stderrChild.Close() //nolint:errcheck // acknowledged dropped error: the parent's copy of the child's write end, closed on every return (after a failed Start too); the parent never writes to it, so no data depends on the result
 	defer func() {
 		if !started {
 			_ = stdout.Close()

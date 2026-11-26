@@ -405,13 +405,13 @@ func providerConnect(w http.ResponseWriter, r *http.Request, hosts []string, tun
 		http.Error(w, "provider unavailable", http.StatusBadGateway)
 		return
 	}
-	defer upstream.Close() //nolint:errcheck // tunnel connection teardown; the copy already reported its error
+	defer upstream.Close() //nolint:errcheck // acknowledged dropped error: releases the upstream connection on every return; the handler has no caller to report a close error to, and both io.Copy errors below are dropped too
 	client, stream, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		http.Error(w, "provider tunnel unavailable", http.StatusBadGateway)
 		return
 	}
-	defer client.Close() //nolint:errcheck // tunnel connection teardown; the copy already reported its error
+	defer client.Close() //nolint:errcheck // acknowledged dropped error: releases the hijacked client connection on every return, including those before any copy; nothing reports it
 	deadline := time.Now().Add(tunnelLifetime)
 	if client.SetDeadline(deadline) != nil || upstream.SetDeadline(deadline) != nil {
 		return

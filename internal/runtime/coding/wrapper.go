@@ -204,7 +204,7 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 		return nil, id, err
 	}
 	defer ready.Close() //nolint:errcheck // read end of the readiness pipe
-	defer child.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
+	defer child.Close() //nolint:errcheck // acknowledged dropped error: the parent's copy of the readiness write end, closed by this defer on the returns before Start succeeds and explicitly after it (a second Close only reports os.ErrClosed); the parent never writes to it
 	wrapper := exec.Command(exe, wrapperArg)
 	wrapper.Dir = filepath.Dir(stateBase)
 	wrapper.Env = []string{}
