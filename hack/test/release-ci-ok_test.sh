@@ -119,6 +119,142 @@ usage_() { # <name> <args...>: a usage error exits 2
 usage_ "a ref that is not a full sha is refused" "${repo}" HEAD "${work}/wruns.json" "${work}/cruns.json"
 usage_ "a repository that is not owner/name is refused" "sablecourt" "${sha}" "${work}/wruns.json" "${work}/cruns.json"
 usage_ "a missing argument is a usage error" "${repo}" "${sha}"
+usage_ "wait mode rejects a non-numeric bound" --wait "${repo}" "${sha}" abc 30
+usage_ "wait mode rejects a zero interval" --wait "${repo}" "${sha}" 60 0
+
+# Polling mode (--wait): stub gh serves a sequence of recorded answers, fake sleep advances a fake clock file,
+# and fake now reads that clock file.
+mkdir -p "${work}/bin"
+cat > "${work}/bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = "api" ] || { echo "unexpected gh call: $*" >&2; exit 1; }
+case "$2" in
+  "repos/${STUB_REPO}/actions/runs?head_sha=${STUB_SHA}&event=push&branch=main&per_page=100")
+    idx="$(cat "${STUB_DIR}/w_idx")"
+    echo $((idx + 1)) > "${STUB_DIR}/w_idx"
+    if [ -f "${STUB_DIR}/w_fail_${idx}" ]; then
+      echo "HTTP 502: Bad Gateway" >&2
+      exit 1
+    fi
+    if [ -f "${STUB_DIR}/w_${idx}.json" ]; then
+      cat "${STUB_DIR}/w_${idx}.json"
+    else
+      cat "${STUB_DIR}/w_default.json"
+    fi
+    ;;
+  "repos/${STUB_REPO}/commits/${STUB_SHA}/check-runs?check_name=ci-ok&per_page=100")
+    idx="$(cat "${STUB_DIR}/c_idx")"
+    echo $((idx + 1)) > "${STUB_DIR}/c_idx"
+    if [ -f "${STUB_DIR}/c_fail_${idx}" ]; then
+      echo "HTTP 502: Bad Gateway" >&2
+      exit 1
+    fi
+    if [ -f "${STUB_DIR}/c_${idx}.json" ]; then
+      cat "${STUB_DIR}/c_${idx}.json"
+    else
+      cat "${STUB_DIR}/c_default.json"
+    fi
+    ;;
+  *)
+    echo "unexpected gh api path: $2" >&2
+    exit 1
+    ;;
+esac
+SH
+cat > "${work}/bin/fake-now" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat "${STUB_DIR}/clock"
+SH
+cat > "${work}/bin/fake-sleep" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+now="$(cat "${STUB_DIR}/clock")"
+echo $((now + $1)) > "${STUB_DIR}/clock"
+echo "$1" >> "${STUB_DIR}/sleeps"
+SH
+chmod +x "${work}/bin/gh" "${work}/bin/fake-now" "${work}/bin/fake-sleep"
+
+# wait_case <name> <max> <interval> <want_rc> <want_sleeps> <setup_fn>
+wait_case() {
+  local name="$1" max="$2" interval="$3" want_rc="$4" want_sleeps="$5" setup="$6"
+  local dir rc=0 sleeps=""
+  dir="$(mktemp -d "${work}/wait.XXXXXX")"
+  echo 0 > "${dir}/w_idx"
+  echo 0 > "${dir}/c_idx"
+  echo 1000 > "${dir}/clock"
+  : > "${dir}/sleeps"
+  "${setup}" "${dir}"
+  env PATH="${work}/bin:${PATH}" STUB_DIR="${dir}" STUB_REPO="${repo}" STUB_SHA="${sha}" \
+    RELEASE_CI_OK_NOW="${work}/bin/fake-now" RELEASE_CI_OK_SLEEP="${work}/bin/fake-sleep" \
+    "${script}" --wait "${repo}" "${sha}" "${max}" "${interval}" > /dev/null 2>&1 || rc=$?
+  sleeps="$(paste -sd, "${dir}/sleeps")"
+  if [ "${rc}" = "${want_rc}" ] && [ "${sleeps}" = "${want_sleeps}" ]; then
+    echo "ok   ${name}"
+  else
+    echo "FAIL ${name}: got exit ${rc} sleeps '${sleeps}', want exit ${want_rc} sleeps '${want_sleeps}'"
+    fails=$((fails + 1))
+  fi
+}
+
+pending_run="$(wruns "$(wrun_ 10 11 in_progress null)")"
+queued_run="$(wruns "$(wrun_ 10 11 queued null)")"
+failed_run="$(wruns "$(wrun_ 10 11 completed '"failure"')")"
+pending_check="$(cruns "$(crun_ 100 11 in_progress null)")"
+failed_check="$(cruns "$(crun_ 100 11 completed '"failure"')")"
+
+setup_in_progress_then_pass() {
+  printf '%s' "${pending_run}" > "$1/w_0.json"
+  printf '%s' "${pending_run}" > "$1/w_1.json"
+  printf '%s' "${ok_run}" > "$1/w_default.json"
+  printf '%s' "${pending_check}" > "$1/c_0.json"
+  printf '%s' "${pending_check}" > "$1/c_1.json"
+  printf '%s' "${ok_check}" > "$1/c_default.json"
+}
+setup_queued_then_pending_check_then_pass() {
+  printf '%s' "${queued_run}" > "$1/w_0.json"
+  printf '%s' "${ok_run}" > "$1/w_default.json"
+  printf '%s' "${pending_check}" > "$1/c_0.json"
+  printf '%s' "${pending_check}" > "$1/c_1.json"
+  printf '%s' "${ok_check}" > "$1/c_default.json"
+}
+setup_in_progress_forever() {
+  printf '%s' "${pending_run}" > "$1/w_default.json"
+  printf '%s' "${pending_check}" > "$1/c_default.json"
+}
+setup_failed_run() {
+  printf '%s' "${failed_run}" > "$1/w_default.json"
+  printf '%s' "${ok_check}" > "$1/c_default.json"
+}
+setup_failed_check() {
+  printf '%s' "${ok_run}" > "$1/w_default.json"
+  printf '%s' "${failed_check}" > "$1/c_default.json"
+}
+setup_in_progress_then_fail() {
+  printf '%s' "${pending_run}" > "$1/w_0.json"
+  printf '%s' "${failed_run}" > "$1/w_default.json"
+  printf '%s' "${pending_check}" > "$1/c_0.json"
+  printf '%s' "${failed_check}" > "$1/c_default.json"
+}
+setup_no_run() {
+  printf '%s' "$(wruns)" > "$1/w_default.json"
+  printf '%s' "${ok_check}" > "$1/c_default.json"
+}
+setup_gh_error() {
+  touch "$1/w_fail_0"
+  printf '%s' "${ok_run}" > "$1/w_default.json"
+  printf '%s' "${ok_check}" > "$1/c_default.json"
+}
+
+wait_case "wait: in progress then success passes" 120 30 0 "30,30" setup_in_progress_then_pass
+wait_case "wait: queued run then pending ci-ok then success passes" 120 30 0 "30,30" setup_queued_then_pending_check_then_pass
+wait_case "wait: in progress until the bound refuses" 75 30 1 "30,30,15" setup_in_progress_forever
+wait_case "wait: failed run refuses at once without sleeping" 120 30 1 "" setup_failed_run
+wait_case "wait: failed ci-ok refuses at once without sleeping" 120 30 1 "" setup_failed_check
+wait_case "wait: in progress then failed run refuses at once" 120 30 1 "30" setup_in_progress_then_fail
+wait_case "wait: no run refuses at once without sleeping" 120 30 1 "" setup_no_run
+wait_case "wait: gh api failure refuses at once without sleeping" 120 30 1 "" setup_gh_error
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2
