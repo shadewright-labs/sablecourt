@@ -2,16 +2,7 @@
 
 The nouns Sablecourt uses, where each one lives (a manifest, the store, a runtime) and how they connect. Each section says whether the concept is built. The statuses are defined on the [home page](index.md#status-words). Short definitions are in the [glossary](glossary.md).
 
-```mermaid
-flowchart LR
-    M["Manifests<br/>Workload, Policy, Budget,<br/>Workflow, Schedule, Conclave"] -->|loaded and validated| D
-    O["sablectl and web UI"] -->|operator credential| D
-    D["sablecourtd<br/>reconciler, scheduler, Conclave broker"] -->|launches with a lease| R["Runtimes<br/>host coding run, Docker, controller"]
-    R -->|calls with the lease| G["Gates<br/>Model Gate, MCP Gate, Approval Queue"]
-    D --> S[("Store")]
-    G --> S
-    S --> A["Audit chain"]
-```
+[![Manifests and operator calls enter sablecourtd; the control plane launches workloads through runtimes with a task lease, workloads call the in-process gates with that lease, and both the control plane and gates record to the store and its SHA-256 audit chain.](diagrams/concepts-map.svg)](diagrams/concepts-map.svg "Open full size")
 
 The daemon (`sablecourtd`) reads manifests, keeps tasks in the store and launches workloads through a runtime. A workload reaches models, tools and approvals through a gate, with a lease the daemon minted for that task. The one exception is council inference, which runs on each harness's own subscription login (see below). The gates run inside the daemon process. The gates, the reconciler, the Conclave broker and the approval queue append most decisions to the audit chain, but not all: an ordinary dispatch of a task is recorded as a task event only. The whole picture is the [system context diagram](how-it-works/index.md).
 

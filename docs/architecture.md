@@ -4,52 +4,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 
 ## System overview
 
-```mermaid
-flowchart TB
-    subgraph Operator["Operator surfaces"]
-        WebUI["Web UI (internal/ui)"]
-        CLI["sablectl CLI & stdio MCP server"]
-        Device["Paired Device (ECDSA P-256)"]
-        NL["Nightloom (Observer API)"]
-        SW["Shadewright (Escalation API)"]
-    end
-
-    subgraph ControlPlane["sablecourtd Control Plane"]
-        HTTP["HTTP Server (Auth, Same-Origin CSRF, 2 MiB cap)"]
-        CP["Control Plane Reconciler & Scheduler"]
-        Conclave["Conclave Broker (Vassals, Wards, Decrees, Relics)"]
-        Attach["AttachHub (Scry ring buffer + exclusive Takeover)"]
-        Voice["Local Voice Com (STT / TTS)"]
-        Store["SQLite WAL or PostgreSQL (0001-0007 migrations)"]
-        Audit["Tamper-Evident SHA-256 Audit Chain"]
-    end
-
-    subgraph Gates["Three Doors Capability Gates"]
-        MG["Model Gate (sc_task_ lease, Budget Ledger, Fallback, agentgateway)"]
-        MCP["Data & Action MCP Gate (Built-in tools + Upstream MCP Bridge)"]
-        AP["Approval Queue (Pinned SHA-256 + macOS OOB / P-256 Sig)"]
-    end
-
-    subgraph Runtimes["Execution Adapters"]
-        Coding["coding-agent (Git Worktree + Seatbelt / Bubblewrap)"]
-        Docker["Docker / Podman (Rootless, no-egress bridge, CapDrop ALL)"]
-        K8s["Kubernetes Citadel (Jobs & Deployments, gVisor, NetworkPolicy)"]
-        Det["Deterministic Controller (Zero-LLM)"]
-    end
-
-    Operator --> HTTP
-    HTTP --> CP
-    HTTP --> Conclave
-    HTTP --> Attach
-    HTTP --> Voice
-    CP --> Store
-    Conclave --> Store
-    Store --> Audit
-    CP --> Runtimes
-    Runtimes -->|"Bearer sc_task_..."| MG
-    Runtimes -->|"Bearer sc_task_..."| MCP
-    MCP --> AP
-```
+[![Callers reach the sablecourtd HTTP server, which dispatches to the reconciler, scheduler and Conclave broker backed by the store and audit chain; the reconciler launches execution adapters with task leases, adapters call the in-process Model Gate and MCP Gate (with deterministic controllers refused at the Model Gate), and actions requiring approval pass to the Approval Queue.](diagrams/architecture-overview.svg)](diagrams/architecture-overview.svg "Open full size")
 
 ## Package map
 
