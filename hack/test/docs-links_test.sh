@@ -103,6 +103,32 @@ case_ "pending fragment used twice, one line" 1 "docs/a.md -> docs/target.md#lat
 " docs/a.md '[t](target.md#later)
 
 [u](target.md#later)'
+case_ "two uses of one reference to a pending target, one line" 1 "docs/a.md -> docs/absent.md
+" docs/a.md 'see [t][p] and [u][p]
+
+[p]: absent.md'
+case_ "two uses of one reference to a pending target, two lines" 0 "docs/a.md -> docs/absent.md
+docs/a.md -> docs/absent.md
+" docs/a.md 'see [t][p] and [u][p]
+
+[p]: absent.md'
+case_ "unused definition to a pending target, one line" 0 "docs/a.md -> docs/absent.md
+" docs/a.md '[p]: absent.md'
+
+# Fences: a closing fence has the opening character and at least its length.
+case_ "four-backtick fence holding three backticks" 1 "" docs/a.md '````
+```
+````
+
+[t](absent.md)'
+case_ "four-backtick fence hides its content" 0 "" docs/a.md '````
+```
+[t](absent.md)
+````'
+case_ "tilde fence is not closed by backticks" 0 "" docs/a.md '~~~
+```
+[t](absent.md)
+~~~'
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2

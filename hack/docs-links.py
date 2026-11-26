@@ -6,7 +6,7 @@ Usage:
   python3 -I hack/docs-links.py external   external links: report the ones that do not answer, never fail
 
 "check" reads every tracked *.md file paragraph by paragraph (so a link may wrap over lines) and follows each
-relative link outside fenced code blocks and code spans: inline links (also the <angle bracket> form, with a
+relative link outside fenced code blocks (``` or ~~~, three or more) and code spans: inline links (also the <angle bracket> form, with a
 title in double quotes, single quotes or parentheses), full and collapsed reference links ([text][ref],
 [text][]), reference definitions, and HTML href and src attributes (double-quoted, single-quoted or unquoted).
 Headings are ATX (# Title) and Setext (a line underlined with === or ---). Shortcut reference links ([text]
@@ -16,8 +16,8 @@ in headings included), or when a reference link has no definition.
 
 Links to pages or headings that are not written yet are listed in hack/docs-pages-pending.txt, one per line as
 "<source file> -> <target>[#fragment]" (paths from the repository root). Each line allows one occurrence of
-exactly that link from that source: two links to the same pending target in one file need two lines, so a second,
-broken link cannot hide behind the first one's entry. A link from another file, or to another fragment, still
+exactly that link from that source: two links to the same pending target in one file need two lines, also when
+both use one reference definition, so a second, broken link cannot hide behind the first one's entry. A link from another file, or to another fragment, still
 fails. An entry whose target now exists, or a line that no link uses any more, fails the check, so the list
 cannot go stale.
 
@@ -37,7 +37,9 @@ import urllib.request
 ROOT = os.environ.get("DOCS_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING = os.path.join(ROOT, "hack", "docs-pages-pending.txt")
 
-FENCE = re.compile(r"^\s*(```|~~~)")
+# An opening fence is three or more backticks or tildes; the closing one has the same character, at least as
+# many of them and nothing after them.
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 # [text](<target with spaces>) or [text](target "title"), with the title in double or single quotes or in
 # parentheses. Text, target and title may run over several lines of one paragraph.
 INLINE = re.compile(
@@ -65,13 +67,15 @@ def lines_outside_fences(path):
     in_fence = None
     with open(os.path.join(ROOT, path), encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
-            m = FENCE.match(line)
+            m = FENCE.match(line.rstrip("\n"))
             if m:
+                fence = m.group(1)
                 if in_fence is None:
-                    in_fence = m.group(1)
-                elif m.group(1) == in_fence:
+                    in_fence = fence
+                    continue
+                if fence[0] == in_fence[0] and len(fence) >= len(in_fence) and not m.group(2).strip():
                     in_fence = None
-                continue
+                    continue
             if in_fence is None:
                 yield n, line.rstrip("\n")
 
@@ -108,7 +112,9 @@ def first(*groups):
 
 
 def scan(path):
-    """Returns (links, reference uses, definitions): links as (line, target)."""
+    """Returns (links, reference uses, definitions): links as (line, target). A reference link counts as one link
+    to its definition's target per use, so each use needs its own pending line; a definition no link uses counts
+    once, at its own line."""
     links, uses, defs = [], [], {}
     for start, raw in paragraphs(path):
         text = blank_code_spans(raw)
@@ -117,8 +123,7 @@ def scan(path):
             return start + text.count("\n", 0, offset)
 
         for m in REFDEF.finditer(text):
-            defs[norm_label(m.group(1))] = True
-            links.append((line_of(m.start()), first(m.group(2), m.group(3))))
+            defs.setdefault(norm_label(m.group(1)), (line_of(m.start()), first(m.group(2), m.group(3))))
         rest = REFDEF.sub(lambda m: " " * len(m.group(0)), text)
         for m in INLINE.finditer(rest):
             links.append((line_of(m.start()), first(m.group(1), m.group(2))))
@@ -128,6 +133,14 @@ def scan(path):
         for m in REFLINK.finditer(no_inline):
             label = m.group(2) or m.group(1)
             uses.append((line_of(m.start()), norm_label(label)))
+    used_labels = set()
+    for n, label in uses:
+        if label in defs:
+            used_labels.add(label)
+            links.append((n, defs[label][1]))
+    for label, (n, target) in defs.items():
+        if label not in used_labels:
+            links.append((n, target))
     return links, uses, defs
 
 
