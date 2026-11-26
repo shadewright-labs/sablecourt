@@ -2,14 +2,20 @@ name: Tests
 
 # Vet, the race-enabled test suite (which also checks the generated reference pages under docs/reference), a
 # short fuzz run of the Model Gate SSRF guard, the build of every binary and the validation of the example
-# manifest. Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
+# manifest. The race run writes a coverage profile, and the coverage job uploads it to Codecov. Called by ci.yml
+# (the only trigger), which decides from the changed files whether it runs. ci-ok sees one result for this
+# workflow: it fails when either job fails, and the coverage job passes without uploading when there is no token.
 on:
   workflow_call:
     inputs:
       run:
-        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        description: Whether the jobs run; ci.yml passes false when no file of this group changed.
         type: boolean
         default: true
+    secrets:
+      CODECOV_TOKEN:
+        description: Upload token of the Codecov project; without it the coverage job uploads nothing and passes.
+        required: false
 
 permissions: {}
 
@@ -39,7 +45,15 @@ jobs:
         run: go vet ./...
 
       - name: Test with race detector
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      # The coverage job uploads this file; it gets nothing else from this job.
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
 
       # The weekly Fuzz workflow runs every fuzz target for minutes; this short run keeps the SSRF guard
       # (SC-05) under fuzzing on every pull request.
@@ -56,3 +70,47 @@ jobs:
 
       - name: Validate example manifests
         run: go run ./cmd/sablectl validate ./examples/local-demo.yaml
+
+  # The upload has its own job because the Codecov action downloads the uploader at run time. Here it runs away
+  # from the test job's Go cache and gets nothing but the coverage file and the upload token. It runs only after
+  # the tests passed (a failed test run fails the test job, and with it this workflow), and passes without
+  # uploading when there is no token: pull requests from forks and from Dependabot get none. A Codecov outage
+  # does not fail it (fail_ci_if_error: false); coverage is reported, never a gate (codecov.yml).
+  coverage:
+    needs: test
+    if: ${{ inputs.run && needs.test.result == 'success' }}
+    permissions:
+      contents: read
+    name: coverage upload
+    runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - name: No token
+        if: env.CODECOV_TOKEN == ''
+        run: echo "no token, nothing uploaded"
+
+      - name: Clone the code
+        if: env.CODECOV_TOKEN != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the coverage profile
+        if: env.CODECOV_TOKEN != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+
+      # version pins the uploader the action downloads, so a run does not take whatever is latest.
+      - name: Upload to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: shadewright-labs/sablecourt
+          files: coverage.out
+          disable_search: true
+          fail_ci_if_error: false
+          version: v11.3.2
+          disable_telem: true

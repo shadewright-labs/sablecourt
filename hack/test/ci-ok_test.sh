@@ -45,6 +45,8 @@ check "repo checks skipped" fail pull_request "$(needs false false false false r
 check "missing job entry" fail pull_request "$(needs true true true true -test)"
 check "missing deselected job entry" fail pull_request "$(needs false false false false -lint)"
 check "failure" fail pull_request "$(needs true true true true lint=failure)"
+# test.yml holds the test and coverage upload jobs; ci-ok sees one result for both, failure if either failed.
+check "test workflow failed (tests or coverage upload)" fail pull_request "$(needs true true true true test=failure)"
 check "failure of a deselected job" fail pull_request "$(needs false true true true lint=failure)"
 check "cancelled" fail pull_request "$(needs true true true true gosec=cancelled)"
 check "changes failed" fail pull_request "$(needs true true true true changes=failure)"

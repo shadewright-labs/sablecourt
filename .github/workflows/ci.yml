@@ -65,6 +65,9 @@ jobs:
     uses: ./.github/workflows/test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
     with:
       run: ${{ needs.changes.outputs.go == 'true' }}
+    # Only the upload token, by name; forks and Dependabot get an empty value and the upload is skipped.
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   govulncheck:
     needs: changes

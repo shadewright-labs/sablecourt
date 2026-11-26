@@ -6,7 +6,9 @@
 #   - every job the decision or the event selects, and every job that always runs, succeeded;
 #   - a job counts as deselected only when the decision said "false" for its group or the event excludes it
 #     (images and codeql run on pull requests only); a deselected job may be skipped or successful.
-# Failure, cancellation or a skip of a selected job fails the check. Tests: hack/test/ci-ok_test.sh.
+# Failure, cancellation or a skip of a selected job fails the check. A called workflow reports one result for all
+# its jobs: `test` covers the race tests and the coverage upload (test.yml), so a failed upload job fails ci-ok
+# and a missing token (the upload job passes without uploading) does not. Tests: hack/test/ci-ok_test.sh.
 # A new job in ci.yml goes into `needs` of ci-ok and into the table below.
 set -euo pipefail
 
