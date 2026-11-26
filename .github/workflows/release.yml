@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release version tag without leading v (e.g. 0.1.0)"
+        description: "Release version without leading v: X.Y.Z or X.Y.Z-rc.N"
         required: true
         default: "0.1.0"
 
@@ -41,6 +41,12 @@ jobs:
           else
             VER="${GITHUB_REF_NAME#v}"
           fi
+          # X.Y.Z or X.Y.Z-rc.N: the tags hack/check-image-refs.sh accepts in this repository.
+          # A bash match reads the whole value, so a second line in a hand-entered version cannot pass.
+          if ! [[ "${VER}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "version '${VER}' is not X.Y.Z or X.Y.Z-rc.N" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -56,7 +62,7 @@ jobs:
             STAGE="dist/stage-${GOOS}-${GOARCH}"
             mkdir -p "${STAGE}"
             CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w" -o "${STAGE}/sablecourtd" ./cmd/sablecourtd
-            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w" -o "${STAGE}/sablectl" ./cmd/sablectl
+            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w -X main.version=${VER}" -o "${STAGE}/sablectl" ./cmd/sablectl
             tar -C "${STAGE}" -czf "dist/sablecourt_${VER}_${GOOS}_${GOARCH}.tar.gz" sablecourtd sablectl
             rm -rf "${STAGE}"
           done
@@ -64,16 +70,20 @@ jobs:
 
       # Creates the release with generated notes, or adds the files to a release that already exists for the
       # tag, so a rerun replaces the assets instead of failing.
+      # A release candidate (X.Y.Z-rc.N) is created as a pre-release.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.version }}
         run: |
+          pre=()
+          case "${VER}" in *-*) pre=(--prerelease) ;; esac
           if gh release view "${TAG}" > /dev/null 2>&1; then
             gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
           else
-            gh release create "${TAG}" --generate-notes dist/*.tar.gz dist/checksums.txt
+            gh release create "${TAG}" --generate-notes "${pre[@]}" dist/*.tar.gz dist/checksums.txt
           fi
 
   containers:
@@ -115,7 +125,21 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME#v}"
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if ! [[ "${TAG}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "version '${TAG}' is not X.Y.Z or X.Y.Z-rc.N" >&2
+            exit 1
+          fi
+          # A release candidate does not move latest.
+          {
+            echo "daemon<<EOF"
+            echo "${DAEMON_IMAGE}:${TAG}"
+            case "${TAG}" in *-*) ;; *) echo "${DAEMON_IMAGE}:latest" ;; esac
+            echo "EOF"
+            echo "agent<<EOF"
+            echo "${AGENT_IMAGE}:${TAG}"
+            case "${TAG}" in *-*) ;; *) echo "${AGENT_IMAGE}:latest" ;; esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push sablecourtd (multi-arch)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -124,9 +148,7 @@ jobs:
           target: daemon
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.DAEMON_IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.DAEMON_IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.daemon }}
 
       - name: Build and push sablecourt-agent (multi-arch)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -135,6 +157,4 @@ jobs:
           target: agent
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.AGENT_IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.AGENT_IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.agent }}
