@@ -9,7 +9,8 @@ repo_url = "https://github.com/shadewright-labs/sablecourt"
 repo_name = "shadewright-labs/sablecourt"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright 2026 The Sablecourt Authors. Licensed under the Apache License 2.0."
-extra_css = ["stylesheets/brand.css"]
+extra_css = ["stylesheets/brand.css", "stylesheets/labs-switcher.css"]
+extra_javascript = ["javascripts/labs-switcher.js"]
 # docs/reference.md is superseded by docs/reference/ and collides with docs/reference/index.md on
 # site/reference/index.html.
 exclude_docs = """
@@ -83,9 +84,6 @@ nav = [
     { "CI" = "ci.md" },
     { "Diagram standard" = "diagrams/README.md" },
   ] },
-  { "Shadewright docs" = "https://shadewright.io/" },
-  { "Armory docs" = "https://shadewrightlabs.com/armory/" },
-  { "Shadewright Labs" = "https://shadewrightlabs.com/" },
 ]
 
 [project.theme]
