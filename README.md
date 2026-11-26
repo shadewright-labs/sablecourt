@@ -6,6 +6,10 @@
 </h1>
 
 <p align="center">
+  <em>The Court is three hooded councilors under a sable banner, and every agent or program that comes before them. Each keeps to its own seat and may only ask. The councilors answer from one written law: what it allows goes ahead, what it does not name is refused, and the gravest matters wait for a person's seal.</em>
+</p>
+
+<p align="center">
   A control plane that runs coding agents and deterministic programs on one machine under limits you set. Workloads get a task lease instead of provider keys: the Model Gate checks a workload's grant and budget, the MCP Gate its grant and policy, and an action that needs approval gets an approval request that a person approves or denies, or that expires. Council harnesses in containers are the exception for inference: they use their own subscription logins, outside the Model Gate.
 </p>
 
