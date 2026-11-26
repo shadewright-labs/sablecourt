@@ -103,7 +103,7 @@ Two lines above change. "The only mounts are..." gains one mount, and "keep them
 - For `claude` and `agy`, every run checks the tool's version and pinned SHA-256 before the harness starts, and so does the login probe, which mounts the tool volume read-only next to the login volume. A missing tool, another version or a checksum mismatch fails the run closed. The `codex` tool is in its image, which the build checks, so it has no such run-time check.
 - Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE; its build checks the release archive against a pinned SHA-256 before extracting it. The `claude` and `agy` images hold the base only.
 
-What this does not change: one container and one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
+What this does not change: one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
 
 Stated limits: Sablecourt trusts the checksums pinned in this repository, and the signature of the vendor's manifest is not verified. A compromised harness still cannot replace its own binary, because the tool volume is read-only to it, but it can write to its own home volume.
 

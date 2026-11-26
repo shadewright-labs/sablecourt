@@ -9,11 +9,11 @@ In container mode, each council turn runs in its own container from an image nam
 | Harness | Licence of the tool | Image contents | Where the tool comes from |
 | --- | --- | --- | --- |
 | Codex CLI (`codex`) | Apache-2.0 | The unmodified Codex CLI 0.172.0 at `/usr/local/bin/codex`, with its `LICENSE` and `NOTICE` in `/licenses/codex/` | Built into the image from the GitHub release `rust-v0.172.0`; the build checks the archive against a pinned SHA-256 before it extracts anything and fails on a mismatch |
-| Claude Code (`claude`) | Proprietary | The base only: no vendor software, an empty `/opt/harness-tool` | At login, `sablectl` downloads and checks it from Anthropic's download host, then installs it into its own volume on the selected Docker engine |
-| Antigravity CLI (`agy`) | Proprietary | The base only: no vendor software, an empty `/opt/harness-tool` | At login, `sablectl` downloads and checks it from Google's download host, then installs it into its own volume on the selected Docker engine |
+| Claude Code (`claude`) | Proprietary | The base only: no vendor software, an empty `/opt/harness-tool` | When needed, `sablectl harness login` downloads and checks it from Anthropic's download host, then installs it into its own volume |
+| Antigravity CLI (`agy`) | Proprietary | The base only: no vendor software, an empty `/opt/harness-tool` | When needed, `sablectl harness login` downloads and checks it from Google's download host, then installs it into its own volume |
 | Council proxy | Apache-2.0 (Sablecourt), BSD-style (Go) | The proxy compiled from source, with `/licenses/sablecourt/LICENSE` and `/licenses/go/LICENSE` | Compiled locally by `sablectl harness build` |
 
-The base in every image is the digest-pinned Debian `bookworm-slim` with packages from the snapshot.debian.org archive of 2026-11-23. The build removes only the apt package lists afterwards. Every image has a `/licenses/README` that lists what it contains, and four OCI labels:
+The base in every image is the digest-pinned Debian `bookworm-slim` with packages from the snapshot.debian.org archive of 2026-11-23. The build removes the apt package lists after installing the packages. Every image has a `/licenses/README` that lists what it contains, and four OCI labels:
 
 - `org.opencontainers.image.title`: the image name, for example `sablecourt-harness-claude`.
 
@@ -21,7 +21,7 @@ The base in every image is the digest-pinned Debian `bookworm-slim` with package
 - `org.opencontainers.image.licenses`: `Apache-2.0` for `codex`, `Apache-2.0 AND BSD-3-Clause` for the proxy, `NOASSERTION` for `claude` and `agy`.
 - `org.opencontainers.image.source`: the Sablecourt repository.
 
-Why: Apache-2.0 lets the Codex CLI be passed on with its licence and notice. Sablecourt treats Claude Code and the Antigravity CLI as proprietary software that gives no such permission, so an image meant for a registry carries neither, and each user downloads the tool from the vendor.
+Why: Apache-2.0 lets the Codex CLI be passed on with its licence and notice. Sablecourt treats Claude Code and the Antigravity CLI as proprietary software that gives no such permission, so an image meant for a registry carries neither, and the install downloads the tool from the vendor.
 
 ## Install the tool at login
 
@@ -41,11 +41,11 @@ The install:
 3. Creates the volume `sablecourt-harness-<role>-tool` with the labels `app.kubernetes.io/managed-by=sablecourt` and `sablecourt.io/harness-tool=<role>` if it does not exist. It refuses a volume whose labels are not exactly these two, and a volume with another driver or with driver options. Labels of a local volume cannot be changed through Docker's volume API after creation, and Sablecourt creates the volume with a name and exactly these two labels. An extra label is enough reason to refuse the volume.
 4. Streams the binary into a short install container from the harness image: user `10001:10001`, no network, all capabilities dropped, `no-new-privileges`, read-only root filesystem, the environment variables `PATH`, `HOME` and `TMPDIR` set by Sablecourt (Docker adds its usual runtime variables), and one requested mount, the writable tool volume at `/opt/harness-tool` (Docker adds its usual runtime mounts such as `/proc`). The login volume is not mounted. The container checks the SHA-256 again, then renames the file into place as mode 0555 and writes `VERSION`.
 
-What is verified for `claude`: the bytes equal the SHA-256 and size pinned in `images.go` for version 2.1.332. What is not verified: the release manifest's own signature (`manifest.json.sig`), because Sablecourt does not fetch the manifest at install time. Sablecourt does not run Anthropic's `install.sh` either. It downloads the pinned binary directly, so only the pinned bytes are installed.
+What is verified for `claude`: the bytes equal the SHA-256 and size pinned in `images.go` for version 2.1.332. What is not verified: the release manifest's own signature (`manifest.json.sig`), because Sablecourt does not fetch the manifest at install time. Sablecourt does not run Anthropic's `install.sh` either. It downloads the pinned binary directly. The install container writes it to a temporary name of its own and renames that file into place only after its SHA-256 matches the pin.
 
 For `codex`, the image build checks the release archive against the SHA-256 pinned in the Dockerfile and in `images.go` for the asset of `rust-v0.172.0` (the Dockerfile comment records that it was read from GitHub's release data on 2026-11-26). Only `linux/arm64` is pinned; a build of the `codex` target for another architecture fails. The build does not verify a Sigstore bundle.
 
-The installed tool is on a read-only volume in the login container and in every turn, so the harness cannot overwrite it. Sablecourt also sets `DISABLE_UPDATES=1` for `claude`, to turn off Claude Code's own updater. The harness home and scratch space stay writable. The versions Sablecourt accepts are the pins compiled into `sablectl`. To move to a new version, use a `sablectl` that contains the new pin, then run `sablectl harness install <role>`.
+The installed tool is on a read-only volume in the login container and in every turn, so the harness cannot overwrite it. Sablecourt also sets `DISABLE_UPDATES=1` for `claude`, to turn off Claude Code's own updater. The harness home and scratch space stay writable. `sablectl` and `sablecourtd` each carry the pins compiled into them: `sablectl harness install` installs the version pinned in `sablectl`, and the daemon admits and launches councils against its own pins. Use both binaries from the same release. To move to a new version, run the new `sablecourtd` and `sablectl`, build the role image again with `sablectl harness build <role>`, then run `sablectl harness install <role>`.
 
 ## What a turn checks
 

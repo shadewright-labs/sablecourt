@@ -29,7 +29,7 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
 
    For `claude` and `agy` the command first downloads the pinned tool from the vendor, checks its digest and installs it into `sablecourt-harness-<role>-tool`. It skips the download only when the login volume exists and the tool is present with the right version and digest. It then creates the labelled login volume `sablecourt-harness-<role>` if needed and starts the login in a container with your terminal attached. If the CLI prints a sign-in address, open it in a browser on your host. In the recorded `agy` flow, finish the sign-in, then type `/exit`.
 
-3. After a Sablecourt upgrade that pins a new tool version, the image tag changes too. A council is first refused with `sablectl harness build <role>`. Build the image again. If the installed `claude` or `agy` tool is then of another version, the council is refused with `sablectl harness install <role>`. Run that command: it replaces the tool and keeps the login.
+3. After a Sablecourt upgrade (of both `sablectl` and `sablecourtd`) that pins a new tool version, the image tag changes too. If the new image is not built yet, a council is refused with `sablectl harness build <role>`. Build the image again. If the installed `claude` or `agy` tool is then of another version, the council is refused with `sablectl harness install <role>`. Run that command: it replaces the tool and keeps the login.
 
 ## Check it worked
 
