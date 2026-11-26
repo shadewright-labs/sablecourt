@@ -30,7 +30,7 @@ func councilHarnessConfig(def harnessimages.Definition) docker.CouncilHarness {
 func installHarnessCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install <role>",
-		Short: "Download the pinned vendor tool and install it into the harness tool volume",
+		Short: "Install the pinned claude or agy tool into its harness tool volume",
 		Long: "Download the pinned vendor tool for claude or agy from the vendor's own download host, check its digest,\n" +
 			"and install it into the harness tool volume, which harness containers mount read-only.\n" +
 			"The codex image carries its tool, so codex needs no install. The login command runs this step when needed.",
