@@ -36,15 +36,14 @@ func TestDockerImages(t *testing.T) {
 				t.Fatal(err)
 			}
 			d, _ := Lookup(role)
-			version := d.Version
-			if role == "claude" {
-				version += " (Claude Code)"
-			}
-			if role == "codex" {
-				version = "codex-cli " + version
+			// codex carries its CLI; claude and agy carry no vendor software and
+			// only the empty mount point for the tool volume.
+			check := fmt.Sprintf("test \"$(%s --version)\" = 'codex-cli %s' && test -s /licenses/codex/LICENSE && test -s /licenses/codex/NOTICE", role, d.Version)
+			if d.Tool != nil {
+				check = fmt.Sprintf("! command -v %s && test -z \"$(ls -A %s)\" && test \"$(stat -c %%u %s)\" = 10001", role, ToolDir, ToolDir)
 			}
 			for _, image := range []struct{ tag, check string }{
-				{d.Image, fmt.Sprintf("test \"$(id -u)\" = 10001 && test \"$(id -g)\" = 10001 && test \"$(%s --version)\" = '%s'", role, version)},
+				{d.Image, "test \"$(id -u)\" = 10001 && test \"$(id -g)\" = 10001 && test -s /licenses/README && " + check},
 				{ProxyImage(), "test \"$(id -u)\" = 10001 && test \"$(id -g)\" = 10001 && test -x /usr/local/bin/council-proxy && /usr/local/bin/council-proxy -h"},
 			} {
 				var nonce [12]byte

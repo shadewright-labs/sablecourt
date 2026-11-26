@@ -2,10 +2,13 @@ package harnessimages
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -102,24 +105,83 @@ func TestCatalogRejectsUnknownWithoutEcho(t *testing.T) {
 	}
 }
 
-func TestVersionCheckIdentity(t *testing.T) {
+func dockerStage(t *testing.T, name string) string {
+	t.Helper()
 	body, err := definitions.ReadFile("Dockerfile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []string{"claude", "codex", "agy"} {
-		t.Run(role, func(t *testing.T) {
-			_, stage, found := strings.Cut(string(body), "FROM base AS "+role+"\n")
-			if !found {
-				t.Fatal("missing image stage")
+	for _, chunk := range strings.Split(string(body), "\nFROM ")[1:] {
+		header, rest, _ := strings.Cut(chunk, "\n")
+		if strings.HasSuffix(header, " AS "+name) {
+			return header + "\n" + rest
+		}
+	}
+	t.Fatalf("missing image stage %s", name)
+	return ""
+}
+
+func TestVersionCheckIdentity(t *testing.T) {
+	stage := dockerStage(t, "codex")
+	user := strings.Index(stage, "USER "+User)
+	version := strings.Index(stage, "--version)")
+	if user < 0 || version < 0 || user > version {
+		t.Fatal("version probe must use the final non-root identity to avoid root-owned CLI state")
+	}
+}
+
+// The published images for the proprietary tools must carry no vendor
+// software: no download, no copy of a binary, only the base and a README.
+func TestToolLessStages(t *testing.T) {
+	for _, name := range []string{"tool-less", "claude", "agy"} {
+		t.Run(name, func(t *testing.T) {
+			stage := dockerStage(t, name)
+			for _, banned := range []string{"curl", "wget", "ADD ", "install.sh", "googleapis", "claude.ai", "/usr/local/bin"} {
+				if strings.Contains(stage, banned) {
+					t.Fatalf("stage %s contains %q", name, banned)
+				}
 			}
-			stage, _, _ = strings.Cut(stage, "\nFROM ")
-			user := strings.Index(stage, "USER "+User)
-			version := strings.Index(stage, "--version)")
-			if user < 0 || version < 0 || user > version {
-				t.Fatal("version probe must use the final non-root identity to avoid root-owned CLI state")
+			if name == "tool-less" {
+				if !strings.HasPrefix(stage, "base AS ") || !strings.Contains(stage, ToolDir) || !strings.Contains(stage, "USER "+User) {
+					t.Fatal("tool-less stage must derive from base, own the tool mount point and run as the harness user")
+				}
+				return
+			}
+			if !strings.HasPrefix(stage, "tool-less AS ") || !strings.Contains(stage, "licenses/image/"+name+".txt /licenses/README") ||
+				!strings.Contains(stage, "Contains no vendor software; the tool is installed at login.") {
+				t.Fatalf("stage %s must derive from tool-less and say it carries no vendor software", name)
 			}
 		})
+	}
+}
+
+func TestImageLicences(t *testing.T) {
+	for _, tc := range []struct{ stage, want string }{
+		{"codex", "COPY licenses/codex/LICENSE licenses/codex/NOTICE /licenses/codex/"},
+		{"codex", "Contains the OpenAI Codex CLI 0.172.0, unmodified."},
+		{"codex", "rust-v0.172.0"},
+		{"proxy", "COPY licenses/go/LICENSE /licenses/go/LICENSE"},
+		{"proxy", "COPY licenses/sablecourt/LICENSE /licenses/sablecourt/LICENSE"},
+		{"proxy", "/licenses/README"},
+	} {
+		if !strings.Contains(dockerStage(t, tc.stage), tc.want) {
+			t.Fatalf("stage %s lacks %q", tc.stage, tc.want)
+		}
+	}
+	for _, name := range []string{"licenses/codex/LICENSE", "licenses/codex/NOTICE", "licenses/go/LICENSE", "licenses/sablecourt/LICENSE",
+		"licenses/image/claude.txt", "licenses/image/codex.txt", "licenses/image/agy.txt", "licenses/image/proxy.txt"} {
+		if body, err := definitions.ReadFile(name); err != nil || len(body) == 0 {
+			t.Fatalf("%s missing from the embedded definitions", name)
+		}
+	}
+	notice, _ := definitions.ReadFile("licenses/codex/NOTICE")
+	if !strings.Contains(string(notice), "OpenAI Codex") {
+		t.Fatal("codex NOTICE is not the upstream file")
+	}
+	ours, _ := definitions.ReadFile("licenses/sablecourt/LICENSE")
+	root, err := os.ReadFile(filepath.Join("..", "..", "LICENSE"))
+	if err != nil || !bytes.Equal(ours, root) {
+		t.Fatal("licenses/sablecourt/LICENSE must equal the repository LICENSE")
 	}
 }
 
@@ -182,8 +244,13 @@ func TestBuild(t *testing.T) {
 				if !reflect.DeepEqual(call.args, want) {
 					t.Fatalf("args %v, want %v", call.args, want)
 				}
-				if len(call.files) != 2 || call.files["Dockerfile"] == "" || call.files["council-proxy"] != "proxy executable" {
-					t.Fatal("build context must contain only the embedded Dockerfile and compiled proxy")
+				if call.files["Dockerfile"] == "" || call.files["council-proxy"] != "proxy executable" || call.files["licenses/codex/NOTICE"] == "" {
+					t.Fatal("build context must contain the embedded Dockerfile, licence files and compiled proxy")
+				}
+				for name := range call.files {
+					if name != "Dockerfile" && name != "council-proxy" && !strings.HasPrefix(name, "licenses/") {
+						t.Fatalf("unexpected build context file %q", name)
+					}
 				}
 				for name := range call.files {
 					if strings.Contains(name, "..") || strings.HasPrefix(name, "/") {

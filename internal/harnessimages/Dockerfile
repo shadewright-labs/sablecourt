@@ -13,37 +13,49 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 
 ENV HOME=/home/harness TMPDIR=/scratch PATH=/usr/local/bin:/usr/bin:/bin
 WORKDIR /workspace
+LABEL org.opencontainers.image.source="https://github.com/shadewright-labs/sablecourt"
 
-FROM base AS claude
-RUN curl -fsSL https://claude.ai/install.sh -o /scratch/install.sh \
-    && HOME=/opt/claude-install bash /scratch/install.sh 2.1.332 \
-    && install -m 0755 "$(readlink -f /opt/claude-install/.local/bin/claude)" /usr/local/bin/claude \
-    && rm -rf /opt/claude-install /scratch/install.sh
+# The images for proprietary tools carry no vendor software. sablectl installs
+# the pinned tool at login into a separate volume that is mounted here read-only.
+FROM base AS tool-less
+RUN install -d -o 10001 -g 10001 -m 0755 /opt/harness-tool
 USER 10001:10001
-RUN test "$(claude --version)" = '2.1.332 (Claude Code)'
-CMD ["claude", "--version"]
+CMD ["/bin/bash", "-c", "cat /licenses/README"]
+
+FROM tool-less AS claude
+COPY licenses/image/claude.txt /licenses/README
+LABEL org.opencontainers.image.title="sablecourt-harness-claude" \
+      org.opencontainers.image.description="Sablecourt council harness base for the claude role. Contains no vendor software; the tool is installed at login." \
+      org.opencontainers.image.licenses="NOASSERTION"
+
+FROM tool-less AS agy
+COPY licenses/image/agy.txt /licenses/README
+LABEL org.opencontainers.image.title="sablecourt-harness-agy" \
+      org.opencontainers.image.description="Sablecourt council harness base for the agy role. Contains no vendor software; the tool is installed at login." \
+      org.opencontainers.image.licenses="NOASSERTION"
 
 FROM base AS codex
 RUN mkdir -p /opt/codex \
     && curl -fsSL https://github.com/openai/codex/releases/download/rust-v0.172.0/codex-aarch64-unknown-linux-musl.tar.gz -o /scratch/codex.tar.gz \
     && tar -xzf /scratch/codex.tar.gz -C /opt/codex \
     && install -m 0755 /opt/codex/codex-aarch64-unknown-linux-musl /usr/local/bin/codex \
-    && rm /scratch/codex.tar.gz
+    && rm -rf /scratch/codex.tar.gz /opt/codex
+COPY licenses/codex/LICENSE licenses/codex/NOTICE /licenses/codex/
+COPY licenses/image/codex.txt /licenses/README
+LABEL org.opencontainers.image.title="sablecourt-harness-codex" \
+      org.opencontainers.image.description="Sablecourt council harness for the codex role. Contains the OpenAI Codex CLI 0.172.0, unmodified." \
+      org.opencontainers.image.licenses="Apache-2.0"
 USER 10001:10001
 RUN test "$(codex --version)" = 'codex-cli 0.172.0'
 CMD ["codex", "--version"]
 
-FROM base AS agy
-RUN curl -fsSL https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-arm/cli_linux_arm64.tar.gz -o /scratch/agy.tar.gz \
-    && echo 'e4f086d0730b325cfd438ea90396ee78eb23a3110ef7f792824c8817b8d0432462b7b5f91b3d933fc1932a6f4ba73de505e2e96f44448c9fb2427292ead716f7  /scratch/agy.tar.gz' | sha512sum -c - \
-    && tar -xzf /scratch/agy.tar.gz -C /scratch antigravity \
-    && install -m 0755 /scratch/antigravity /usr/local/bin/agy \
-    && rm -f /scratch/agy.tar.gz /scratch/antigravity
-USER 10001:10001
-RUN test "$(agy --version)" = '1.5.17'
-CMD ["agy", "--version"]
-
 FROM base AS proxy
 COPY council-proxy /usr/local/bin/council-proxy
+COPY licenses/sablecourt/LICENSE /licenses/sablecourt/LICENSE
+COPY licenses/go/LICENSE /licenses/go/LICENSE
+COPY licenses/image/proxy.txt /licenses/README
+LABEL org.opencontainers.image.title="sablecourt-harness-proxy" \
+      org.opencontainers.image.description="Sablecourt council proxy, built from source. Contains no vendor software." \
+      org.opencontainers.image.licenses="Apache-2.0 AND BSD-3-Clause"
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/council-proxy"]

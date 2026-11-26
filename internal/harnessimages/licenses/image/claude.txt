@@ -1,0 +1,13 @@
+sablecourt-harness-claude
+
+This image contains no vendor software. It holds a Debian bookworm base
+(packages from the snapshot.debian.org archive of 2026-11-23, copyright
+files under /usr/share/doc) and an empty directory /opt/harness-tool.
+
+Claude Code is proprietary software of Anthropic and is not in this image.
+`sablectl harness login claude` (or `sablectl harness install claude`)
+downloads the pinned version from Anthropic's own download host on your
+machine, checks its SHA-256, and stores it in a separate volume that the
+harness container mounts read-only at /opt/harness-tool.
+
+Source: https://github.com/shadewright-labs/sablecourt
