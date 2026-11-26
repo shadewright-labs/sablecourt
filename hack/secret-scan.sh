@@ -3,7 +3,14 @@
 # secret-scan.yml (and of hack/test/gitleaks_test.sh, so the controls test exactly what CI runs). Findings are
 # printed redacted; exit 1 on any finding. The log options are gitleaks' defaults (every ref, full history) plus
 # --diff-merges=first-parent: without it `git log -p` shows no diff for a merge commit, so a change made only
-# while resolving a merge (a token added in the merge commit itself) would never be scanned. Usage:
+# while resolving a merge (a token added in the merge commit itself) would never be scanned.
+#
+# Fails closed when the history cannot be read. gitleaks runs `git log` itself and ignores its exit status: a
+# failed or empty read scans nothing and passes. So this script first reads the same range itself, checks git's
+# exit status and that the log holds exactly `git rev-list --count` commits, and counts the commits gitleaks must
+# report as scanned: those with a text hunk in a file that is not deleted (gitleaks skips deleted and binary
+# files, so an empty commit, a mode change, a pure rename, a binary change or a deletion is not counted). The
+# scan fails when gitleaks reports fewer, or no count at all. Usage:
 #   hack/secret-scan.sh <gitleaks binary> [repository, default .]
 set -euo pipefail
 
@@ -11,5 +18,37 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
   echo "usage: $0 <gitleaks binary> [repository]" >&2
   exit 2
 fi
-exec "$1" git "${2:-.}" --redact --no-banner --exit-code 1 \
-  --log-opts='--all --full-history --diff-merges=first-parent'
+gitleaks="$1" repo="${2:-.}"
+range=(--all --full-history)
+log_opts=("${range[@]}" --diff-merges=first-parent)
+work="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")"
+trap 'rm -rf "${work}"' EXIT
+
+fail() {
+  echo "secret scan: $*" >&2
+  exit 1
+}
+
+total="$(git -C "${repo}" rev-list --count "${range[@]}")" || fail "git rev-list failed"
+[[ "${total}" =~ ^[0-9]+$ ]] || fail "git rev-list returned '${total}'"
+git -C "${repo}" log --format='commit %H' -p -U0 --no-ext-diff --no-textconv "${log_opts[@]}" > "${work}/log" \
+  || fail "git log failed"
+read -r listed want < <(awk '
+  /^commit [0-9a-f]+$/ { c = $2; listed++; del = 0; next }
+  /^diff --git / { del = 0; next }
+  /^deleted file mode / { del = 1; next }
+  /^@@ / { if (c != "" && !del && !(c in seen)) { seen[c] = 1; want++ } }
+  END { print listed + 0, want + 0 }
+' "${work}/log") || fail "cannot count the commits of the log"
+[ "${listed}" -eq "${total}" ] || fail "git log listed ${listed} commits, git rev-list counts ${total}"
+
+rc=0
+"${gitleaks}" git "${repo}" --redact --no-banner --exit-code 1 --log-opts="${log_opts[*]}" > "${work}/out" 2>&1 || rc=$?
+cat "${work}/out"
+if [ "${rc}" -ne 0 ]; then
+  exit "${rc}"
+fi
+scanned="$(sed 's/\x1b\[[0-9;]*m//g' "${work}/out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) commits scanned.*/\1/p' | tail -n 1)"
+[ -n "${scanned}" ] || fail "gitleaks reported no count of scanned commits"
+[ "${scanned}" -ge "${want}" ] || fail "gitleaks scanned ${scanned} commits, the history has ${want} with text changes (${total} in all)"
+echo "secret scan: ${scanned} commits scanned, ${want} with text changes expected, ${total} in all"

@@ -97,6 +97,60 @@ merge_only "token added only in a merge commit" notes/merged.txt "token = ghp_$(
 merge_only "key added only in a merge commit, allowlisted path" internal/attach/hub_test.go "$(pem_block)"
 merge_only "token added only in a merge commit to an existing file" README.txt "token = ghp_$(alnum 36)"
 
+# The scan fails closed when the history cannot be read. A stub git first in PATH breaks `git log`, either for
+# every caller or only for gitleaks' own call (`log -p -U0` with no --format), while every other git command
+# runs the real git. Without the check, gitleaks reads no commits, finds nothing and exits 0.
+real_git="$(command -v git)"
+stub="${work}/stub"
+mkdir -p "${stub}"
+cat > "${stub}/git" <<EOF
+#!/bin/sh
+case "\${GIT_STUB_MODE}" in
+  fail-log|fail-gitleaks-log|empty-gitleaks-log) ;;
+  *) exec "${real_git}" "\$@" ;;
+esac
+is_log=0 has_format=0
+for a in "\$@"; do
+  case "\${a}" in
+    log) is_log=1 ;;
+    --format=*) has_format=1 ;;
+  esac
+done
+if [ "\${is_log}" = 1 ]; then
+  if [ "\${GIT_STUB_MODE}" = fail-log ]; then echo "stub: log failed" >&2; exit 128; fi
+  if [ "\${has_format}" = 0 ]; then
+    if [ "\${GIT_STUB_MODE}" = fail-gitleaks-log ]; then echo "stub: log failed" >&2; exit 128; fi
+    exit 0
+  fi
+fi
+exec "${real_git}" "\$@"
+EOF
+chmod +x "${stub}/git"
+
+# history_repo: a clean repository whose history has every kind of commit gitleaks does not count (empty, mode
+# change, pure rename, binary, deletion, a merge with no first-parent change) next to ordinary ones.
+history_repo() {
+  new_repo
+  printf 'a\nb\n' > "${repo}/a.txt"
+  git_q -C "${repo}" add -A && git_q -C "${repo}" commit -qm text
+  git_q -C "${repo}" commit -q --allow-empty -m empty
+  chmod +x "${repo}/a.txt" && git_q -C "${repo}" commit -qam mode
+  git_q -C "${repo}" mv a.txt b.txt && git_q -C "${repo}" commit -qm rename
+  printf '\000\001\002' > "${repo}/bin.dat" && git_q -C "${repo}" add -A && git_q -C "${repo}" commit -qm binary
+  git_q -C "${repo}" rm -q bin.dat && git_q -C "${repo}" commit -qm delete
+  git_q -C "${repo}" checkout -q -b side
+  echo side > "${repo}/side.txt" && git_q -C "${repo}" add -A && git_q -C "${repo}" commit -qm side
+  git_q -C "${repo}" checkout -q main
+  git_q -C "${repo}" merge -q --no-ff -s ours side -m merge
+}
+
+history_repo
+scan_repo "clean history with uncounted commits passes" 0
+for mode in fail-log fail-gitleaks-log empty-gitleaks-log; do
+  history_repo
+  GIT_STUB_MODE="${mode}" PATH="${stub}:${PATH}" scan_repo "history read broken (${mode}) fails" 1
+done
+
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2
   exit 1
