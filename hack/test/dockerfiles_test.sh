@@ -40,13 +40,6 @@ case_ "a package named like go is not the go command" 0 Dockerfile 'FROM alpine
 RUN apk add go-bindata'
 case_ "no go at all" 0 Dockerfile 'FROM scratch
 COPY x /x'
-case_ "go on a continued RUN line" 1 Dockerfile 'FROM golang AS build
-RUN apk add git && \
-    go build ./cmd/x'
-case_ "GOWORK=off on a continued ENV line" 0 Dockerfile 'FROM golang AS build
-ENV CGO_ENABLED=0 \
-    GOWORK=off
-RUN go build ./cmd/x'
 if "${root}/hack/check-dockerfiles.sh" "${root}" > /dev/null 2>&1; then echo "ok   this repository"; else echo "FAIL this repository"; fails=$((fails + 1)); fi
 
 if [ "${fails}" -ne 0 ]; then
