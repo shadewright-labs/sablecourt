@@ -29,7 +29,7 @@ func TestMetricsHandlerExposesPrometheusFormat(t *testing.T) {
 	})
 	_ = st.RecordBudgetUsage(ctx, domain.BudgetEntry{
 		TaskID: "t1", WorkloadName: "triage-agent", Provider: "anthropic", Model: "claude-sonnet-4-5",
-		InputTokens: 500, OutputTokens: 100, CostMicroUSD: 3000,
+		InputTokens: 500, CacheWriteTokens: 200, CacheReadTokens: 1200, OutputTokens: 100, CostMicroUSD: 3000,
 	})
 
 	rec := httptest.NewRecorder()
@@ -42,6 +42,9 @@ func TestMetricsHandlerExposesPrometheusFormat(t *testing.T) {
 		`sablecourt_workloads_total{zone="runtime"} 1`,
 		`sablecourt_tasks_total{state="working"} 1`,
 		`sablecourt_budget_input_tokens_total 500`,
+		`sablecourt_budget_cache_write_tokens_total 200`,
+		`sablecourt_budget_cache_read_tokens_total 1200`,
+		`sablecourt_budget_output_tokens_total 100`,
 		`sablecourt_budget_cost_microusd_total 3000`,
 	} {
 		if !strings.Contains(body, want) {

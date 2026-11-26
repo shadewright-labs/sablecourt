@@ -395,12 +395,12 @@ func TestRecordedExit(t *testing.T) {
 		stdout, stderr string
 		wantError      bool
 	}{
-		{"redacted", exitRecord{workerIdentity{42, start}, &code}, "password=fixture-value\n", "password=fixture-value\n", false},
-		{"other_pid", exitRecord{workerIdentity{41, start}, &code}, "", "", true},
-		{"other_start", exitRecord{workerIdentity{42, start.Add(time.Second)}, &code}, "", "", true},
-		{"missing_status", exitRecord{workerIdentity{42, start}, nil}, "", "", true},
-		{"oversized_stdout", exitRecord{workerIdentity{42, start}, &code}, strings.Repeat("a", 64*1024+1), "", true},
-		{"oversized_stderr", exitRecord{workerIdentity{42, start}, &code}, "", strings.Repeat("a", maxDiagnosticTail+129), true},
+		{"redacted", exitRecord{workerIdentity: workerIdentity{42, start}, Code: &code}, "password=fixture-value\n", "password=fixture-value\n", false},
+		{"other_pid", exitRecord{workerIdentity: workerIdentity{41, start}, Code: &code}, "", "", true},
+		{"other_start", exitRecord{workerIdentity: workerIdentity{42, start.Add(time.Second)}, Code: &code}, "", "", true},
+		{"missing_status", exitRecord{workerIdentity: workerIdentity{42, start}, Code: nil}, "", "", true},
+		{"oversized_stdout", exitRecord{workerIdentity: workerIdentity{42, start}, Code: &code}, strings.Repeat("a", 64*1024+1), "", true},
+		{"oversized_stderr", exitRecord{workerIdentity: workerIdentity{42, start}, Code: &code}, "", strings.Repeat("a", maxDiagnosticTail+129), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := scruntime.Handle{PID: 42, ProcessStartTime: start, WorkDir: filepath.Join(t.TempDir(), "work")}

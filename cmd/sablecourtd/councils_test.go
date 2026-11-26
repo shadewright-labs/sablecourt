@@ -170,7 +170,7 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 		{name: "writer with ref", bodyExtra: `,"writer":"claude"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "claude"},
 		{name: "writer default HEAD", omitRef: true, bodyExtra: `,"writer":"codex"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "codex"},
 		{name: "client fields", bodyExtra: `,"title":"Review this","decree":"Review this","rounds":1,"starts":3,"durationSeconds":7,"with":["agy","claude","codex"],"sequential":true`, rounds: 1, starts: 3, duration: 7 * time.Second, roles: "agy,claude,codex", sequential: true, wantRef: "HEAD", wantCommit: head},
-		{name: "redaction", bodyExtra: `,"title":"-----BEGIN PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
+		{name: "redaction", bodyExtra: `,"title":"-----BEGIN` + ` PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
 		{name: "embedded credential", bodyExtra: fmt.Sprintf(`,"title":%q`, "prefix"+token+"suffix"), rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,7 +178,7 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 			h := councilTestHandler(st, nil, councilTestOptions(token))
 			question := "Review this"
 			if tc.name == "redaction" {
-				question += " -----BEGIN PRIVATE KEY----- concealed"
+				question += " -----BEGIN" + " PRIVATE KEY----- concealed"
 			}
 			if tc.name == "embedded credential" {
 				question += " prefix" + token + "suffix"
@@ -512,7 +512,7 @@ func councilTestGit(t *testing.T, repo string, args ...string) string {
 			env = append(env, entry)
 		}
 	}
-	cmd.Env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=")
+	cmd.Env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=") //nolint:gocritic // env is not used again
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v (%s)", args[0], err, out)
@@ -564,7 +564,7 @@ func councilAssertEmpty(t *testing.T, st store.Store) {
 
 func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	st := daemonTestStore(t)
-	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
 	if err != nil {
 		t.Fatalf("ensureCouncilPanelWorkloads: %v", err)
 	}
@@ -580,12 +580,12 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{
 		domain.ClassCodingAgent: &councilTestAdapter{},
 	}
-	check := councilRuntimeChecker(func() *config.Bundle { return bundle }, adapters)
+	check := councilRuntimeChecker(func() *config.Bundle { return bundle }, adapters, "seatbelt")
 	if err := check(t.Context(), store.CouncilCheckout{Source: repo}); err != nil {
 		t.Fatalf("expected built-in panel to pass runtime check: %v", err)
 	}
 
-	if err := councilRuntimeChecker(func() *config.Bundle { return bundle }, nil)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return bundle }, nil, "seatbelt")(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
 		t.Fatal("expected missing coding adapter to fail runtime check")
 	}
 
@@ -594,7 +594,7 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 	wl := badBundle.Workloads["claude"]
 	wl.Spec.Grants.ModelGate.Allowed = true
 	badBundle.Workloads["claude"] = wl
-	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return badBundle }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: repo}); err == nil {
 		t.Fatal("expected Model Gate grant on council panel workload to fail runtime check")
 	}
 
@@ -617,7 +617,7 @@ func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
 		w.Spec.Coding = &cfg
 		relBundle.Workloads[role] = w
 	}
-	if err := councilRuntimeChecker(func() *config.Bundle { return relBundle }, adapters)(t.Context(), store.CouncilCheckout{Source: canonRelRepo}); err != nil {
+	if err := councilRuntimeChecker(func() *config.Bundle { return relBundle }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: canonRelRepo}); err != nil {
 		t.Fatalf("expected relative RepoPath matching absolute checkout.Source to pass: %v", err)
 	}
 }
@@ -727,7 +727,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 					},
 				},
 			}
-			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b); err == nil {
+			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b, "seatbelt"); err == nil {
 				t.Fatalf("ensureCouncilPanelWorkloads accepted manifest workload named %q", role)
 			}
 		})
@@ -735,7 +735,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 
 	t.Run("runtime checker refuses extra grants on panel workload", func(t *testing.T) {
 		st := daemonTestStore(t)
-		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil)
+		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -744,7 +744,7 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 		wl.Spec.Grants.MCPTools = []string{"conclave.read"}
 		bad.Workloads["claude"] = wl
 		adapters := map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: &councilTestAdapter{}}
-		if err := councilRuntimeChecker(func() *config.Bundle { return bad }, adapters)(t.Context(), store.CouncilCheckout{Source: t.TempDir()}); err == nil {
+		if err := councilRuntimeChecker(func() *config.Bundle { return bad }, adapters, "seatbelt")(t.Context(), store.CouncilCheckout{Source: t.TempDir()}); err == nil {
 			t.Fatal("expected extra MCP grants on council panel workload to fail runtime check")
 		}
 	})

@@ -134,7 +134,7 @@ func TestSchedulerBlockedWorkflowDoesNotStallOtherSlots(t *testing.T) {
 		t.Fatalf("slow submission returned before entering store: %v", err)
 	case <-time.After(5 * time.Second):
 		close(st.release)
-		<-slow
+		<-slow //nolint:errcheck // waits for the blocked submission before failing the test
 		t.Fatal("slow submission did not enter store")
 	}
 	fast, duplicate := fire("fast"), fire("slow")
@@ -152,7 +152,7 @@ func TestSchedulerBlockedWorkflowDoesNotStallOtherSlots(t *testing.T) {
 			}
 		case <-time.After(time.Second):
 			t.Errorf("%s stalled behind the blocked submission", run.name)
-			defer func() { <-run.result }()
+			defer func() { <-run.result }() //nolint:errcheck // drains the stalled run; the test has already failed
 		}
 	}
 	close(st.release)

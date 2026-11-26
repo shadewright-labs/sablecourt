@@ -94,11 +94,19 @@ func Read(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	return readToken(root)
 }
 
-// LoadOrCreate publishes a new credential only after the complete file is ready.
+// Test hooks for the pending-file write and its removal; production code uses io.WriteString and Root.Remove.
+var (
+	writePending  = io.WriteString
+	removePending = func(root *os.Root, name string) error { return root.Remove(name) }
+)
+
+// LoadOrCreate publishes a new credential only after the complete file is ready. A pending file that a failed
+// attempt cannot remove holds a credential nobody uses; that removal error is returned (joined with the
+// error that stopped the attempt), never dropped, so the caller sees that a token-bearing file was left behind.
 func LoadOrCreate(dir string) (string, error) {
 	safeDir, err := ensureStateDir(dir)
 	if err != nil {
@@ -108,7 +116,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	token, err := readToken(root)
 	if !errors.Is(err, os.ErrNotExist) {
 		return token, err
@@ -119,7 +127,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer lock.Close()
+	defer lock.Close() //nolint:errcheck // lock handle on a directory; it holds no data
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return "", fmt.Errorf("lock operator state: %w", err)
 	}
@@ -139,26 +147,37 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Remove(pending)
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return "", err
-	}
-	if _, err := io.WriteString(f, token+"\n"); err != nil {
-		_ = f.Close()
-		return "", err
-	}
-	syncErr := f.Sync()
-	if err := errors.Join(syncErr, f.Close()); err != nil {
-		return "", err
-	}
-	if err := root.Rename(pending, Filename); err != nil {
+	if err := publishPending(root, f, pending, token); err != nil {
 		return "", err
 	}
 	if err := lock.Sync(); err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// publishPending writes the token to the open pending file and renames it to Filename. On every return the
+// pending file is removed if it is still there; a removal that fails for any reason but "does not exist" is
+// joined into the returned error.
+func publishPending(root *os.Root, f *os.File, pending, token string) (err error) {
+	defer func() {
+		if rmErr := removePending(root, pending); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove %s, which holds an unused credential: %w", pending, rmErr))
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := writePending(f, token+"\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	syncErr := f.Sync()
+	if err := errors.Join(syncErr, f.Close()); err != nil {
+		return err
+	}
+	return root.Rename(pending, Filename)
 }
 
 func openState(dir string) (*os.Root, error) {
@@ -214,7 +233,7 @@ func mkdirBelow(ancestor, rel string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	actual, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, actual) || !safeAncestor(actual) {
 		return errors.New("operator state parent directory changed while opening it")
@@ -334,7 +353,7 @@ func readToken(root *os.Root) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	actual, err := f.Stat()
 	if err != nil {
 		return "", err

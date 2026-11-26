@@ -109,7 +109,7 @@ func pemHeader(raw []byte) (start, end int) {
 			if bytes.HasPrefix(dashes, []byte("-----")) {
 				return start, start + len(pemBegin) + n + 5
 			}
-			if bytes.HasPrefix([]byte("-----"), dashes) {
+			if bytes.HasPrefix([]byte("-----"), dashes) { //nolint:gocritic // on purpose: the label ends in a partial run of dashes
 				return start, -1
 			}
 		}

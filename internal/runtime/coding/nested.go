@@ -321,7 +321,7 @@ func verifyEmptyNestedRepo(path string) error {
 	if err != nil {
 		return err
 	}
-	defer checkout.Close()
+	defer checkout.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	entries, err := fs.ReadDir(checkout.FS(), ".")
 	if err != nil {
 		return err
@@ -336,7 +336,7 @@ func verifyEmptyNestedRepo(path string) error {
 	if err != nil {
 		return err
 	}
-	defer repo.Close()
+	defer repo.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	// Inspect the stores without loading config or following a nested gitdir.
 	for _, file := range []string{"commondir", "index", "packed-refs", "reftable"} {
 		if _, err := repo.Lstat(file); err == nil {

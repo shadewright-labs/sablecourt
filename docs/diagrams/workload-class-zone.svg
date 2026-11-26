@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 368" role="img" aria-labelledby="t d" data-diagram="matrix" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Workload class and zone</title>
+  <desc id="d">Matrix of the three workload classes and the sandbox zone against runtime adapter, Model Gate, MCP tools, and actions or delegation. A coding-agent runs under the coding adapter, does not receive a Model Gate address in its environment, reaches MCP tools when a grant and a policy rule allow it, and may hold actions or delegation only in the runtime zone. A long-lived-agent runs in a Docker container, reaches the Model Gate if granted and MCP tools when a grant and a policy rule allow it, and may hold actions or delegation only in the runtime zone. A deterministic-controller runs under the controller and Docker adapter, never receives Model Gate access, reaches MCP tools when a grant and a policy rule allow it, and may hold actions or delegation only in the runtime zone. Any workload in the sandbox zone keeps its class runtime and Model Gate rules, reaches MCP tools when a grant and a policy rule allow it, and never holds actions or delegation grants. A note states that sandbox workloads also cannot message a runtime-zone Vassal, sablectl promote makes a local branch for review, and the Kubernetes runtime is parked.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="368" rx="18" fill="#08060e"/>
+  <text class="lanet" x="308" y="52">ADAPTER / RUNTIME</text>
+  <text class="lanet" x="536" y="52">MODEL GATE</text>
+  <text class="lanet" x="728" y="52">MCP TOOLS</text>
+  <text class="lanet" x="896" y="52">ACTIONS, DELEGATE</text>
+
+  <rect class="box" x="36" y="72" width="1048" height="56" rx="10"/>
+  <text class="h" x="56" y="105">coding-agent</text>
+  <text class="s" x="308" y="105">coding adapter</text>
+  <text class="s" x="536" y="105">not injected</text>
+  <text class="s" x="728" y="105">grant and policy</text>
+  <text class="s" x="896" y="105">runtime zone only</text>
+
+  <rect class="box" x="36" y="136" width="1048" height="56" rx="10"/>
+  <text class="h" x="56" y="169">long-lived-agent</text>
+  <text class="s" x="308" y="169">docker container</text>
+  <text class="s" x="536" y="169">if granted</text>
+  <text class="s" x="728" y="169">grant and policy</text>
+  <text class="s" x="896" y="169">runtime zone only</text>
+
+  <rect class="box" x="36" y="200" width="1048" height="56" rx="10"/>
+  <text class="h" x="56" y="233">deterministic-controller</text>
+  <text class="s" x="308" y="233">controller + docker</text>
+  <text class="no" x="536" y="233">never</text>
+  <text class="s" x="728" y="233">grant and policy</text>
+  <text class="s" x="896" y="233">runtime zone only</text>
+
+  <rect class="key" x="36" y="264" width="1048" height="56" rx="12"/>
+  <text class="h" x="56" y="297">sandbox zone (any class)</text>
+  <text class="s" x="308" y="297">per class</text>
+  <text class="s" x="536" y="297">per class</text>
+  <text class="s" x="728" y="297">grant and policy</text>
+  <text class="no" x="896" y="297">never</text>
+
+  <text class="cap" x="36" y="346">Sandbox workloads also cannot message a runtime-zone Vassal; sablectl promote makes a local branch for review. Kubernetes runtime is parked.</text>
+</svg>

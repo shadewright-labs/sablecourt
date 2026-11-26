@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue #27 adds a round-governed council mode to the Conclave in ADR-0008. The broker dispatches always-on roles at opening and can wake on-mention roles as messages arrive. The assembler selects operator Decrees, decisions, recent Relics, and the addressed message on a peer wake. The coding adapter creates a branch and worktree per task, and zero disables the broker's message and ping-pong checks. [ADR-0008](0008-conclaves-wards-and-live-attach.md), [broker](../../internal/conclave/broker.go), [assembler](../../internal/contextpack/assembler.go), [coding adapter](../../internal/runtime/coding/coding.go).
+Issue #27 adds a round-governed council mode to the Conclave in ADR-0008. The broker dispatches always-on roles at opening and can wake on-mention roles as messages arrive. The assembler selects operator Decrees, decisions, recent Relics, and the addressed message on a peer wake. The coding adapter creates a branch and worktree per task, and zero disables the broker's message and ping-pong checks. [ADR-0008](0008-conclaves-wards-and-live-attach.md), [broker](https://github.com/shadewright-labs/sablecourt/blob/main/internal/conclave/broker.go), [assembler](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/assembler.go), [coding adapter](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/coding.go).
 
 ## Decision
 

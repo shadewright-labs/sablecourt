@@ -183,7 +183,7 @@ func TestCouncilDriverBarrier(t *testing.T) {
 			if sequential {
 				count = 1
 			}
-			for i := 0; i < 3; i++ {
+			for i := range 3 {
 				f.pass(t)
 				f.pass(t)
 				f.launch(t, count)

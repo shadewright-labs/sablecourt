@@ -205,7 +205,7 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 
 			form := url.Values{}
 			form.Set("scope", tc.scope)
-			if tc.key == "conclave-msg-1" {
+			if tc.key == "conclave-"+"msg-1" {
 				form.Set("key", "conclave-msg-"+strconv.FormatInt(msgID, 10))
 			} else {
 				form.Set("key", tc.key)

@@ -246,7 +246,7 @@ func (a *Adapter) streamPodLogsBySelector(parent context.Context, taskID, select
 	defer cancel()
 
 	var podName string
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: selector,
 		})

@@ -3,11 +3,12 @@ package docker
 import (
 	"context"
 	"errors"
-	"github.com/moby/moby/api/types/image"
-	"github.com/moby/moby/api/types/network"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -85,7 +86,7 @@ func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 				Class: domain.ClassLongLivedAgent,
 				Runtime: domain.RuntimeConfig{
 					Type:           "docker",
-					Image:          "ghcr.io/shadewright-labs/triage:0.1.0",
+					Image:          "registry.example/triage:0.1.0",
 					ReadOnlyRootfs: true,
 				},
 			},

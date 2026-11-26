@@ -1,0 +1,11 @@
+sablecourt-harness-codex
+
+This image contains the OpenAI Codex CLI 0.172.0, unmodified, as released
+at https://github.com/openai/codex/releases/tag/rust-v0.172.0
+(/usr/local/bin/codex). It is licensed under the Apache License 2.0; its
+LICENSE and NOTICE files are in /licenses/codex/.
+
+The rest is a Debian bookworm base (packages from the snapshot.debian.org
+archive of 2026-11-23, copyright files under /usr/share/doc).
+
+Source: https://github.com/shadewright-labs/sablecourt

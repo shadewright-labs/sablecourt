@@ -102,7 +102,7 @@ func testConcurrentChildReservation(t *testing.T, st, second store.Store) {
 	now := time.Now().UTC()
 
 	stores := [2]store.Store{st, second}
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

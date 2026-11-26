@@ -1,0 +1,54 @@
+name: Gosec
+
+# Static security analysis with the pinned standalone gosec. G104 (unchecked errors, covered by errcheck in
+# golangci-lint), G304 (file paths from variables) and G204 (subprocess with variable arguments) are excluded.
+# gosec can report a package it failed to load and still exit 0, so the log is searched for load and analysis
+# errors (and for a scan of zero files), and any of them fails the job.
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
+jobs:
+  gosec:
+    if: ${{ inputs.run }}
+    permissions:
+      contents: read
+    name: gosec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Static security analysis (gosec)
+        env:
+          GOSEC_VERSION: v2.30.0
+        run: |
+          set -euo pipefail
+          GOFLAGS='' go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          rc=0
+          "$(go env GOPATH)/bin/gosec" -exclude=G104,G304,G204 ./... 2>&1 | tee "$log" || rc=$?
+          if grep -qE "Golang errors in file:|Error building the SSA|Error running analyzer|could not import|Files[[:space:]]*:[[:space:]]*0([^0-9]|$)" "$log"; then
+            echo "gosec reported package load or analysis errors" >&2
+            exit 1
+          fi
+          exit "$rc"

@@ -1,0 +1,42 @@
+name: Images build
+
+# Builds the daemon and agent targets of the Dockerfile for linux/amd64 without pushing. Called by ci.yml on
+# pull requests; release.yml publishes the images on v* tags.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the jobs run; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} (no push)
+    if: ${{ inputs.run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [daemon, agent]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx and BuildKit (pinned)
+        run: hack/setup-buildx.sh
+
+      # amd64 only to keep pull requests quick; release.yml builds both architectures on v* tags.
+      - name: Build linux/amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: false
