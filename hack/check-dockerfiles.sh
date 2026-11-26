@@ -10,11 +10,21 @@ files="$(git ls-files -- 'Dockerfile' '*/Dockerfile' '*.Dockerfile' 'Dockerfile.
 bad=0
 while IFS= read -r f; do
   [ -n "${f}" ] || continue
-  # Per stage (each FROM starts one): remember ENV GOWORK=off, flag a RUN that calls go before it.
+  # Per stage (each FROM starts one): remember ENV GOWORK=off, flag a RUN that calls go before it. Lines that end
+  # in a backslash continue the instruction, so they are joined first and reported at the instruction's first line.
   out="$(awk '
-    toupper($1) == "FROM" { off = 0; next }
-    toupper($1) == "ENV" && $0 ~ /(^|[[:space:]])GOWORK=off([[:space:]]|$)/ { off = 1; next }
-    toupper($1) == "RUN" && $0 ~ /(^|[[:space:];&|])go[[:space:]]/ && !off { print FILENAME ":" FNR ": go runs before ENV GOWORK=off in this stage" }
+    function instr(s, at,   w) {
+      split(s, w, /[[:space:]]+/)
+      if (toupper(w[1]) == "FROM") { off = 0; return }
+      if (toupper(w[1]) == "ENV" && s ~ /(^|[[:space:]])GOWORK=off([[:space:]]|$)/) { off = 1; return }
+      if (toupper(w[1]) == "RUN" && s ~ /(^|[[:space:];&|])go[[:space:]]/ && !off) print FILENAME ":" at ": go runs before ENV GOWORK=off in this stage"
+    }
+    {
+      if (buf == "") { at = FNR; sub(/^[[:space:]]+/, "") }
+      if ($0 ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, " "); buf = buf $0; next }
+      instr(buf $0 " ", at); buf = ""
+    }
+    END { if (buf != "") instr(buf, at) }
   ' "${f}")" || { echo "cannot read ${f}" >&2; exit 1; }
   if [ -n "${out}" ]; then
     echo "${out}" >&2
