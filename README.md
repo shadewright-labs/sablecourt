@@ -80,6 +80,8 @@ Councils (`sablectl council "<question>"`) need more setup, and the CLI wants `c
 
 ## Guides
 
+Published docs site: [shadewrightlabs.com/sablecourt](https://shadewrightlabs.com/sablecourt/) (available once GitHub Pages is published).
+
 - [Overview](docs/overview.md): what Sablecourt is and is not, why it starts on one machine, and the parked parts.
 - [Concepts](docs/concepts.md) and the [glossary](docs/glossary.md): workloads, leases, gates, Conclaves and the court vocabulary.
 - [How it works](docs/how-it-works/index.md): the path of a request and where each invariant is enforced.
@@ -104,7 +106,8 @@ make test         # go test -race ./...
 make vet          # go vet ./...
 make build        # bin/sablecourtd and bin/sablectl
 make docs         # regenerate the generated blocks of docs/reference/cli.md
-make docs-check   # check the generated CLI blocks and the tested parts of the reference pages
+make docs-venv    # create .venv and install the hash-locked docs site packages
+make docs-check   # check reference pages, build the docs site (via docs-venv) and check its links
 make agent-image  # the built-in agent container image
 make demo         # run the daemon with examples/local-demo.yaml
 ```

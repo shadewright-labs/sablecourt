@@ -1,0 +1,204 @@
+/*
+ * Sablecourt dark theme for the docs site.
+ * Colours come from the diagram standard (docs/diagrams/README.md) so pages and standalone SVG diagrams
+ * share one palette. Text and code use the system font stacks (Google Fonts is off via `font = false` in
+ * zensical.toml) so the site makes no third-party requests.
+ *
+ * One scheme: slate (dark only). Every text pair meets WCAG 2.2 AA (4.5:1), computed on sRGB relative
+ * luminance:
+ *   heading #efe9dc on canvas #08060e: 16.65:1 (on box #14111c: 15.41:1)
+ *   body #bbb4c5 on canvas #08060e: 10.02:1 (on box #14111c: 9.27:1, on zone #111422: 9.11:1)
+ *   muted #8a8594 on canvas #08060e: 5.62:1 (on box #14111c: 5.20:1)
+ *   link/accent #2dd4bf on canvas #08060e: 10.82:1 (on box #14111c: 10.01:1)
+ *   link hover/provider #7fd6b4 on canvas #08060e: 11.68:1 (on box #14111c: 10.81:1)
+ *   warning/number #f0b86a on box #14111c: 10.45:1
+ *   refused #f87171 on box #14111c: 6.74:1
+ *   primary button text #08060e on accent #2dd4bf: 10.82:1
+ */
+
+:root {
+  --sc-canvas: #08060e;
+  --sc-box: #14111c;
+  --sc-zone: #111422;
+  --sc-line: #373040;
+  --sc-heading: #efe9dc;
+  --sc-body: #bbb4c5;
+  --sc-muted: #8a8594;
+  --sc-accent: #2dd4bf;
+  --sc-provider: #7fd6b4;
+  --sc-waiting: #f0b86a;
+  --sc-refused: #f87171;
+  --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 262;
+  --md-default-bg-color: var(--sc-canvas);
+  --md-default-fg-color: var(--sc-body);
+  --md-default-fg-color--light: var(--sc-muted);
+  --md-default-fg-color--lighter: var(--sc-muted);
+  --md-default-fg-color--lightest: var(--sc-line);
+  --md-typeset-color: var(--sc-body);
+  --md-typeset-a-color: var(--sc-accent);
+  --md-primary-fg-color: var(--sc-box);
+  --md-primary-fg-color--light: var(--sc-zone);
+  --md-primary-fg-color--dark: var(--sc-canvas);
+  --md-primary-bg-color: var(--sc-heading);
+  --md-primary-bg-color--light: var(--sc-body);
+  --md-accent-fg-color: var(--sc-accent);
+  --md-accent-fg-color--transparent: #2dd4bf1f;
+  --md-code-bg-color: var(--sc-box);
+  --md-code-fg-color: var(--sc-heading);
+  --md-code-hl-keyword-color: var(--sc-accent);
+  --md-code-hl-string-color: var(--sc-provider);
+  --md-code-hl-number-color: var(--sc-waiting);
+  --md-code-hl-comment-color: var(--sc-muted);
+  --md-footer-bg-color: var(--sc-box);
+  --md-footer-bg-color--dark: var(--sc-canvas);
+}
+
+/* Header, tabs and footer. */
+.md-header {
+  background-color: var(--sc-box);
+  box-shadow: 0 1px 0 0 var(--sc-line);
+}
+.md-header__title {
+  color: var(--sc-heading);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.md-tabs {
+  background-color: var(--sc-box);
+  border-bottom: 1px solid var(--sc-line);
+}
+.md-header,
+.md-tabs,
+.md-footer,
+.md-footer-meta {
+  color: var(--sc-heading);
+}
+.md-footer-meta {
+  background-color: var(--sc-canvas);
+}
+.md-footer__link,
+.md-footer-meta__inner,
+.md-copyright,
+.md-copyright a,
+.md-footer-meta a {
+  color: var(--sc-body);
+}
+.md-search__form {
+  background-color: var(--sc-zone);
+  border: 1px solid var(--sc-line);
+}
+.md-search__input,
+.md-search__input::placeholder,
+.md-search__form .md-icon {
+  color: var(--sc-heading);
+}
+
+/* Headings. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  color: var(--sc-heading);
+  font-weight: 650;
+}
+.md-typeset h2 {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--sc-line);
+}
+
+/* Navigation: teal marker on the active page. */
+[data-md-color-scheme="slate"] .md-sidebar .md-nav__link.md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: var(--sc-accent);
+}
+.md-sidebar--primary .md-nav__link--active {
+  box-shadow: inset 2px 0 0 var(--sc-accent);
+  padding-left: 0.4rem;
+}
+
+/* Links and inline code. */
+.md-typeset a:hover {
+  color: var(--sc-provider);
+}
+.md-typeset :not(pre) > code {
+  background-color: var(--sc-box);
+  color: var(--sc-heading);
+  box-shadow: inset 0 0 0 1px var(--sc-line);
+}
+
+/* Tables. */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--sc-line);
+  background-color: var(--sc-canvas);
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--sc-box);
+  color: var(--sc-heading);
+  font-weight: 600;
+}
+.md-typeset table:not([class]) tr:hover {
+  background-color: var(--sc-zone);
+}
+
+/* Buttons. */
+.md-typeset .md-button {
+  border-color: var(--sc-accent);
+  color: var(--sc-accent);
+  font-weight: 600;
+}
+.md-typeset .md-button--primary {
+  background-color: var(--sc-accent);
+  border-color: var(--sc-accent);
+  color: var(--sc-canvas);
+}
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus {
+  background-color: var(--sc-provider);
+  border-color: var(--sc-provider);
+  color: var(--sc-canvas);
+}
+
+/* Standalone SVG diagrams share the page canvas: frame them lightly as figures. */
+.md-typeset a[href$=".svg"] > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--sc-line);
+  border-radius: 0.5rem;
+  background-color: var(--sc-canvas);
+}
+
+/* Keyboard focus and reduced motion. */
+:focus-visible {
+  outline: 2px solid var(--sc-accent);
+  outline-offset: 2px;
+}
+.md-header :focus-visible,
+.md-footer :focus-visible {
+  outline-color: var(--sc-heading);
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 404 page. */
+.sc-404 {
+  max-width: 34rem;
+  margin: 2rem auto;
+  text-align: center;
+}
+.sc-404 .md-button {
+  margin: 0.25rem 0.3rem;
+}

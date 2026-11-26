@@ -50,6 +50,9 @@ jobs:
       - name: Test the link checker
         run: hack/test/docs-links_test.sh
 
+      - name: Test the built docs site check
+        run: hack/test/docs-site-check_test.sh
+
       - name: Test the image reference check
         run: hack/test/check-image-refs_test.sh
 

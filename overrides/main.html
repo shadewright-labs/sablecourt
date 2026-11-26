@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{#- Link previews: Open Graph and Twitter tags with the local brand image (no third-party social cards service). -#}
+{% block extrahead %}
+  {% set sc_title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page and page.title and not page.is_homepage else config.site_name) %}
+  {% set sc_desc = page.meta.description if page.meta and page.meta.description else config.site_description %}
+  {% set sc_image = config.site_url ~ "assets/brand/sablecourt-horizontal-nolabs-dark.png" %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ sc_title | e }}">
+  <meta property="og:description" content="{{ sc_desc | e }}">
+  <meta property="og:image" content="{{ sc_image }}">
+  <meta property="og:image:width" content="1040">
+  <meta property="og:image:height" content="288">
+  <meta property="og:image:alt" content="Sablecourt: a control plane that runs coding agents and deterministic programs on one machine under limits you set">
+  {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ sc_title | e }}">
+  <meta name="twitter:description" content="{{ sc_desc | e }}">
+  <meta name="twitter:image" content="{{ sc_image }}">
+{% endblock %}

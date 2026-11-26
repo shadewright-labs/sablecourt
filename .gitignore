@@ -6,6 +6,10 @@ dist/
 *.out
 coverage.txt
 
+# Docs site build
+.venv/
+site/
+
 # Local state and secrets
 .env
 .env.*
