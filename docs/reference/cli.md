@@ -243,6 +243,7 @@ Convene a bounded multi-agent council, stream round answers, and print the diges
 | `--rounds` | int | `2` | Maximum council rounds |
 | `--sequential` | bool | `false` | Run participants sequentially within each round |
 | `--with` | string | `claude,codex,agy` | Comma-separated participant harnesses (claude,codex,agy) |
+| `--writer` | seat | empty | Give one panel seat (claude, codex or agy) a writable worktree; without --ref it pins HEAD (excludes --live) |
 
 ### `sablectl device`
 
