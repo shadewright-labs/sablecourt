@@ -59,6 +59,8 @@ The [docs home page](docs/index.md#status) has a longer status table with issue 
 
 Nothing is released, so build from source with `make install`. You need Go 1.27.4 or newer (the version in [go.mod](go.mod)) on macOS or Linux.
 
+[Verify a release](docs/how-to/verify-a-release.md) lists the commands that check a signed release.
+
 ```bash
 git clone https://github.com/shadewright-labs/sablecourt.git
 cd sablecourt
