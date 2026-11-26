@@ -49,7 +49,7 @@ jobs:
         run: go mod tidy -diff
 
       - name: Check linter configuration
-        run: make lint-config
+        run: make -f Makefile lint-config
 
       - name: Run linter
-        run: make lint
+        run: make -f Makefile lint

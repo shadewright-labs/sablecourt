@@ -66,6 +66,13 @@ expect "Go file renamed to text" true true true true
 new_repo; git_q rm -q internal/x/a.go; commit
 expect "Go file deleted" true true true true
 
+# Make reads GNUmakefile and makefile ahead of Makefile, so either can change what a bare `make` runs.
+new_repo; printf 'lint:\n\ttrue\n' > GNUmakefile; commit
+expect "GNUmakefile only" true false true false
+
+new_repo; printf 'lint:\n\ttrue\n' > makefile; commit
+expect "lowercase makefile only" true false true false
+
 new_repo; echo 'go 1.27' >> go.mod; commit
 expect "go.mod only" true true false true
 

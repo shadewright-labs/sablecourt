@@ -151,7 +151,7 @@ mkdir -p "${stub}"
 cat > "${stub}/git" <<EOF
 #!/bin/sh
 case "\${GIT_STUB_MODE}" in
-  fail-log|fail-gitleaks-log|empty-gitleaks-log) ;;
+  fail-log|fail-gitleaks-log|empty-gitleaks-log|partial-gitleaks-log) ;;
   *) exec "${real_git}" "\$@" ;;
 esac
 is_log=0 has_format=0
@@ -165,6 +165,13 @@ if [ "\${is_log}" = 1 ]; then
   if [ "\${GIT_STUB_MODE}" = fail-log ]; then echo "stub: log failed" >&2; exit 128; fi
   if [ "\${has_format}" = 0 ]; then
     if [ "\${GIT_STUB_MODE}" = fail-gitleaks-log ]; then echo "stub: log failed" >&2; exit 128; fi
+    # The read stops inside the last commit: every commit header arrives, the end of the last hunk does not.
+    if [ "\${GIT_STUB_MODE}" = partial-gitleaks-log ]; then
+      "${real_git}" "\$@" > "${work}/full.log"
+      n=\$(wc -c < "${work}/full.log")
+      head -c "\$((n - 8))" "${work}/full.log"
+      exit 74
+    fi
     exit 0
   fi
 fi
@@ -191,7 +198,7 @@ history_repo() {
 
 history_repo
 scan_repo "clean history with uncounted commits passes" 0
-for mode in fail-log fail-gitleaks-log empty-gitleaks-log; do
+for mode in fail-log fail-gitleaks-log empty-gitleaks-log partial-gitleaks-log; do
   history_repo
   GIT_STUB_MODE="${mode}" PATH="${stub}:${PATH}" scan_repo "history read broken (${mode}) fails" 1
 done

@@ -37,4 +37,4 @@ jobs:
           go-version-file: go.mod
 
       - name: Check the reference pages
-        run: make docs-check
+        run: make -f Makefile docs-check

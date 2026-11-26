@@ -10,7 +10,8 @@
 # exit status and that the log holds exactly `git rev-list --count` commits, and counts the commits gitleaks must
 # report as scanned: those with a text hunk in a file that is not deleted (gitleaks skips deleted and binary
 # files, so an empty commit, a mode change, a pure rename, a binary change or a deletion is not counted). The
-# scan fails when gitleaks reports fewer, or no count at all. Usage:
+# scan fails when gitleaks reports fewer, or no count at all, or when the git process gitleaks started did not
+# exit 0 (a read cut short inside a commit). Usage:
 #   hack/secret-scan.sh <gitleaks binary> [repository, default .]
 set -euo pipefail
 
@@ -42,11 +43,35 @@ read -r listed want < <(awk '
 ' "${work}/log") || fail "cannot count the commits of the log"
 [ "${listed}" -eq "${total}" ] || fail "git log listed ${listed} commits, git rev-list counts ${total}"
 
+# gitleaks starts its own git and does not look at how it ended, so a read that stops part way through a commit
+# still counts that commit. A shim named git, first in PATH for the gitleaks call only, runs the real git and
+# writes the exit status of each `git log` to a file (gitleaks also runs other git commands that may fail
+# harmlessly); any status but 0, or no `git log` at all, fails the scan.
+real_git="$(command -v git)" || fail "git not found"
+mkdir "${work}/bin"
+# shellcheck disable=SC2016 # the shim's own variables must reach the file unexpanded
+{
+  printf '#!/bin/sh\n'
+  printf 'is_log=0\n'
+  printf 'for a in "$@"; do [ "$a" = log ] && is_log=1; done\n'
+  printf '"%s" "$@"\n' "${real_git}"
+  printf 'rc=$?\n'
+  printf '[ "$is_log" = 1 ] && echo "$rc" >> "%s"\n' "${work}/git-status"
+  printf 'exit "$rc"\n'
+} > "${work}/bin/git"
+chmod +x "${work}/bin/git"
+: > "${work}/git-status"
+
 rc=0
-"${gitleaks}" git "${repo}" --redact --no-banner --exit-code 1 --log-opts="${log_opts[*]}" > "${work}/out" 2>&1 || rc=$?
+PATH="${work}/bin:${PATH}" "${gitleaks}" git "${repo}" --redact --no-banner --exit-code 1 \
+  --log-opts="${log_opts[*]}" > "${work}/out" 2>&1 || rc=$?
 cat "${work}/out"
 if [ "${rc}" -ne 0 ]; then
   exit "${rc}"
+fi
+[ -s "${work}/git-status" ] || fail "gitleaks did not read the history through git"
+if grep -qv '^0$' "${work}/git-status"; then
+  fail "the git process that fed gitleaks exited with $(grep -v '^0$' "${work}/git-status" | head -n 1)"
 fi
 scanned="$(sed 's/\x1b\[[0-9;]*m//g' "${work}/out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) commits scanned.*/\1/p' | tail -n 1)"
 [ -n "${scanned}" ] || fail "gitleaks reported no count of scanned commits"

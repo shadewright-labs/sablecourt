@@ -35,14 +35,14 @@ trap 'fail_open "$LINENO"' ERR
 # of the ignore file count because they decide what the build context holds.
 build_paths='.*\.go|go\.mod|go\.sum|go\.work|go\.work\.sum|vendor/.*|cmd/.*|internal/.*|examples/.*|Dockerfile|\.dockerignore|Dockerfile\.dockerignore'
 # The reference pages under docs/reference are checked against the code by go test, so they are Go inputs too.
-go_paths="${build_paths}|Makefile|hack/.*|\.golangci\.yml|docs/reference/.*"
+go_paths="${build_paths}|Makefile|GNUmakefile|makefile|hack/.*|\.golangci\.yml|docs/reference/.*"
 # Go workflows that ci.yml does not call; a change to one runs the Go checks.
 go_workflows='\.github/workflows/(fuzz|release)\.yml'
 go_re="^(${go_paths}|${go_workflows})$"
 # The image build also runs hack/setup-buildx.sh (images-build.yml); hack/test/ci-changed_test.sh lists every input.
 images_re="^(${build_paths}|LICENSE|hack/setup-buildx\.sh)$"
 # The reference pages and what renders or checks them.
-docs_re='^(docs/reference/.*|cmd/.*|internal/.*|Makefile)$'
+docs_re='^(docs/reference/.*|cmd/.*|internal/.*|Makefile|GNUmakefile|makefile)$'
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.
 codeql_re='^(.*\.go|go\.mod|go\.sum|\.github/workflows/.*|\.github/actions/.*|\.github/codeql/.*)$'
 # ci.yml and the workflows it calls, and this script.
