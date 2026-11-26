@@ -209,6 +209,10 @@ def failure_rows(text):
     return rows
 
 
+NEEDS_ROW = r"^\| `([a-z-]+)` \| ((?:`[a-z-]+`(?:, )?)+|nothing) \|$"
+FAILURE_ROW = r"^\| `([a-z-]+)` \| ([^|]*) \| ([^|]*) \|$"
+
+
 def unique(pairs):
     """A dict of the (key, value) pairs, or None when a key repeats, so a second row for a job cannot replace or
     hide the first one."""
@@ -223,13 +227,26 @@ def unique(pairs):
 def doc_rows(doc):
     """The rows of the failure table in docs/ci.md whose first cell is one job name; None when a job repeats."""
     return unique((m.group(1), (m.group(2).strip(), m.group(3).strip()))
-                  for m in re.finditer(r"^\| `([a-z-]+)` \| ([^|]*) \| ([^|]*) \|", doc, re.M))
+                  for m in re.finditer(FAILURE_ROW, doc, re.M))
 
 
 def doc_needs(doc):
-    """The rows of the needs table in docs/ci.md; None when a job repeats."""
-    return unique((m.group(1), set(re.findall(r"`([a-z-]+)`", m.group(2))))
-                  for m in re.finditer(r"^\| `([a-z-]+)` \| ((?:`[a-z-]+`(?:, )?)+|nothing) \|$", doc, re.M))
+    """The rows of the needs table in docs/ci.md; None when a job or a job's dependency repeats."""
+    rows = [(m.group(1), re.findall(r"`([a-z-]+)`", m.group(2))) for m in re.finditer(NEEDS_ROW, doc, re.M)]
+    if any(len(deps) != len(set(deps)) for _, deps in rows):
+        return None
+    return unique((job, set(deps)) for job, deps in rows)
+
+
+def unread_rows(doc):
+    """The table rows of docs/ci.md, Releases, that start with a job name in backticks but have the form of neither
+    table, so neither parser reads them."""
+    at = doc.find("\n## Releases\n")
+    rel = doc[at:] if at >= 0 else ""
+    nxt = re.search(r"^## ", rel[2:], re.M)
+    rel = rel[:nxt.start() + 2] if nxt else rel
+    return [l for l in rel.splitlines() if re.match(r"^\| `[a-z-]+` \|", l)
+            and not re.match(NEEDS_ROW, l) and not re.match(FAILURE_ROW, l)]
 
 
 def job_env(job_text):
@@ -332,8 +349,9 @@ def release_checks(text):
         ("every signing job needs scan-images itself", all("scan-images" in needs(j.get(n, "")) for n in signers)),
         ("nothing is tagged or released unless verify passed",
          writers == ["publish"] and all("verify" in ancestors(j, n) for n in writers)),
-        ("the failure table of docs/ci.md is the one the needs graph gives", docs == rows),
-        ("the needs table of docs/ci.md is the one of the workflow", doc_needs(CI_DOC) == {n: needs(t) for n, t in j.items()}),
+        ("the failure table of docs/ci.md is the one the needs graph gives", docs == rows and unread_rows(CI_DOC) == []),
+        ("the needs table of docs/ci.md is the one of the workflow",
+         doc_needs(CI_DOC) == {n: needs(t) for n, t in j.items()} and unread_rows(CI_DOC) == []),
     ]
     out += [
         ("check: version is X.Y.Z or X.Y.Z-rc.N",
@@ -805,6 +823,9 @@ DOC_MUTATIONS = [
     (NEEDS_CHECK, "| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |\n",
      "| `verify` | `check`, `sign-binaries` |\n| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |\n"),
     (NEEDS_CHECK, "| `scan-images` | `images` |\n", "| `scan-images` | `check` |\n"),
+    (NEEDS_CHECK, "| `images` | `check` |\n", "| `images` | `check` |\n| `images` | also waits for `verify` |\n"),
+    (NEEDS_CHECK, "| `images` | `check` |\n", "| `images` | `check`, `check` |\n"),
+    (FAILURE_CHECK, "| `check` | nothing | nothing |\n", "| `check` | nothing | nothing | untagged image digests in GHCR |\n"),
 ]
 true_doc = CI_DOC
 for name, old, new in DOC_MUTATIONS:
