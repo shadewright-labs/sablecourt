@@ -11,27 +11,33 @@ on:
         required: true
         default: "0.1.0"
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
   binaries:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload the archives
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Resolve version
         id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VER="${{ github.event.inputs.tag }}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            VER="${INPUT_TAG}"
           else
             VER="${GITHUB_REF_NAME#v}"
           fi
@@ -39,9 +45,10 @@ jobs:
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Build cross-platform archives
+        env:
+          VER: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          VER="${{ steps.meta.outputs.version }}"
           mkdir -p dist
           for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
             GOOS="${target%/*}"
@@ -53,10 +60,10 @@ jobs:
             tar -C "${STAGE}" -czf "dist/sablecourt_${VER}_${GOOS}_${GOARCH}.tar.gz" sablecourtd sablectl
             rm -rf "${STAGE}"
           done
-          (cd dist && sha256sum *.tar.gz > checksums.txt)
+          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           generate_release_notes: true
@@ -66,18 +73,27 @@ jobs:
 
   containers:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the images to GHCR
+    env:
+      DAEMON_IMAGE: ghcr.io/shadewright-labs/sablecourt
+      AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
+      # The same pinned Buildx and BuildKit as the pull request image build (images-build.yml).
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        run: hack/setup-buildx.sh
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -85,32 +101,35 @@ jobs:
 
       - name: Resolve image tag
         id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG}"
           else
             TAG="${GITHUB_REF_NAME#v}"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push sablecourtd (multi-arch)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: daemon
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/shadewright-labs/sablecourt:${{ steps.meta.outputs.tag }}
-            ghcr.io/shadewright-labs/sablecourt:latest
+            ${{ env.DAEMON_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.DAEMON_IMAGE }}:latest
 
       - name: Build and push sablecourt-agent (multi-arch)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: agent
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/shadewright-labs/sablecourt-agent:${{ steps.meta.outputs.tag }}
-            ghcr.io/shadewright-labs/sablecourt-agent:latest
+            ${{ env.AGENT_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.AGENT_IMAGE }}:latest
