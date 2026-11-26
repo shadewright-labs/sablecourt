@@ -2,7 +2,7 @@
 
 Check that a Sablecourt archive or image was built and signed by this repository's release workflow for a given release tag, and that its bytes have not changed since.
 
-No release existed when this page was written. The commands below apply to releases made by the signed release workflow described in [CI, Releases](../ci.md#releases). Before a release becomes public, that workflow runs the same kinds of checks on the files of its run, pinned to its own tag and commit, plus a few more.
+The commands below apply to releases made by the signed release workflow described in [CI, Releases](../ci.md#releases). Before a release becomes public, that workflow runs the same kinds of checks on the files and image digests of its run, pinned to its own tag and commit, plus a few more.
 
 ## What is signed
 
@@ -15,14 +15,14 @@ Each release has these files:
 
 The images `ghcr.io/shadewright-labs/sablecourt` and `ghcr.io/shadewright-labs/sablecourt-agent` are built for linux/amd64 and linux/arm64. Each image index has a cosign keyless signature and a build provenance attestation in the registry, and each platform image has its SPDX SBOM attached as a signed attestation. The release notes list both index digests.
 
-Keyless means the signing certificate was issued to the workflow run through GitHub's OIDC token, so you need no Sablecourt public key. cosign and gh check that short-lived certificate against the Sigstore and GitHub trust roots. The certificate names the repository, the workflow file and the tag it ran for, and the commands below require that exact name.
+Keyless means the workflow asks for a short-lived signing certificate with its GitHub OIDC token instead of holding a key, so you need no Sablecourt public key. cosign and gh check the certificate against the Sigstore and GitHub trust roots. The commands below require the certificate to name this repository, the workflow file and the tag exactly.
 
 ## Prerequisites
 
-- [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x. The workflow uses 3.1.4; cosign 3 reads the Sigstore bundle format of the image signatures by default, and older versions were not tried.
-- The [GitHub CLI](https://cli.github.com/) (`gh`), logged in, with `gh attestation verify --cert-identity` and `--deny-self-hosted-runners` (gh 2.105.0 was used for this page).
+- [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x. The workflow pins 3.1.4, and cosign 3 reads the Sigstore bundle format by default. The commands were checked with 3.1.4.
+- The [GitHub CLI](https://cli.github.com/) (`gh`), logged in, with `gh attestation verify` flags `--cert-identity`, `--source-digest` and `--deny-self-hosted-runners`. The commands were checked with gh 2.105.0.
 - For images: [Docker](https://docs.docker.com/engine/install/) with Buildx (for `docker buildx imagetools`) and [jq](https://jqlang.org/). If GHCR asks for credentials, log in with `docker login ghcr.io`.
-- Bash. Run the blocks below after `set -euo pipefail`, so that a failed command in a loop or a pipe stops the block instead of being hidden.
+- Bash. Run the blocks below in one shell after `set -euo pipefail`, so that a failed command, in a loop or a pipe too, stops the block. The blocks put each command that can fail on its own line, because `set -e` does not stop at a failed command on the left of `&&`.
 
 Set these once:
 
@@ -38,7 +38,8 @@ ISSUER=https://token.actions.githubusercontent.com
 ## Verify an archive
 
 ```bash
-mkdir "sablecourt-$VERSION" && cd "sablecourt-$VERSION"
+mkdir "sablecourt-$VERSION"
+cd "sablecourt-$VERSION"
 gh release download "v$VERSION" --repo shadewright-labs/sablecourt
 
 # 1. checksums.txt was signed by release.yml on the tag v$VERSION.
@@ -64,7 +65,7 @@ done
 
 To check the provenance against the release's own file instead of GitHub's attestation API, add `--bundle "sablecourt_${VERSION}_provenance.intoto.jsonl"` to the `gh attestation verify` command.
 
-A good result: every command exits 0. `cosign verify-blob` prints `Verified OK`, `sha256sum` prints `OK` after each of the nine file names, and each `gh attestation verify` prints `Verification succeeded!` followed by the attestations it matched and the workflow that signed them. If a check fails, do not use the file. A failure can also come from the network, a login or the tool; fix that and run the check again, because only a check that passes tells you something about the file.
+A good result: every command exits 0. `cosign verify-blob` prints `Verified OK`, `sha256sum` prints `OK` after each of the nine file names, and each `gh attestation verify` prints `Verification succeeded!` followed by the attestations it matched and the workflow that signed them. If a check fails, do not use the file. A checksum mismatch means the file differs from the signed `checksums.txt`. A failure can also come from the network, a login or the tool; fix that and verify again before you use the file.
 
 ## Check that the commit is on main
 
@@ -81,11 +82,11 @@ SHA=$(gh attestation verify checksums.txt \
 gh api "repos/shadewright-labs/sablecourt/compare/main...$SHA" --jq .status
 ```
 
-`identical` or `behind` means the commit is on main. `ahead` or `diverged` means it is not: do not use the release. In a clone, `git merge-base --is-ancestor "$SHA" origin/main` answers the same question. Pass `--source-digest "$SHA"` to later `gh attestation verify` calls to require that commit.
+`identical` or `behind` means the commit is on main. `ahead` or `diverged` means it is not: do not use the release. The command prints the status and does not fail on `ahead` or `diverged`, so read it. In a clone with the full history and a freshly fetched `origin/main`, `git merge-base --is-ancestor "$SHA" origin/main` exits 0 when that main contains the commit. Pass `--source-digest "$SHA"` to later `gh attestation verify` calls to require that commit.
 
 ## Verify an image
 
-Verify by digest, never by tag: a tag can be moved, a digest cannot. Take the digest from the release notes, and check that the version tag points at it:
+Verify by digest, not by tag: a tag can be moved, while a digest names fixed content. Take the digest from the release notes, and check that the version tag points at it:
 
 ```bash
 IMAGE=ghcr.io/shadewright-labs/sablecourt    # or ghcr.io/shadewright-labs/sablecourt-agent
@@ -98,7 +99,8 @@ cosign verify \
   --certificate-oidc-issuer "$ISSUER" \
   "$IMAGE@$DIGEST" > /dev/null
 
-# 2. Each platform image carries a signed SPDX SBOM; this writes it to sbom-<arch>.spdx.json.
+# 2. Each platform image carries a signed SPDX SBOM equal to the release's SBOM file of that image and platform.
+#    Run this in the folder where you downloaded the release files (see "Verify an archive").
 for ARCH in amd64 arm64; do
   CHILD=$(docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | jq -er --arg a "$ARCH" \
     '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest] | if length == 1 then .[0] else error("not one \($a) image") end')
@@ -106,8 +108,9 @@ for ARCH in amd64 arm64; do
     --certificate-identity "$IDENTITY" \
     --certificate-oidc-issuer "$ISSUER" \
     "$IMAGE@$CHILD" > "attestations-$ARCH.json"
-  jq -se 'map(.payload | @base64d | fromjson | .predicate) | .[0]' "attestations-$ARCH.json" > "sbom-$ARCH.spdx.json"
-  jq -e .spdxVersion "sbom-$ARCH.spdx.json"
+  SBOM="sablecourt_${VERSION}_image_${IMAGE##*/}_linux_$ARCH.spdx.json"
+  jq -se --slurpfile want "$SBOM" 'map(.payload | @base64d | fromjson | .predicate) | any(. == $want[0])' \
+    "attestations-$ARCH.json"
 done
 
 # 3. The index has build provenance from release.yml on this tag, made on a GitHub-hosted runner.
@@ -119,7 +122,7 @@ gh attestation verify "oci://$IMAGE@$DIGEST" \
   --deny-self-hosted-runners
 ```
 
-A good result: every command exits 0, the `test` line included. `cosign verify` and `cosign verify-attestation` report the image reference and the checks they made on standard error; the verified payload they write on standard output is kept in `attestations-<arch>.json` or discarded. `jq -e .spdxVersion` prints the SPDX version of each SBOM. `gh attestation verify` prints `Verification succeeded!` and details. Then deploy `$IMAGE@$DIGEST`, not the tag. The same SBOMs are release files, `sablecourt_<version>_image_<image>_linux_<arch>.spdx.json`, covered by `checksums.txt`.
+A good result: every command exits 0, the `test` line included. `cosign verify` and `cosign verify-attestation` report the image reference and the checks they made on standard error; the verified payload they write on standard output is kept in `attestations-<arch>.json` or discarded. The `jq -se` line prints `true` when one of the verified SBOM attestations equals the release's SBOM file, which `checksums.txt` covers, and fails otherwise. `gh attestation verify` prints `Verification succeeded!` and details. Then deploy `$IMAGE@$DIGEST`, not the tag.
 
 ## What the checks prove and what they do not
 
@@ -127,4 +130,4 @@ What you learn: the repository (`shadewright-labs/sablecourt`), the workflow pat
 
 Only the `gh attestation verify` commands with `--deny-self-hosted-runners` prove that the signing run used a GitHub-hosted runner. The cosign commands and `sha256sum` do not check the runner. The workflow's own `gh attestation verify` calls pass the flag too.
 
-What you do not learn: who pushed the tag, and what that run's `release.yml` checked. GitHub runs the workflow file of the tagged commit, so a tag placed on a commit whose `release.yml` lacks the main-branch check, the scan or the verification still produces files signed as `release.yml@refs/tags/v$VERSION`. The trust anchor is the repository's tag ruleset, which must limit who may create `v*` tags; it is a repository setting, and no file in this repository shows or enforces it. The step in [Check that the commit is on main](#check-that-the-commit-is-on-main) is the part you can check yourself.
+What you do not learn: who pushed the tag, and what that run's `release.yml` checked. The identity names the workflow path and the tag, not the content of the workflow file, so a `release.yml` on a tagged commit that lacks the main-branch check, the scan or the verification would sign as `release.yml@refs/tags/v$VERSION` too. The trust anchor is the repository's tag ruleset, which must limit who may create `v*` tags; it is a repository setting, and no file in this repository shows or enforces it. The step in [Check that the commit is on main](#check-that-the-commit-is-on-main) is the part you can check yourself.
