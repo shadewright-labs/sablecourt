@@ -96,7 +96,7 @@ formatters:
     - goimports
 
 # Not enabled, with the reason (counts are the findings on the code when this file was added):
-# - gosec: the Security job runs the pinned standalone gosec with its own exclusions and load-error check;
+# - gosec: gosec.yml runs the pinned standalone gosec with its own exclusions and load-error check;
 #   a second copy here, at another version, would need a second set of exclusions kept in step.
 # - lll (1,523), goconst (933), gocyclo (63), modernize (78), prealloc (15): style and size rules the code
 #   base was never written to. Their findings were counted, not reviewed one by one; gocyclo and prealloc in

@@ -55,8 +55,8 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
-      # The weekly Fuzz workflow runs every fuzz target for minutes; this short run keeps the SSRF guard
-      # (SC-05) under fuzzing on every pull request.
+      # The weekly Fuzz workflow runs every fuzz target for minutes; this short run fuzzes the SSRF guard
+      # (SC-05) on each run of ci.yml that selects the go group of hack/ci-changed.sh, and on every push to main.
       - name: Fuzz Model Gate SSRF guard (SC-05)
         run: go test -run '^$' -fuzz=FuzzSC05_JoinUpstreamURLPreservesHostAndScheme -fuzztime=10s ./internal/gate/model
 

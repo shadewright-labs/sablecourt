@@ -2,7 +2,7 @@ name: Docs links
 
 # Weekly report of external links in the tracked Markdown files that no longer answer. Never runs on pull
 # requests, so a pull request does not depend on third-party sites, and never fails on a dead link: read the
-# warnings in the run log. Internal links are checked on pull requests by docs-check.yml.
+# warnings in the run log. Internal links are checked on pull requests by repo-checks.yml.
 on:
   schedule:
     - cron: "17 5 * * 3" # Wednesdays 05:17 UTC
