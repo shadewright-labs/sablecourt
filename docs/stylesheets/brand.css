@@ -13,7 +13,10 @@
  *   link hover/provider #7fd6b4 on canvas #08060e: 11.68:1 (on box #14111c: 10.81:1)
  *   warning/number #f0b86a on box #14111c: 10.45:1
  *   refused #f87171 on box #14111c: 6.74:1
- *   primary button text #08060e on accent #2dd4bf: 10.82:1
+ *   primary button text #08060e on accent #2dd4bf: 10.82:1 (hover #08060e on provider #7fd6b4: 11.68:1)
+ *   secondary button text #2dd4bf on box #14111c: 10.01:1 (hover #08060e on provider #7fd6b4: 11.68:1)
+ *   hero lore and tagline #bbb4c5 on canvas #08060e: 10.02:1 (link #2dd4bf: 10.82:1, hover #7fd6b4: 11.68:1)
+ *   announcement bar text #ffe2bd on #2e200c: 12.70:1 (link #ffffff: 15.81:1, focus #efe9dc: 13.07:1)
  */
 
 :root {
@@ -28,6 +31,7 @@
   --sc-provider: #7fd6b4;
   --sc-waiting: #f0b86a;
   --sc-refused: #f87171;
+  --sc-heading-font: Georgia, "Iowan Old Style", "Times New Roman", serif;
   --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -63,9 +67,19 @@
   background-color: var(--sc-box);
   box-shadow: 0 1px 0 0 var(--sc-line);
 }
+.md-header__button.md-logo {
+  padding: 0.35rem;
+}
+.md-header__button.md-logo img {
+  height: 1.75rem;
+  width: auto;
+  min-width: 16px;
+  display: block;
+}
 .md-header__title {
   color: var(--sc-heading);
-  font-weight: 650;
+  font-family: var(--sc-heading-font);
+  font-weight: 400;
   letter-spacing: 0.02em;
 }
 .md-tabs {
@@ -163,6 +177,86 @@
   color: var(--sc-canvas);
 }
 
+/* Home page hero: flat canvas field with clear space around the horizontal lockup. */
+.sc-hero {
+  margin: 0.5rem 0 2.5rem;
+  padding: 2.75rem 1.5rem 2.25rem;
+  text-align: center;
+  background-color: var(--sc-canvas);
+  border-radius: 0.5rem;
+  color: var(--sc-heading);
+}
+.sc-hero img {
+  display: block;
+  margin: 0 auto;
+  width: min(520px, 100%);
+  min-width: 120px;
+  height: auto;
+}
+.md-typeset .sc-hero .sc-lore {
+  max-width: 34rem;
+  margin: 1.5rem auto 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--sc-body);
+}
+.md-typeset .sc-hero .sc-lore a {
+  white-space: nowrap;
+}
+.md-typeset .sc-hero .sc-tagline {
+  max-width: 38rem;
+  margin: 1.75rem auto 1.85rem;
+  font-size: 1.05rem;
+  color: var(--sc-body);
+}
+.md-typeset .sc-hero .md-button {
+  color: var(--sc-accent);
+}
+.md-typeset .sc-hero .md-button--primary {
+  color: var(--sc-canvas);
+}
+.md-typeset .sc-hero .md-button:not(.md-button--primary) {
+  background-color: var(--sc-box);
+}
+.md-typeset .sc-hero .md-button:hover,
+.md-typeset .sc-hero .md-button:focus,
+.md-typeset .sc-hero .md-button:not(.md-button--primary):hover,
+.md-typeset .sc-hero .md-button:not(.md-button--primary):focus {
+  background-color: var(--sc-provider);
+  border-color: var(--sc-provider);
+  color: var(--sc-canvas);
+}
+.sc-hero .md-button {
+  margin: 0.25rem 0.3rem;
+}
+.md-typeset h1.sc-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Announcement bar (overrides/main.html). */
+.md-banner {
+  background-color: #2e200c;
+  color: #ffe2bd;
+}
+.md-banner a {
+  color: #ffffff;
+  text-decoration: underline;
+}
+.md-banner .md-typeset code {
+  background-color: transparent;
+  color: #ffe2bd;
+  box-shadow: none;
+  padding: 0;
+}
+
 /* Standalone SVG diagrams share the page canvas: frame them lightly as figures. */
 .md-typeset a[href$=".svg"] > img {
   display: block;
@@ -179,7 +273,8 @@
   outline-offset: 2px;
 }
 .md-header :focus-visible,
-.md-footer :focus-visible {
+.md-footer :focus-visible,
+.md-banner :focus-visible {
   outline-color: var(--sc-heading);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -190,6 +285,19 @@
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Narrow screens. */
+@media (max-width: 44.9375em) {
+  .sc-hero {
+    padding: 1.75rem 1rem 1.5rem;
+  }
+  .sc-hero img {
+    width: 100%;
+  }
+  .md-header__button.md-logo img {
+    height: 1.5rem;
   }
 }
 

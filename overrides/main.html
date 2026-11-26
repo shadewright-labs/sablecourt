@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 
+{#- Announcement bar: pre-release status notice, on every page. -#}
+{% block announce %}
+  <strong>Early:</strong> nothing is released yet, so you build from source; local Sanctum mode, the gates, Conclaves and councils are built. Host coding runs and the approval dialog need macOS; Citadel mode, Kubernetes, voice and live Takeover are parked.
+  <a href="{{ base_url }}/#status">What is built</a>
+{% endblock %}
+
 {#- Link previews: Open Graph and Twitter tags with the local brand image (no third-party social cards service). -#}
 {% block extrahead %}
   {% set sc_title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page and page.title and not page.is_homepage else config.site_name) %}
