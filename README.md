@@ -69,6 +69,9 @@ sablecourtd --manifests=examples/local-demo.yaml   # listens on 127.0.0.1:7432 b
 Once a release is published, you can install `sablecourtd` and `sablectl` from a release archive (`sablecourt_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux`, `amd64` or `arm64`). First download and verify the signatures, checksums, and provenance following [Verify a release](docs/how-to/verify-a-release.md), then unpack the archive into `~/.local/bin`:
 
 ```bash
+VERSION=0.1.0   # the release you verified
+OS=darwin        # or linux
+ARCH=arm64       # or amd64
 mkdir -p ~/.local/bin
 tar -xzf "sablecourt_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin sablecourtd sablectl
 ```
