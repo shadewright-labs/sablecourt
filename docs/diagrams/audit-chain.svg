@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 396" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Audit hash chain</title>
+  <desc id="d">Structure and verification of the audit hash chain. Row 1 hashes the anchor word genesis plus its row fields with SHA-256. Each later row stores the previous row hash and its own SHA-256 up to Row N at the head, where deletion of the last rows is not detected. A dashed planned box marks signed audit heads as proposed in ADR-0014 and not built. To verify, sablectl audit verify calls GET /api/v1/audit/verify on sablecourtd, and the store walks audit_log in id order, skipping older rows without a hash and recomputing each chain hash. If all hashed rows match, the daemon returns 200 with the verified count; on a hash mismatch or a read error it answers 409. A legend marks planned and mismatch styles.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="396" rx="18" fill="#08060e"/>
+
+  <rect class="box" x="24" y="36" width="116" height="72" rx="10"/>
+  <text class="h" x="40" y="62">genesis</text>
+  <text class="s" x="40" y="83">chain anchor</text>
+
+  <rect class="box" x="180" y="36" width="196" height="72" rx="10"/>
+  <text class="h" x="196" y="62">Row 1</text>
+  <text class="s" x="196" y="83">prev: genesis</text>
+  <text class="s" x="196" y="100">hash: SHA-256(prev, row)</text>
+
+  <rect class="box" x="416" y="36" width="196" height="72" rx="10"/>
+  <text class="h" x="432" y="62">Row 2</text>
+  <text class="s" x="432" y="83">prev: row 1 hash</text>
+  <text class="s" x="432" y="100">hash: SHA-256(prev, row)</text>
+
+  <rect class="key" x="652" y="36" width="200" height="72" rx="12"/>
+  <text class="h" x="668" y="62">Row N (head)</text>
+  <text class="s" x="668" y="83">prev: row N-1 hash</text>
+  <text class="s" x="668" y="100">tail deletion unseen</text>
+
+  <rect class="plan" x="932" y="36" width="164" height="72" rx="10"/>
+  <text class="h" x="948" y="62">Signed head</text>
+  <text class="s" x="948" y="83">proposed in ADR-0014</text>
+  <text class="s" x="948" y="100">not built</text>
+
+  <rect class="box" x="24" y="184" width="228" height="72" rx="10"/>
+  <text class="h" x="40" y="210">sablectl audit verify</text>
+  <text class="s" x="40" y="231">GET /api/v1/audit/verify</text>
+  <text class="s" x="40" y="248">asks sablecourtd</text>
+
+  <rect class="box" x="308" y="184" width="284" height="72" rx="10"/>
+  <text class="h" x="324" y="210">Store walks audit_log</text>
+  <text class="s" x="324" y="231">recomputes SHA-256 in id order</text>
+  <text class="s" x="324" y="248">skips older rows without a hash</text>
+
+  <rect class="box" x="684" y="184" width="212" height="72" rx="10"/>
+  <text class="h" x="700" y="210">Valid (200)</text>
+  <text class="s" x="700" y="231">verified row count</text>
+  <text class="s" x="700" y="248">returned to caller</text>
+
+  <rect class="bad" x="308" y="304" width="284" height="64" rx="10"/>
+  <text class="no" x="324" y="330">Verify failed (409)</text>
+  <text class="s" x="324" y="351">hash mismatch or read error</text>
+
+  <path class="f" d="M140 72H174" marker-end="url(#a)"/>
+  <path class="f" d="M376 72H410" marker-end="url(#a)"/>
+  <path class="f" d="M612 72H646" marker-end="url(#a)"/>
+  <path class="r" d="M852 72H926" marker-end="url(#m)"/>
+  <text class="lbl" x="889" y="64" text-anchor="middle">planned</text>
+
+  <path class="f" d="M252 220H302" marker-end="url(#a)"/>
+  <path class="f" d="M592 220H678" marker-end="url(#a)"/>
+  <text class="lbl" x="635" y="212" text-anchor="middle">all match</text>
+  <path class="r" d="M512 184V114" marker-end="url(#m)"/>
+  <text class="lbl" x="524" y="152">reads rows</text>
+  <path class="deny" d="M450 256V298" marker-end="url(#x)"/>
+  <text class="no" x="462" y="284">hash mismatch</text>
+
+  <rect class="plan" x="684" y="328" width="28" height="16" rx="4"/>
+  <text class="lbl" x="720" y="340">planned</text>
+  <path class="deny" d="M812 336H848" marker-end="url(#x)"/>
+  <text class="lbl" x="858" y="340">mismatch / failed</text>
+</svg>

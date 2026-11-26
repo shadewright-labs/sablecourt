@@ -1,6 +1,6 @@
 # How it works
 
-The whole path from a request to a recorded result, and where each of the six rules is enforced. Each part has its own page; this one shows how they fit together.
+The whole path from a request to a recorded result, and where each of the six rules is enforced. Each part has its own page; this one shows how they fit together. For the map of the nouns these pages use, see [concepts](../concepts.md).
 
 Status: built. Parts that are partly built or parked are marked in the [status table](../index.md#status).
 

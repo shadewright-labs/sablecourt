@@ -82,10 +82,10 @@ The epics behind the open work are #1 (scope and local trust), #15 (a CLI harnes
 
 ## Map of the docs
 
-- Start: [overview](overview.md), [concepts](concepts.md), [glossary](glossary.md).
-- How it works: [index](how-it-works/index.md), [tasks](how-it-works/tasks.md), [workloads and runtimes](how-it-works/workloads-and-runtimes.md), [model gate](how-it-works/model-gate.md), [tools and actions](how-it-works/tools-and-actions.md), [approvals](how-it-works/approvals.md), [Conclaves](how-it-works/conclaves.md), [council](how-it-works/council.md), [harness containers](how-it-works/harness-containers.md), [context and learning](how-it-works/context-and-learning.md), [audit](how-it-works/audit.md), [identity and access](how-it-works/identity-and-access.md), [integrations](how-it-works/integrations.md).
+- Start: [overview](overview.md).
+- How it works: [index](how-it-works/index.md), [concepts](concepts.md), [tasks](how-it-works/tasks.md), [workloads and runtimes](how-it-works/workloads-and-runtimes.md), [model gate](how-it-works/model-gate.md), [tools and actions](how-it-works/tools-and-actions.md), [approvals](how-it-works/approvals.md), [Conclaves](how-it-works/conclaves.md), [council](how-it-works/council.md), [harness containers](how-it-works/harness-containers.md), [context and learning](how-it-works/context-and-learning.md), [audit](how-it-works/audit.md), [identity and access](how-it-works/identity-and-access.md), [integrations](how-it-works/integrations.md).
 - Trust: [threat model](threat-model.md).
 - How-to: [index](how-to/index.md), covering install, manifests, harness logins, councils, approvals, watching and steering, retry, audit verification and finding why something was refused.
-- Reference: [index](reference/index.md), covering manifests, HTTP API, CLI, configuration, limits and metrics.
+- Reference: [index](reference/index.md), covering manifests, HTTP API, CLI, configuration, limits, metrics and the [glossary](glossary.md).
 - Design: [index](design/index.md), [architecture](design/architecture.md), [storage](design/storage.md), the [v0.1 baseline](design/v0.1-baseline.md) and the [harness spike record](harnesses.md).
 - Diagrams: [standard](diagrams/README.md).
