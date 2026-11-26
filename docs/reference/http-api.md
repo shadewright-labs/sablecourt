@@ -158,7 +158,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablecourtd/councils.go`, `cmd/sablecour
 | `repo` | string | none | Required absolute path, at most 4096 bytes, of a primary Git checkout owned by the daemon user, outside the state and credential directories. |
 | `ref` | string | none | Branch, tag, `HEAD` or full commit ID, at most 256 bytes. Excludes `live`. |
 | `live` | bool | `true` when neither `ref` nor `writer` is set | Read-only view of the working tree. Excludes `ref` and `writer`. |
-| `writer` | string | none | `claude`, `codex` or `agy`. With no `ref`, the ref is `HEAD`. Reachable through the API only, `sablectl council` has no flag for it. |
+| `writer` | string | none | `claude`, `codex` or `agy`. With no `ref`, the ref is `HEAD`. `sablectl council --writer <seat>` sets it. |
 | `rounds` | integer | `2` | At least 1. |
 | `starts` | integer | `6` | From 1 to 6. |
 | `durationSeconds` | integer | `900` | At least 1. |
