@@ -1,87 +1,138 @@
 name: CI
 
+# One graph per pull request and push to main. The `changes` job decides once, from the files the pull request
+# changes (hack/ci-changed.sh), which groups of checks have to run; the jobs below call the workflows that hold
+# the checks and pass that decision as `run`. A called job that is not needed is skipped, which counts as
+# passing. `ci-ok` is the single required check of this graph: it fails when detection failed or when any called
+# job failed or was cancelled, so a broken `changes` job can never let a pull request merge unchecked.
+#
+# Never add trigger-level `paths` here: a workflow that never starts leaves its required check pending forever.
+# A new job goes into the `needs` of `ci-ok`.
+#
+# Images are published from images.yml on main and v* tags; release.yml builds the binaries on v* tags;
+# vulncheck.yml also has its weekly schedule. Cancelling superseded runs is safe only here, so the concurrency
+# group is only in this file (in a called workflow github.workflow is the caller's name, and a second group
+# there could deadlock the run).
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
+  changes:
+    name: Changed files
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      go: ${{ steps.changed.outputs.go }}
+      images: ${{ steps.changed.outputs.images }}
+      docs: ${{ steps.changed.outputs.docs }}
+      codeql: ${{ steps.changed.outputs.codeql }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-          cache: true
+          persist-credentials: false
 
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test with race detector
-        run: go test -race -count=1 ./...
-
-      - name: Fuzz Model Gate SSRF guard (SC-05)
-        run: go test -fuzz=FuzzSC05_JoinUpstreamURLPreservesHostAndScheme -fuzztime=10s ./internal/gate/model
-
-      - name: Build binaries
-        run: |
-          go build ./cmd/sablecourtd
-          go build ./cmd/sablectl
-          go build ./cmd/sablecourt-agent
-          go build ./examples/demo-agent
-
-      - name: Validate example manifests
-        run: go run ./cmd/sablectl validate ./examples/local-demo.yaml
-
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Vulnerability scan (govulncheck)
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-
-      - name: Static security analysis (gosec)
-        run: |
-          set -euo pipefail
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          log="$(mktemp)"
-          trap 'rm -f "$log"' EXIT
-          rc=0
-          "$(go env GOPATH)/bin/gosec" -exclude=G104,G304,G204 ./... 2>&1 | tee "$log" || rc=$?
-          if grep -qE "Golang errors in file:|Error building the SSA|Error running analyzer|could not import|Files[[:space:]]*:[[:space:]]*0([^0-9]|$)" "$log"; then
-            echo "gosec reported package load or analysis errors" >&2
-            exit 1
-          fi
-          exit "$rc"
-
-      - name: Secret scan (gitleaks)
+      - name: Decide from the changed files
+        id: changed
         env:
-          GITLEAKS_VERSION: "8.30.1"
-          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: hack/ci-changed.sh >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  test:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  govulncheck:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vulncheck.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  gosec:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/gosec.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.go == 'true' }}
+
+  # Pull request build only (amd64, no push); main and tags publish from images.yml.
+  images:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/images-build.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.images == 'true' }}
+
+  docs-check:
+    needs: changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docs-check.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    with:
+      run: ${{ needs.changes.outputs.docs == 'true' }}
+
+  # Pull requests only, and only when Go code or workflows changed; main and the weekly run use codeql.yml's own
+  # triggers. The caller grants what the called job asks for: security-events: write only here.
+  codeql:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codeql == 'true' }}
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
+  workflow-lint:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
+  secret-scan:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scan.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
+  ci-ok:
+    name: ci-ok
+    if: ${{ always() }}
+    needs: [changes, lint, test, govulncheck, gosec, images, docs-check, codeql, workflow-lint, secret-scan]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check the results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          archive="/tmp/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl --fail --location --silent --show-error \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            --output "$archive"
-          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check -
-          tar -xzf "$archive" -C /tmp gitleaks
-          /tmp/gitleaks git --redact --exit-code 1
+          printf '%s\n' "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "${NEEDS}" | jq -e '
+            .changes.result == "success"
+            and ([.[].result] | all(. == "success" or . == "skipped"))' > /dev/null

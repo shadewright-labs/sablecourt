@@ -1,0 +1,20 @@
+# Pages and headings that the docs link to but that are not written yet. hack/docs-links.py allows a link to
+# an entry here and fails when an entry exists or nothing links to it any more, so remove a line in the pull
+# request that adds the page. One path per line, relative to the repository root; path#anchor for a heading.
+docs/design/architecture.md
+docs/design/index.md
+docs/design/storage.md
+docs/design/v0.1-baseline.md
+docs/how-it-works/audit.md
+docs/how-it-works/identity-and-access.md
+docs/how-to/find-why-refused.md
+docs/how-to/index.md
+docs/how-to/install-and-start.md
+docs/how-to/write-manifests.md
+docs/threat-model.md
+docs/troubleshooting.md
+# Glossary terms are a definition list, which has no anchors on GitHub.
+docs/glossary.md#conclave
+docs/glossary.md#session-marker
+# docs/harnesses.md has no such heading.
+docs/harnesses.md#changes-needed-in-internalruntimedocker

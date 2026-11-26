@@ -1,0 +1,58 @@
+name: Tests
+
+# Vet, the race-enabled test suite (which also checks the generated reference pages under docs/reference), a
+# short fuzz run of the Model Gate SSRF guard, the build of every binary and the validation of the example
+# manifest. Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
+jobs:
+  test:
+    if: ${{ inputs.run != false }}
+    permissions:
+      contents: read
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+      # The weekly Fuzz workflow runs every fuzz target for minutes; this short run keeps the SSRF guard
+      # (SC-05) under fuzzing on every pull request.
+      - name: Fuzz Model Gate SSRF guard (SC-05)
+        run: go test -run '^$' -fuzz=FuzzSC05_JoinUpstreamURLPreservesHostAndScheme -fuzztime=10s ./internal/gate/model
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          go build -o /dev/null ./cmd/sablecourtd
+          go build -o /dev/null ./cmd/sablectl
+          go build -o /dev/null ./cmd/sablecourt-agent
+          go build -o /dev/null ./examples/demo-agent
+
+      - name: Validate example manifests
+        run: go run ./cmd/sablectl validate ./examples/local-demo.yaml

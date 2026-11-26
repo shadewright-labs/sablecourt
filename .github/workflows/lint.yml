@@ -1,0 +1,55 @@
+name: Lint
+
+# golangci-lint (pinned in the Makefile, configuration in .golangci.yml) and the go.mod tidiness check.
+# Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Whether the job runs; ci.yml passes false when no file of this group changed.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
+jobs:
+  lint:
+    if: ${{ inputs.run != false }}
+    permissions:
+      contents: read
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      # golangci-lint's analysis cache. Pull requests restore the newest cache of main or of their own branch.
+      - name: Cache golangci-lint
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-lint-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml') }}-
+            golangci-lint-${{ runner.os }}-
+
+      # -diff reports go.mod and go.sum drift without changing them.
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
+      - name: Check linter configuration
+        run: make lint-config
+
+      - name: Run linter
+        run: make lint
