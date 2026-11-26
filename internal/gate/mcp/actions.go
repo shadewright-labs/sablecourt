@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
@@ -54,26 +53,16 @@ type GitHubPROpener struct {
 	Secrets secret.SecretStore
 	APIURL  string
 	Client  *http.Client
-	// Timeout bounds one API call; zero means defaultGitHubTimeout.
-	Timeout time.Duration
 }
 
-const defaultGitHubTimeout = 30 * time.Second
-
 // httpClient returns a client that never follows redirects, so the gate's token
-// cannot be replayed to another URL, and that gives up after the timeout.
+// cannot be replayed to another URL.
 func (gh *GitHubPROpener) httpClient() *http.Client {
 	var cli http.Client
 	if gh.Client != nil {
 		cli = *gh.Client
 	}
 	cli.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if gh.Timeout > 0 {
-		cli.Timeout = gh.Timeout
-	}
-	if cli.Timeout <= 0 {
-		cli.Timeout = defaultGitHubTimeout
-	}
 	return &cli
 }
 

@@ -305,21 +305,3 @@ func TestParseGitHubRemote(t *testing.T) {
 		}
 	}
 }
-
-func TestGitHubPROpenerTimesOut(t *testing.T) {
-	release := make(chan struct{})
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release
-	}))
-	defer api.Close()
-	defer close(release)
-	gh := &GitHubPROpener{Secrets: secret.NewMemoryStore(map[string]string{"github_token": "test-token-not-real"}), APIURL: api.URL, Timeout: 100 * time.Millisecond}
-	start := time.Now()
-	_, err := gh.OpenPR(context.Background(), OpenPRInput{Owner: "acme", Repo: "widgets", Head: "sablecourt/x", Base: "main", Title: "t"})
-	if err == nil || time.Since(start) > 5*time.Second {
-		t.Fatalf("want a timeout error within the bound, got %v after %v", err, time.Since(start))
-	}
-	if (&GitHubPROpener{}).httpClient().Timeout != defaultGitHubTimeout {
-		t.Fatalf("default client has no timeout")
-	}
-}
