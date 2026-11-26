@@ -11,9 +11,10 @@
 #     refusals before any write, the latest rule and a draft that is published last. Each check reads the job and
 #     step it is about. Facts derived from the needs graph: nothing is signed before check, both builds and the scan
 #     passed, nothing is released or tagged before verify passed, and the needs and failure tables of docs/ci.md
-#     match the graph. The signing, verify and publish jobs have an exact, ordered list of steps. A mutation table
+#     match the graph, with one row per job (a repeated row fails). The signing, verify and publish jobs have an
+#     exact, ordered list of steps. A mutation table
 #     removes or weakens each property in a copy of the file and requires the matching check to fail; the test
-#     prints how many mutation cases it ran.
+#     prints how many mutation cases it ran. A second table edits the docs tables the same way.
 #   - every action is pinned by commit with its version, and every checkout keeps no credentials; the verify page
 #     uses the exact identity of release.yml and --deny-self-hosted-runners in its commands.
 # Usage: hack/test/workflows_test.sh [repository root]
@@ -208,10 +209,27 @@ def failure_rows(text):
     return rows
 
 
+def unique(pairs):
+    """A dict of the (key, value) pairs, or None when a key repeats, so a second row for a job cannot replace or
+    hide the first one."""
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            return None
+        out[k] = v
+    return out
+
+
 def doc_rows(doc):
-    """The rows of the failure table in docs/ci.md whose first cell is one job name."""
-    return {m.group(1): (m.group(2).strip(), m.group(3).strip())
-            for m in re.finditer(r"^\| `([a-z-]+)` \| ([^|]*) \| ([^|]*) \|", doc, re.M)}
+    """The rows of the failure table in docs/ci.md whose first cell is one job name; None when a job repeats."""
+    return unique((m.group(1), (m.group(2).strip(), m.group(3).strip()))
+                  for m in re.finditer(r"^\| `([a-z-]+)` \| ([^|]*) \| ([^|]*) \|", doc, re.M))
+
+
+def doc_needs(doc):
+    """The rows of the needs table in docs/ci.md; None when a job repeats."""
+    return unique((m.group(1), set(re.findall(r"`([a-z-]+)`", m.group(2))))
+                  for m in re.finditer(r"^\| `([a-z-]+)` \| ((?:`[a-z-]+`(?:, )?)+|nothing) \|$", doc, re.M))
 
 
 def job_env(job_text):
@@ -314,12 +332,8 @@ def release_checks(text):
         ("every signing job needs scan-images itself", all("scan-images" in needs(j.get(n, "")) for n in signers)),
         ("nothing is tagged or released unless verify passed",
          writers == ["publish"] and all("verify" in ancestors(j, n) for n in writers)),
-        ("the failure table of docs/ci.md is the one the needs graph gives",
-         all(docs.get(n) == rows[n] for n in rows) and set(docs) == set(rows)),
-        ("the needs table of docs/ci.md is the one of the workflow",
-         {m.group(1): set(re.findall(r"`([a-z-]+)`", m.group(2)))
-          for m in re.finditer(r"^\| `([a-z-]+)` \| ((?:`[a-z-]+`(?:, )?)+|nothing) \|$", CI_DOC, re.M)}
-         == {n: needs(t) for n, t in j.items()}),
+        ("the failure table of docs/ci.md is the one the needs graph gives", docs == rows),
+        ("the needs table of docs/ci.md is the one of the workflow", doc_needs(CI_DOC) == {n: needs(t) for n, t in j.items()}),
     ]
     out += [
         ("check: version is X.Y.Z or X.Y.Z-rc.N",
@@ -766,6 +780,27 @@ for name, *change in MUTATIONS:
     check(f"release.yml without it: {name} fails", name in names and mutated != release and results.get(name) is False)
 check("release.yml: every check has a mutation that breaks it", names == {m[0] for m in MUTATIONS})
 print(f"{len(MUTATIONS)} mutation cases")
+# Edits of the two tables of docs/ci.md that make them false; a repeated row with another value must fail even
+# when the true row follows it.
+FAILURE_CHECK = "the failure table of docs/ci.md is the one the needs graph gives"
+NEEDS_CHECK = "the needs table of docs/ci.md is the one of the workflow"
+DOC_MUTATIONS = [
+    (FAILURE_CHECK, "| `scan-images` | untagged image digests in GHCR | nothing |\n",
+     "| `scan-images` | nothing | nothing |\n| `scan-images` | untagged image digests in GHCR | nothing |\n"),
+    (FAILURE_CHECK, "| `scan-images` | untagged image digests in GHCR | nothing |\n",
+     "| `scan-images` | untagged image digests in GHCR | nothing |\n| `scan-images` | nothing | nothing |\n"),
+    (FAILURE_CHECK, "| `check` | nothing | nothing |\n", "| `check` | nothing | untagged image digests in GHCR |\n"),
+    (NEEDS_CHECK, "| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |\n",
+     "| `verify` | `check`, `sign-binaries` |\n| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |\n"),
+    (NEEDS_CHECK, "| `scan-images` | `images` |\n", "| `scan-images` | `check` |\n"),
+]
+true_doc = CI_DOC
+for name, old, new in DOC_MUTATIONS:
+    CI_DOC = true_doc.replace(old, new, 1)
+    results = dict(release_checks(release))
+    check(f"docs/ci.md with {new.splitlines()[0][:50]!r}: {name} fails", CI_DOC != true_doc and results.get(name) is False)
+CI_DOC = true_doc
+print(f"{len(DOC_MUTATIONS)} docs table mutation cases")
 for wf in sorted(os.listdir(os.path.join(root, ".github/workflows"))):
     for use in re.findall(r"^\s+(?:- )?uses: (.+)$", read(".github/workflows/" + wf), re.M):
         check(f"{wf}: {use.split('@')[0].split(' ')[0]} pinned by commit with its version",
