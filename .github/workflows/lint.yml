@@ -18,7 +18,7 @@ env:
 
 jobs:
   lint:
-    if: ${{ inputs.run != false }}
+    if: ${{ inputs.run }}
     permissions:
       contents: read
     name: lint

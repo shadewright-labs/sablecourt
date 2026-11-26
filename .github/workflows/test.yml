@@ -19,7 +19,7 @@ env:
 
 jobs:
   test:
-    if: ${{ inputs.run != false }}
+    if: ${{ inputs.run }}
     permissions:
       contents: read
     name: test

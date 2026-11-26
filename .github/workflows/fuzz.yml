@@ -36,7 +36,10 @@ jobs:
 
       - name: List the fuzz targets
         id: list
-        run: echo "list=$(hack/fuzz-targets.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          list="$(hack/fuzz-targets.sh)"
+          echo "list=${list}" >> "$GITHUB_OUTPUT"
 
   fuzz:
     needs: targets

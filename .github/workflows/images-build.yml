@@ -15,7 +15,7 @@ permissions: {}
 jobs:
   build:
     name: Build ${{ matrix.target }} (no push)
-    if: ${{ inputs.run != false }}
+    if: ${{ inputs.run }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

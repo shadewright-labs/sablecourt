@@ -1,6 +1,7 @@
 name: Workflow lint
 
-# Lints .github/workflows with actionlint (syntax, expressions, shellcheck) and zizmor (security audit:
+# Lints .github/workflows with actionlint (syntax, expressions, shellcheck of run blocks), the scripts under hack/
+# with shellcheck, and the workflows with zizmor (security audit:
 # template injection, excessive permissions, unpinned actions, credential persistence). Both tools are pinned;
 # actionlint's download is checked against the sha256 published with its release.
 # Run the same checks locally before changing a workflow: actionlint, then zizmor .github/workflows
@@ -36,9 +37,18 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
           "${RUNNER_TEMP}/actionlint" -color
 
+      - name: Run shellcheck
+        run: shellcheck hack/*.sh hack/test/*.sh
+
+      - name: Install zizmor
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/zizmor"
+          "${RUNNER_TEMP}/zizmor/bin/pip" install --quiet --no-deps --only-binary=:all: --require-hashes \
+            -r hack/zizmor-requirements.txt
+
       # The token lets zizmor run its online audits (for example impostor commits and ref confusion).
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-          ZIZMOR_VERSION: 1.32.0
-        run: pipx run "zizmor==${ZIZMOR_VERSION}" .github/workflows
+        run: '"${RUNNER_TEMP}/zizmor/bin/zizmor" .github/workflows'

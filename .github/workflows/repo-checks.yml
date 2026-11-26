@@ -1,0 +1,48 @@
+name: Repo checks
+
+# Checks that run on every pull request whatever changed, because they are cheap and a change anywhere can break
+# them: the internal links of the tracked Markdown files (a renamed source file can break a docs link), the image
+# references under ghcr.io/shadewright-labs/ (they must name images and tags the Images workflow publishes), and
+# the offline tests of the scripts under hack/ that CI and the release rely on.
+# Called by ci.yml (the only trigger); always runs.
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  repo-checks:
+    name: repo checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check internal links
+        run: python3 -I hack/docs-links.py check
+
+      - name: Check image references
+        run: hack/check-image-refs.sh
+
+      - name: Test the changed-files detector
+        run: hack/test/ci-changed_test.sh
+
+      - name: Test the ci-ok predicate
+        run: hack/test/ci-ok_test.sh
+
+      - name: Test the release helpers
+        run: hack/test/release-scripts_test.sh
+
+      - name: Test the fuzz target list
+        run: hack/test/fuzz-targets_test.sh
+
+      - name: Test the link checker
+        run: hack/test/docs-links_test.sh
+
+      - name: Test the image reference check
+        run: hack/test/check-image-refs_test.sh

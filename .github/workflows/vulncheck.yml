@@ -3,7 +3,8 @@ name: Vulncheck
 # govulncheck (pinned in the Makefile) over the module, with the Go release of go.mod, which is the release the
 # binaries and the images are built with. Fails on any known vulnerability the code reaches.
 # Called by ci.yml on pull requests and pushes to main, which decides from the changed files whether it runs.
-# A scheduled or manual run has no inputs and always runs.
+# A scheduled run always runs; a manual run of this workflow has its own `run` input, true by default. (Without
+# it, a missing input would compare equal to false and the job would skip itself.)
 on:
   workflow_call:
     inputs:
@@ -15,6 +16,11 @@ on:
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
+    inputs:
+      run:
+        description: Run govulncheck.
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -24,7 +30,7 @@ env:
 
 jobs:
   vulncheck:
-    if: ${{ inputs.run != false }}
+    if: ${{ github.event_name == 'schedule' || inputs.run }}
     permissions:
       contents: read
     name: govulncheck

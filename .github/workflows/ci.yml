@@ -3,11 +3,13 @@ name: CI
 # One graph per pull request and push to main. The `changes` job decides once, from the files the pull request
 # changes (hack/ci-changed.sh), which groups of checks have to run; the jobs below call the workflows that hold
 # the checks and pass that decision as `run`. A called job that is not needed is skipped, which counts as
-# passing. `ci-ok` is the single required check of this graph: it fails when detection failed or when any called
-# job failed or was cancelled, so a broken `changes` job can never let a pull request merge unchecked.
+# passing only when the decision (or the event) deselected it. `ci-ok` is the single required check of this graph;
+# its predicate is hack/ci-ok.sh (tests in hack/test/ci-ok_test.sh): the `changes` job must succeed with four
+# boolean outputs, every job the decision selects and every job that always runs must succeed, and a job missing
+# from the results fails it, so a broken `changes` job can never let a pull request merge unchecked.
 #
 # Never add trigger-level `paths` here: a workflow that never starts leaves its required check pending forever.
-# A new job goes into the `needs` of `ci-ok`.
+# A new job goes into the `needs` of `ci-ok` and into the table in hack/ci-ok.sh.
 #
 # Images are published from images.yml on main and v* tags; release.yml builds the binaries on v* tags;
 # vulncheck.yml also has its weekly schedule. Cancelling superseded runs is safe only here, so the concurrency
@@ -110,6 +112,13 @@ jobs:
       actions: read
     uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
 
+  # Always runs: the internal docs link check, the image reference check and the offline tests of the scripts
+  # under hack/ (detector, ci-ok predicate, release helpers, fuzz enumerator, link checker).
+  repo-checks:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/repo-checks.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+
   workflow-lint:
     permissions:
       contents: read
@@ -123,16 +132,18 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [changes, lint, test, govulncheck, gosec, images, docs-check, codeql, workflow-lint, secret-scan]
+    needs: [changes, lint, test, govulncheck, gosec, images, docs-check, codeql, repo-checks, workflow-lint, secret-scan]
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Check the results
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          printf '%s\n' "${NEEDS}" | jq -e '
-            .changes.result == "success"
-            and ([.[].result] | all(. == "success" or . == "skipped"))' > /dev/null
+          EVENT_NAME: ${{ github.event_name }}
+        run: hack/ci-ok.sh

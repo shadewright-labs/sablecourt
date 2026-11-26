@@ -1,9 +1,8 @@
 name: Docs check
 
 # Checks that the reference pages under docs/reference match the code (make docs-check, the same tests go test
-# runs) and that every relative link in the tracked Markdown files points at a file and heading that exist
-# (hack/docs-links.py check; pages not written yet are listed in hack/docs-pages-pending.txt). External links
-# are reported weekly by docs-links.yml.
+# runs). The internal link check runs on every pull request in repo-checks.yml; external links are reported
+# weekly by docs-links.yml.
 # Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
 on:
   workflow_call:
@@ -21,7 +20,7 @@ env:
 
 jobs:
   docs-check:
-    if: ${{ inputs.run != false }}
+    if: ${{ inputs.run }}
     name: docs check
     runs-on: ubuntu-latest
     permissions:
@@ -39,6 +38,3 @@ jobs:
 
       - name: Check the reference pages
         run: make docs-check
-
-      - name: Check internal links
-        run: python3 -I hack/docs-links.py check
