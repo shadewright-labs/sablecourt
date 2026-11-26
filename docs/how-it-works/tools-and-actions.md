@@ -13,7 +13,13 @@ Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/
 
 The lease must be active, and its workload must be declared in the loaded manifests. The action body is limited to 2 MiB, unknown fields are refused. The action path is `/gate/actions/<name>`.
 
-Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`, `memory.get`, `memory.search` and `memory.delete`. Memory writes are redacted, namespaces `learning:*` and `system:*` are closed to the tools, and `search` is a substring match (SQL `LIKE`) on keys and values. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
+Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`, `memory.get`, `memory.search` and `memory.delete`. Memory writes are redacted, namespaces `learning:*` and `system:*` are closed to the tools, and `search` is a substring match (SQL `LIKE`) on keys and values. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`, and owner and repository must be the GitHub repository pinned at start, see below) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
+
+Each action payload is decoded once, strictly, into the action's typed input: a duplicate key, a key that differs from a field only in case, an unknown field, a `null` value or any data after the object is refused with 400 before an approval exists. The approval digest, the dialog and the executor all use that one decoded value. Branch and base names are checked as Git ref names and used as given, nothing trimmed, and `git.create_branch` needs an explicit `base`. A body over 2 MiB is refused with 413.
+
+## Which repository `git.open_pr` may target
+
+When the daemon starts it reads the `origin` remote of its repo root once and pins that GitHub `owner/repo`. `git.open_pr` refuses any other target, refuses every call when the origin read at call time differs from the pin, and refuses every call when nothing could be pinned (no origin, or an origin that is not on github.com). Each action's audit row names the pin as `allowed_repo`. A reload (`POST /api/v1/reload`, a manifest saved in the web UI, or a manifests git sync) never changes the pin: it reads the origin again only to compare it. A changed or unreadable origin logs a warning on each reload and writes one `denied` audit row with reason `repo_origin_changed` or `repo_origin_unreadable` each time the observed origin changes. To point `git.open_pr` at another repository, change the origin and restart the daemon.
 
 ## How a call is decided
 
@@ -44,9 +50,8 @@ The gate appends a row, category `data_action_gate`, for each denial, error and 
 What the code does today, where it falls short of the design.
 
 - Tool calls whose effect is `approve` cannot complete: each call creates a new pending approval and there is no way to present an approved one. Only actions can be approved and re-run.
-- An approved action can be repeated for the life of the lease: the approval is not marked used and its expiry is not checked at use. Making it single-use is decided in [ADR-0014](../adr/0014-identity-and-authentication.md), Proposed.
 - The circuit breaker never opens, because the gate and the policy engine hold separate breaker objects.
-- `git.open_pr` does not validate `owner`, `repo` or `base`. There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
+- There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
 - The sandbox-zone rule covers `action:` and `delegate:` only; a mutating MCP tool such as `memory.put` is open to a sandbox workload when policy allows it.
 
 ## Not built yet
