@@ -77,7 +77,7 @@ install: build
 	cp bin/sablectl $(BIN_DIR)/sablectl
 
 agent-image:
-	docker build -t sablecourt-agent:0.1.0 -f cmd/sablecourt-agent/Dockerfile .
+	docker build --target agent -t sablecourt-agent:0.1.0 .
 
 demo:
 	go run ./cmd/sablecourtd --manifests=$(MANIFESTS)

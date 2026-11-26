@@ -18,12 +18,12 @@ new_repo() {
   repo="${work}/repo$((n += 1))"
   mkdir -p "${repo}" && cd "${repo}"
   git_q init -q -b main .
-  mkdir -p internal/x cmd/y docs/reference docs/how-to cmd/sablecourt-agent
+  mkdir -p internal/x cmd/y docs/reference docs/how-to internal/gate/councilproxy
   echo 'package x' > internal/x/a.go
   echo 'module m' > go.mod
   echo '# ref' > docs/reference/cli.md
   echo '# how' > docs/how-to/a.md
-  echo 'FROM scratch' > cmd/sablecourt-agent/Dockerfile
+  echo 'FROM scratch' > internal/gate/councilproxy/Dockerfile
   echo 'notes' > notes.txt
   git_q add -A && git_q commit -qm base
   base="$(git rev-parse HEAD)"
@@ -91,7 +91,7 @@ expect "a file that only looks like go.work" false false false false
 new_repo; echo 'bin/' > .dockerignore; commit
 expect ".dockerignore" true true false false
 
-new_repo; echo 'FROM scratch AS x' >> cmd/sablecourt-agent/Dockerfile; commit
+new_repo; echo 'FROM scratch AS x' >> internal/gate/councilproxy/Dockerfile; commit
 expect "nested Dockerfile (not built; Go group runs)" true true true false
 
 new_repo; echo 'more' >> docs/how-to/a.md; commit
