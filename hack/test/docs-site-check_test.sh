@@ -26,12 +26,10 @@ build() { # dir: valid site with home page, subpage, local stylesheet, local SVG
     '<h2 id="step">Step</h2><a href="../">Home</a> <a href="../diagrams/ctx.svg"><img src="../diagrams/ctx.svg" alt="ctx"></a>'
 }
 
-# expect <name> <want: pass|fail> <site dir> [pending file] [repo dir]
+# expect <name> <want: pass|fail> <site dir> [pending file]
 expect() {
-  local name="$1" want="$2" site="$3" pending="${4:-}" repo="${5:-}" got
-  if [ -n "${repo}" ]; then
-    if python3 -I "${checker}" check "${site}" "${pending}" "${repo}" > "${work}/out" 2>&1; then got=pass; else got=fail; fi
-  elif [ -n "${pending}" ]; then
+  local name="$1" want="$2" site="$3" pending="${4:-}" got
+  if [ -n "${pending}" ]; then
     if python3 -I "${checker}" check "${site}" "${pending}" > "${work}/out" 2>&1; then got=pass; else got=fail; fi
   else
     if python3 -I "${checker}" check "${site}" > "${work}/out" 2>&1; then got=pass; else got=fail; fi
@@ -94,6 +92,34 @@ expect "third-party image fails" fail "${s}"
 mentions "third-party image" "third-party image https://img.example.invalid/x.png"
 
 build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg 1x, https://img.example.invalid/x.png 2x" alt="ctx">'
+expect "third-party img srcset candidate fails" fail "${s}"
+mentions "third-party img srcset candidate" "third-party image https://img.example.invalid/x.png"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<picture><source srcset="diagrams/ctx.svg 1x, https://img.example.invalid/dark.png 2x"><img src="diagrams/ctx.svg" alt="ctx"></picture>'
+expect "third-party picture source srcset candidate fails" fail "${s}"
+mentions "third-party picture source srcset candidate" "third-party image https://img.example.invalid/dark.png"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg 1x, diagrams/missing.svg 2x" alt="ctx">'
+expect "missing local img srcset candidate fails" fail "${s}"
+mentions "missing local img srcset candidate" "missing image diagrams/missing.svg"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<picture><source srcset="diagrams/ctx.svg 1x, ./diagrams/ctx.svg 2x"><img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg 1x" alt="ctx"></picture>'
+expect "local img and picture source srcset candidates pass" pass "${s}"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<a href="/guide/">Root outside base</a>'
+expect "root-relative link outside base path fails" fail "${s}"
+mentions "root-relative link outside base path" "/sablecourt/"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<a href="/sablecourt/">Root home</a> <a href="/sablecourt/guide/#step">Root guide</a>'
+expect "root-relative link under base path passes" pass "${s}"
+
+build "${s}"
 mkdir -p "${s}/old"
 printf '<!doctype html><html><head><meta http-equiv="refresh" content="0; url=../gone/"></head></html>\n' > "${s}/old/index.html"
 expect "broken redirect fails" fail "${s}"
@@ -109,19 +135,15 @@ page "${s}/guide/index.html" "../stylesheets/brand.css" '<h2 id="step">Step</h2>
 expect "pending entry does not cover another source page" fail "${s}" "${work}/pending.txt"
 
 build "${s}"
-mkdir -p "${work}/repo/cmd/app"
-printf 'package main\n' > "${work}/repo/cmd/app/main.go"
+mkdir -p "${work}/cmd/app"
+printf 'package main\n' > "${work}/cmd/app/main.go"
 page "${s}/guide/index.html" "../stylesheets/brand.css" '<h2 id="step">Step</h2><a href="../../cmd/app/main.go">Source</a>'
-expect "link to existing repo source passes when repo dir is given" pass "${s}" "" "${work}/repo"
-expect "link escaping site fails when repo dir is omitted" fail "${s}"
-
-build "${s}"
-page "${s}/guide/index.html" "../stylesheets/brand.css" '<h2 id="step">Step</h2><a href="../../cmd/app/missing.go">Missing</a>'
-expect "link to missing repo source fails" fail "${s}" "" "${work}/repo"
+expect "link escaping site fails with repository URL hint" fail "${s}"
+mentions "link escaping site" "repository URL"
 
 build "${s}"
 page "${s}/guide/index.html" "../stylesheets/brand.css" '<h2 id="step">Step</h2><img src="../../cmd/app/main.go" alt="bad">'
-expect "image escaping site fails even when file exists in repo" fail "${s}" "" "${work}/repo"
+expect "image escaping site fails" fail "${s}"
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2

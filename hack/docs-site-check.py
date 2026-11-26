@@ -3,27 +3,52 @@
 images, stylesheets, scripts, redirects, and absence of third-party assets.
 
 Usage (run with -I, standard library only):
-  python3 -I hack/docs-site-check.py check SITE_DIR [PENDING_FILE [REPO_DIR]]
+  python3 -I hack/docs-site-check.py check SITE_DIR [PENDING_FILE]
 
 PENDING_FILE uses the same "<source> -> <target>[#fragment]" format as hack/docs-pages-pending.txt
 (paths relative to the repository root under docs/). Each entry allows one occurrence of that link
-on its source page in the built site. Relative <a href> links that step one level above site/ into
-tracked source files in REPO_DIR (such as ADR links to cmd/ or internal/) are checked against
-REPO_DIR when REPO_DIR is provided; images, stylesheets and scripts must exist inside SITE_DIR.
-Any other broken internal link, broken anchor, missing image, missing stylesheet/script, broken
-meta-refresh redirect, or third-party script/stylesheet/image URL exits 1.
+on its source page in the built site. Images, stylesheets, scripts and internal links must resolve
+inside SITE_DIR; links to repository source files outside docs/ must use the repository URL.
+Any broken internal link, broken anchor, missing image, missing stylesheet/script, broken
+meta-refresh redirect, root-relative path outside the site base path, or third-party
+script/stylesheet/image URL exits 1.
 
 Tests: hack/test/docs-site-check_test.sh.
 """
 
 import os
+import posixpath
 import re
 import sys
 import urllib.parse
 from html.parser import HTMLParser
 
-SITE_URL = "https://shadewrightlabs.com/sablecourt"
-SITE_BASE_PATH = "/sablecourt"
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+DEFAULT_ZENSICAL_TOML = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zensical.toml"
+)
+
+
+def read_site_url(config_path=DEFAULT_ZENSICAL_TOML):
+    """Reads project.site_url from zensical.toml."""
+    with open(config_path, "rb") as f:
+        if tomllib is not None:
+            url = tomllib.load(f).get("project", {}).get("site_url", "")
+        else:
+            m = re.search(r'^\s*site_url\s*=\s*"([^"]+)"', f.read().decode("utf-8"), re.M)
+            url = m.group(1) if m else ""
+    if not url:
+        raise ValueError(f"{config_path}: missing project.site_url")
+    return url.rstrip("/")
+
+
+def parse_srcset(value):
+    """Extracts candidate URLs from an HTML srcset attribute."""
+    return [m.group(1) for m in re.finditer(r"(?:^|,)\s*(data:[^\s,]+,[^\s]+|[^\s,]+)", value)]
 
 
 class Page(HTMLParser):
@@ -36,6 +61,7 @@ class Page(HTMLParser):
         self.images = []
         self.assets = []
         self.refresh = None
+        self._picture_depth = 0
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -49,6 +75,13 @@ class Page(HTMLParser):
         elif tag == "img":
             if a.get("src") is not None:
                 self.images.append(a["src"])
+            if a.get("srcset"):
+                self.images.extend(parse_srcset(a["srcset"]))
+        elif tag == "picture":
+            self._picture_depth += 1
+        elif tag == "source" and self._picture_depth > 0:
+            if a.get("srcset"):
+                self.images.extend(parse_srcset(a["srcset"]))
         elif tag == "script":
             if a.get("src") is not None:
                 self.assets.append(("script", a["src"]))
@@ -60,6 +93,10 @@ class Page(HTMLParser):
             m = re.search(r"url\s*=\s*['\"]?([^'\";]+)", a.get("content") or "", re.I)
             if m:
                 self.refresh = m.group(1).strip()
+
+    def handle_endtag(self, tag):
+        if tag == "picture" and self._picture_depth > 0:
+            self._picture_depth -= 1
 
 
 def pages(site):
@@ -82,40 +119,60 @@ def parse(path):
     return p
 
 
-def is_external_http(ref):
+def is_site_url(ref, site_parts, base_path):
+    """True when an http(s) ref targets the site itself (same origin and under base_path)."""
+    u = urllib.parse.urlsplit(ref)
+    if u.scheme != site_parts.scheme or u.netloc != site_parts.netloc:
+        return False
+    norm = posixpath.normpath(urllib.parse.unquote(u.path or "/"))
+    if norm.startswith("//"):
+        norm = "/" + norm.lstrip("/")
+    return not base_path or norm == base_path or norm.startswith(base_path + "/")
+
+
+def is_external_http(ref, site_parts, base_path):
     u = urllib.parse.urlsplit(ref)
     if u.scheme in ("http", "https"):
-        return ref != SITE_URL and not ref.startswith(SITE_URL + "/")
+        return not is_site_url(ref, site_parts, base_path)
     return ref.startswith("//")
 
 
-def resolve(ref, base):
-    """Returns (site-root-relative path, fragment, escapes_by_one) for an internal reference, or None if external.
-
-    escapes_by_one is the repo-relative path (e.g. 'cmd/sablecourtd/main.go') when a relative reference
-    steps exactly one directory above the site root (matching a Markdown link from docs/ to repo root).
-    """
+def resolve(ref, base, site_parts, base_path):
+    """Returns (site-root-relative path, fragment, error_reason) for an internal reference, or None if external."""
     if not ref:
         return None
-    if ref == SITE_URL or ref.startswith(SITE_URL + "/"):
-        ref = ref[len(SITE_URL):] or "/"
     u = urllib.parse.urlsplit(ref)
     if u.scheme or u.netloc:
-        return None
-    raw_path = u.path
-    if raw_path == SITE_BASE_PATH or raw_path.startswith(SITE_BASE_PATH + "/"):
-        raw_path = raw_path[len(SITE_BASE_PATH):] or "/"
-    escapes_by_one = None
-    if raw_path and not raw_path.startswith("/"):
-        base_dir = base if base.endswith("/") else os.path.dirname(base)
-        rel_norm = os.path.normpath(os.path.join(base_dir.lstrip("/"), urllib.parse.unquote(raw_path))).replace(os.sep, "/")
-        if rel_norm.startswith("../") and not rel_norm.startswith("../../"):
-            escapes_by_one = rel_norm[len("../"):]
-    if raw_path:
-        path = urllib.parse.unquote(urllib.parse.urljoin(base, raw_path))
+        if u.scheme in ("http", "https") and is_site_url(ref, site_parts, base_path):
+            raw_path = u.path or "/"
+        else:
+            return None
     else:
-        path = base
-    return path, urllib.parse.unquote(u.fragment), escapes_by_one
+        raw_path = u.path
+    frag = urllib.parse.unquote(u.fragment)
+    if not raw_path:
+        return base, frag, None
+    if raw_path.startswith("/"):
+        unquoted = urllib.parse.unquote(raw_path)
+        norm_root = posixpath.normpath(unquoted)
+        if norm_root.startswith("//"):
+            norm_root = "/" + norm_root.lstrip("/")
+        if base_path:
+            if norm_root != base_path and not norm_root.startswith(base_path + "/"):
+                return norm_root, frag, f"outside site base path {base_path}/"
+            stripped = norm_root[len(base_path):] or "/"
+        else:
+            stripped = norm_root
+        if unquoted.endswith("/") and stripped != "/":
+            stripped += "/"
+        return stripped, frag, None
+    base_dir = base if base.endswith("/") else posixpath.dirname(base)
+    rel_norm = posixpath.normpath(posixpath.join(base_dir.lstrip("/"), urllib.parse.unquote(raw_path)))
+    if rel_norm == ".." or rel_norm.startswith("../"):
+        target = rel_norm[len("../"):] if rel_norm.startswith("../") and not rel_norm.startswith("../../") else rel_norm
+        return None, frag, f"escapes site to {target}; use the repository URL"
+    path = urllib.parse.unquote(urllib.parse.urljoin(base, raw_path))
+    return path, frag, None
 
 
 def target_path(site, path):
@@ -177,18 +234,13 @@ def read_pending(pending_file):
     return entries
 
 
-def repo_target_exists(repo_dir, rel):
-    """True when rel is an existing non-docs file or directory inside repo_dir."""
-    if not repo_dir or not rel or rel == "docs" or rel.startswith("docs/"):
-        return False
-    root = os.path.normpath(os.path.abspath(repo_dir))
-    target = os.path.normpath(os.path.join(root, rel))
-    if target == root or not target.startswith(root + os.sep):
-        return False
-    return os.path.exists(target)
+def check(site, pending_file=None, site_url=None):
+    if site_url is None:
+        site_url = read_site_url()
+    site_url = site_url.rstrip("/")
+    site_parts = urllib.parse.urlsplit(site_url)
+    base_path = site_parts.path.rstrip("/")
 
-
-def check(site, pending_file=None, repo_dir=None):
     problems = []
     built = pages(site)
     if not built:
@@ -212,36 +264,38 @@ def check(site, pending_file=None, repo_dir=None):
 
     for url, p in sorted(parsed.items()):
         for src in p.images:
-            if is_external_http(src):
+            if is_external_http(src, site_parts, base_path):
                 problems.append(f"{url}: third-party image {src}")
                 continue
-            r = resolve(src, url)
+            r = resolve(src, url, site_parts, base_path)
             if r is None:
                 continue
-            path, _, escaped = r
-            if escaped is not None or not file_exists(site, path):
+            path, _, err = r
+            if err is not None:
+                problems.append(f"{url}: missing image {src} ({err})")
+            elif not file_exists(site, path):
                 problems.append(f"{url}: missing image {src} (no file {path})")
 
         for kind, ref in p.assets:
-            if is_external_http(ref):
+            if is_external_http(ref, site_parts, base_path):
                 problems.append(f"{url}: third-party {kind} {ref}")
                 continue
-            r = resolve(ref, url)
+            r = resolve(ref, url, site_parts, base_path)
             if r is None:
                 continue
-            path, _, escaped = r
-            if escaped is not None or not file_exists(site, path):
+            path, _, err = r
+            if err is not None:
+                problems.append(f"{url}: missing {kind} {ref} ({err})")
+            elif not file_exists(site, path):
                 problems.append(f"{url}: missing {kind} {ref} (no file {path})")
 
         for href in p.links:
-            r = resolve(href, url)
+            r = resolve(href, url, site_parts, base_path)
             if r is None:
                 continue
-            path, frag, escaped = r
-            if escaped is not None:
-                if repo_target_exists(repo_dir, escaped):
-                    continue
-                problems.append(f"{url}: broken link {href} (escapes site to {escaped})")
+            path, frag, err = r
+            if err is not None:
+                problems.append(f"{url}: broken link {href} ({err})")
                 continue
             if not page_or_file_exists(site, path):
                 if exempt(url, path, frag):
@@ -257,20 +311,23 @@ def check(site, pending_file=None, repo_dir=None):
                     problems.append(f"{url}: broken anchor {href} (no #{frag} on {path})")
 
         if p.refresh:
-            r = resolve(p.refresh, url)
-            if r is not None and (r[2] is not None or not page_or_file_exists(site, r[0])):
-                problems.append(f"{url}: broken redirect {p.refresh} (no page {r[0]})")
+            r = resolve(p.refresh, url, site_parts, base_path)
+            if r is not None:
+                path, _, err = r
+                if err is not None:
+                    problems.append(f"{url}: broken redirect {p.refresh} ({err})")
+                elif not page_or_file_exists(site, path):
+                    problems.append(f"{url}: broken redirect {p.refresh} (no page {path})")
 
     return problems
 
 
 def main(argv):
-    if len(argv) not in (3, 4, 5) or argv[1] != "check":
+    if len(argv) not in (3, 4) or argv[1] != "check":
         print(__doc__, file=sys.stderr)
         return 2
-    pending = argv[3] if len(argv) >= 4 and argv[3] else None
-    repo_dir = argv[4] if len(argv) == 5 else None
-    problems = check(argv[2], pending, repo_dir)
+    pending = argv[3] if len(argv) == 4 and argv[3] else None
+    problems = check(argv[2], pending)
     for problem in problems:
         print(f"ERROR {problem}", file=sys.stderr)
     if problems:

@@ -106,7 +106,8 @@ make test         # go test -race ./...
 make vet          # go vet ./...
 make build        # bin/sablecourtd and bin/sablectl
 make docs         # regenerate the generated blocks of docs/reference/cli.md
-make docs-check   # check the generated CLI blocks and the tested parts of the reference pages
+make docs-venv    # create .venv and install the hash-locked docs site packages
+make docs-check   # check reference pages, build the docs site (via docs-venv) and check its links
 make agent-image  # the built-in agent container image
 make demo         # run the daemon with examples/local-demo.yaml
 ```
