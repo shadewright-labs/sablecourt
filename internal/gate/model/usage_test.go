@@ -350,6 +350,58 @@ func TestParseUsageOutcomesAndFailClosedSettlement(t *testing.T) {
 			wantCost:      750,
 		},
 		{
+			// Regression guard: armory rejects chat total_tokens below the sum of parts.
+			name:          "out of range chat total_tokens below parts",
+			provider:      "openai",
+			upstreamPath:  "/v1/chat/completions",
+			contentType:   "application/json",
+			body:          []byte(`{"id":"chatcmpl-test0003","object":"chat.completion","model":"gpt-example","choices":[{"index":0,"message":{"role":"assistant","content":"The pod is out of memory."},"finish_reason":"stop"}],"usage":{"prompt_tokens":19,"completion_tokens":10,"total_tokens":20}}`),
+			wantOutcome:   usageOutcomeNone,
+			wantErrTarget: modelusage.ErrOutOfRange,
+			wantIn:        100,
+			wantOut:       50,
+			wantCost:      750,
+		},
+		{
+			// Regression guard: armory rejects chat SSE total_tokens below the sum of parts.
+			name:          "out of range chat stream total_tokens below parts",
+			provider:      "openai",
+			upstreamPath:  "/v1/chat/completions",
+			contentType:   "text/event-stream",
+			body:          []byte("data: {\"id\":\"chatcmpl-test0003\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-example\",\"choices\":[],\"usage\":{\"prompt_tokens\":19,\"completion_tokens\":10,\"total_tokens\":20}}\n\ndata: [DONE]\n\n"),
+			wantOutcome:   usageOutcomeNone,
+			wantErrTarget: modelusage.ErrOutOfRange,
+			wantIn:        100,
+			wantOut:       50,
+			wantCost:      750,
+		},
+		{
+			// Regression guard: armory fails closed on non-terminal Responses status in_progress.
+			name:          "non-terminal responses status in_progress fails closed as truncated",
+			provider:      "openai",
+			upstreamPath:  "/v1/responses",
+			contentType:   "application/json",
+			body:          []byte(`{"id":"resp_test0002","object":"response","status":"in_progress","error":null,"incomplete_details":null,"model":"gpt-example","output":[],"usage":{"input_tokens":75,"output_tokens":12,"total_tokens":87}}`),
+			wantOutcome:   usageOutcomeNone,
+			wantErrTarget: modelusage.ErrTruncated,
+			wantIn:        100,
+			wantOut:       50,
+			wantCost:      750,
+		},
+		{
+			// Regression guard: armory fails closed on Responses SSE with non-terminal status in_progress.
+			name:          "non-terminal responses stream status in_progress fails closed as truncated",
+			provider:      "openai",
+			upstreamPath:  "/v1/responses",
+			contentType:   "text/event-stream",
+			body:          []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test0002\",\"object\":\"response\",\"status\":\"in_progress\",\"error\":null,\"incomplete_details\":null,\"model\":\"gpt-example\",\"output\":[],\"usage\":{\"input_tokens\":75,\"output_tokens\":12,\"total_tokens\":87}}}\n\n"),
+			wantOutcome:   usageOutcomeNone,
+			wantErrTarget: modelusage.ErrTruncated,
+			wantIn:        100,
+			wantOut:       50,
+			wantCost:      750,
+		},
+		{
 			name:          "oversized json body returns LimitError",
 			provider:      "anthropic",
 			upstreamPath:  "/v1/messages",
@@ -992,65 +1044,666 @@ func TestAnthropic1hCacheWritePricingAndReserve(t *testing.T) {
 	}
 }
 
-// TestModelGatePinsAnthropicCompactionUndercount pins the known limitation in
-// github.com/shadewright-labs/armory/modelusage (shadewright-labs/armory issue 26):
-// the gate forwards anthropic-beta unchanged and does not yet count
-// usage.iterations entries of type compaction.
-func TestModelGatePinsAnthropicCompactionUndercount(t *testing.T) {
-	ctx := context.Background()
-	var gotBetaHeader string
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotBetaHeader = r.Header.Get("anthropic-beta")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"id": "msg_compact",
-			"type": "message",
-			"model": "claude-sonnet-4-5",
+// TestModelGateChargesAnthropicCompactionAndAdvisorUsage verifies that Anthropic
+// compaction and advisor_message iteration entries are charged in input, cache
+// write (including 1-hour TTL writes), cache read, and output totals for both
+// JSON replies and SSE streams, while forwarding anthropic-beta unchanged.
+func TestModelGateChargesAnthropicCompactionAndAdvisorUsage(t *testing.T) {
+	tests := []struct {
+		name           string
+		reqBody        string
+		betaHeader     string
+		contentType    string
+		respBody       string
+		wantIn         int64
+		wantCacheWrite int64
+		wantCacheRead  int64
+		wantTotalIn    int64
+		wantOut        int64
+		wantCost       int64
+	}{
+		{
+			name:        "anthropic json compaction",
+			reqBody:     `{"model":"claude-example","max_tokens":1000}`,
+			betaHeader:  "compact-2026-01-12",
+			contentType: "application/json",
+			// Shape from armory/modelusage/testdata/anthropic-reply-compaction.json:
+			// uncached = 23000 + 180000 = 203000 ($3.00 = 609000)
+			// cw = 200 + 400 = 600 (5m = 500 * $3.75 = 1875, 1h = 100 * $6.00 = 600)
+			// cr = 1000 + 50000 = 51000 ($0.30 = 15300)
+			// out = 1000 + 3500 = 4500 ($15.00 = 67500)
+			// total = 694275 microUSD
+			respBody: `{
+				"id": "msg_test0004",
+				"type": "message",
+				"role": "assistant",
+				"model": "claude-example",
+				"content": [
+					{"type": "compaction", "content": "Summary of earlier turns."},
+					{"type": "text", "text": "The pod is out of memory."}
+				],
+				"stop_reason": "end_turn",
+				"stop_sequence": null,
+				"usage": {
+					"input_tokens": 23000,
+					"cache_creation_input_tokens": 200,
+					"cache_read_input_tokens": 1000,
+					"output_tokens": 1000,
+					"iterations": [
+						{
+							"type": "compaction",
+							"input_tokens": 180000,
+							"output_tokens": 3500,
+							"cache_creation_input_tokens": 400,
+							"cache_read_input_tokens": 50000,
+							"cache_creation": {
+								"ephemeral_5m_input_tokens": 300,
+								"ephemeral_1h_input_tokens": 100
+							}
+						},
+						{
+							"type": "message",
+							"input_tokens": 23000,
+							"output_tokens": 1000,
+							"cache_creation_input_tokens": 200,
+							"cache_read_input_tokens": 1000
+						}
+					]
+				}
+			}`,
+			wantIn:         203000,
+			wantCacheWrite: 600,
+			wantCacheRead:  51000,
+			wantTotalIn:    254600,
+			wantOut:        4500,
+			wantCost:       694275,
+		},
+		{
+			name:        "anthropic sse compaction",
+			reqBody:     `{"model":"claude-example","max_tokens":1000,"stream":true}`,
+			betaHeader:  "compact-2026-01-12",
+			contentType: "text/event-stream",
+			// Shape from armory/modelusage/testdata/anthropic-stream-compaction.sse:
+			// uncached = 23000 + 180000 = 203000 ($3.00 = 609000)
+			// cr = 50000 ($0.30 = 15000)
+			// out = 1000 + 3500 = 4500 ($15.00 = 67500)
+			// total = 691500 microUSD
+			respBody: "" +
+				"event: message_start\n" +
+				`data: {"type":"message_start","message":{"id":"msg_test0005","type":"message","role":"assistant","model":"claude-example","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":23000,"output_tokens":1,"iterations":[{"type":"compaction","input_tokens":180000,"output_tokens":3500,"cache_read_input_tokens":50000}]}}}` + "\n\n" +
+				"event: content_block_start\n" +
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The pod is out of memory."}}` + "\n\n" +
+				"event: content_block_stop\n" +
+				`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1000,"iterations":[{"type":"compaction","input_tokens":180000,"output_tokens":3500,"cache_read_input_tokens":50000},{"type":"message","input_tokens":23000,"output_tokens":1000}]}}` + "\n\n" +
+				"event: message_stop\n" +
+				`data: {"type":"message_stop"}` + "\n\n",
+			wantIn:         203000,
+			wantCacheWrite: 0,
+			wantCacheRead:  50000,
+			wantTotalIn:    253000,
+			wantOut:        4500,
+			wantCost:       691500,
+		},
+		{
+			name:        "anthropic json advisor",
+			reqBody:     `{"model":"claude-example","max_tokens":1000}`,
+			betaHeader:  "advisor-tool-2026-03-01",
+			contentType: "application/json",
+			// Shape from armory/modelusage/testdata/anthropic-reply-advisor.json:
+			// uncached = 1760 + 823 = 2583 ($3.00 = 7749)
+			// cr = 412 ($0.30 = 123.6)
+			// out = 531 + 1612 = 2143 ($15.00 = 32145)
+			// total = ceil(40017.6) = 40018 microUSD
+			respBody: `{
+				"id": "msg_test0006",
+				"type": "message",
+				"role": "assistant",
+				"model": "claude-example",
+				"content": [{"type": "text", "text": "The pod is out of memory."}],
+				"stop_reason": "end_turn",
+				"stop_sequence": null,
+				"usage": {
+					"input_tokens": 1760,
+					"cache_read_input_tokens": 412,
+					"output_tokens": 531,
+					"iterations": [
+						{
+							"type": "message",
+							"input_tokens": 1760,
+							"cache_read_input_tokens": 412,
+							"output_tokens": 531
+						},
+						{
+							"type": "advisor_message",
+							"input_tokens": 823,
+							"output_tokens": 1612
+						}
+					]
+				}
+			}`,
+			wantIn:         2583,
+			wantCacheWrite: 0,
+			wantCacheRead:  412,
+			wantTotalIn:    2995,
+			wantOut:        2143,
+			wantCost:       40018,
+		},
+		{
+			name:        "anthropic sse advisor",
+			reqBody:     `{"model":"claude-example","max_tokens":1000,"stream":true}`,
+			betaHeader:  "advisor-tool-2026-03-01",
+			contentType: "text/event-stream",
+			// Shape from armory/modelusage/testdata/anthropic-stream-advisor.sse:
+			// same counts as anthropic-reply-advisor.json -> 40018 microUSD
+			respBody: "" +
+				"event: message_start\n" +
+				`data: {"type":"message_start","message":{"id":"msg_test0007","type":"message","role":"assistant","model":"claude-example","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1760,"cache_read_input_tokens":412,"output_tokens":1}}}` + "\n\n" +
+				"event: content_block_start\n" +
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The pod is out of memory."}}` + "\n\n" +
+				"event: content_block_stop\n" +
+				`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":531,"iterations":[{"type":"message","input_tokens":1760,"cache_read_input_tokens":412,"output_tokens":531},{"type":"advisor_message","input_tokens":823,"output_tokens":1612}]}}` + "\n\n" +
+				"event: message_stop\n" +
+				`data: {"type":"message_stop"}` + "\n\n",
+			wantIn:         2583,
+			wantCacheWrite: 0,
+			wantCacheRead:  412,
+			wantTotalIn:    2995,
+			wantOut:        2143,
+			wantCost:       40018,
+		},
+		{
+			name:        "anthropic json advisor with cache creation 1h and cache read",
+			reqBody:     `{"model":"claude-example","max_tokens":1000}`,
+			betaHeader:  "advisor-tool-2026-03-01",
+			contentType: "application/json",
+			// uncached = 100 + 200 = 300 ($3.00 = 900)
+			// cw = 50 + 80 = 130 (5m = 90 * $3.75 = 337.5, 1h = 40 * $6.00 = 240)
+			// cr = 20 + 300 = 320 ($0.30 = 96)
+			// out = 10 + 60 = 70 ($15.00 = 1050)
+			// total = ceil(2623.5) = 2624 microUSD
+			respBody: `{
+				"id": "msg_adv_cache",
+				"type": "message",
+				"model": "claude-example",
+				"usage": {
+					"input_tokens": 100,
+					"cache_creation_input_tokens": 50,
+					"cache_read_input_tokens": 20,
+					"output_tokens": 10,
+					"iterations": [
+						{
+							"type": "advisor_message",
+							"input_tokens": 200,
+							"output_tokens": 60,
+							"cache_creation_input_tokens": 80,
+							"cache_read_input_tokens": 300,
+							"cache_creation": {
+								"ephemeral_5m_input_tokens": 40,
+								"ephemeral_1h_input_tokens": 40
+							}
+						}
+					]
+				}
+			}`,
+			wantIn:         300,
+			wantCacheWrite: 130,
+			wantCacheRead:  320,
+			wantTotalIn:    750,
+			wantOut:        70,
+			wantCost:       2624,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var gotBetaHeader string
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBetaHeader = r.Header.Get("anthropic-beta")
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write([]byte(tc.respBody))
+			})
+			gate, st := setupGateTest(t, map[string]UpstreamConfig{
+				"anthropic": {BaseURL: "https://anthropic.test", SecretName: "anthropic_api_key", RequireSecret: true, AnthropicVer: "2023-06-01"},
+			}, handlerTransport(upstream))
+			b := gate.bundle.Budgets["agent-budget"]
+			b.Spec.PerTask.MaxInputTokens = 1_000_000
+			b.Spec.PerTask.MaxOutputTokens = 100_000
+			b.Spec.PerTask.MaxCostUSD = 10.00
+			gate.bundle.Budgets["agent-budget"] = b
+
+			taskID := fmt.Sprintf("task-iter-%d", i)
+			if err := st.CreateTask(ctx, domain.Task{
+				ID: taskID, IdempotencyKey: taskID, WorkloadName: "ai-agent", State: domain.TaskStateWorking,
+			}); err != nil {
+				t.Fatalf("CreateTask: %v", err)
+			}
+			tok, err := MintTaskToken(ctx, st, taskID, "ai-agent", time.Hour)
+			if err != nil {
+				t.Fatalf("MintTaskToken: %v", err)
+			}
+
+			rec := doGateRequest(gate.Handler(), http.MethodPost, "/anthropic/v1/messages", tc.reqBody, map[string]string{
+				"x-api-key":      tok,
+				"anthropic-beta": tc.betaHeader,
+			})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
+			}
+			if gotBetaHeader != tc.betaHeader {
+				t.Errorf("upstream anthropic-beta = %q, want %q (must not be stripped silently)", gotBetaHeader, tc.betaHeader)
+			}
+
+			totals, err := st.TaskBudgetTotals(ctx, taskID)
+			if err != nil {
+				t.Fatalf("TaskBudgetTotals: %v", err)
+			}
+			if totals.InputTokens != tc.wantIn || totals.CacheWriteTokens != tc.wantCacheWrite ||
+				totals.CacheReadTokens != tc.wantCacheRead || totals.OutputTokens != tc.wantOut {
+				t.Errorf("totals = %+v, want in=%d cw=%d cr=%d out=%d",
+					totals, tc.wantIn, tc.wantCacheWrite, tc.wantCacheRead, tc.wantOut)
+			}
+			if totals.TotalInputTokens() != tc.wantTotalIn {
+				t.Errorf("TotalInputTokens = %d, want %d", totals.TotalInputTokens(), tc.wantTotalIn)
+			}
+			if totals.CostMicroUSD != tc.wantCost {
+				t.Errorf("CostMicroUSD = %d, want %d", totals.CostMicroUSD, tc.wantCost)
+			}
+		})
+	}
+}
+
+func TestModelGateChargesAnthropicUnclassifiedIterations(t *testing.T) {
+	reserve := domain.BudgetTotals{InputTokens: 1, OutputTokens: 1, CostMicroUSD: 21}
+
+	tests := []struct {
+		name             string
+		contentType      string
+		body             string
+		wantOutcome      usageOutcome
+		wantIn           int64
+		wantCacheWrite   int64
+		wantCacheWrite1h int64
+		wantCacheRead    int64
+		wantTotalIn      int64
+		wantOut          int64
+		wantCost         int64
+	}{
+		{
+			name:        "json fallback_message 1h cache write bills at 1h cache write rate",
+			contentType: "application/json",
+			// Review input: fallback_message with 1,000,000 1h cache write tokens.
+			// Must bill at $6.00/M (6,000,000 microUSD), not $3.00/M, while TotalInputTokens stays 1,000,000.
+			body: `{
+				"id": "msg_unclass_1h_cw",
+				"type": "message",
+				"model": "claude-example",
+				"usage": {
+					"input_tokens": 0,
+					"output_tokens": 0,
+					"iterations": [
+						{
+							"type": "fallback_message",
+							"cache_creation_input_tokens": 1000000,
+							"cache_creation": {"ephemeral_1h_input_tokens": 1000000}
+						}
+					]
+				}
+			}`,
+			wantOutcome:      usageOutcomeFinal,
+			wantIn:           0,
+			wantCacheWrite:   1000000,
+			wantCacheWrite1h: 1000000,
+			wantCacheRead:    0,
+			wantTotalIn:      1000000,
+			wantOut:          0,
+			wantCost:         6000000,
+		},
+		{
+			name:        "json fallback_message adds all input-side counts to 1h cache write and output to output",
+			contentType: "application/json",
+			// top: in=100 ($3=300), cw=50 (5m: $3.75=187.5), cr=200 ($0.30=60), out=30
+			// fallback_message: input=40 + cw=10 + cr=25 = 75 unclassified in (1h: $6=450); out=15 unclassified out
+			// settled: in=100, cw=125 (5m=50, 1h=75), cr=200 (totalIn=425), out=45 ($15=675) -> ceil(1672.5)=1673
+			body: `{
+				"id": "msg_unclass_1",
+				"type": "message",
+				"model": "claude-example",
+				"usage": {
+					"input_tokens": 100,
+					"cache_creation_input_tokens": 50,
+					"cache_read_input_tokens": 200,
+					"output_tokens": 30,
+					"iterations": [
+						{"type": "fallback_message", "input_tokens": 40, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 25, "output_tokens": 15}
+					]
+				}
+			}`,
+			wantOutcome:      usageOutcomeFinal,
+			wantIn:           100,
+			wantCacheWrite:   125,
+			wantCacheWrite1h: 75,
+			wantCacheRead:    200,
+			wantTotalIn:      425,
+			wantOut:          45,
+			wantCost:         1673,
+		},
+		{
+			name:        "json unknown and missing iteration types fail closed into 1h cache write and output",
+			contentType: "application/json",
+			// top: in=20 ($3=60), out=5; unknown: in=30, out=10; missing type: in=15, out=4; null type: in=5, out=1
+			// settled: in=20, cw=50 (1h: $6=300), totalIn=70, out=20 ($15=300) -> 660
+			body: `{
+				"id": "msg_unclass_2",
+				"type": "message",
+				"model": "claude-example",
+				"usage": {
+					"input_tokens": 20,
+					"output_tokens": 5,
+					"iterations": [
+						{"type": "future_step", "input_tokens": 30, "output_tokens": 10},
+						{"input_tokens": 15, "output_tokens": 4},
+						{"type": null, "input_tokens": 5, "output_tokens": 1}
+					]
+				}
+			}`,
+			wantOutcome:      usageOutcomeFinal,
+			wantIn:           20,
+			wantCacheWrite:   50,
+			wantCacheWrite1h: 50,
+			wantTotalIn:      70,
+			wantOut:          20,
+			wantCost:         660,
+		},
+		{
+			name:        "partial sse stream preserves unclassified iteration counts at 1h cache write rate",
+			contentType: "text/event-stream",
+			// message_start: in=20, cr=100, out=1, unclassified in=40 (1h cw), unclassified out=10
+			// partial bills no cache-read discount: in=120 ($3=360), cw=40 (1h: $6=240), totalIn=160, out=11 ($15=165) -> 765
+			body: "" +
+				"event: message_start\n" +
+				`data: {"type":"message_start","message":{"id":"msg_unclass_sse","model":"claude-example","usage":{"input_tokens":20,"cache_read_input_tokens":100,"output_tokens":1,"iterations":[{"type":"fallback_message","input_tokens":40,"output_tokens":10}]}}}` + "\n\n",
+			wantOutcome:      usageOutcomePartial,
+			wantIn:           120,
+			wantCacheWrite:   40,
+			wantCacheWrite1h: 40,
+			wantTotalIn:      160,
+			wantOut:          11,
+			wantCost:         765,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseUsage("anthropic", "/v1/messages", []byte(tc.body), tc.contentType)
+			if parsed.Outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %v (err=%v), want %v", parsed.Outcome, parsed.Err, tc.wantOutcome)
+			}
+			settled, cost := settleUsageForEntry("anthropic", "claude-example", parsed, reserve, nil)
+			if settled.InputTokens != tc.wantIn || settled.CacheWriteTokens != tc.wantCacheWrite ||
+				settled.CacheWrite1hTokens != tc.wantCacheWrite1h || settled.CacheReadTokens != tc.wantCacheRead ||
+				settled.OutputTokens != tc.wantOut {
+				t.Errorf("settled = %+v, want in=%d cw=%d cw1h=%d cr=%d out=%d",
+					settled, tc.wantIn, tc.wantCacheWrite, tc.wantCacheWrite1h, tc.wantCacheRead, tc.wantOut)
+			}
+			if settled.TotalInputTokens() != tc.wantTotalIn {
+				t.Errorf("TotalInputTokens = %d, want %d", settled.TotalInputTokens(), tc.wantTotalIn)
+			}
+			if cost != tc.wantCost {
+				t.Errorf("cost = %d, want %d", cost, tc.wantCost)
+			}
+		})
+	}
+}
+
+func TestModelGateChargesReportedTotalExcessAsOutput(t *testing.T) {
+	reserve := domain.BudgetTotals{InputTokens: 1, OutputTokens: 1, CostMicroUSD: 13}
+
+	tests := []struct {
+		name          string
+		upstreamPath  string
+		contentType   string
+		body          string
+		wantOutcome   usageOutcome
+		wantIn        int64
+		wantCacheRead int64
+		wantOut       int64
+		wantCost      int64
+	}{
+		{
+			name:         "chat json prompt 9 completion 2 total 20 charges 9 extra as output",
+			upstreamPath: "/v1/chat/completions",
+			contentType:  "application/json",
+			// parts = 9 + 2 = 11; excess = 20 - 11 = 9 -> out = 11
+			// 9 * $2.50 + 11 * $10.00 = 22.5 + 110 = 132.5 -> ceil 133
+			body:        `{"model":"gpt-5","usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20}}`,
+			wantOutcome: usageOutcomeFinal,
+			wantIn:      9,
+			wantOut:     11,
+			wantCost:    133,
+		},
+		{
+			name:         "chat json with cached prompt keeps cache split and charges excess as output",
+			upstreamPath: "/v1/chat/completions",
+			contentType:  "application/json",
+			// uncached = 5, cacheRead = 4, parts = 11, excess = 9 -> out = 11
+			// 5 * $2.50 + 4 * $1.25 + 11 * $10.00 = 12.5 + 5 + 110 = 127.5 -> ceil 128
+			body:          `{"model":"gpt-5","usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":4}}}`,
+			wantOutcome:   usageOutcomeFinal,
+			wantIn:        5,
+			wantCacheRead: 4,
+			wantOut:       11,
+			wantCost:      128,
+		},
+		{
+			name:         "responses json input 9 output 2 total 20 charges 9 extra as output",
+			upstreamPath: "/v1/responses",
+			contentType:  "application/json",
+			body:         `{"id":"resp_tot","status":"completed","model":"gpt-5","usage":{"input_tokens":9,"output_tokens":2,"total_tokens":20}}`,
+			wantOutcome:  usageOutcomeFinal,
+			wantIn:       9,
+			wantOut:      11,
+			wantCost:     133,
+		},
+		{
+			name:         "chat partial sse stream preserves reported total excess as output",
+			upstreamPath: "/v1/chat/completions",
+			contentType:  "text/event-stream",
+			body:         `data: {"model":"gpt-5","usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20}}` + "\n\n",
+			wantOutcome:  usageOutcomePartial,
+			wantIn:       9,
+			wantOut:      11,
+			wantCost:     133,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseUsage("openai", tc.upstreamPath, []byte(tc.body), tc.contentType)
+			if parsed.Outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %v (err=%v), want %v", parsed.Outcome, parsed.Err, tc.wantOutcome)
+			}
+			settled, cost := settleUsageForEntry("openai", "gpt-5", parsed, reserve, nil)
+			if settled.InputTokens != tc.wantIn || settled.CacheReadTokens != tc.wantCacheRead || settled.OutputTokens != tc.wantOut {
+				t.Errorf("settled = %+v, want in=%d cr=%d out=%d", settled, tc.wantIn, tc.wantCacheRead, tc.wantOut)
+			}
+			if settled.TotalTokens() != 20 {
+				t.Errorf("TotalTokens = %d, want 20", settled.TotalTokens())
+			}
+			if cost != tc.wantCost {
+				t.Errorf("cost = %d, want %d", cost, tc.wantCost)
+			}
+		})
+	}
+}
+
+func TestModelUsageMappingOverflowSafetyAndCacheSeparation(t *testing.T) {
+	reserve := domain.BudgetTotals{
+		InputTokens:  100,
+		OutputTokens: 50,
+		CostMicroUSD: estimateReserveMicroUSD("anthropic", "claude-example", 100, 50, nil),
+	}
+
+	overflowCases := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{
+			name:        "json input plus unclassified input exceeds maxReservedTokens",
+			contentType: "application/json",
+			body: fmt.Sprintf(
+				`{"usage":{"input_tokens":%d,"output_tokens":0,"iterations":[{"type":"fallback_message","input_tokens":1,"output_tokens":0}]}}`,
+				maxReservedTokens,
+			),
+		},
+		{
+			name:        "json output plus unclassified output exceeds maxReservedTokens",
+			contentType: "application/json",
+			body: fmt.Sprintf(
+				`{"usage":{"input_tokens":0,"output_tokens":%d,"iterations":[{"type":"fallback_message","input_tokens":0,"output_tokens":1}]}}`,
+				maxReservedTokens,
+			),
+		},
+		{
+			name:        "json total tokens with unclassified exceeds maxReservedTokens",
+			contentType: "application/json",
+			body: fmt.Sprintf(
+				`{"usage":{"input_tokens":%d,"output_tokens":0,"iterations":[{"type":"fallback_message","input_tokens":0,"output_tokens":1}]}}`,
+				maxReservedTokens,
+			),
+		},
+		{
+			name:        "partial sse stream with unclassified exceeding maxReservedTokens fails closed",
+			contentType: "text/event-stream",
+			body: fmt.Sprintf(
+				"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":%d,\"output_tokens\":0,\"iterations\":[{\"type\":\"fallback_message\",\"input_tokens\":1,\"output_tokens\":0}]}}}\n\n",
+				maxReservedTokens,
+			),
+		},
+	}
+
+	for _, tc := range overflowCases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseUsage("anthropic", "/v1/messages", []byte(tc.body), tc.contentType)
+			if parsed.Outcome != usageOutcomeNone {
+				t.Fatalf("outcome = %v (usage=%+v), want usageOutcomeNone", parsed.Outcome, parsed.Usage)
+			}
+			if !errors.Is(parsed.Err, modelusage.ErrOutOfRange) {
+				t.Fatalf("err = %v, want modelusage.ErrOutOfRange", parsed.Err)
+			}
+			settled, cost := settleUsageForEntry("anthropic", "claude-example", parsed, reserve, nil)
+			if settled.InputTokens != reserve.InputTokens || settled.OutputTokens != reserve.OutputTokens || cost != reserve.CostMicroUSD {
+				t.Fatalf("settled = %+v cost=%d, want reserve %+v", settled, cost, reserve)
+			}
+		})
+	}
+
+	t.Run("exact maxReservedTokens with unclassified is accepted", func(t *testing.T) {
+		body := fmt.Sprintf(
+			`{"usage":{"input_tokens":%d,"output_tokens":5,"iterations":[{"type":"fallback_message","input_tokens":3,"output_tokens":2}]}}`,
+			maxReservedTokens-10,
+		)
+		parsed := parseUsage("anthropic", "/v1/messages", []byte(body), "application/json")
+		if parsed.Outcome != usageOutcomeFinal {
+			t.Fatalf("outcome = %v err = %v, want usageOutcomeFinal", parsed.Outcome, parsed.Err)
+		}
+		if parsed.Usage.InputTokens != maxReservedTokens-10 || parsed.Usage.CacheWriteTokens != 3 ||
+			parsed.Usage.CacheWrite1hTokens != 3 || parsed.Usage.TotalInputTokens() != maxReservedTokens-7 ||
+			parsed.Usage.OutputTokens != 7 || parsed.Usage.TotalTokens() != maxReservedTokens {
+			t.Fatalf("usage = %+v, want in=%d cw=3 cw1h=3 totalIn=%d out=7 total=%d",
+				parsed.Usage, maxReservedTokens-10, maxReservedTokens-7, maxReservedTokens)
+		}
+	})
+
+	t.Run("iteration 1h lifetime without parent cache write adds nothing", func(t *testing.T) {
+		body := `{
 			"usage": {
-				"input_tokens": 90,
-				"output_tokens": 20,
+				"input_tokens": 10,
+				"cache_creation_input_tokens": 100,
+				"output_tokens": 5,
 				"iterations": [
-					{"type": "message", "input_tokens": 90, "output_tokens": 20},
-					{"type": "compaction", "input_tokens": 80, "output_tokens": 10}
+					{
+						"type": "compaction",
+						"input_tokens": 20,
+						"output_tokens": 5,
+						"cache_creation": {"ephemeral_1h_input_tokens": 80}
+					}
 				]
 			}
-		}`))
+		}`
+		parsed := parseUsage("anthropic", "/v1/messages", []byte(body), "application/json")
+		if parsed.Outcome != usageOutcomeFinal {
+			t.Fatalf("outcome = %v err = %v, want usageOutcomeFinal", parsed.Outcome, parsed.Err)
+		}
+		if parsed.Usage.CacheWriteTokens != 100 || parsed.Usage.CacheWrite1hTokens != 0 {
+			t.Fatalf("usage = %+v, want cw=100 cw1h=0", parsed.Usage)
+		}
 	})
-	gate, st := setupGateTest(t, map[string]UpstreamConfig{
-		"anthropic": {BaseURL: "https://anthropic.test", SecretName: "anthropic_api_key", RequireSecret: true, AnthropicVer: "2023-06-01"},
-	}, handlerTransport(upstream))
 
-	if err := st.CreateTask(ctx, domain.Task{
-		ID: "task-compact", IdempotencyKey: "task-compact", WorkloadName: "ai-agent", State: domain.TaskStateWorking,
-	}); err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
-	tok, err := MintTaskToken(ctx, st, "task-compact", "ai-agent", time.Hour)
-	if err != nil {
-		t.Fatalf("MintTaskToken: %v", err)
-	}
-
-	rec := doGateRequest(gate.Handler(), http.MethodPost, "/anthropic/v1/messages", `{"model":"claude-sonnet-4-5","max_tokens":50}`, map[string]string{
-		"x-api-key":      tok,
-		"anthropic-beta": "compact-2026-01-12",
+	t.Run("partial anthropic stream keeps compaction output and 1h surcharge", func(t *testing.T) {
+		body := "" +
+			"event: message_start\n" +
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":50,"output_tokens":1,"iterations":[{"type":"compaction","input_tokens":200,"output_tokens":90,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":40},"cache_read_input_tokens":50}]}}}` + "\n\n"
+		parsed := parseUsage("anthropic", "/v1/messages", []byte(body), "text/event-stream")
+		if parsed.Outcome != usageOutcomePartial {
+			t.Fatalf("outcome = %v err = %v, want usageOutcomePartial", parsed.Outcome, parsed.Err)
+		}
+		// totalIn = 50 + 200 + 100 + 50 = 400; cw = 100 (60*3.75 + 40*6 = 225 + 240 = 465);
+		// remaining 300 at $3 = 900; out = 91 at $15 = 1365 -> total = 2730
+		settled, cost := settleUsageForEntry("anthropic", "claude-example", parsed, reserve, nil)
+		if settled.InputTokens != 300 || settled.CacheWriteTokens != 100 || settled.CacheWrite1hTokens != 40 || settled.CacheReadTokens != 0 || settled.OutputTokens != 91 {
+			t.Fatalf("settled = %+v, want in=300 cw=100 cw1h=40 cr=0 out=91", settled)
+		}
+		if cost != 2730 {
+			t.Fatalf("cost = %d, want 2730", cost)
+		}
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
-	}
-	if gotBetaHeader != "compact-2026-01-12" {
-		t.Errorf("upstream anthropic-beta = %q, want %q (must not be stripped silently)", gotBetaHeader, "compact-2026-01-12")
-	}
 
-	// Pinned known under-count: only the top-level 90 input / 20 output tokens are
-	// counted; the 80 input / 10 output compaction iteration tokens are omitted
-	// until shadewright-labs/armory issue 26 lands.
-	totals, err := st.TaskBudgetTotals(ctx, "task-compact")
-	if err != nil {
-		t.Fatalf("TaskBudgetTotals: %v", err)
-	}
-	if totals.InputTokens != 90 || totals.OutputTokens != 20 {
-		t.Errorf("totals = %+v, want pinned top-level in=90 out=20", totals)
-	}
+	t.Run("Usage totals saturate on int64 overflow", func(t *testing.T) {
+		u := Usage{
+			InputTokens:      math.MaxInt64 - 5,
+			CacheWriteTokens: 10,
+			CacheReadTokens:  10,
+			OutputTokens:     10,
+		}
+		if got := u.TotalInputTokens(); got != math.MaxInt64 {
+			t.Errorf("TotalInputTokens = %d, want MaxInt64", got)
+		}
+		if got := u.TotalTokens(); got != math.MaxInt64 {
+			t.Errorf("TotalTokens = %d, want MaxInt64", got)
+		}
+	})
+
+	t.Run("satAddInt64 clamps negative operands and saturates on overflow", func(t *testing.T) {
+		tests := []struct {
+			name string
+			a, b int64
+			want int64
+		}{
+			{name: "normal sum", a: 10, b: 20, want: 30},
+			{name: "overflow saturates", a: math.MaxInt64 - 5, b: 10, want: math.MaxInt64},
+			{name: "negative b clamped to zero", a: 10, b: -1, want: 10},
+			{name: "min int64 b clamped to zero", a: 10, b: math.MinInt64, want: 10},
+			{name: "negative a clamped to zero", a: -5, b: 10, want: 10},
+			{name: "both negative clamped to zero", a: -5, b: -1, want: 0},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := satAddInt64(tc.a, tc.b); got != tc.want {
+					t.Errorf("satAddInt64(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+				}
+			})
+		}
+	})
 }
 
 func TestMicroUSDFromFloatRoundsUpAtBoundaries(t *testing.T) {

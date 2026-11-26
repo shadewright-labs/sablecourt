@@ -15,10 +15,10 @@ Source: `internal/telemetry/metrics.go`.
 | `sablecourt_workloads_total` | gauge | `zone` (`runtime`, `sandbox`) | Declared workloads per zone. Both labels are always present. |
 | `sablecourt_tasks_total` | gauge | `state` | Tasks per state. Only states that have tasks appear. States: `submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`. |
 | `sablecourt_approvals_pending` | gauge | none | Approvals waiting for a decision. |
-| `sablecourt_budget_input_tokens_total` | counter | none | Uncached input tokens recorded in the budget ledger. |
-| `sablecourt_budget_cache_write_tokens_total` | counter | none | Cache write input tokens recorded in the budget ledger. |
-| `sablecourt_budget_cache_read_tokens_total` | counter | none | Cache read input tokens recorded in the budget ledger. |
-| `sablecourt_budget_output_tokens_total` | counter | none | Output tokens recorded in the budget ledger. |
+| `sablecourt_budget_input_tokens_total` | counter | none | Uncached input tokens recorded in the budget ledger, including Anthropic compaction and advisor uncached input. |
+| `sablecourt_budget_cache_write_tokens_total` | counter | none | Cache write input tokens recorded in the budget ledger, including Anthropic compaction, advisor, and unclassified iteration input. |
+| `sablecourt_budget_cache_read_tokens_total` | counter | none | Cache read input tokens recorded in the budget ledger, including Anthropic compaction and advisor cache reads. |
+| `sablecourt_budget_output_tokens_total` | counter | none | Output tokens recorded in the budget ledger, including Anthropic compaction, advisor, and unclassified iteration output, Gemini thinking tokens, and any OpenAI `total_tokens` excess above the reported parts. |
 | `sablecourt_budget_cost_microusd_total` | counter | none | Cost in millionths of a US dollar. |
 | `sablecourt_conclaves_total` | gauge | `state` | Conclave sessions per state: `active`, `input-required`, `completed`, `cancelled`. Only states that have sessions appear. |
 | `sablecourt_conclave_ward_trips_recent` | gauge | none | Audit rows with action `conclave.ward` among the last 500 rows. |

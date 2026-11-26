@@ -29,14 +29,25 @@ type Usage struct {
 	OutputTokens       int64
 }
 
-// TotalInputTokens returns all input tokens (uncached, cache write, and cache read).
-func (u Usage) TotalInputTokens() int64 {
-	return u.InputTokens + u.CacheWriteTokens + u.CacheReadTokens
+func satAddInt64(a, b int64) int64 {
+	a = max(a, 0)
+	b = max(b, 0)
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
-// TotalTokens returns all input and output tokens.
+// TotalInputTokens returns all input tokens (uncached, cache write, and cache read),
+// saturating at math.MaxInt64 on overflow.
+func (u Usage) TotalInputTokens() int64 {
+	sum := satAddInt64(max(u.InputTokens, 0), max(u.CacheWriteTokens, 0))
+	return satAddInt64(sum, max(u.CacheReadTokens, 0))
+}
+
+// TotalTokens returns all input and output tokens, saturating at math.MaxInt64 on overflow.
 func (u Usage) TotalTokens() int64 {
-	return u.TotalInputTokens() + u.OutputTokens
+	return satAddInt64(u.TotalInputTokens(), max(u.OutputTokens, 0))
 }
 
 // PricePerMillionTokens holds per-million-token rates in USD (equivalently,
@@ -181,16 +192,121 @@ func familyForRoute(provider, upstreamPath string) (modelusage.Family, bool) {
 	}
 }
 
-func usageFromModelUsage(mu modelusage.Usage) Usage {
+func cacheWrite1hTokens(mu modelusage.Usage, cw int64) int64 {
+	if cw <= 0 {
+		return 0
+	}
+	// Cap each group's 1-hour lifetime count at its own parent cache-write count
+	// so a lifetime field without a parent count adds nothing.
+	top := min(max(mu.CacheCreation1hInputTokens, 0), max(mu.CacheCreationInputTokens, 0))
+	comp := min(max(mu.CompactionCacheCreation1hInputTokens, 0), max(mu.CompactionCacheCreationInputTokens, 0))
+	adv := min(max(mu.AdvisorCacheCreation1hInputTokens, 0), max(mu.AdvisorCacheCreationInputTokens, 0))
+	return min(satAddInt64(satAddInt64(top, comp), adv), cw)
+}
+
+func usageFromModelUsage(mu modelusage.Usage) (Usage, error) {
 	cw := max(mu.CacheWriteTokens(), 0)
-	cw1h := min(max(mu.CacheCreation1hInputTokens, 0), cw)
+	cr := max(mu.CacheReadTokens(), 0)
+	uncached := max(mu.UncachedInputTokens(), 0)
+	totalIn := max(mu.TotalInputTokens(), 0)
+	out := max(mu.TotalOutputTokens(), 0)
+	unclassIn := max(mu.UnclassifiedIterationInputTokens, 0)
+	unclassOut := max(mu.UnclassifiedIterationOutputTokens, 0)
+	reportedTotal := max(mu.ReportedTotalTokens, 0)
+
+	if totalIn > maxReservedTokens || out > maxReservedTokens ||
+		unclassIn > maxReservedTokens || unclassOut > maxReservedTokens ||
+		reportedTotal > maxReservedTokens ||
+		cw > totalIn || cr > totalIn-cw {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	// Add unclassified Anthropic iteration input to cache write (1-hour TTL)
+	// and output to output. An unknown iteration entry may carry 1-hour cache
+	// writes, so pricing its input at the dearest input rate is fail-closed
+	// while keeping TotalInputTokens unchanged.
+	if unclassIn > maxReservedTokens-totalIn {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	cw1h := cacheWrite1hTokens(mu, cw)
+	cw += unclassIn
+	cw1h += unclassIn
+	totalIn += unclassIn
+
+	if unclassOut > maxReservedTokens-out {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	out += unclassOut
+
+	if totalIn > maxReservedTokens-out {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	parts := totalIn + out
+	// When the provider reports total_tokens above the sum of input and output
+	// parts, charge the difference as output tokens (the dearer side) so the
+	// charged total is never below the provider total.
+	if reportedTotal > parts {
+		out += reportedTotal - parts
+	}
+
 	return Usage{
-		InputTokens:        max(mu.UncachedInputTokens(), 0),
+		InputTokens:        uncached,
 		CacheWriteTokens:   cw,
 		CacheWrite1hTokens: cw1h,
-		CacheReadTokens:    max(mu.CacheReadTokens(), 0),
-		OutputTokens:       max(mu.OutputTokens, 0),
+		CacheReadTokens:    cr,
+		OutputTokens:       out,
+	}, nil
+}
+
+func partialUsageFromModelUsage(mu modelusage.Usage) (Usage, error) {
+	// Per modelusage.PartialError, UncachedInputTokens is not a lower bound
+	// on an incomplete stream. Price the partial by its sums: keep cache
+	// writes (which may carry a surcharge) and bill remaining prompt tokens
+	// at the uncached input rate with no cache-read discount.
+	baseIn := max(mu.TotalInputTokens(), 0)
+	out := max(mu.TotalOutputTokens(), 0)
+	unclassIn := max(mu.UnclassifiedIterationInputTokens, 0)
+	unclassOut := max(mu.UnclassifiedIterationOutputTokens, 0)
+	reportedTotal := max(mu.ReportedTotalTokens, 0)
+
+	if baseIn > maxReservedTokens || out > maxReservedTokens ||
+		unclassIn > maxReservedTokens || unclassOut > maxReservedTokens ||
+		reportedTotal > maxReservedTokens {
+		return Usage{}, modelusage.ErrOutOfRange
 	}
+	cacheWrite := min(max(mu.CacheWriteTokens(), 0), baseIn)
+	cacheWrite1h := cacheWrite1hTokens(mu, cacheWrite)
+
+	// Add unclassified Anthropic iteration input to cache write (1-hour TTL)
+	// and output to output; an unknown entry may carry 1-hour cache writes,
+	// so billing its input at the dearest input rate is the fail-closed direction.
+	if unclassIn > maxReservedTokens-baseIn {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	cacheWrite += unclassIn
+	cacheWrite1h += unclassIn
+	totalIn := baseIn + unclassIn
+
+	if unclassOut > maxReservedTokens-out {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	out += unclassOut
+
+	if totalIn > maxReservedTokens-out {
+		return Usage{}, modelusage.ErrOutOfRange
+	}
+	parts := totalIn + out
+	// Charge any excess of ReportedTotalTokens over the parts as output tokens
+	// (the dearer side) so partial settlement never falls below the provider total.
+	if reportedTotal > parts {
+		out += reportedTotal - parts
+	}
+
+	return Usage{
+		InputTokens:        totalIn - cacheWrite,
+		CacheWriteTokens:   cacheWrite,
+		CacheWrite1hTokens: cacheWrite1h,
+		OutputTokens:       out,
+	}, nil
 }
 
 func parseUsage(provider, upstreamPath string, body []byte, contentType string) parsedUsage {
@@ -205,30 +321,27 @@ func parseUsage(provider, upstreamPath string, body []byte, contentType string) 
 		if isSSE {
 			mu, err := modelusage.ParseStream(family, bytes.NewReader(body), lim)
 			if err == nil {
-				u := usageFromModelUsage(mu)
+				u, uerr := usageFromModelUsage(mu)
+				if uerr != nil {
+					return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: uerr}
+				}
 				u.Model = modelName
 				return parsedUsage{Usage: u, Outcome: usageOutcomeFinal}
 			}
 			if _, ok := errors.AsType[*modelusage.TrailingError](err); ok {
-				u := usageFromModelUsage(mu)
+				u, uerr := usageFromModelUsage(mu)
+				if uerr != nil {
+					return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: uerr}
+				}
 				u.Model = modelName
 				return parsedUsage{Usage: u, Outcome: usageOutcomeTrailing, Err: err}
 			}
 			if _, ok := errors.AsType[*modelusage.PartialError](err); ok {
-				// Per modelusage.PartialError, UncachedInputTokens is not a lower bound
-				// on an incomplete stream. Price the partial by its sums: keep cache
-				// writes (which may carry a surcharge) and bill remaining prompt tokens
-				// at the uncached input rate with no cache-read discount.
-				totalIn := max(mu.TotalInputTokens(), 0)
-				cacheWrite := min(max(mu.CacheWriteTokens(), 0), totalIn)
-				cacheWrite1h := min(max(mu.CacheCreation1hInputTokens, 0), cacheWrite)
-				u := Usage{
-					Model:              modelName,
-					InputTokens:        totalIn - cacheWrite,
-					CacheWriteTokens:   cacheWrite,
-					CacheWrite1hTokens: cacheWrite1h,
-					OutputTokens:       max(mu.OutputTokens, 0),
+				u, uerr := partialUsageFromModelUsage(mu)
+				if uerr != nil {
+					return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: uerr}
 				}
+				u.Model = modelName
 				return parsedUsage{Usage: u, Outcome: usageOutcomePartial, Err: err}
 			}
 			return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: err}
@@ -238,7 +351,10 @@ func parseUsage(provider, upstreamPath string, body []byte, contentType string) 
 		if err != nil {
 			return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: err}
 		}
-		u := usageFromModelUsage(mu)
+		u, uerr := usageFromModelUsage(mu)
+		if uerr != nil {
+			return parsedUsage{Usage: Usage{Model: modelName}, Outcome: usageOutcomeNone, Err: uerr}
+		}
 		u.Model = modelName
 		return parsedUsage{Usage: u, Outcome: usageOutcomeFinal}
 	}
