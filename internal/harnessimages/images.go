@@ -20,7 +20,7 @@ const (
 	StateDir = "/home/harness"
 )
 
-//go:embed Dockerfile
+//go:embed Dockerfile licenses
 var definitions embed.FS
 
 type Definition struct {
@@ -32,6 +32,23 @@ type Definition struct {
 	// LoginFiles are credential files inside the volume, as paths under
 	// StateDir. A login exists when any one of them is a non-empty file.
 	LoginFiles []string
+	// Tool is set for a role whose vendor tool is not in the image. The tool
+	// is installed on the user's machine into its own volume (see tool.go).
+	Tool *Tool
+	// Bundled is set for a role whose image carries its tool. The Dockerfile
+	// repeats these values, and a test keeps the two in step.
+	Bundled *Bundled
+}
+
+// Bundled pins the release archive that the Dockerfile downloads into an image.
+type Bundled struct {
+	Version  string
+	Platform string
+	// Target is the vendor's name for the platform in the asset name.
+	Target string
+	// SHA256 is the digest of the release archive for Platform. The build
+	// checks it before extracting and fails on a mismatch.
+	SHA256 string
 }
 
 // Docker is the only boundary that communicates with the local engine.
@@ -50,12 +67,32 @@ func Lookup(role string) (Definition, error) {
 	case "claude":
 		d.Version, d.LoginArgv = "2.1.332", []string{"claude", "auth", "login"}
 		d.LoginFiles = []string{StateDir + "/.claude/.credentials.json"}
+		d.Tool = &Tool{
+			Binary: "claude", Version: d.Version, Volume: d.Volume + "-tool",
+			URL:    "https://downloads.claude.ai/claude-code-releases/2.1.332/linux-arm64/claude",
+			SHA256: "50c305fcb8912851ce774429131d94ed6f84edbe3d8d0ed7a59dade5d893acc0",
+			Size:   385475840,
+		}
 	case "codex":
 		d.Version, d.LoginArgv = "0.172.0", []string{"codex", "login", "--device-auth"}
+		// The SHA-256 is the digest GitHub lists for the release asset
+		// codex-aarch64-unknown-linux-musl.tar.gz of tag rust-v0.172.0, read
+		// from the release API on 2026-11-26 and checked against a download.
+		d.Bundled = &Bundled{Version: d.Version, Platform: Platform, Target: "aarch64-unknown-linux-musl",
+			SHA256: "0b99526c185a4425fe96a2214fb7b6a6a7f7c1471883b7afbebe97e15e83e79e"}
 		d.LoginFiles = []string{StateDir + "/.codex/auth.json"}
 	case "agy":
 		d.Version, d.LoginArgv = "1.5.17", []string{"agy"}
 		d.LoginFiles = []string{StateDir + "/.gemini/oauth_tokens.json", StateDir + "/.gemini/antigravity-cli/oauth_tokens.json"}
+		d.Tool = &Tool{
+			Binary: "agy", Version: d.Version, Volume: d.Volume + "-tool",
+			URL:           "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-arm/cli_linux_arm64.tar.gz",
+			ArchiveSHA512: "e4f086d0730b325cfd438ea90396ee78eb23a3110ef7f792824c8817b8d0432462b7b5f91b3d933fc1932a6f4ba73de505e2e96f44448c9fb2427292ead716f7",
+			ArchiveSize:   93662528,
+			ArchiveMember: "antigravity",
+			SHA256:        "ea65d564db41f7f16b6efc423ab9abe7b0778c1da0157167b5284b5563131b47",
+			Size:          260657840,
+		}
 	default:
 		return Definition{}, fmt.Errorf("unknown harness role (choose claude, codex, or agy)")
 	}
@@ -65,6 +102,10 @@ func Lookup(role string) (Definition, error) {
 
 // BuildCommand is the command that creates the local image for role.
 func BuildCommand(role string) string { return "sablectl harness build " + role }
+
+// InstallCommand is the command that installs the pinned vendor tool for a
+// role whose image does not carry it.
+func InstallCommand(role string) string { return "sablectl harness install " + role }
 
 // LoginCommand is the command that stores the subscription login for role.
 func LoginCommand(role string) string { return "sablectl harness login " + role }

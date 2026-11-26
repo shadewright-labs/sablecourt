@@ -26,18 +26,17 @@ type loginRuntime interface {
 	ResolveLocalImage(context.Context, string) (string, error)
 	ProvisionCouncilProxy(context.Context, string, councilproxy.Config) (councilproxy.LaunchSession, error)
 	RunCouncilLogin(context.Context, rt.CouncilLaunch, func(context.Context, io.Reader, io.Writer) error, rt.CouncilRecorder) (rt.CouncilResult, error)
+	InstallCouncilTool(context.Context, string, io.Reader) error
 }
 
 // newLoginRuntime builds the Docker runtime for one harness, with the same
-// role, image, volume and login files the daemon launcher uses.
+// role, image, volumes, tool pin and login files the daemon launcher uses.
 var newLoginRuntime = func(def harnessimages.Definition) (loginRuntime, error) {
 	a, err := docker.NewFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("configure Docker runtime: %w", err)
 	}
-	a.CouncilHarnesses = map[string]docker.CouncilHarness{
-		def.Role: {Image: def.Image, LoginVolume: def.Volume, LoginFiles: def.LoginFiles},
-	}
+	a.CouncilHarnesses = map[string]docker.CouncilHarness{def.Role: councilHarnessConfig(def)}
 	return a, nil
 }
 
@@ -45,8 +44,11 @@ const loginWallTime = 30 * time.Minute
 
 func loginHarnessCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:       "login <role>",
-		Short:     "Log in to a harness inside its container and keep the login in its volume",
+		Use:   "login <role>",
+		Short: "Log in to a harness inside its container and keep the login in its volume",
+		Long: "Log in to a harness inside its container and keep the login in its volume.\n" +
+			"For claude and agy, whose images carry no vendor tool, it first installs the pinned tool\n" +
+			"(as sablectl harness install does) when the tool volume is missing or holds another version.",
 		ValidArgs: []string{"claude", "codex", "agy"},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
@@ -74,14 +76,22 @@ func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut
 	missingImage := fmt.Errorf("image for %s is missing: run %s", role, harnessimages.BuildCommand(role))
 	err = runtime.CheckCouncilHarness(ctx, role)
 	var fault *docker.HarnessError
+	install := false
 	if errors.As(err, &fault) {
 		switch fault.Fault {
 		case docker.FaultImageMissing:
 			return missingImage
-		case docker.FaultVolumeMissing, docker.FaultLoginMissing:
+		case docker.FaultVolumeMissing:
+			// The tool was not checked yet: install it for a role that needs one.
+			install = def.Tool != nil
+		case docker.FaultToolMissing, docker.FaultToolVersion, docker.FaultToolChecksum:
+			install = true
+		case docker.FaultLoginMissing:
 			// The login flow below creates the volume and the login.
 		case docker.FaultVolumeInvalid:
 			return fmt.Errorf("volume %s exists but is not a local Sablecourt volume for %s (driver, options or labels differ): remove it by hand and run this command again", def.Volume, role)
+		case docker.FaultToolInvalid:
+			return fmt.Errorf("volume %s exists but is not a local Sablecourt tool volume for %s (driver, options or labels differ): remove it by hand and run this command again", def.Tool.Volume, role)
 		default:
 			return fmt.Errorf("cannot check the %s harness: Docker or the harness configuration is unavailable", role)
 		}
@@ -89,6 +99,11 @@ func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut
 		return fmt.Errorf("cannot check the %s harness: %w", role, err)
 	} else {
 		fmt.Fprintf(errOut, "A login for %s already exists; continuing will replace it if you finish the flow.\n", role)
+	}
+	if install {
+		if err := installHarnessTool(ctx, def, runtime, errOut); err != nil {
+			return err
+		}
 	}
 	proxyID, err := runtime.ResolveLocalImage(ctx, harnessimages.ProxyImage())
 	if err != nil {
