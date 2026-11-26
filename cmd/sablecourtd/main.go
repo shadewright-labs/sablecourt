@@ -55,6 +55,20 @@ import (
 )
 
 func main() {
+	rootCmd := newRootCmd()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the daemon command and its flags. The CLI reference is
+// generated from it.
+func newRootCmd() *cobra.Command {
 	var (
 		dbPath               string
 		postgresDSN          string
@@ -132,14 +146,7 @@ func main() {
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
 	rootCmd.Flags().Bool("operator-auth-required", true, "Require operator authentication")
 	_ = rootCmd.Flags().MarkDeprecated("operator-auth-required", "operator authentication is always required")
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 type daemonConfig struct {
@@ -631,7 +638,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", listenAddr, err)
 	}
-	limitedTCPLn := councilproxy.LimitListener(tcpLn, 256)
+	limitedTCPLn := councilproxy.LimitListener(tcpLn, maxListenerConns)
 
 	var unixSrv *http.Server
 	if socketPath != "" {
@@ -650,7 +657,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		unixSrv = newDaemonServer(unixMux)
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
-			_ = unixSrv.Serve(councilproxy.LimitListener(uln, 256))
+			_ = unixSrv.Serve(councilproxy.LimitListener(uln, maxListenerConns))
 		}()
 	}
 
@@ -686,6 +693,9 @@ const daemonIdleTimeout = 60 * time.Second
 // variable so tests can shorten it. No write timeout is set, so streaming
 // responses are not cut.
 var daemonReadTimeout = 60 * time.Second
+
+// maxListenerConns caps open connections on each listener (TCP and Unix socket).
+const maxListenerConns = 256
 
 func newDaemonServer(handler http.Handler) *http.Server {
 	return &http.Server{
@@ -732,6 +742,9 @@ type handlerConfig struct {
 	councilPrivateDirs  []string
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
+	// routeSink, when set, is told every route pattern the handler registers.
+	// The HTTP API reference test uses it; routing does not depend on it.
+	routeSink func(pattern string)
 	// preflightCouncilHarness is set in container mode. It replaces the host
 	// executable and sandbox checks with image, volume and login checks.
 	preflightCouncilHarness func(context.Context, string) error
@@ -744,7 +757,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	if len(options) > 0 {
 		cfg = options[0]
 	}
-	mux := http.NewServeMux()
+	serveMux := http.NewServeMux()
+	mux := recordingMux{serveMux, cfg.routeSink}
 	if dash != nil {
 		dash.RegisterRoutes(mux)
 	}
@@ -1775,9 +1789,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		})
 	}
 	auth := newOperatorAuth(cfg.operatorToken)
+	auth.onRoute = cfg.routeSink
 	mux.HandleFunc("GET /login", operatorLoginPage)
 	mux.HandleFunc("POST /login", auth.login)
-	return securityHeadersMiddleware(auth.requireOperatorAuth(mux, guardOperatorRequest(mux), secrets))
+	return securityHeadersMiddleware(auth.requireOperatorAuth(serveMux, guardOperatorRequest(serveMux), secrets))
 }
 
 // Gate requests can arrive after a terminal transition and before lease cleanup.

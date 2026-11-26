@@ -1,0 +1,133 @@
+package clidoc
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/spf13/cobra"
+)
+
+const page = "intro\n<!-- BEGIN GENERATED a: do not edit, run `make docs` -->\n\nold a\n\n<!-- END GENERATED a -->\nmid\n<!-- BEGIN GENERATED b: do not edit, run `make docs` -->\n\nold b\n\n<!-- END GENERATED b -->\n"
+
+func TestReplaceRefusesBrokenMarkers(t *testing.T) {
+	for _, tc := range []struct {
+		name, page string
+	}{
+		{"missing", "no markers"},
+		{"reversed", "<!-- END GENERATED a -->\n<!-- BEGIN GENERATED a: do not edit, run `make docs` -->\n"},
+		{"twice", page + page},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := replace([]byte(tc.page), "a", "x"); !errors.Is(err, errMarkers) {
+				t.Fatalf("err = %v, want errMarkers", err)
+			}
+		})
+	}
+}
+
+func TestCheckNeverWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cli.md")
+	if err := os.WriteFile(path, []byte(page), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(path, "a", "new a"); err == nil {
+		t.Fatal("stale block passed")
+	}
+	if err := Check(path, "a", "old a"); err != nil {
+		t.Fatalf("current block failed: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != page {
+		t.Fatal("Check changed the page")
+	}
+}
+
+func TestWriteBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		blocks  map[string]string
+		wantErr bool
+	}{
+		{"all blocks", map[string]string{"a": "new a", "b": "new b"}, false},
+		{"block file missing", map[string]string{"a": "new a"}, true},
+		{"block not on page", map[string]string{"a": "new a", "b": "new b", "c": "new c"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cli.md")
+			if err := os.WriteFile(path, []byte(page), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			for name, content := range tc.blocks {
+				if err := SaveBlock(dir, name, content); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := WriteBlocks(path, dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if got, _ := os.ReadFile(path); string(got) != page {
+					t.Fatal("a failed write changed the page")
+				}
+				return
+			}
+			for name, content := range tc.blocks {
+				if err := Check(path, name, content); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderListsCompletion checks that the completion commands appear for
+// a root with subcommands and for a root without any, since cobra serves
+// "completion" in both cases.
+func TestRenderListsCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sub  bool
+	}{
+		{"root with subcommands", true},
+		{"root without subcommands", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := &cobra.Command{Use: "tool", Run: func(*cobra.Command, []string) {}}
+			if tc.sub {
+				root.AddCommand(&cobra.Command{Use: "run", Short: "Run it", Run: func(*cobra.Command, []string) {}})
+			}
+			out := Render(root)
+			for _, want := range []string{"### `tool completion`", "### `tool completion bash`", "### `tool completion zsh`"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("Render output lacks %s:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderEscapesPipesInDefaults checks that a default with a pipe stays
+// in its cell: every row of the flag table keeps four cells.
+func TestRenderEscapesPipesInDefaults(t *testing.T) {
+	root := &cobra.Command{Use: "tool", Run: func(*cobra.Command, []string) {}}
+	root.Flags().String("format", "json|yaml", "Output format, json|yaml")
+	root.Flags().String("plain", "text", "Plain default")
+	out := Render(root)
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "| `--") {
+			continue
+		}
+		unescaped := strings.Count(line, "|") - strings.Count(line, `\|`)
+		if unescaped != 5 {
+			t.Errorf("row %q has %d cell separators, want 5", line, unescaped)
+		}
+	}
+	if !strings.Contains(out, "| `--format` | string | `json\\|yaml` |") || !strings.Contains(out, "| `--plain` | string | `text` |") {
+		t.Errorf("defaults not rendered as expected:\n%s", out)
+	}
+}

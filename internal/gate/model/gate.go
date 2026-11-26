@@ -222,7 +222,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	reqBody, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "failed to read request body")
 		return
@@ -317,7 +317,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var captured bytes.Buffer
 	flusher, canFlush := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, upstreamReadChunkBytes)
 	for {
 		n, readErr := upResp.Body.Read(buf)
 		if n > 0 {
@@ -326,7 +326,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			if canFlush {
 				flusher.Flush()
 			}
-			if captured.Len() < 8<<20 {
+			if captured.Len() < maxCapturedResponseBytes {
 				captured.Write(chunk)
 			}
 		}
@@ -496,30 +496,60 @@ func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, det
 	})
 }
 
+const (
+	// maxRequestBodyBytes is how much of a request body the gate reads.
+	maxRequestBodyBytes = 16 << 20
+	// maxCapturedResponseBytes is how much of a response the gate keeps to
+	// read usage from. A chunk is kept whole while less than this is held,
+	// so up to upstreamReadChunkBytes-1 more can be kept.
+	maxCapturedResponseBytes = 8 << 20
+	// upstreamReadChunkBytes is the size of one read from the upstream response.
+	upstreamReadChunkBytes = 32 << 10
+)
+
+// modelPlaceholder in a route stands for any model name.
+const modelPlaceholder = "{model}"
+
+// routes lists, per provider and in matching order, the upstream paths the
+// gate forwards. The gate forwards the request method unchanged.
+var routes = []struct{ provider, path string }{
+	{"openai", "/v1/chat/completions"},
+	{"openai", "/v1/responses"},
+	{"anthropic", "/v1/messages"},
+	{"gemini", "/v1beta/models/" + modelPlaceholder + ":generateContent"},
+	{"gemini", "/v1beta/models/" + modelPlaceholder + ":streamGenerateContent"},
+	{"local", "/v1/chat/completions"},
+	{"local", "/v1/responses"},
+}
+
+// Routes returns the paths the gate serves, relative to its mount point, as
+// "/<provider><upstream path>". A {model} segment matches any model name.
+func Routes() []string {
+	out := make([]string, 0, len(routes))
+	for _, r := range routes {
+		out = append(out, "/"+r.provider+r.path)
+	}
+	return out
+}
+
+// routeProvider finds the route of path in routes, the one list of providers
+// and paths the gate dispatches and documents.
 func routeProvider(path string) (provider, upstreamPath string, ok bool) {
-	for _, p := range []string{"openai", "anthropic", "gemini", "local"} {
-		prefix := "/" + p + "/"
-		if strings.HasPrefix(path, prefix) {
-			rest := strings.TrimPrefix(path, "/"+p)
-			switch p {
-			case "openai", "local":
-				if rest == "/v1/chat/completions" || rest == "/v1/responses" {
-					return p, rest, true
-				}
-			case "anthropic":
-				if rest == "/v1/messages" {
-					return p, rest, true
-				}
-			case "gemini":
-				if strings.HasPrefix(rest, "/v1beta/models/") &&
-					(strings.HasSuffix(rest, ":generateContent") || strings.HasSuffix(rest, ":streamGenerateContent")) {
-					return p, rest, true
-				}
-			}
-			return "", "", false
+	for _, r := range routes {
+		rest, found := strings.CutPrefix(path, "/"+r.provider)
+		if found && strings.HasPrefix(rest, "/") && matchRoute(r.path, rest) {
+			return r.provider, rest, true
 		}
 	}
 	return "", "", false
+}
+
+func matchRoute(pattern, path string) bool {
+	before, after, wildcard := strings.Cut(pattern, modelPlaceholder)
+	if !wildcard {
+		return path == pattern
+	}
+	return len(path) >= len(before)+len(after) && strings.HasPrefix(path, before) && strings.HasSuffix(path, after)
 }
 
 func extractTaskToken(r *http.Request) string {

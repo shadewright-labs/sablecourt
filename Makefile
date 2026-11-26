@@ -3,13 +3,30 @@ PLIST_PATH ?= $(HOME)/Library/LaunchAgents/io.shadewright.sablecourtd.plist
 LOG_PATH ?= $(HOME)/Library/Logs/sablecourtd.log
 MANIFESTS ?= $(PWD)/examples/local-demo.yaml
 
-.PHONY: test vet build install demo agent-image service-install service-uninstall
+.PHONY: test vet build install demo agent-image service-install service-uninstall docs docs-check
 
 test:
 	go test -race ./...
 
 vet:
 	go vet ./...
+
+# Reference pages under docs/reference are generated from the code or checked
+# against it by tests, which `go test ./...` (and so CI) also runs.
+DOCS_TESTS = TestCLIReferenceIsCurrent|TestConfigurationStateDirectory|TestConfigurationEnvironmentVariables|TestHTTPReferenceListsEveryRoute|TestManifestReferenceMatchesTypesAndLoader|TestLimitsReferenceMatchesConstants|TestMetricsReferenceListsEveryMetric
+DOCS_PKGS = ./cmd/sablectl ./cmd/sablecourtd ./internal/config ./internal/refdocs ./internal/telemetry
+
+# docs regenerates the generated blocks of docs/reference/cli.md. Each command
+# package saves its rendered block to its own file in a scratch directory, and
+# one writer puts them into the page.
+docs:
+	go run ./internal/clidoc/write docs/reference/cli.md ./cmd/sablectl ./cmd/sablecourtd
+
+# docs-check fails when any reference page is stale. It never writes: the
+# check tests only read the pages, and the block directory variable is
+# cleared so the render step cannot run.
+docs-check:
+	env -u SABLECOURT_CLI_BLOCK_DIR go test -count=1 -run '$(DOCS_TESTS)' $(DOCS_PKGS)
 
 build:
 	mkdir -p bin
