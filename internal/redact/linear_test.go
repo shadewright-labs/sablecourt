@@ -60,7 +60,8 @@ func growthRatio(run func(int), small, large int) float64 {
 
 // TestJSONTimeGrowsLinearly runs the JSON redactor on shapes that would cost
 // more than linear time in a scanner that sorts keys, rescans nested strings
-// or backtracks over escapes, at 256 KiB and 1 MiB.
+// or backtracks over escapes, at 256 KiB and 1 MiB (64 KiB and 256 KiB under
+// the race detector).
 func TestJSONTimeGrowsLinearly(t *testing.T) {
 	wide := func(n int) string {
 		var b strings.Builder
@@ -106,7 +107,13 @@ func TestJSONTimeGrowsLinearly(t *testing.T) {
 		{"stringified JSON", nested},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			small, large := tc.gen(256*1024), tc.gen(1024*1024)
+			size := 256 * 1024
+			if raceEnabled {
+				// Same 4x step, smaller sizes: the race detector slows every
+				// byte down about tenfold.
+				size = 64 * 1024
+			}
+			small, large := tc.gen(size), tc.gen(4*size)
 			ratio := growthRatio(func(n int) {
 				if n == len(small) {
 					redact.JSON(small)
@@ -125,6 +132,9 @@ func TestJSONTimeGrowsLinearly(t *testing.T) {
 // the size of its output and not a decoded copy of the document: a wide
 // object of short members and a deep one, 1 MiB each.
 func TestJSONMemoryIsOutputBound(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under the race detector")
+	}
 	var wide strings.Builder
 	wide.WriteByte('{')
 	for i := 0; wide.Len() < 1<<20; i++ {
