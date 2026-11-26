@@ -184,7 +184,6 @@ func TestConclaveWatchPrintsEachMessageOnce(t *testing.T) {
 }
 
 func TestConclaveWatchStreamRefusedReturnsError(t *testing.T) {
-	t.Skip("defect: conclave watch ignores the stream response status, so a 403 or 404 stream exits 0 with no output")
 	d := newCLIDaemon().
 		on("GET /api/v1/conclaves/c1", http.StatusOK, `{"messages":[]}`).
 		on("GET /api/v1/conclaves/c1/stream", http.StatusForbidden, `{"error":"operator credential required"}`)
