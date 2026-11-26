@@ -6,7 +6,7 @@
 </h1>
 
 <p align="center">
-  A control plane that runs coding agents and deterministic programs on one machine under limits you set. Workloads get a task lease instead of provider keys: the Model Gate checks a workload's grant and budget, the MCP Gate its grant and policy, and an action that needs approval waits in a queue until it is approved. The council harnesses are the exception: they use their own subscription login for inference.
+  A control plane that runs coding agents and deterministic programs on one machine under limits you set. Workloads get a task lease instead of provider keys: the Model Gate checks a workload's grant and budget, the MCP Gate its grant and policy, and an action that needs approval gets an approval request that a person approves or denies, or that expires. Council harnesses in containers are the exception for inference: they use their own subscription logins, outside the Model Gate.
 </p>
 
 <p align="center">
@@ -25,12 +25,12 @@
 2. **Gates** model calls: for a call through the Model Gate it checks the lease, the provider grant and the budget, then forwards the request to the configured upstream (OpenAI, Anthropic, Gemini, a local OpenAI-compatible server, or one gateway set with `--model-gateway-url`), adding the provider key when one is configured. Deterministic controllers are refused there.
 3. **Checks** tools and actions: the MCP Gate serves the tools a workload is granted and a closed set of typed actions. Deterministic policy decides each call: `allow`, `approve` or `deny`, and no matching rule means deny.
 4. **Queues** an action whose effect is `approve`, pinned by the SHA-256 digest of its payload. In Sanctum mode you confirm it in a native macOS dialog. The API also accepts a signature from a device enrolled earlier, but enrolling a device answers `503` today, so on a fresh install outside macOS you can only deny.
-5. **Convenes** councils: one question to `claude`, `codex` and `agy`, which answer in rounds on your checkout, and the room posts each seat's valid final answer. With a Docker engine configured, each turn runs in its own container; without one, turns run on the host under macOS Seatbelt.
-6. **Records** policy and approval outcomes, task submission and cancellation, Model Gate refusals and successful calls in an audit chain that `sablectl audit verify` checks. An upstream error that the Model Gate passes through leaves no row, and council inference does not pass the Model Gate at all.
+5. **Convenes** councils: one question to `claude`, `codex` and `agy`, which answer in rounds on your checkout. The room posts a seat's final message after a verified successful exit; a writer's turn also needs matching diff evidence. With a Docker engine configured, each turn runs in its own container; without one, turns run on the host under macOS Seatbelt.
+6. **Records** task submission and cancellation, approval requests and approve or deny decisions, the common Model Gate denials and settled successful calls in an audit chain that `sablectl audit verify` checks. Not everything is recorded: a forwarded upstream error status and an expired approval leave no row, and council inference does not pass the Model Gate at all.
 
 A model's answer is never authorization: only deterministic policy, or a person confirming a pinned digest, lets an action run.
 
-[![The daemon launches workloads with leases. The Model Gate forwards inference, the MCP Gate handles tools and Git actions, and actions that need approval go to the queue. Council harnesses reach their providers through their proxy.](docs/diagrams/system-context.svg)](docs/diagrams/system-context.svg)
+[![The daemon launches workloads with leases. The Model Gate forwards inference, the MCP Gate handles tools and Git actions, and actions that need approval go to the queue. Council harnesses in containers reach their providers through a per-turn proxy.](docs/diagrams/system-context.svg)](docs/diagrams/system-context.svg)
 
 ## State of the areas
 
@@ -39,12 +39,12 @@ The [docs home page](docs/index.md#status) has a longer status table with issue 
 | Area | State | Limits |
 | --- | --- | --- |
 | Tasks, reconciler, scheduler | Built | Suspend stops the workload, so resume does not work yet |
-| Host coding runs | Built | macOS Seatbelt only |
+| Host coding runs | Partly built | macOS Seatbelt launches the CLIs; a host run gets a fresh home directory, so a saved harness login does not reach it |
 | Docker workloads and deterministic controllers | Built | |
 | Model Gate, MCP Gate, typed actions, policy | Built | The upstream MCP bridge is parked |
 | Approvals | Partly built | Pairing a device answers `503`, so a fresh install approves only through the macOS dialog; a device enrolled earlier can still sign |
 | Conclaves | Built | Voice and live Takeover are parked |
-| Council | Built | The room posts a completed seat's valid final answer; an empty or missing final message gives no answer. Harness inference uses each harness's own login and is not counted by the Model Gate |
+| Council | Built | The room posts a turn's final message after a verified successful exit, and needs diff evidence from a writer; an empty or missing final message gives no answer. Container seats use their own logins and are not counted by the Model Gate |
 | Learning | Partly built | Matching legacy `learning:` entries still reach context packets. SQLite stores reviewed learning records, but acceptance has no operator interface and packets do not use those records |
 | Audit chain | Built | Misses deletion of the last rows; not anchored outside the database |
 | Shadewright incident intake | Partly built | Both POST routes return a result; there is no GET for an incident's later status |
