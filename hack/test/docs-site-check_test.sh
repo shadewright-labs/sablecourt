@@ -92,6 +92,11 @@ expect "third-party image fails" fail "${s}"
 mentions "third-party image" "third-party image https://img.example.invalid/x.png"
 
 build "${s}"
+: > "${s}/diagrams/a,b.svg"
+page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/a,b.svg 2x" alt="ctx">'
+expect "comma inside a srcset URL stays in the URL" pass "${s}"
+
+build "${s}"
 page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg 1x, https://img.example.invalid/x.png 2x" alt="ctx">'
 expect "third-party img srcset candidate fails" fail "${s}"
 mentions "third-party img srcset candidate" "third-party image https://img.example.invalid/x.png"

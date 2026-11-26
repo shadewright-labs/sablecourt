@@ -47,8 +47,35 @@ def read_site_url(config_path=DEFAULT_ZENSICAL_TOML):
 
 
 def parse_srcset(value):
-    """Extracts candidate URLs from an HTML srcset attribute."""
-    return [m.group(1) for m in re.finditer(r"(?:^|,)\s*(data:[^\s,]+,[^\s]+|[^\s,]+)", value)]
+    """Extracts candidate URLs from an HTML srcset attribute, as the HTML parsing rules split it.
+
+    A URL is a run of characters with no white space, so a comma inside it belongs to it. Commas at its
+    end close the candidate; otherwise the descriptors run to the next comma outside parentheses.
+    """
+    urls, i, n = [], 0, len(value)
+    while True:
+        while i < n and (value[i].isspace() or value[i] == ","):
+            i += 1
+        if i >= n:
+            return urls
+        start = i
+        while i < n and not value[i].isspace():
+            i += 1
+        url = value[start:i]
+        if url.endswith(","):
+            urls.append(url.rstrip(","))
+            continue
+        urls.append(url)
+        depth = 0
+        while i < n:
+            c = value[i]
+            i += 1
+            if c == "(":
+                depth += 1
+            elif c == ")" and depth:
+                depth -= 1
+            elif c == "," and not depth:
+                break
 
 
 class Page(HTMLParser):

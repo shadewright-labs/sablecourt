@@ -43,9 +43,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install docs requirements
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --require-hashes -r requirements-docs.txt
+        run: make -f Makefile docs-venv
 
       - name: Check the reference pages and build the docs site
         run: make -f Makefile docs-check

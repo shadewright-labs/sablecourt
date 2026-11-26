@@ -26,7 +26,7 @@ The groups call these workflows:
 - `vulncheck.yml` (go): `make -f Makefile vulncheck` (govulncheck, version pinned in the Makefile). It also runs every Monday and can be started by hand.
 - `gosec.yml` (go): gosec v2.30.0 with G104, G304 and G204 excluded, on the Linux build. The job also fails when gosec's output matches one of its load or analysis error patterns, or reports zero files, even if gosec exits 0.
 - `images-build.yml` (images): builds the `daemon` and `agent` targets of the root `Dockerfile` for linux/amd64 without pushing, with the pinned Buildx and BuildKit of `hack/setup-buildx.sh`.
-- `docs-check.yml` (docs): sets up Go and Python, installs `requirements-docs.txt` with `pip install --require-hashes` into `.venv`, and runs `make -f Makefile docs-check`. That runs the reference page tests under `docs/reference/`, builds the Zensical site with `--clean --strict`, and runs `hack/docs-site-check.py` over the built `site/`.
+- `docs-check.yml` (docs): sets up Go and Python, installs `requirements-docs.txt` with `pip install --require-hashes` into `.venv` (`make docs-venv`), and runs `make -f Makefile docs-check`. That runs the reference page tests under `docs/reference/`, builds the Zensical site with `--clean --strict`, and runs `hack/docs-site-check.py` over the built `site/`.
 - `codeql.yml` (codeql): CodeQL for Go and for the workflows. It also runs on pushes to main, every Monday and by hand.
 
 Three jobs of `ci.yml` run on every pull request, whatever changed:

@@ -33,7 +33,7 @@ DOCS_TESTS = TestCLIReferenceIsCurrent|TestConfigurationStateDirectory|TestConfi
 DOCS_PKGS = ./cmd/sablectl ./cmd/sablecourtd ./internal/config ./internal/refdocs ./internal/telemetry
 ZENSICAL ?= .venv/bin/zensical
 ifeq ($(ZENSICAL),.venv/bin/zensical)
-DOCS_VENV_DEP = .venv/bin/zensical
+DOCS_VENV_DEP = .venv/docs-requirements.stamp
 endif
 
 # docs regenerates the generated blocks of docs/reference/cli.md. Each command
@@ -48,12 +48,14 @@ docs-requirements:
 		--output-file=requirements-docs.txt requirements-docs.in
 
 # docs-venv creates .venv and installs the hash-locked docs site requirements.
-docs-venv: .venv/bin/zensical
+docs-venv: .venv/docs-requirements.stamp
 
-.venv/bin/zensical: requirements-docs.txt
+# The stamp records a finished install of the locked requirements, so a zensical placed in .venv some
+# other way, or an install that stopped half way, does not count.
+.venv/docs-requirements.stamp: requirements-docs.txt
 	python3 -m venv .venv
 	.venv/bin/pip install --require-hashes -r requirements-docs.txt
-	touch .venv/bin/zensical
+	touch $@
 
 # docs-check fails when any reference page is stale, when the Zensical build reports an issue,
 # or when the built site has a broken internal link, broken anchor, missing image or third-party asset.
