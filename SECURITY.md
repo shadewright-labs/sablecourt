@@ -12,6 +12,10 @@ Sablecourt is designed as a policy-governed control plane that isolates untruste
 - Browser state-changing requests enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and bounded request body limits.
 - In `--mode=citadel`, `sablecourtd` enforces fail-closed bearer authentication (`--operator-auth-required=true`), disables host-level process execution, and requires cryptographic ECDSA P-256 device signatures for approvals.
 
+## Verifying a release
+
+Release archives and images are signed keyless with cosign and carry build provenance and SBOM attestations. [Verify a release](docs/how-to/verify-a-release.md) gives the commands.
+
 ## Reporting a vulnerability
 
 If you discover a security issue in Sablecourt, do not open a public issue with exploit details. Report it privately through GitHub Security Advisories for this repository, including:
