@@ -18,7 +18,8 @@ if [ "$#" -ne 2 ]; then
 fi
 version="$1" out="$2"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-if ! printf '%s' "${version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'; then
+# [[ =~ ]] matches the whole value; grep would accept a value whose first line matches.
+if ! [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
   echo "version '${version}' is not X.Y.Z or X.Y.Z-rc.N" >&2
   exit 2
 fi
@@ -26,6 +27,8 @@ if [ -e "${out}" ] && [ -n "$(ls -A "${out}")" ]; then
   echo "${out} is not empty" >&2
   exit 1
 fi
+# The packer runs on this machine, whatever GOOS and GOARCH the environment sets for the target builds.
+hostos="$(go env GOHOSTOS)" hostarch="$(go env GOHOSTARCH)"
 epoch="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}"
 case "${epoch}" in '' | *[!0-9]*) echo "SOURCE_DATE_EPOCH '${epoch}' is not a number of seconds" >&2; exit 1 ;; esac
 
@@ -38,6 +41,6 @@ for target in ${RELEASE_TARGETS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm
     -o "${bin}/sablecourtd" ./cmd/sablecourtd
   CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -buildvcs=false \
     -ldflags="-s -w -X main.version=${version}" -o "${bin}/sablectl" ./cmd/sablectl
-  go run "${root}/hack/targz.go" "${bin}" "${out}/dist/sablecourt_${version}_${goos}_${goarch}.tar.gz" "${epoch}"
+  GOOS="${hostos}" GOARCH="${hostarch}" go run "${root}/hack/targz.go" "${bin}" "${out}/dist/sablecourt_${version}_${goos}_${goarch}.tar.gz" "${epoch}"
 done
 echo "$(go env GOVERSION): $(cd "${out}/dist" && ls)"
