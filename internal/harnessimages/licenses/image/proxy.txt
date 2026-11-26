@@ -1,0 +1,13 @@
+sablecourt-harness-proxy
+
+This image contains the Sablecourt council proxy (/usr/local/bin/council-proxy),
+compiled from the Sablecourt source with the Go toolchain. It contains no
+vendor software.
+
+- Sablecourt: Apache License 2.0, /licenses/sablecourt/LICENSE
+- Go standard library linked into the proxy: BSD-style licence, /licenses/go/LICENSE
+
+The rest is a Debian bookworm base (packages from the snapshot.debian.org
+archive of 2026-11-23, copyright files under /usr/share/doc).
+
+Source: https://github.com/shadewright-labs/sablecourt

@@ -1,0 +1,14 @@
+sablecourt-harness-agy
+
+This image contains no vendor software. It holds a Debian bookworm base
+(packages from the snapshot.debian.org archive of 2026-11-23, copyright
+files under /usr/share/doc) and an empty directory /opt/harness-tool.
+
+The Antigravity CLI is proprietary software of Google and is not in this image.
+`sablectl harness install agy` downloads the pinned version from Google's own download host on your
+machine, checks the archive SHA-512 and the binary SHA-256, and stores it in a separate volume that the
+harness container mounts read-only at /opt/harness-tool.
+`sablectl harness login agy` runs that step when the login volume does not
+exist yet or the tool is missing, of another version or does not match its pin.
+
+Source: https://github.com/shadewright-labs/sablecourt

@@ -27,6 +27,14 @@ const (
 	FaultVolumeInvalid HarnessFault = "volume-invalid"
 	// FaultLoginMissing means the volume holds no credential file for the harness.
 	FaultLoginMissing HarnessFault = "login-missing"
+	// FaultToolMissing means the tool volume or the tool in it does not exist.
+	FaultToolMissing HarnessFault = "tool-missing"
+	// FaultToolVersion means the tool volume holds another version than the pin.
+	FaultToolVersion HarnessFault = "tool-version"
+	// FaultToolChecksum means the installed bytes differ from the pinned SHA-256.
+	FaultToolChecksum HarnessFault = "tool-checksum"
+	// FaultToolInvalid means the tool volume exists but is not the labelled local tool volume of this harness.
+	FaultToolInvalid HarnessFault = "tool-invalid"
 	// FaultBackend means Docker or the harness configuration failed, so nothing is known about the login.
 	FaultBackend HarnessFault = "backend"
 )
@@ -56,6 +64,9 @@ const (
 	loginProbeAbsent = 1
 )
 
+// Exit statuses of toolProbeScript for the tool faults.
+var toolProbeFaults = map[int]HarnessFault{3: FaultToolMissing, 4: FaultToolVersion, 5: FaultToolChecksum}
+
 // The script accepts only a regular, non-empty file that is not a symlink. It
 // never opens the file, so contents are not read.
 const loginProbeScript = `for f in "$@"; do if test -f "$f" && test ! -L "$f" && test -s "$f"; then exit 0; fi; done; exit 1`
@@ -66,7 +77,10 @@ type volumeCreator interface {
 
 // CheckCouncilHarness verifies, with no pull and no network, that the harness
 // image exists locally, that its login volume is the labelled local volume, and
-// that the volume holds a credential file by path. Every failure is a *HarnessError.
+// that the volume holds a credential file by path. For a harness whose tool is
+// installed at login it also checks the tool volume's labels, and that the
+// tool is present, of the pinned version and of the pinned SHA-256, without
+// running it. Every failure is a *HarnessError.
 func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error {
 	fault := func(f HarnessFault, err error) error { return &HarnessError{Harness: harness, Fault: f, Err: err} }
 	cfg, ok := a.CouncilHarnesses[harness]
@@ -93,6 +107,21 @@ func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error
 	}
 	if err := validateCouncilLoginVolume(vol.Volume, harness, cfg.LoginVolume); err != nil {
 		return fault(FaultVolumeInvalid, err)
+	}
+	if cfg.Tool != nil {
+		if err := a.validateCouncilTool(harness, cfg); err != nil {
+			return fault(FaultBackend, err)
+		}
+		tv, err := engine.VolumeInspect(ctx, cfg.Tool.Volume, client.VolumeInspectOptions{})
+		if err != nil {
+			if isMissing(err) {
+				return fault(FaultToolMissing, nil)
+			}
+			return fault(FaultBackend, err)
+		}
+		if err := validateCouncilToolVolume(tv.Volume, harness, cfg.Tool.Volume); err != nil {
+			return fault(FaultToolInvalid, err)
+		}
 	}
 	present, err := a.probeLogin(ctx, engine, imageID, harness, cfg)
 	if err != nil {
@@ -154,7 +183,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	defer cancel()
 	pids := loginProbePIDs
 	cmd := append([]string{"-c", loginProbeScript, "probe"}, cfg.LoginFiles...)
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	opts := client.ContainerCreateOptions{
 		Name: "sablecourt-login-probe-" + rand.Text(),
 		Config: &container.Config{
 			Image:       imageID,
@@ -175,7 +204,12 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 			Mounts:         []mount.Mount{{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: "/home/harness", ReadOnly: true}},
 			Resources:      container.Resources{Memory: loginProbeMemory, MemorySwap: loginProbeMemory, PidsLimit: &pids},
 		},
-	})
+	}
+	if cfg.Tool != nil {
+		opts.Config.Cmd = append([]string{"-c", toolProbeScript, "probe", councilToolDir + "/" + cfg.Tool.Binary, cfg.Tool.Version, cfg.Tool.SHA256}, cfg.LoginFiles...)
+		opts.HostConfig.Mounts = append(opts.HostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
+	}
+	created, err := a.Client.ContainerCreate(ctx, opts)
 	if err != nil {
 		return false, fmt.Errorf("create login probe: %w", err)
 	}
@@ -199,6 +233,11 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	if err := validateCouncilLoginVolume(vol.Volume, harness, cfg.LoginVolume); err != nil {
 		return false, &HarnessError{Harness: harness, Fault: FaultVolumeInvalid, Err: err}
 	}
+	if cfg.Tool != nil {
+		if err := inspectCouncilToolVolume(ctx, engine, harness, cfg.Tool.Volume); err != nil {
+			return false, &HarnessError{Harness: harness, Fault: FaultToolInvalid, Err: err}
+		}
+	}
 	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return false, fmt.Errorf("start login probe: %w", err)
 	}
@@ -212,6 +251,9 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	case loginProbeAbsent:
 		return false, nil
 	default:
+		if f, ok := toolProbeFaults[result.ExitCode]; ok && cfg.Tool != nil {
+			return false, &HarnessError{Harness: harness, Fault: f}
+		}
 		return false, fmt.Errorf("login probe exited with status %d", result.ExitCode)
 	}
 }

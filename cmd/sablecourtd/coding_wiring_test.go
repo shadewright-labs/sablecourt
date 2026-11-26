@@ -131,6 +131,13 @@ func TestWireCouncilContainers(t *testing.T) {
 		if !ok || got.Image != def.Image || got.LoginVolume != def.Volume {
 			t.Fatalf("harness %s config = %+v, want image=%q volume=%q", role, got, def.Image, def.Volume)
 		}
+		if (def.Tool == nil) != (got.Tool == nil) {
+			t.Fatalf("harness %s tool = %+v", role, got.Tool)
+		}
+		if got.Tool != nil && (got.Tool.Volume != def.Tool.Volume || got.Tool.SHA256 != def.Tool.SHA256 || got.Tool.Version != def.Tool.Version ||
+			got.Tool.InstallCommand != harnessimages.InstallCommand(role) || got.Tool.Volume == got.LoginVolume) {
+			t.Fatalf("harness %s tool = %+v", role, got.Tool)
+		}
 	}
 
 	// Citadel must not wire local council containers.

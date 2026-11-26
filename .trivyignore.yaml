@@ -1,0 +1,11 @@
+# Vulnerability findings that the image scan of release.yml may not fail a release for. The scan fails on every
+# HIGH and CRITICAL finding, fixed or not; a finding is accepted only by an entry here, added in a pull request
+# that a maintainer reviews. An entry names the id, a `statement` that says why the finding does not apply or is
+# accepted, and `expired_at`, so it comes back for review. release.yml reads this file from the tagged commit, so
+# a new entry needs a commit on main and a new tag. Nothing is accepted today. Example entry:
+#
+# vulnerabilities:
+#   - id: CVE-2026-00000
+#     statement: the vulnerable function is not reachable from sablecourtd
+#     expired_at: 2027-06-01
+vulnerabilities: []

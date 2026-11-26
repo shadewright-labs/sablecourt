@@ -209,11 +209,16 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 		if lookupErr != nil {
 			continue
 		}
-		harnesses[role] = docker.CouncilHarness{
+		h := docker.CouncilHarness{
 			Image:       def.Image,
 			LoginVolume: def.Volume,
 			LoginFiles:  def.LoginFiles,
 		}
+		if t := def.Tool; t != nil {
+			// The image carries no vendor tool: it comes from the read-only tool volume.
+			h.Tool = &docker.CouncilTool{Volume: t.Volume, Binary: t.Binary, Version: t.Version, SHA256: t.SHA256, InstallCommand: harnessimages.InstallCommand(role)}
+		}
+		harnesses[role] = h
 	}
 	dockerAdapter.CouncilHarnesses = harnesses
 	codingAdapter, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)

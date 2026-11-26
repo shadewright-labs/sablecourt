@@ -287,6 +287,12 @@ Build a pinned harness image and its proxy locally
 | --- | --- | --- | --- |
 | `--source` | string | `.` | Sablecourt source checkout containing the council proxy |
 
+### `sablectl harness install <role>`
+
+Install the pinned claude or agy tool into its harness tool volume
+
+No flags of its own.
+
 ### `sablectl harness login <role>`
 
 Log in to a harness inside its container and keep the login in its volume

@@ -59,6 +59,8 @@ The [docs home page](docs/index.md#status) has a longer status table with issue 
 
 Nothing is released, so build from source with `make install`. You need Go 1.27.4 or newer (the version in [go.mod](go.mod)) on macOS or Linux.
 
+[Verify a release](docs/how-to/verify-a-release.md) lists the commands that check a signed release.
+
 ```bash
 git clone https://github.com/shadewright-labs/sablecourt.git
 cd sablecourt
@@ -74,14 +76,14 @@ sablectl conclave open feature-conclave --title="Fix retry timeout"
 sablectl conclave list
 ```
 
-Councils (`sablectl council "<question>"`) need more setup, and the CLI wants `claude`, `codex` and `agy` on its own `PATH` in both modes. In container mode, the daemon needs Docker Engine 28.0 or newer with isolated gateway networking, and each seat needs its harness image (built for `linux/arm64`) from `sablectl harness build <role>` and a login from `sablectl harness login <role>`. Without Docker, the daemon admits a council only on a host where the macOS Seatbelt sandbox works and the three CLIs are on its `PATH`.
+Councils (`sablectl council "<question>"`) need more setup, and the CLI wants `claude`, `codex` and `agy` on its own `PATH` in both modes. In container mode, the daemon needs Docker Engine 28.0 or newer with isolated gateway networking, and each seat needs its harness image (built for `linux/arm64`) from `sablectl harness build <role>` and a login, prepared with `sablectl harness build <role>` and `sablectl harness login <role>` (the daemon checks the resulting image, volumes and credential file, not which command made them). The `claude` and `agy` images carry no vendor software, so for those two roles the login command first installs the pinned tool into its own volume when the login volume does not exist yet or the tool is missing, of another version or does not match its digest ([harness images](docs/how-to/harness-images.md)). Without Docker, the daemon admits a council only on a host where the macOS Seatbelt sandbox works and the three CLIs are on its `PATH`.
 
 ## Guides
 
 - [Overview](docs/overview.md): what Sablecourt is and is not, why it starts on one machine, and the parked parts.
 - [Concepts](docs/concepts.md) and the [glossary](docs/glossary.md): workloads, leases, gates, Conclaves and the court vocabulary.
 - [How it works](docs/how-it-works/index.md): the path of a request and where each invariant is enforced.
-- [Run a council](docs/how-to/run-a-council.md) and [log in to harnesses](docs/how-to/log-in-harnesses.md).
+- [Run a council](docs/how-to/run-a-council.md), [log in to harnesses](docs/how-to/log-in-harnesses.md) and [harness images and tool install](docs/how-to/harness-images.md): what each harness image contains and how the proprietary tools are installed at login.
 - [Review an approval](docs/how-to/review-an-approval.md): read the pinned payload, then approve or deny.
 - [Watch and steer](docs/how-to/watch-and-steer.md) and [retry with a handoff](docs/how-to/retry-with-handoff.md).
 - [Reference](docs/reference/index.md): manifests, HTTP API, CLI, configuration, limits and metrics, with the tested parts checked against the code.

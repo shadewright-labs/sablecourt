@@ -31,7 +31,7 @@ The groups call these workflows:
 
 Three jobs of `ci.yml` run on every pull request, whatever changed:
 
-- `repo-checks.yml`: `python3 -I hack/docs-links.py check`, which reads the tracked Markdown files, reports full and collapsed reference links with no definition, checks that linked local files exist and checks heading fragments in Markdown files. It recognises inline links, angle-bracket links, full and collapsed reference links, the `href` and `src` of `<a>` and `<img>`, and headings in both the `#` and the underlined (Setext) form. It skips fenced code blocks and code spans, but it reads a fence inside a block quote as ordinary text. It does not follow shortcut reference links (`[text]` alone). Links to pages or headings not written yet are listed in `hack/docs-pages-pending.txt` as `<source> -> <target>[#fragment]`. Each line covers one link, and each use of a reference link counts as one link, so two links from one page to the same pending target need two lines. The check fails when a target exists or a line is no longer used, so remove the lines in the pull request that adds the page. The same job runs `hack/check-image-refs.sh`, which searches tracked text for the full prefix `ghcr.io/shadewright-labs/` and leaves out its own script and test. It fails on an image name other than `sablecourt` and `sablecourt-agent`, on a tag other than `X.Y.Z`, `X.Y.Z-rc.N` and `latest` (such as `v0.1.0` or an empty tag), and on a digest, alone or after a tag, that is not `sha256:` and 64 lower-case hex digits. `release.yml` accepts the same two version forms. The job also runs `hack/check-dockerfiles.sh` and seven of the offline suites under `hack/test/` (the eighth, `gitleaks_test.sh`, runs in `secret-scan.yml`). One of them, `workflows_test.sh`, searches the workflow text for the two action names `docker/setup-buildx-action` and `anchore/sbom-action`, and in each shell script under `hack/` compares the number of checksum commands with the number of lines that start with `curl`.
+- `repo-checks.yml`: `python3 -I hack/docs-links.py check`, which reads the tracked Markdown files, reports full and collapsed reference links with no definition, checks that linked local files exist and checks heading fragments in Markdown files. It recognises inline links, angle-bracket links, full and collapsed reference links, the `href` and `src` of `<a>` and `<img>`, and headings in both the `#` and the underlined (Setext) form. It skips fenced code blocks and code spans, but it reads a fence inside a block quote as ordinary text. It does not follow shortcut reference links (`[text]` alone). Links to pages or headings not written yet are listed in `hack/docs-pages-pending.txt` as `<source> -> <target>[#fragment]`. Each line covers one link, and each use of a reference link counts as one link, so two links from one page to the same pending target need two lines. The check fails when a target exists or a line is no longer used, so remove the lines in the pull request that adds the page. The same job runs `hack/check-image-refs.sh`, which searches tracked text for the full prefix `ghcr.io/shadewright-labs/` and leaves out its own script and test. It fails on an image name other than `sablecourt` and `sablecourt-agent`, on a tag other than `X.Y.Z`, `X.Y.Z-rc.N` and `latest` (such as `v0.1.0` or an empty tag), and on a digest, alone or after a tag, that is not `sha256:` and 64 lower-case hex digits. `release.yml` accepts the same two version forms. The job also runs `hack/check-dockerfiles.sh` and fourteen of the offline suites under `hack/test/` (the fifteenth, `gitleaks_test.sh`, runs in `secret-scan.yml`). One of them, `workflows_test.sh`, searches the workflow text for the two action names `docker/setup-buildx-action` and `anchore/sbom-action`, in each shell script under `hack/` compares the number of checksum commands with the number of lines that start with `curl`, checks that every action is pinned by commit with its version in a comment, and checks the structure of `release.yml` (see [Releases](#releases)).
 - `workflow-lint.yml`: actionlint, shellcheck over `hack/*.sh` and `hack/test/*.sh`, and zizmor over `.github/workflows`. zizmor is installed with `pip --require-hashes` from `hack/zizmor-requirements.txt`.
 - `secret-scan.yml`: gitleaks with the default rules plus `.gitleaks.toml`, over every ref and the full history of the checkout (`fetch-depth: 0`), including the changes that only a merge commit introduces (`hack/secret-scan.sh` passes `--diff-merges=first-parent`).
 
@@ -43,7 +43,7 @@ The last job, `ci-ok`, needs all of them and runs `hack/ci-ok.sh` on their resul
 
 Two more workflows run on pull requests outside `ci.yml`. `dependency-review.yml` (job `Dependency review`) is configured to fail on a new or bumped dependency with a known vulnerability of moderate severity or higher, or with one of ten licences named by exact SPDX identifier: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1 and LGPL-3.0, each in its `-only` and `-or-later` form. `pr-title.yml` (job `Conventional PR title`) checks the title against Conventional Commits: an allowed type, a scope from its list if there is one, and a summary of at least two characters that starts with a lower-case letter and does not end with a full stop. It runs on `pull_request_target`, so GitHub takes the workflow from the base branch, not from the pull request.
 
-Every workflow except `pr-title.yml` starts with `permissions: {}` and grants each job its own permissions; `pr-title.yml` grants `pull-requests: read` at workflow level and has no checkout step. Every checkout step sets `persist-credentials: false`, and every action from another repository is pinned to a full commit SHA. The executables that a job downloads itself (actionlint, gitleaks, Buildx) are checked against a sha256 kept in the file that installs them, and the BuildKit image is pinned by digest. Actions and tools may download further components of their own.
+Every workflow except `pr-title.yml` starts with `permissions: {}` and grants each job its own permissions; `pr-title.yml` grants `pull-requests: read` at workflow level and has no checkout step. Every checkout step sets `persist-credentials: false`, and every action from another repository is pinned to a full commit SHA. The executables that a job downloads itself (actionlint, gitleaks, Buildx, syft, Trivy) are checked against a sha256 kept in the file that installs them, and the BuildKit image is pinned by digest. Actions and tools may download further components of their own.
 
 ### Required checks
 
@@ -70,8 +70,53 @@ The pull request that brings this layout removes the jobs `verify` and `security
 
 ## Releases
 
-`release.yml` runs on a pushed `v*` tag, or by hand with a version. It builds `sablecourtd` and `sablectl` for darwin and linux (amd64 and arm64) into four `sablecourt_<version>_<os>_<arch>.tar.gz` archives, publishes them with `checksums.txt` as a GitHub release, and pushes the `daemon` and `agent` images to `ghcr.io/shadewright-labs/sablecourt` and `ghcr.io/shadewright-labs/sablecourt-agent`, tagged with the version without its `v`. A full release (`X.Y.Z`) also moves `latest` and is published as a normal release; a release candidate (`X.Y.Z-rc.N`) leaves `latest` alone and is published as a pre-release. Any other version form fails the run before anything is built. `sablectl version` prints the released version. It pins its external actions by commit, grants permissions per job and installs Buildx with `hack/setup-buildx.sh`, the script the pull request image build uses.
+`release.yml` runs on a pushed `v*` tag. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.
 
-The publish step uses the `gh` client. When `gh release view` finds a release for the tag, it uploads the five files with `--clobber`, which replaces assets of the same name; the release's notes and its draft state stay as they were, so a rerun does not publish a draft. When the lookup fails for any reason, the step tries `gh release create` with generated notes.
+No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.
+A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress, and a newer run of the group cancels a pending one and waits in its place ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).
+The `needs` of each job:
 
-Who may create `v*` tags is a repository setting, not something this repository's files enforce. A signed and verified release path is tracked in a follow-up issue.
+| Job | Needs |
+| --- | --- |
+| `check` | nothing |
+| `binaries` | `check` |
+| `images` | `check` |
+| `scan-images` | `images` |
+| `sign-images` | `check`, `binaries`, `images`, `scan-images` |
+| `sign-binaries` | `check`, `binaries`, `scan-images`, `sign-images` |
+| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |
+| `publish` | `check`, `binaries`, `images`, `scan-images`, `verify` |
+
+What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml`. It reads the rows whose first cell is a job name in backticks, and fails when they differ from what it derived or name a job twice.
+
+| Job that failed | Can exist from the other jobs | Can exist in part from the failed job |
+| --- | --- | --- |
+| `check` | nothing | nothing |
+| `binaries` | untagged image digests in GHCR | nothing |
+| `images` | nothing | untagged image digests in GHCR |
+| `scan-images` | untagged image digests in GHCR | nothing |
+| `sign-images` | untagged image digests in GHCR | image signatures, SBOM attestations and image provenance |
+| `sign-binaries` | untagged image digests in GHCR; image signatures, SBOM attestations and image provenance | the signature of `checksums.txt` and the provenance of the release files |
+| `verify` | untagged image digests in GHCR; image signatures, SBOM attestations and image provenance; the signature of `checksums.txt` and the provenance of the release files | nothing |
+
+### Scan policy
+
+- A HIGH or CRITICAL finding fails `scan-images`, with or without a fix, unless `.trivyignore.yaml` in the tagged commit accepts it, and the signing jobs need `scan-images`.
+- Record an accepted finding as an entry in `.trivyignore.yaml`, in a reviewed pull request.
+- The vulnerability database is pinned by digest in `TRIVY_DB` in `release.yml`; change the pin in a pull request.
+- When a tag fails, fix the cause on `main`, cut the next release candidate from the new commit, and do not reuse the tag.
+
+### Repository settings
+
+`release.yml` does not set these repository settings, and no file in this repository holds their values:
+
+- A tag ruleset that limits who may create `v*` tags. No step of `release.yml` checks who pushed the tag.
+- Immutable releases. GitHub's documentation says that the assets of a published immutable release are protected from modification and deletion, and that its tag is locked to its commit ([immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)). `publish` attaches the files to a draft before it publishes it.
+- Required reviewers on the `release` environment, if wanted. `publish` names the environment and `release.yml` sets no reviewers. A workflow that names an environment that does not exist creates it with no protection rules ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)).
+
+### Known limits
+
+- Not pinned by a checksum in this repository: the Go toolchain that `actions/setup-go` installs from `go.mod`, and the runner's `gh`, `jq`, Docker and preinstalled Buildx.
+- The tests read the text of `release.yml` and run the release scripts under `hack/` on fixtures and stub commands. No test runs `release.yml`.
+- No step of `release.yml` creates a Git tag: a run starts from a pushed tag.
+- `publish` writes the image tags before it publishes the draft release, and no step removes them, so a failure in between can leave image tags next to a draft release.
