@@ -40,13 +40,13 @@ type Store interface {
 	DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error
 	// ConsumeApproval spends an approval: one UPDATE moves the row from
 	// approved to consumed only where it belongs to taskID and capability, pins
-	// payloadSHA256 and expires later than the time now returns, read just
-	// before that UPDATE. Exactly one affected row means the caller may act. A
-	// matching approved row past its expiry is marked expired and ErrExpired is
-	// returned; a missing row returns ErrNotFound; any other mismatch, or a row
-	// that is not approved, returns ErrConflict. A consumed row never becomes
-	// usable again.
-	ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error
+	// payloadSHA256 and expires later than the database's own clock, read
+	// inside that UPDATE. Exactly one affected row means the caller may act. A
+	// refusal changes nothing: a matching approved row (which can only have
+	// failed the expiry) returns ErrExpired, a missing row ErrNotFound, and any
+	// other mismatch, or a row that is not approved, ErrConflict. A consumed row
+	// never becomes usable again.
+	ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error
 
 	CreateLease(ctx context.Context, lease domain.Lease) error
 	GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error)
@@ -90,4 +90,13 @@ type Store interface {
 	GetMemory(ctx context.Context, namespace, key string) (domain.MemoryEntry, error)
 	SearchMemory(ctx context.Context, namespace, query string, limit int) ([]domain.MemoryEntry, error)
 	DeleteMemory(ctx context.Context, namespace, key string) error
+}
+
+// ConsumeRefusal names why ConsumeApproval updated no row, from the row as
+// read afterwards. It only reads: a refusal never changes the approval.
+func ConsumeRefusal(a domain.Approval, taskID, capability, payloadSHA256 string) error {
+	if a.Status == domain.ApprovalApproved && a.TaskID == taskID && a.Capability == capability && a.PayloadSHA256 == payloadSHA256 {
+		return ErrExpired
+	}
+	return ErrConflict
 }

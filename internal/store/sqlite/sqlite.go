@@ -453,37 +453,21 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
-func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error {
-	if now == nil {
-		return errors.New("consume approval: no clock")
-	}
-	// The store has one connection. Holding it first means a wait for another
-	// call of this process happens before the clock is read, not after.
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	// One statement in the driver's own autocommit transaction, with the clock
-	// read immediately before it. Residual window: the statement may still
-	// wait for the database write lock held by another process, up to
-	// busy_timeout (5 s, set in Open), and the time it compares against was
-	// read before that wait. An approval can therefore be consumed at most
-	// that long after its expiry, never longer: a statement that cannot take
-	// the lock within busy_timeout fails and nothing is consumed. If the
-	// connection was ever reopened without the pragma, busy_timeout is zero and
-	// a held lock fails the statement at once.
-	//
-	// julianday rounds both sides to the millisecond. The rounding is
-	// monotonic, so a time at or after the expiry never compares as earlier; a
-	// use less than a millisecond before the expiry may be refused.
-	at := now().UTC().Format(time.RFC3339Nano)
-	res, err := conn.ExecContext(ctx, `
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+	// One statement in the driver's autocommit transaction, compared against
+	// SQLite's own clock. julianday('now') is read while the statement runs,
+	// after it has taken the database write lock, so a wait for that lock (up
+	// to busy_timeout) or a pause of the daemon before the statement cannot
+	// carry an earlier time past the expiry. What remains: 'now' is fixed for
+	// the one statement, and julianday rounds both sides to the millisecond.
+	// The rounding is monotonic, so a time at or after the expiry never
+	// compares as earlier; a use less than a millisecond before the expiry may
+	// be refused.
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE approvals SET status = ?
 		WHERE id = ? AND status = ? AND task_id = ? AND capability = ? AND payload_sha256 = ?
-		  AND julianday(expires_at) > julianday(?)
-	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256, at)
+		  AND julianday(expires_at) > julianday('now')
+	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256)
 	if err != nil {
 		return err
 	}
@@ -497,27 +481,11 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capabilit
 	if n != 0 {
 		return fmt.Errorf("consume approval: %d rows updated", n)
 	}
-	// Nothing was consumed. Say why: a matching approved row can only have
-	// failed the expiry clause, and is marked expired.
-	var rowTask, rowCapability, rowDigest, status string
-	err = conn.QueryRowContext(ctx, `
-		SELECT task_id, capability, payload_sha256, status FROM approvals WHERE id = ?
-	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return store.ErrNotFound
-	}
+	a, err := s.GetApproval(ctx, id)
 	if err != nil {
 		return err
 	}
-	if status != string(domain.ApprovalApproved) || rowTask != taskID || rowCapability != capability || rowDigest != payloadSHA256 {
-		return store.ErrConflict
-	}
-	if _, err := conn.ExecContext(ctx, `
-		UPDATE approvals SET status = ? WHERE id = ? AND status = ?
-	`, string(domain.ApprovalExpired), id, string(domain.ApprovalApproved)); err != nil {
-		return fmt.Errorf("%w (marking it expired failed: %v)", store.ErrExpired, err)
-	}
-	return store.ErrExpired
+	return store.ConsumeRefusal(a, taskID, capability, payloadSHA256)
 }
 
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {

@@ -70,7 +70,6 @@ type typedGateOptions struct {
 	effect    domain.PolicyEffect
 	workloads []string
 	wrapStore func(store.Store) store.Store
-	clock     *atomic.Pointer[time.Time]
 	opener    PROpener // replaces the recording opener when set
 }
 
@@ -148,12 +147,8 @@ func setupTypedGate(t *testing.T, opts typedGateOptions) *typedGate {
 	if opts.wrapStore != nil {
 		gateStore = opts.wrapStore(st)
 	}
-	var now func() time.Time
-	if opts.clock != nil {
-		now = func() time.Time { return *opts.clock.Load() }
-	}
 	engine := policy.NewEngine([]domain.Policy{pol}, nil)
-	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue, Now: now})
+	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue})
 	pr := &recordingPROpener{}
 	var opener PROpener = pr
 	if opts.opener != nil {

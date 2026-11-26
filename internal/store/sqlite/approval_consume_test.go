@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -24,8 +26,10 @@ func TestConsumeApproval(t *testing.T) {
 		wantStatus domain.ApprovalStatus
 	}{
 		{"approved and matching", domain.ApprovalApproved, now.Add(time.Minute), "task-1", "action:git.open_pr", "d1", nil, domain.ApprovalConsumed},
-		{"expired", domain.ApprovalApproved, now.Add(-time.Second), "task-1", "action:git.open_pr", "d1", store.ErrExpired, domain.ApprovalExpired},
-		{"expires exactly now", domain.ApprovalApproved, now, "task-1", "action:git.open_pr", "d1", store.ErrExpired, domain.ApprovalExpired},
+		// A refusal changes nothing: an expired row stays approved, and the
+		// expiry clause keeps refusing it.
+		{"expired", domain.ApprovalApproved, now.Add(-time.Second), "task-1", "action:git.open_pr", "d1", store.ErrExpired, domain.ApprovalApproved},
+		{"expires exactly now", domain.ApprovalApproved, now, "task-1", "action:git.open_pr", "d1", store.ErrExpired, domain.ApprovalApproved},
 		{"pending", domain.ApprovalPending, now.Add(time.Minute), "task-1", "action:git.open_pr", "d1", store.ErrConflict, domain.ApprovalPending},
 		{"denied", domain.ApprovalDenied, now.Add(time.Minute), "task-1", "action:git.open_pr", "d1", store.ErrConflict, domain.ApprovalDenied},
 		{"other task", domain.ApprovalApproved, now.Add(time.Minute), "task-2", "action:git.open_pr", "d1", store.ErrConflict, domain.ApprovalApproved},
@@ -36,23 +40,28 @@ func TestConsumeApproval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
 			seedApproval(t, st, "apr-c", tc.expiresAt, tc.status)
-			err := st.ConsumeApproval(ctx, "apr-c", tc.task, tc.cap, tc.digest, fixed(now))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err %v, want %v", err, tc.wantErr)
-			}
-			got, err := st.GetApproval(ctx, "apr-c")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Status != tc.wantStatus {
-				t.Fatalf("status %q, want %q", got.Status, tc.wantStatus)
+			for i := 0; i < 2; i++ { // a refusal leaves the row able to refuse again
+				err := st.ConsumeApproval(ctx, "apr-c", tc.task, tc.cap, tc.digest)
+				if i == 1 && tc.wantErr == nil {
+					tc.wantErr = store.ErrConflict // the second use of a spent approval
+				}
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("use %d: err %v, want %v", i+1, err, tc.wantErr)
+				}
+				got, err := st.GetApproval(ctx, "apr-c")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != tc.wantStatus {
+					t.Fatalf("use %d: status %q, want %q", i+1, got.Status, tc.wantStatus)
+				}
 			}
 		})
 	}
 
 	t.Run("missing", func(t *testing.T) {
 		st := openTestStore(t)
-		if err := st.ConsumeApproval(ctx, "nope", "task-1", "action:git.open_pr", "d1", fixed(now)); !errors.Is(err, store.ErrNotFound) {
+		if err := st.ConsumeApproval(ctx, "nope", "task-1", "action:git.open_pr", "d1"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("err %v, want ErrNotFound", err)
 		}
 	})
@@ -67,7 +76,7 @@ func TestConsumeApproval(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := st.ConsumeApproval(ctx, "apr-c", "task-1", "action:git.open_pr", "d1", fixed(now)); err == nil {
+				if err := st.ConsumeApproval(ctx, "apr-c", "task-1", "action:git.open_pr", "d1"); err == nil {
 					mu.Lock()
 					ok++
 					mu.Unlock()
@@ -78,7 +87,7 @@ func TestConsumeApproval(t *testing.T) {
 		if ok != 1 {
 			t.Fatalf("%d uses succeeded, want exactly 1", ok)
 		}
-		if err := st.ConsumeApproval(ctx, "apr-c", "task-1", "action:git.open_pr", "d1", fixed(now)); !errors.Is(err, store.ErrConflict) {
+		if err := st.ConsumeApproval(ctx, "apr-c", "task-1", "action:git.open_pr", "d1"); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("later use: err %v, want ErrConflict", err)
 		}
 	})
@@ -102,69 +111,69 @@ func seedApproval(t *testing.T, st *SQLiteStore, id string, expiresAt time.Time,
 	}
 }
 
-func fixed(t time.Time) func() time.Time { return func() time.Time { return t } }
-
 // The expiry is compared as a time, not as text: RFC 3339 text drops trailing
 // zeros of the fraction, so "...:05Z" sorts after "...:05.5Z" although it is
-// earlier.
+// earlier. The database clock cannot be set, so the test waits until the
+// current second is at least 300 ms old and seeds expiries around it.
 func TestConsumeApprovalComparesExpiryAsTime(t *testing.T) {
 	ctx := context.Background()
-	whole := time.Date(2026, 11, 26, 12, 0, 5, 0, time.UTC)
+	now := time.Now().UTC()
+	if frac := now.Sub(now.Truncate(time.Second)); frac < 300*time.Millisecond || frac > 700*time.Millisecond {
+		time.Sleep(time.Second - frac + 400*time.Millisecond)
+		now = time.Now().UTC()
+	}
+	whole := now.Truncate(time.Second)
 	cases := []struct {
 		name    string
 		expires time.Time
-		now     time.Time
 		wantErr error
 	}{
-		{"expiry on a whole second, use half a second later", whole, whole.Add(500 * time.Millisecond), store.ErrExpired},
-		{"expiry half a second past, use on the whole second", whole.Add(500 * time.Millisecond), whole, nil},
-		{"use one nanosecond after the expiry", whole.Add(time.Millisecond), whole.Add(time.Millisecond + time.Nanosecond), store.ErrExpired},
+		{"expiry on the whole second just past", whole, store.ErrExpired},
+		{"expiry with a fraction in the next second", whole.Add(1500 * time.Millisecond), nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
 			seedApproval(t, st, "apr-t", tc.expires, domain.ApprovalApproved)
-			if err := st.ConsumeApproval(ctx, "apr-t", "task-1", "action:git.open_pr", "d1", fixed(tc.now)); !errors.Is(err, tc.wantErr) {
+			if err := st.ConsumeApproval(ctx, "apr-t", "task-1", "action:git.open_pr", "d1"); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err %v, want %v", err, tc.wantErr)
 			}
 		})
 	}
 }
 
-// The clock is read only once the store's connection is held, so a wait for
-// another call of this process cannot carry a time from before the expiry
-// past it.
-func TestConsumeApprovalReadsClockAfterTakingTheConnection(t *testing.T) {
+// The expiry is compared with SQLite's clock inside the statement, after the
+// statement has taken the write lock. A wait for a lock held by another
+// connection that spans the expiry refuses the approval: no time read before
+// the wait is used.
+func TestConsumeApprovalWaitingForTheLockSpansTheExpiry(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
-	start := time.Now().UTC()
-	seedApproval(t, st, "apr-w", start.Add(time.Minute), domain.ApprovalApproved)
-
-	held, err := st.db.Conn(ctx)
+	path := filepath.Join(t.TempDir(), "sablecourt.db")
+	st, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	clock := start
-	read := false
-	now := func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		read = true
-		return clock
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedApproval(t, st, "apr-w", time.Now().UTC().Add(200*time.Millisecond), domain.ApprovalApproved)
+
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	other.SetMaxOpenConns(1)
+	if _, err := other.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- st.ConsumeApproval(ctx, "apr-w", "task-1", "action:git.open_pr", "d1", now) }()
-	time.Sleep(100 * time.Millisecond)
-	mu.Lock()
-	if read {
-		mu.Unlock()
-		t.Fatal("clock read while the connection was still held elsewhere")
+	go func() { done <- st.ConsumeApproval(ctx, "apr-w", "task-1", "action:git.open_pr", "d1") }()
+	time.Sleep(600 * time.Millisecond)
+	if _, err := other.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
 	}
-	// The wait spans the expiry.
-	clock = start.Add(2 * time.Minute)
-	mu.Unlock()
-	_ = held.Close()
 	if err := <-done; !errors.Is(err, store.ErrExpired) {
 		t.Fatalf("err %v, want ErrExpired", err)
 	}

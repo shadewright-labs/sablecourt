@@ -96,5 +96,5 @@ func TestUpgradeExpiresApprovalsApprovedBeforeIt(t *testing.T) {
 }
 
 func consumeForTest(st *SQLiteStore, id string) error {
-	return st.ConsumeApproval(context.Background(), id, "task-1", "action:git.open_pr", "d1", func() time.Time { return time.Now().UTC() })
+	return st.ConsumeApproval(context.Background(), id, "task-1", "action:git.open_pr", "d1")
 }

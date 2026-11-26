@@ -410,7 +410,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			// only if it is pinned to this task, capability and digest and has
 			// not expired. The approval is spent before the side effect runs, so
 			// a failed or interrupted action needs a fresh approval.
-			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest, g.now); err != nil {
+			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest); err != nil {
 				reason := "approval_check_failed"
 				switch {
 				case errors.Is(err, store.ErrExpired):

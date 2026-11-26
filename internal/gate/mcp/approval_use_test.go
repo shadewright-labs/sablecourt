@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,37 +33,35 @@ func requestAndApprove(t *testing.T, tg *typedGate, action, payload string) stri
 	return pending.ApprovalID
 }
 
-// slowStore stands for a wait between the gate deciding to consume and the
-// store running its statement: the clock moves on before the store reads it.
+// slowStore stands for a pause between the gate deciding to consume and the
+// store running its statement, such as a suspended daemon.
 type slowStore struct {
 	store.Store
-	clock *atomic.Pointer[time.Time]
-	wait  time.Duration
+	wait time.Duration
 }
 
-func (s slowStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error {
-	later := s.clock.Load().Add(s.wait)
-	s.clock.Store(&later)
-	return s.Store.ConsumeApproval(ctx, id, taskID, capability, payloadSHA256, now)
+func (s slowStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+	time.Sleep(s.wait)
+	return s.Store.ConsumeApproval(ctx, id, taskID, capability, payloadSHA256)
 }
 
-// The gate hands the store its clock instead of a time sampled before the
-// call, so a wait that spans the expiry refuses the approval.
-func TestApprovalExpiryUsesTheTimeTheStoreReads(t *testing.T) {
-	var clock atomic.Pointer[time.Time]
-	start := time.Now().UTC()
-	clock.Store(&start)
+// The expiry is compared with the database's clock inside the consuming
+// statement, so a pause that spans the expiry refuses the approval.
+func TestApprovalExpiryUsesTheDatabaseClock(t *testing.T) {
 	tg := setupTypedGate(t, typedGateOptions{
 		effect: domain.EffectApprove,
-		clock:  &clock,
 		wrapStore: func(inner store.Store) store.Store {
-			return slowStore{Store: inner, clock: &clock, wait: 20 * time.Minute}
+			return slowStore{Store: inner, wait: 500 * time.Millisecond}
 		},
 	})
 	id := requestAndApprove(t, tg, "git.open_pr", validOpenPR)
+	soon := time.Now().UTC().Add(200 * time.Millisecond).Format(time.RFC3339Nano)
+	if _, err := tg.rawDB(t).Exec(`UPDATE approvals SET expires_at = ? WHERE id = ?`, soon, id); err != nil {
+		t.Fatal(err)
+	}
 	rec := tg.post("ops-agent", "git.open_pr", `{"approvalId":"`+id+`","payload":`+validOpenPR+`}`)
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "approval_expired") {
-		t.Fatalf("a wait spanning expiry must refuse: got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("a pause spanning expiry must refuse: got %d: %s", rec.Code, rec.Body.String())
 	}
 	if n := len(tg.pr.calls()); n != 0 {
 		t.Fatalf("action ran %d times", n)
