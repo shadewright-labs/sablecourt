@@ -9,8 +9,11 @@
 #     push, scan and signing by digest, SBOMs and provenance files, the exact file set, verification of every
 #     artifact with the exact identity, issuer, commit and runner before the publish job, and in publish the
 #     refusals before any write, the latest rule and a draft that is published last. Each check reads the job and
-#     step it is about. A mutation table removes or weakens each property in a copy of the file and requires the
-#     matching check to fail.
+#     step it is about. Facts derived from the needs graph: nothing is signed before check, both builds and the scan
+#     passed, nothing is released or tagged before verify passed, and the needs and failure tables of docs/ci.md
+#     match the graph. The signing, verify and publish jobs have an exact, ordered list of steps. A mutation table
+#     removes or weakens each property in a copy of the file and requires the matching check to fail; the test
+#     prints how many mutation cases it ran.
 #   - every action is pinned by commit with its version, and every checkout keeps no credentials; the verify page
 #     uses the exact identity of release.yml and --deny-self-hosted-runners in its commands.
 # Usage: hack/test/workflows_test.sh [repository root]
@@ -98,8 +101,9 @@ check("ci: the test job gets the Codecov token and nothing else",
 # not count. Each check runs on the real file and must pass; each entry of MUTATIONS then removes or changes one
 # thing in a copy of the file and requires that the named check fails on it, so no check passes without what it
 # guards.
+CI_DOC = read("docs/ci.md")
 RELEASE_JOBS = {
-    "check": {"contents: read", "checks: read"},
+    "check": {"contents: read", "checks: read", "actions: read"},
     "binaries": {"contents: read"},
     "images": {"contents: read", "packages: write"},
     "scan-images": {"contents: read", "packages: read"},
@@ -113,11 +117,38 @@ RELEASE_NEEDS = {
     "binaries": {"check"},
     "images": {"check"},
     "scan-images": {"images"},
-    "sign-images": {"check", "images"},
-    "sign-binaries": {"check", "binaries", "sign-images"},
+    "sign-images": {"check", "binaries", "images", "scan-images"},
+    "sign-binaries": {"check", "binaries", "scan-images", "sign-images"},
     "verify": {"check", "images", "sign-binaries", "sign-images"},
     "publish": {"check", "binaries", "images", "scan-images", "verify"},
 }
+# The exact, ordered step names of the jobs that sign or write. A step inserted, removed or moved fails the test
+# until this list is changed on purpose, so a new write cannot slip in between two checked steps.
+EXACT_STEPS = {
+    "sign-images": ["Clone the code", "Log in to GHCR", "Install cosign", "Install syft (pinned)",
+                    "Sign the images and attest their SBOMs (keyless)", "Attest the build provenance of sablecourtd",
+                    "Attest the build provenance of sablecourt-agent", "Keep the provenance bundles as release files",
+                    "Keep the image SBOMs and provenance for the next jobs"],
+    "sign-binaries": ["Download the files", "Write checksums.txt", "Install cosign", "Sign checksums.txt (keyless)",
+                      "Attest the build provenance", "Keep the provenance bundle as a release file",
+                      "Keep checksums.txt, its signature and the provenance"],
+    "verify": ["Download the files and the signature bundle", "Install cosign", "Log in to GHCR", "Check the set of files",
+               "Verify the archives", "Verify the images", "Run the stamped sablectl"],
+    "publish": ["Clone the code", "Download the verified files", "Refuse a moved tag or a published release",
+                "Set up Buildx and BuildKit (pinned)", "Log in to GHCR", "Refuse to move a version image tag",
+                "Decide whether this release moves latest", "Remove the drafts of earlier runs", "Create the draft release",
+                "Check the draft's assets byte for byte", "Tag the verified image digests", "Publish the release",
+                "Check the published assets byte for byte"],
+}
+# What each job can leave behind outside the run, found from its text: image digests pushed to GHCR, and the
+# signatures, attestations and provenance records that cosign and attest-build-provenance write to GHCR, the
+# Sigstore transparency log and GitHub's attestation store. publish is described by hand in docs/ci.md, step by step.
+EFFECTS = [
+    ("push-by-digest=true", "untagged image digests in GHCR"),
+    ("cosign sign --yes", "image signatures, SBOM attestations and image provenance"),
+    ("cosign sign-blob", "the signature of `checksums.txt` and the provenance of the release files"),
+]
+SIGNED_ONLY_AFTER = {"check", "binaries", "images", "scan-images"}
 IDENTITY = 'identity="https://github.com/${REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"'
 ISSUER = 'issuer="https://token.actions.githubusercontent.com"'
 # The provenance checks of gh: the exact certificate identity, the issuer, this tag and this commit, and a
@@ -127,6 +158,10 @@ ATTEST = re.compile(r'--repo "\$\{REPOSITORY\}" \\\n\s+--cert-identity "\$\{iden
                     r'\s+--source-digest "\$\{GITHUB_SHA\}" \\\n\s+--deny-self-hosted-runners > /dev/null\n')
 CHILD = ('[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest]'
          ' | if length == 1 then .[0] else error("not one \\($a) image") end')
+TRIVY_CMD = ('"${RUNNER_TEMP}/trivy-bin/trivy" image --image-src remote --scanners vuln \\\n'
+             '                --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml --skip-version-check \\\n'
+             '                --cache-dir "${RUNNER_TEMP}/trivy-cache" --db-repository "${TRIVY_DB}" \\\n'
+             '                "${image}@${child}"\n')
 REFS = 'for ref in "${DAEMON_IMAGE}@${DAEMON_DIGEST}" "${AGENT_IMAGE}@${AGENT_DIGEST}"; do'
 
 
@@ -142,6 +177,45 @@ def needs(job_text):
     if not m:
         return set()
     return {n.strip() for n in m.group(1).strip("[]").split(",")}
+
+
+def ancestors(j, job):
+    """Every job that must succeed before job starts, from the needs of the workflow."""
+    seen, todo = set(), list(needs(j.get(job, "")))
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo += list(needs(j.get(n, "")))
+    return seen
+
+
+def effects(job_text):
+    return [phrase for marker, phrase in EFFECTS if marker in job_text]
+
+
+def failure_rows(text):
+    """For each job but publish: what can exist when it fails, derived from needs. A job that does not need the
+    failed job (directly or not) can still run and finish; the failed job itself may have done part of its work."""
+    j = jobs(text)
+    rows = {}
+    for job in j:
+        if job == "publish":
+            continue
+        others = [e for n in j if n != job and job not in ancestors(j, n) for e in effects(j[n])]
+        rows[job] = ("; ".join(others) or "nothing", "; ".join(effects(j[job])) or "nothing")
+    return rows
+
+
+def doc_rows(doc):
+    """The rows of the failure table in docs/ci.md whose first cell is one job name."""
+    return {m.group(1): (m.group(2).strip(), m.group(3).strip())
+            for m in re.finditer(r"^\| `([a-z-]+)` \| ([^|]*) \| ([^|]*) \|", doc, re.M)}
+
+
+def job_env(job_text):
+    m = re.search(r"^    env:\n((?:      \S.*\n)+)", job_text, re.M)
+    return m.group(1) if m else ""
 
 
 def steps(job_text):
@@ -220,6 +294,26 @@ def release_checks(text):
         out.append((f"{name}: grants exactly {', '.join(sorted(want))}", grants(j.get(name, "")) == want))
     for name, want in RELEASE_NEEDS.items():
         out.append((f"{name}: needs {', '.join(sorted(want)) or 'nothing'}", needs(j.get(name, "")) == want))
+    for name, want in EXACT_STEPS.items():
+        out.append((f"{name}: exactly the pinned steps in order", list(s.get(name, {})) == want))
+    signers = [n for n, t in j.items() if "id-token: write" in t or "cosign " in t and "cosign verify" not in t
+               or "attest-build-provenance@" in t]
+    writers = [n for n, t in j.items()
+               if "contents: write" in (grants(t) or set()) or "imagetools create" in t or "gh release " in t]
+    rows, docs = failure_rows(text), doc_rows(CI_DOC)
+    out += [
+        ("nothing is signed unless check, both builds and the scan passed",
+         signers == ["sign-images", "sign-binaries"] and all(SIGNED_ONLY_AFTER <= ancestors(j, n) for n in signers)),
+        ("every signing job needs scan-images itself", all("scan-images" in needs(j.get(n, "")) for n in signers)),
+        ("nothing is tagged or released unless verify passed",
+         writers == ["publish"] and all("verify" in ancestors(j, n) for n in writers)),
+        ("the failure table of docs/ci.md is the one the needs graph gives",
+         all(docs.get(n) == rows[n] for n in rows) and set(docs) == set(rows)),
+        ("the needs table of docs/ci.md is the one of the workflow",
+         {m.group(1): set(re.findall(r"`([a-z-]+)`", m.group(2)))
+          for m in re.finditer(r"^\| `([a-z-]+)` \| ((?:`[a-z-]+`(?:, )?)+|nothing) \|$", CI_DOC, re.M)}
+         == {n: needs(t) for n, t in j.items()}),
+    ]
     out += [
         ("check: version is X.Y.Z or X.Y.Z-rc.N",
          r"=~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]" in meta),
@@ -230,9 +324,9 @@ def release_checks(text):
          line(meta, 'hack/release-state.sh "${TAG}" > /dev/null') and "set -euo pipefail" in meta),
         ("check: ci-ok passed on main for the tagged commit",
          in_order(ciok, "set -euo pipefail",
-                  'gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-runs?check_name=ci-ok&per_page=100" > "${RUNNER_TEMP}/runs.json"',
-                  'gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-suites?per_page=100" > "${RUNNER_TEMP}/suites.json"')
-         and line(ciok, 'hack/release-ci-ok.sh "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/suites.json"')),
+                  'gh api "repos/${GH_REPO}/actions/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=100" > "${RUNNER_TEMP}/runs.json"',
+                  'gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-runs?check_name=ci-ok&per_page=100" > "${RUNNER_TEMP}/checks.json"')
+         and line(ciok, 'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json"')),
         ("binaries: the pinned package script, no setup-go cache, no target override",
          'hack/package-binaries.sh "${VERSION}"' in st("binaries", "Build and pack the archives")
          and "cache: false" in st("binaries", "Set up Go") and "RELEASE_TARGETS" not in text),
@@ -252,9 +346,16 @@ def release_checks(text):
         ("scan-images: every platform image of both images, by digest",
          in_order(scan, "set -euo pipefail", REFS, "for arch in amd64 arm64; do", CHILD,
                   '"${RUNNER_TEMP}/trivy-bin/trivy" image --image-src remote --scanners vuln', '"${image}@${child}"\n')),
+        ("scan-images: the Trivy database pinned by digest",
+         re.fullmatch(r"      TRIVY_DB: ghcr\.io/aquasecurity/trivy-db@sha256:[0-9a-f]{64}\n", "".join(
+             l + "\n" for l in job_env(j.get("scan-images", "")).splitlines() if "TRIVY_DB" in l)) is not None
+         and '--cache-dir "${RUNNER_TEMP}/trivy-cache" --db-repository "${TRIVY_DB}"' in scan
+         and "TRIVY_DB" not in text.replace(j.get("scan-images", ""), "")),
         ("scan-images: HIGH and CRITICAL fail unless .trivyignore.yaml accepts them",
          "--severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml" in scan
-         and "--ignore-unfixed" not in text and "|| true" not in scan),
+         and "--ignore-unfixed" not in text and "|| true" not in scan
+         # The whole command, so an added flag that narrows the scan (--pkg-types, --skip-dirs) fails too.
+         and TRIVY_CMD in scan and text.count('"${RUNNER_TEMP}/trivy-bin/trivy" ') == 1),
         ("sign-images: signs the digests, never a tag",
          in_order(sign, REFS, 'cosign sign --yes "${ref}"') and re.findall(r"cosign sign --yes (\S+)", text) == ['"${ref}"']),
         ("sign-images: an SPDX SBOM attestation per platform image, kept as a release file",
@@ -302,8 +403,19 @@ def release_checks(text):
                   'gh attestation verify "${file}" \\\n              --repo',
                   'gh attestation verify "${file}" \\\n              --bundle "${DIST}/sablecourt_${VERSION}_provenance.intoto.jsonl"')
          and len(ATTEST.findall(varch)) == 2),
-        ("verify: the stamped sablectl prints the version",
-         line(varch, '"${RUNNER_TEMP}/sablectl" version | grep -F -- "${VERSION}"')),
+        ("verify: the stamped sablectl prints exactly the version",
+         in_order(st("verify", "Run the stamped sablectl"), "set -euo pipefail",
+                  'tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl',
+                  'got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version)"',
+                  'if [ "${got}" != "sablectl ${VERSION}" ]; then', "exit 1")
+         and "grep" not in st("verify", "Run the stamped sablectl")),
+        ("verify: no token where the built sablectl runs",
+         "GH_TOKEN" not in job_env(j.get("verify", ""))
+         and [n for n, b in s.get("verify", {}).items() if "GH_TOKEN" in b] == ["Verify the archives", "Verify the images"]
+         and all("GH_TOKEN: ${{ github.token }}" in st("verify", n) for n in ("Verify the archives", "Verify the images"))
+         and in_order(st("verify", "Run the stamped sablectl"), "docker logout ghcr.io", 'mkdir "${RUNNER_TEMP}/empty-home"',
+                      "env -i PATH=/usr/bin:/bin HOME=")
+         and list(s.get("verify", {}))[-1:] == ["Run the stamped sablectl"]),
         ("verify: image signatures and SBOM attestations against this tag's exact identity",
          in_order(vimg, "set -euo pipefail", IDENTITY, ISSUER, REFS,
                   'cosign verify \\\n              --certificate-identity "${identity}" \\\n'
@@ -429,9 +541,6 @@ MUTATIONS = [
     ("check: a published release or a failed lookup stops the run",
      'hack/release-state.sh "${TAG}" > /dev/null',
      'if state="$(gh release view "${TAG}" --json isDraft --jq .isDraft 2> /dev/null)" && [ "${state}" = false ]; then exit 1; fi'),
-    ("check: ci-ok passed on main for the tagged commit",
-     'hack/release-ci-ok.sh "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/suites.json"',
-     'hack/release-ci-ok.sh "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/suites.json" || echo "no ci-ok"'),
     ("check: ci-ok passed on main for the tagged commit", "check-runs?check_name=ci-ok&", "check-runs?"),
     ("binaries: the pinned package script, no setup-go cache, no target override", "cache: false #", "cache: true #"),
     ("binaries: SBOM of the binaries from the pinned syft", 'syft" scan "dir:${out}/bin"', 'syft" scan "dir:${out}/dist"'),
@@ -445,6 +554,8 @@ MUTATIONS = [
     ("scan-images: HIGH and CRITICAL fail unless .trivyignore.yaml accepts them", "--exit-code 1 --ignorefile", "--exit-code 0 --ignorefile"),
     ("scan-images: HIGH and CRITICAL fail unless .trivyignore.yaml accepts them", "--severity HIGH,CRITICAL", "--severity CRITICAL"),
     ("scan-images: HIGH and CRITICAL fail unless .trivyignore.yaml accepts them", "--scanners vuln \\\n", "--scanners vuln --ignore-unfixed \\\n"),
+    ("scan-images: HIGH and CRITICAL fail unless .trivyignore.yaml accepts them",
+     "--scanners vuln \\\n", "--scanners vuln --pkg-types library \\\n"),
     ("sign-images: signs the digests, never a tag", 'cosign sign --yes "${ref}"', 'cosign sign --yes "${image}:latest"'),
     ("sign-images: an SPDX SBOM attestation per platform image, kept as a release file", "cosign attest --yes --type spdxjson", "echo"),
     ("sign-images: an SPDX SBOM attestation per platform image, kept as a release file",
@@ -476,7 +587,57 @@ MUTATIONS = [
      in_step(*VA, '--source-digest "${GITHUB_SHA}"', '--source-digest "${GITHUB_SHA:0:7}"')),
     ("verify: provenance of every file from the API and from the release bundle, bound to this tag and commit",
      in_step(*VA, '              --bundle "${DIST}/sablecourt_${VERSION}_provenance.intoto.jsonl" \\\n', "")),
-    ("verify: the stamped sablectl prints the version", '          "${RUNNER_TEMP}/sablectl" version | grep -F -- "${VERSION}"\n', ""),
+    ("verify: the stamped sablectl prints exactly the version",
+     'if [ "${got}" != "sablectl ${VERSION}" ]; then', 'if ! printf \'%s\\n\' "${got}" | grep -F -- "${VERSION}"; then'),
+    ("verify: the stamped sablectl prints exactly the version",
+     'if [ "${got}" != "sablectl ${VERSION}" ]; then', 'if [[ "${got}" != *"${VERSION}"* ]]; then'),
+    ("verify: no token where the built sablectl runs",
+     "      REPOSITORY: ${{ github.repository }}\n      TAG:", "      GH_TOKEN: ${{ github.token }}\n      REPOSITORY: ${{ github.repository }}\n      TAG:"),
+    ("verify: no token where the built sablectl runs", 'got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl"', 'got="$("${RUNNER_TEMP}/sablectl"'),
+    ("verify: no token where the built sablectl runs", "          docker logout ghcr.io\n", ""),
+    ("verify: no token where the built sablectl runs", in_step("verify", "Run the stamped sablectl", "        env:\n", "        env:\n          GH_TOKEN: ${{ github.token }}\n")),
+    ("scan-images: the Trivy database pinned by digest", in_job("scan-images", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db@sha256:", "TRIVY_DB: ghcr.io/aquasecurity/trivy-db:2 #")),
+    ("scan-images: the Trivy database pinned by digest", ' --db-repository "${TRIVY_DB}"', ""),
+    ("check: ci-ok passed on main for the tagged commit", "event=push&branch=main&", ""),
+    ("check: ci-ok passed on main for the tagged commit", 'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json"',
+     'hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json" || true'),
+    # Each signing job loses scan-images from its needs: it would sign a digest that failed the scan.
+    ("every signing job needs scan-images itself", in_job("sign-images", "needs: [check, binaries, images, scan-images]", "needs: [check, binaries, images]")),
+    ("nothing is signed unless check, both builds and the scan passed",
+     in_job("sign-images", "needs: [check, binaries, images, scan-images]", "needs: [check, binaries, images]")),
+    ("every signing job needs scan-images itself",
+     in_job("sign-binaries", "needs: [check, binaries, scan-images, sign-images]", "needs: [check, binaries, sign-images]")),
+    ("sign-binaries: needs binaries, check, scan-images, sign-images",
+     in_job("sign-binaries", "needs: [check, binaries, scan-images, sign-images]", "needs: [check, binaries, sign-images]")),
+    ("nothing is signed unless check, both builds and the scan passed",
+     in_job("sign-images", "needs: [check, binaries, images, scan-images]", "needs: [check, images, scan-images]")),
+    ("nothing is signed unless check, both builds and the scan passed",
+     in_job("binaries", "      - name: Keep the files for the next jobs\n",
+            "      - name: Sign early\n        run: cosign sign-blob --yes x\n\n      - name: Keep the files for the next jobs\n")),
+    ("nothing is tagged or released unless verify passed",
+     in_job("publish", "needs: [check, binaries, images, scan-images, verify]", "needs: [check, binaries, images, scan-images, sign-binaries]")),
+    ("nothing is tagged or released unless verify passed",
+     in_job("sign-binaries", "      - name: Keep checksums.txt, its signature and the provenance\n",
+            "      - name: Tag early\n        run: docker buildx imagetools create --tag x y\n\n      - name: Keep checksums.txt, its signature and the provenance\n")),
+    ("the failure table of docs/ci.md is the one the needs graph gives",
+     in_job("sign-images", "needs: [check, binaries, images, scan-images]", "needs: [check, images, scan-images]")),
+    ("the failure table of docs/ci.md is the one the needs graph gives",
+     in_job("sign-binaries", "needs: [check, binaries, scan-images, sign-images]", "needs: [check, binaries, scan-images]")),
+    ("the needs table of docs/ci.md is the one of the workflow",
+     in_job("scan-images", "    needs: images\n", "    needs: [check, images]\n")),
+    # The reviewer's mutation: a step that deletes drafts inserted before the image tag refusal.
+    ("publish: exactly the pinned steps in order",
+     "      - name: Refuse to move a version image tag\n",
+     "      - name: Clean up\n        run: hack/release-state.sh \"${TAG}\" | xargs -r -I{} gh api --method DELETE \"repos/${GH_REPO}/releases/{}\"\n\n"
+     "      - name: Refuse to move a version image tag\n"),
+    ("publish: exactly the pinned steps in order", drafts_first),
+    ("publish: exactly the pinned steps in order", "      - name: Check the published assets byte for byte\n        run: hack/release-assets.sh \"${TAG}\" \"${RUNNER_TEMP}/dist\"\n", ""),
+    ("sign-images: exactly the pinned steps in order",
+     in_job("sign-images", "      - name: Install cosign\n", "      - name: Sign by tag\n        run: echo\n\n      - name: Install cosign\n")),
+    ("sign-binaries: exactly the pinned steps in order",
+     in_job("sign-binaries", "      - name: Write checksums.txt\n", "      - name: Write the checksums\n")),
+    ("verify: exactly the pinned steps in order",
+     in_job("verify", "      - name: Check the set of files\n", "      - name: Extra\n        run: echo\n\n      - name: Check the set of files\n")),
     ("verify: image signatures and SBOM attestations against this tag's identity".replace("identity", "exact identity"),
      "cosign verify-attestation --type spdxjson \\\n                --certificate-identity \"${identity}\" \\\n"
      "                --certificate-oidc-issuer \"${issuer}\" \\\n",
@@ -539,6 +700,7 @@ for name, *change in MUTATIONS:
     results = dict(release_checks(mutated))
     check(f"release.yml without it: {name} fails", name in names and mutated != release and results.get(name) is False)
 check("release.yml: every check has a mutation that breaks it", names == {m[0] for m in MUTATIONS})
+print(f"{len(MUTATIONS)} mutation cases")
 for wf in sorted(os.listdir(os.path.join(root, ".github/workflows"))):
     for use in re.findall(r"^\s+(?:- )?uses: (.+)$", read(".github/workflows/" + wf), re.M):
         check(f"{wf}: {use.split('@')[0].split(' ')[0]} pinned by commit with its version",

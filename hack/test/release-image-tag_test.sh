@@ -46,6 +46,12 @@ case_ "a denied lookup stops the release" 1 "" STUB_RC=1 STUB_ERR="ERROR: unexpe
 case_ "a registry error stops the release" 1 "" STUB_RC=1 STUB_ERR="ERROR: failed to do request: 502 Bad Gateway"
 case_ "not found for another reference stops the release" 1 "" STUB_RC=1 STUB_ERR="ERROR: ${image}:latest: not found"
 case_ "a failure with no message stops the release" 1 "" STUB_RC=1
+case_ "not found next to another error stops the release" 1 "" STUB_RC=1 STUB_ERR="ERROR: ${image}:1.0.0: not found
+ERROR: failed to authorize: 401 Unauthorized"
+case_ "not found after a warning stops the release" 1 "" STUB_RC=1 STUB_ERR="WARNING: rate limited, retrying
+ERROR: ${image}:1.0.0: not found"
+case_ "not found with an exit status other than 1 stops the release" 1 "" STUB_RC=2 STUB_ERR="ERROR: ${image}:1.0.0: not found"
+case_ "not found with output on stdout stops the release" 1 "" STUB_RC=1 STUB_OUT='{"digest":"x"}' STUB_ERR="ERROR: ${image}:1.0.0: not found"
 case_ "an answer without a digest stops the release" 1 "" STUB_OUT='{"mediaType":"x"}'
 case_ "an answer that is not JSON stops the release" 1 "" STUB_OUT="<html>"
 

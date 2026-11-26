@@ -53,7 +53,9 @@ case_ "an answer that is not a list stops the run" '{"message":"Not Found"}' 1 "
 case_ "a release without a draft field stops the run" '[{"id":1,"tag_name":"v1.0.0"}]' 1 ""
 case_ "a draft field that is a string stops the run" '[{"id":1,"tag_name":"v1.0.0","draft":"false"}]' 1 ""
 case_ "an answer that is not JSON stops the run" "<html>" 1 ""
-case_ "an empty answer is no release" "" 0 ""
+case_ "an empty answer stops the run" "" 1 ""
+case_ "an answer of only white space stops the run" " 
+" 1 ""
 
 rc=0
 "${script}" > /dev/null 2>&1 || rc=$?
