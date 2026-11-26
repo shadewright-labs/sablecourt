@@ -1,160 +1,505 @@
-name: Release Binaries and Container Images
+name: Release
 
+# Builds, signs, verifies and publishes a release for a pushed v* tag (docs/ci.md, "Releases"):
+#   1. check: the tag is X.Y.Z or X.Y.Z-rc.N, its commit is on main and no published release exists for it.
+#   2. binaries: four archives (hack/package-binaries.sh), an SPDX SBOM of the binaries and checksums.txt.
+#      images: the daemon and agent images for linux/amd64 and linux/arm64, pushed by digest with no tag.
+#   3. sign-binaries: a cosign keyless signature of checksums.txt (bundle file) and build provenance for every
+#      file. sign-images: a cosign keyless signature of each image index, an SPDX SBOM attestation per platform
+#      image and build provenance for each index. Keyless means a short-lived certificate for this workflow
+#      from GitHub's OIDC token: there is no key to store.
+#   4. verify: the commands of docs/how-to/verify-a-release.md, pinned to this tag and commit. It has no write
+#      permission, and nothing public changes before it passed.
+#   5. publish: a draft release with every file, checked byte for byte (hack/release-assets.sh), then the
+#      version tag (and latest for X.Y.Z) on the verified image digests, then the draft is published.
+# A rerun is safe: check and publish refuse a tag whose release is published, publish deletes a draft left by an
+# earlier run (never the tag) and recreates it, and no step creates, moves or deletes a tag.
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release version without leading v: X.Y.Z or X.Y.Z-rc.N"
-        required: true
-        default: "0.1.0"
+    tags: ["v*"]
 
 permissions: {}
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DAEMON_IMAGE: ghcr.io/shadewright-labs/sablecourt
+  AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent
+
 jobs:
-  binaries:
+  check:
+    name: Check the tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: write # create the GitHub release and upload the archives
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # fetch-depth 0 brings the history of main for the ancestry check.
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check the version, the commit and the release state
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # X.Y.Z or X.Y.Z-rc.N: the tags hack/check-image-refs.sh accepts in this repository.
+          if ! [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "tag '${TAG}' is not vX.Y.Z or vX.Y.Z-rc.N" >&2
+            exit 1
+          fi
+          # The signature identity says "release.yml on a v* tag"; only a commit on main may carry it.
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "refusing to release: ${GITHUB_SHA} is not on main; tag a commit that is on main" >&2
+            exit 1
+          fi
+          # A token with contents: read sees published releases only, which are the ones that matter here.
+          if state="$(gh release view "${TAG}" --json isDraft --jq .isDraft 2> /dev/null)" && [ "${state}" = false ]; then
+            echo "release ${TAG} is already published; this run would change nothing" >&2
+            exit 1
+          fi
+          prerelease=false
+          case "${version}" in *-rc.*) prerelease=true ;; esac
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Build the archives
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      go-version: ${{ steps.build.outputs.go-version }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache: false # a release build must not read a cache that another run could have written
 
-      - name: Resolve version
-        id: meta
+      # -trimpath, the version stamp and archive times from the commit (SOURCE_DATE_EPOCH) fix the inputs.
+      - name: Build and pack the archives
+        id: build
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            VER="${INPUT_TAG}"
-          else
-            VER="${GITHUB_REF_NAME#v}"
-          fi
-          # X.Y.Z or X.Y.Z-rc.N: the tags hack/check-image-refs.sh accepts in this repository.
-          # A bash match reads the whole value, so a second line in a hand-entered version cannot pass.
-          if ! [[ "${VER}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
-            echo "version '${VER}' is not X.Y.Z or X.Y.Z-rc.N" >&2
-            exit 1
-          fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: Build cross-platform archives
-        env:
-          VER: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
-            GOOS="${target%/*}"
-            GOARCH="${target#*/}"
-            STAGE="dist/stage-${GOOS}-${GOARCH}"
-            mkdir -p "${STAGE}"
-            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w" -o "${STAGE}/sablecourtd" ./cmd/sablecourtd
-            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w -X main.version=${VER}" -o "${STAGE}/sablectl" ./cmd/sablectl
-            tar -C "${STAGE}" -czf "dist/sablecourt_${VER}_${GOOS}_${GOARCH}.tar.gz" sablecourtd sablectl
-            rm -rf "${STAGE}"
-          done
-          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" hack/package-binaries.sh "${VERSION}" "${RUNNER_TEMP}/out"
+          echo "go-version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+          echo "Built with $(go env GOVERSION), SOURCE_DATE_EPOCH $(git log -1 --format=%ct HEAD)" >> "$GITHUB_STEP_SUMMARY"
 
-      # Creates the release with generated notes, or adds the files to a release that already exists for the
-      # tag, so a rerun replaces the assets instead of failing.
-      # A release candidate (X.Y.Z-rc.N) is created as a pre-release.
-      - name: Publish GitHub Release
+      - name: Install syft (pinned)
+        run: hack/install-syft.sh "${RUNNER_TEMP}/syft"
+
+      # checksums.txt lists the archives and the SBOM, so its signature covers all five files.
+      - name: Write the SBOM and checksums.txt
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          VER: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
-          pre=()
-          case "${VER}" in *-*) pre=(--prerelease) ;; esac
-          if gh release view "${TAG}" > /dev/null 2>&1; then
-            gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
-          else
-            gh release create "${TAG}" --generate-notes "${pre[@]}" dist/*.tar.gz dist/checksums.txt
-          fi
+          set -euo pipefail
+          out="${RUNNER_TEMP}/out"
+          "${RUNNER_TEMP}/syft/syft" scan "dir:${out}/bin" --source-name sablecourt --source-version "${VERSION}" \
+            -o "spdx-json=${out}/dist/sablecourt_${VERSION}_sbom.spdx.json"
+          (cd "${out}/dist" && sha256sum -- sablecourt_* > checksums.txt)
+          cat "${out}/dist/checksums.txt" >> "$GITHUB_STEP_SUMMARY"
 
-  containers:
+      - name: Keep the files for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/out/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-binaries:
+    name: Sign and attest the archives
+    needs: binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
-      packages: write # push the images to GHCR
-    env:
-      DAEMON_IMAGE: ghcr.io/shadewright-labs/sablecourt
-      AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent
+      id-token: write # cosign keyless signing and the provenance attestation
+      attestations: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download the files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sign checksums.txt (keyless)
+        env:
+          DIST: ${{ runner.temp }}/dist
+        run: cosign sign-blob --yes --bundle "${DIST}/checksums.txt.sigstore.json" "${DIST}/checksums.txt"
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/sablecourt_*.tar.gz
+            ${{ runner.temp }}/dist/sablecourt_*_sbom.spdx.json
+            ${{ runner.temp }}/dist/checksums.txt
+
+      - name: Keep the signature bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signature
+          path: ${{ runner.temp }}/dist/checksums.txt.sigstore.json
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    name: Build and push the images by digest
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push the image digests to GHCR; no tag is written here
+    outputs:
+      daemon-digest: ${{ steps.daemon.outputs.digest }}
+      agent-digest: ${{ steps.agent.outputs.digest }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
-      # The same pinned Buildx and BuildKit as the pull request image build (images-build.yml).
-      - name: Set up Docker Buildx
+      # The same pinned Buildx and BuildKit as the pull request image build (images-build.yml). The Dockerfile
+      # cross-compiles in a build stage on the runner's platform, so arm64 needs no emulation.
+      - name: Set up Buildx and BuildKit (pinned)
         run: hack/setup-buildx.sh
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
-      - name: Resolve image tag
-        id: meta
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${INPUT_TAG}"
-          else
-            TAG="${GITHUB_REF_NAME#v}"
-          fi
-          if ! [[ "${TAG}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
-            echo "version '${TAG}' is not X.Y.Z or X.Y.Z-rc.N" >&2
-            exit 1
-          fi
-          # A release candidate does not move latest.
-          {
-            echo "daemon<<EOF"
-            echo "${DAEMON_IMAGE}:${TAG}"
-            case "${TAG}" in *-*) ;; *) echo "${DAEMON_IMAGE}:latest" ;; esac
-            echo "EOF"
-            echo "agent<<EOF"
-            echo "${AGENT_IMAGE}:${TAG}"
-            case "${TAG}" in *-*) ;; *) echo "${AGENT_IMAGE}:latest" ;; esac
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push sablecourtd (multi-arch)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - name: Build and push sablecourtd by digest
+        id: daemon
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: daemon
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.daemon }}
+          outputs: type=image,name=${{ env.DAEMON_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Build and push sablecourt-agent (multi-arch)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - name: Build and push sablecourt-agent by digest
+        id: agent
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: agent
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.agent }}
+          outputs: type=image,name=${{ env.AGENT_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+  sign-images:
+    name: Sign and attest the images
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # store the signatures and attestations next to the images
+      id-token: write # cosign keyless signing and the provenance attestations
+      attestations: write
+    env:
+      DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}
+      AGENT_DIGEST: ${{ needs.images.outputs.agent-digest }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Install syft (pinned)
+        run: hack/install-syft.sh "${RUNNER_TEMP}/syft"
+
+      # Always by digest: the index digest names both architectures and cannot move. Each platform image gets
+      # its own SBOM, made by syft from that image's digest, because the two can differ.
+      - name: Sign the images and attest their SBOMs (keyless)
+        run: |
+          set -euo pipefail
+          for ref in "${DAEMON_IMAGE}@${DAEMON_DIGEST}" "${AGENT_IMAGE}@${AGENT_DIGEST}"; do
+            image="${ref%@*}"
+            cosign sign --yes "${ref}"
+            for arch in amd64 arm64; do
+              child="$(docker buildx imagetools inspect --raw "${ref}" | jq -er --arg a "${arch}" \
+                '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest] | if length == 1 then .[0] else error("not one \($a) image") end')"
+              sbom="${RUNNER_TEMP}/sbom-${image##*/}-${arch}.spdx.json"
+              "${RUNNER_TEMP}/syft/syft" scan "registry:${image}@${child}" -o "spdx-json=${sbom}"
+              cosign attest --yes --type spdxjson --predicate "${sbom}" "${image}@${child}"
+            done
+          done
+
+      - name: Attest the build provenance of sablecourtd
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.DAEMON_IMAGE }}
+          subject-digest: ${{ env.DAEMON_DIGEST }}
+          push-to-registry: true
+
+      - name: Attest the build provenance of sablecourt-agent
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.AGENT_IMAGE }}
+          subject-digest: ${{ env.AGENT_DIGEST }}
+          push-to-registry: true
+
+  # The public commands of docs/how-to/verify-a-release.md, with the identity pinned to this tag and the
+  # provenance to this commit. No write permission: a failure here leaves no release and no image tag.
+  verify:
+    name: Verify everything
+    needs: [check, images, sign-binaries, sign-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read # read the images and their signatures from GHCR
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.check.outputs.version }}
+      DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}
+      AGENT_DIGEST: ${{ needs.images.outputs.agent-digest }}
+    steps:
+      - name: Download the files and the signature bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/dist
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify the archives
+        env:
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release\.yml@refs/tags/${TAG//./\\.}$"
+          issuer="https://token.actions.githubusercontent.com"
+          expected="$(printf '%s\n' checksums.txt checksums.txt.sigstore.json "sablecourt_${VERSION}_sbom.spdx.json" \
+            "sablecourt_${VERSION}_"{darwin,linux}_{amd64,arm64}.tar.gz | LC_ALL=C sort)"
+          if [ "$(find "${DIST}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" != "${expected}" ]; then
+            echo "the files to release are not exactly: ${expected}" >&2
+            exit 1
+          fi
+          cosign verify-blob \
+            --bundle "${DIST}/checksums.txt.sigstore.json" \
+            --certificate-identity-regexp "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${DIST}/checksums.txt"
+          (cd "${DIST}" && sha256sum --check --strict checksums.txt)
+          if [ "$(wc -l < "${DIST}/checksums.txt")" -ne 5 ]; then
+            echo "checksums.txt does not list the four archives and the SBOM" >&2
+            exit 1
+          fi
+          for file in "${DIST}"/sablecourt_* "${DIST}/checksums.txt"; do
+            gh attestation verify "${file}" \
+              --repo "${REPOSITORY}" \
+              --signer-workflow "${REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "${GITHUB_SHA}" \
+              --deny-self-hosted-runners > /dev/null
+          done
+          tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl
+          "${RUNNER_TEMP}/sablectl" version | grep -F -- "${VERSION}"
+
+      - name: Verify the images
+        run: |
+          set -euo pipefail
+          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release\.yml@refs/tags/${TAG//./\\.}$"
+          issuer="https://token.actions.githubusercontent.com"
+          for ref in "${DAEMON_IMAGE}@${DAEMON_DIGEST}" "${AGENT_IMAGE}@${AGENT_DIGEST}"; do
+            image="${ref%@*}"
+            cosign verify \
+              --certificate-identity-regexp "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              "${ref}" > /dev/null
+            for arch in amd64 arm64; do
+              child="$(docker buildx imagetools inspect --raw "${ref}" | jq -er --arg a "${arch}" \
+                '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest] | if length == 1 then .[0] else error("not one \($a) image") end')"
+              cosign verify-attestation --type spdxjson \
+                --certificate-identity-regexp "${identity}" \
+                --certificate-oidc-issuer "${issuer}" \
+                "${image}@${child}" > /dev/null
+            done
+            gh attestation verify "oci://${ref}" \
+              --repo "${REPOSITORY}" \
+              --signer-workflow "${REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "${GITHUB_SHA}" \
+              --deny-self-hosted-runners > /dev/null
+            echo "verified ${ref}" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  # The only job with contents: write. It builds and signs nothing: it publishes what verify checked.
+  publish:
+    name: Publish the release
+    needs: [check, binaries, images, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create, check and publish the GitHub release of this tag
+      packages: write # add the version tag (and latest) to the verified image digests
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.check.outputs.version }}
+      PRERELEASE: ${{ needs.check.outputs.prerelease }}
+      DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}
+      AGENT_DIGEST: ${{ needs.images.outputs.agent-digest }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the verified files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/dist
+
+      # A published release is never touched again: its assets keep their bytes. A draft from an earlier run
+      # is deleted (the release only, never the tag) and made again from the files verify checked.
+      - name: Refuse a moved tag or a published release, remove an old draft
+        run: |
+          set -euo pipefail
+          sha="$(gh api "repos/${GH_REPO}/commits/tags/${TAG}" --jq .sha)"
+          if [ "${sha}" != "${GITHUB_SHA}" ]; then
+            echo "tag ${TAG} now points at ${sha}, not at ${GITHUB_SHA} that this run built; refusing to publish" >&2
+            exit 1
+          fi
+          gh api --paginate "repos/${GH_REPO}/releases" > "${RUNNER_TEMP}/releases.json"
+          jq -r --arg tag "${TAG}" '.[] | select(.tag_name == $tag) | "\(.id) \(.draft)"' "${RUNNER_TEMP}/releases.json" > "${RUNNER_TEMP}/found"
+          if grep -q ' false$' "${RUNNER_TEMP}/found"; then
+            echo "release ${TAG} is already published; this run changes nothing" >&2
+            exit 1
+          fi
+          while read -r id _; do
+            gh api --method DELETE "repos/${GH_REPO}/releases/${id}"
+            echo "deleted the draft release ${id} of an earlier run"
+          done < "${RUNNER_TEMP}/found"
+
+      - name: Create the draft release
+        env:
+          GO_VERSION: ${{ needs.binaries.outputs.go-version }}
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            echo "## Images"
+            echo
+            echo "- \`${DAEMON_IMAGE}@${DAEMON_DIGEST}\`"
+            echo "- \`${AGENT_IMAGE}@${AGENT_DIGEST}\`"
+            echo
+            echo "Binaries built with ${GO_VERSION} from ${GITHUB_SHA}. To verify the images and the archives, see"
+            echo "[Verify a release](https://github.com/${GH_REPO}/blob/${TAG}/docs/how-to/verify-a-release.md)."
+            echo
+          } > "${notes}"
+          flags=(--verify-tag --draft --title "${TAG}" --notes-file "${notes}" --generate-notes)
+          if [ "${PRERELEASE}" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${TAG}" "${flags[@]}" "${DIST}"/*
+
+      - name: Check the draft's assets byte for byte
+        run: hack/release-assets.sh "${TAG}" "${RUNNER_TEMP}/dist"
+
+      - name: Set up Buildx and BuildKit (pinned)
+        run: hack/setup-buildx.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Version tags first, then latest (X.Y.Z only), both images each time; a failure leaves the draft
+      # unpublished and a rerun points the same tags at the digests of that run.
+      - name: Tag the verified image digests
+        run: |
+          set -euo pipefail
+          tags=("${VERSION}")
+          if [ "${PRERELEASE}" != true ]; then
+            tags+=(latest)
+          fi
+          for tag in "${tags[@]}"; do
+            for ref in "${DAEMON_IMAGE}@${DAEMON_DIGEST}" "${AGENT_IMAGE}@${AGENT_DIGEST}"; do
+              image="${ref%@*}" digest="${ref#*@}"
+              docker buildx imagetools create --tag "${image}:${tag}" "${ref}"
+              got="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{json .Manifest}}' | jq -r .digest)"
+              if [ "${got}" != "${digest}" ]; then
+                echo "${image}:${tag} is ${got}, not the verified ${digest}" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          if [ "${PRERELEASE}" = true ]; then
+            gh release edit "${TAG}" --draft=false --prerelease
+          else
+            gh release edit "${TAG}" --draft=false --latest
+          fi
+
+      - name: Check the published assets byte for byte
+        run: hack/release-assets.sh "${TAG}" "${RUNNER_TEMP}/dist"

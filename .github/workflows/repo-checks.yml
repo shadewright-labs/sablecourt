@@ -58,3 +58,9 @@ jobs:
 
       - name: Test the workflows' structure
         run: hack/test/workflows_test.sh
+
+      - name: Test the release archive packer
+        run: hack/test/package-binaries_test.sh
+
+      - name: Test the release asset check
+        run: hack/test/release-assets_test.sh
