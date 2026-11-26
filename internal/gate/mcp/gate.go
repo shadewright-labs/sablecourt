@@ -1,7 +1,6 @@
 package mcpgate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,17 @@ type ToolDef struct {
 	Handler     ToolFunc
 }
 
+// ActionFunc runs an action registered without a typed input. It receives the
+// canonical encoding of the decoded payload, never the caller's bytes.
 type ActionFunc func(ctx context.Context, workload domain.Workload, taskID string, payload json.RawMessage) (any, error)
+
+// actionDef is one entry of the closed action catalog. decode turns the
+// caller's payload into the one value that is approved, hashed, shown and
+// executed; run executes that value.
+type actionDef struct {
+	decode func(raw json.RawMessage) (any, error)
+	run    func(ctx context.Context, workload domain.Workload, taskID string, value any) (any, error)
+}
 
 type Options struct {
 	Store     store.Store
@@ -53,7 +62,7 @@ type Gate struct {
 
 	mu      sync.RWMutex
 	tools   map[string]ToolDef
-	actions map[string]ActionFunc
+	actions map[string]actionDef
 }
 
 func New(opts Options) *Gate {
@@ -69,7 +78,7 @@ func New(opts Options) *Gate {
 		approvals: opts.Approvals,
 		now:       nowFn,
 		tools:     make(map[string]ToolDef),
-		actions:   make(map[string]ActionFunc),
+		actions:   make(map[string]actionDef),
 	}
 }
 
@@ -114,10 +123,53 @@ func (g *Gate) RegisterTool(def ToolDef) {
 	g.tools[def.Name] = def
 }
 
+// RegisterAction adds an action without a typed input. Its payload must be a
+// JSON object with no duplicate or case-colliding keys at any depth, and fn
+// receives the canonical encoding of that object.
 func (g *Gate) RegisterAction(name string, fn ActionFunc) {
+	g.registerAction(name, actionDef{
+		decode: func(raw json.RawMessage) (any, error) { return decodeGeneric(raw) },
+		run: func(ctx context.Context, wl domain.Workload, taskID string, value any) (any, error) {
+			canonical, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			return fn(ctx, wl, taskID, canonical)
+		},
+	})
+}
+
+// RegisterTypedAction adds an action whose payload decodes strictly into T
+// (see decodeTyped) and passes validate. The decoded T is the value the
+// approval digest covers, the dialog shows and run receives.
+func RegisterTypedAction[T any](g *Gate, name string, validate func(T) error, run func(ctx context.Context, workload domain.Workload, taskID string, in T) (any, error)) {
+	g.registerAction(name, actionDef{
+		decode: func(raw json.RawMessage) (any, error) {
+			in, err := decodeTyped[T](raw)
+			if err != nil {
+				return nil, err
+			}
+			if validate != nil {
+				if err := validate(in); err != nil {
+					return nil, fmt.Errorf("%w: %v", errInvalidPayload, err)
+				}
+			}
+			return in, nil
+		},
+		run: func(ctx context.Context, wl domain.Workload, taskID string, value any) (any, error) {
+			in, ok := value.(T)
+			if !ok {
+				return nil, errors.New("action input has the wrong type")
+			}
+			return run(ctx, wl, taskID, in)
+		},
+	})
+}
+
+func (g *Gate) registerAction(name string, def actionDef) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.actions[name] = fn
+	g.actions[name] = def
 }
 
 type authCtxKey struct{}
@@ -235,6 +287,9 @@ type actionRequest struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
+// maxActionBody is the largest action request body the gate reads.
+const maxActionBody = 2 << 20
+
 // ActionHandler serves the closed catalog of typed mutating actions at POST /{actionName}.
 func (g *Gate) ActionHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +310,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 
 		g.mu.RLock()
-		fn, exists := g.actions[actionName]
+		def, exists := g.actions[actionName]
 		g.mu.RUnlock()
 		if !exists {
 			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, "action:"+actionName, "denied", `{"reason":"unknown_action"}`)
@@ -263,48 +318,66 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 
-		rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		// One byte past the limit is read so that a longer body is refused
+		// instead of cut at the limit: a cut could drop trailing data the
+		// strict decoder would otherwise refuse.
+		rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxActionBody+1))
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 			return
 		}
-		dec := json.NewDecoder(bytes.NewReader(rawBody))
-		dec.DisallowUnknownFields()
-		var req actionRequest
-		if err := dec.Decode(&req); err != nil {
+		if len(rawBody) > maxActionBody {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "action request larger than 2 MiB"})
+			return
+		}
+		req, err := decodeTyped[actionRequest](rawBody)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + err.Error()})
 			return
 		}
 
-		var canonicalPayload any
-		if len(req.Payload) > 0 {
-			if err := json.Unmarshal(req.Payload, &canonicalPayload); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload JSON"})
-				return
-			}
-		}
-
 		capability := "action:" + actionName
+		wlName := ac.Workload.Metadata.Name
+		auditAction := func(outcome string, detail map[string]any) {
+			raw, _ := json.Marshal(detail)
+			g.audit(ctx, ac.Lease.TaskID, wlName, capability, outcome, string(raw))
+		}
 		if snap.policy == nil {
-			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", `{"reason":"policy_engine_unavailable"}`)
+			auditAction("denied", map[string]any{"reason": "policy_engine_unavailable"})
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy failed closed"})
 			return
 		}
 		decision := snap.policy.Evaluate(ac.Workload, capability)
-		approvalUsed := ""
-		switch decision.Effect {
-		case domain.EffectDeny:
-			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q}`, decision.Reason))
+		if decision.Effect == domain.EffectDeny {
+			auditAction("denied", map[string]any{"reason": decision.Reason})
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy denied: " + decision.Reason})
 			return
+		}
 
+		// One strict decode into the action's typed value. From here on the
+		// caller's bytes are not used: the digest, the dialog (through the
+		// approval's canonical JSON) and the executor all work from value.
+		value, err := def.decode(req.Payload)
+		if err != nil {
+			auditAction("denied", map[string]any{"reason": "invalid_payload", "error": redact.String(err.Error())})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": redact.String(err.Error())})
+			return
+		}
+		_, digest, err := approval.CanonicalizeAndHash(value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
+			return
+		}
+
+		approvalUsed := ""
+		switch decision.Effect {
 		case domain.EffectApprove:
 			if req.ApprovalID == "" {
 				if g.approvals == nil {
 					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "approval queue unavailable"})
 					return
 				}
-				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, canonicalPayload, 15*time.Minute)
+				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, wlName, capability, value, 15*time.Minute)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
@@ -318,42 +391,39 @@ func (g *Gate) ActionHandler() http.Handler {
 				return
 			}
 
-			// Consume the approval: one store transaction checks it is approved, unexpired and
-			// pinned to this task, capability and canonical payload digest, and moves it to
-			// consumed. The approval is spent before the side effect runs, so a failed or
-			// interrupted action needs a fresh approval instead of reusing this one.
-			_, digest, err := approval.CanonicalizeAndHash(canonicalPayload)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
-				return
-			}
+			// Consume the approval: the store moves it from approved to consumed
+			// only if it is pinned to this task, capability and digest and has
+			// not expired. The approval is spent before the side effect runs, so
+			// a failed or interrupted action needs a fresh approval.
 			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest, g.now); err != nil {
-				reason := "approval_mismatch_or_unapproved"
+				reason := "approval_check_failed"
 				switch {
 				case errors.Is(err, store.ErrExpired):
 					reason = "approval_expired"
 				case errors.Is(err, store.ErrNotFound):
 					reason = "approval_not_found"
-				case !errors.Is(err, store.ErrConflict):
-					reason = "approval_check_failed"
+				case errors.Is(err, store.ErrConflict):
+					reason = "approval_mismatch_or_unapproved"
 				}
-				g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"reason":%q,"approval_id":%q}`, reason, req.ApprovalID))
+				auditAction("denied", map[string]any{"reason": reason, "approval_id": req.ApprovalID})
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "approval does not authorize this payload: " + reason})
 				return
 			}
 			approvalUsed = req.ApprovalID
-			// The consumption record is what tells a crash between this point and the side
-			// effect apart from a refused call, so the action does not run without it.
+			// Consumption and its audit row are two steps. The order fails
+			// closed: the approval is spent first, and the action runs only once
+			// the record of that use is written. A failed write stops here and
+			// the approval stays spent.
 			if err := g.store.AppendAudit(ctx, domain.AuditRecord{
 				Category:     "approval",
 				TaskID:       ac.Lease.TaskID,
-				WorkloadName: ac.Workload.Metadata.Name,
+				WorkloadName: wlName,
 				Action:       capability,
 				Outcome:      "consumed",
 				DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"payload_sha256":%q}`, req.ApprovalID, digest),
 				CreatedAt:    g.now(),
 			}); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record approval use failed"})
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording the approval use failed; the approval is spent and the action did not run, request a new approval"})
 				return
 			}
 
@@ -364,11 +434,11 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 
-		result, err := fn(ctx, ac.Workload, ac.Lease.TaskID, req.Payload)
+		result, err := def.run(ctx, ac.Workload, ac.Lease.TaskID, value)
 		if errors.Is(err, errToolRefused) {
 			// A refused target is a policy outcome, not a failing dependency: the
 			// breaker does not count it.
-			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "denied", fmt.Sprintf(`{"error":%q,"approval_id":%q}`, redact.String(err.Error()), approvalUsed))
+			auditAction("denied", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
@@ -376,7 +446,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			if g.breaker != nil {
 				g.breaker.RecordFailure(capability)
 			}
-			g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "error", fmt.Sprintf(`{"error":%q,"approval_id":%q}`, redact.String(err.Error()), approvalUsed))
+			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}
@@ -385,7 +455,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
-		g.audit(ctx, ac.Lease.TaskID, ac.Workload.Metadata.Name, capability, "allowed", fmt.Sprintf(`{"redaction_hits":%d,"approval_id":%q}`, red.Hits, approvalUsed))
+		auditAction("allowed", map[string]any{"redaction_hits": red.Hits, "approval_id": approvalUsed})
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

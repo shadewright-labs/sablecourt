@@ -17,9 +17,16 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
+// The typed inputs below are the canonical encoding of each action: the
+// approval digest is the SHA-256 of json.Marshal of the value, so field names,
+// their order and omitempty are part of what an approver approved. Changing
+// any of them changes the digest of every payload, and approvals pending
+// across the upgrade then fail at consumption and need a new approval.
+// TestCanonicalEncodingOfTypedActionsIsFixed holds a golden digest per action.
+
 type CreateBranchInput struct {
 	Branch string `json:"branch"`
-	Base   string `json:"base,omitempty"`
+	Base   string `json:"base"`
 }
 
 type OpenPRInput struct {
@@ -137,44 +144,19 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		},
 	})
 
-	g.RegisterAction("git.create_branch", func(ctx context.Context, _ domain.Workload, _ string, raw json.RawMessage) (any, error) {
-		var in CreateBranchInput
-		if err := decodeStrict(raw, &in); err != nil {
-			return nil, err
-		}
-		if err := validateSafeBranch(in.Branch); err != nil {
-			return nil, err
-		}
+	RegisterTypedAction(g, "git.create_branch", validateCreateBranch, func(ctx context.Context, _ domain.Workload, _ string, in CreateBranchInput) (any, error) {
 		if repoRoot == "" {
 			return nil, errors.New("repo root not configured for git.create_branch")
 		}
-		base := strings.TrimSpace(in.Base)
-		if strings.HasPrefix(base, "-") || strings.Contains(base, "..") || strings.ContainsAny(base, " \t\r\n") {
-			return nil, errors.New("invalid base ref for git.create_branch")
-		}
-		args := []string{"-C", repoRoot, "branch", "--", in.Branch}
-		if base != "" {
-			args = append(args, base)
-		}
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "branch", "--", in.Branch, in.Base)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("git branch failed: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
-		return map[string]string{"branch": in.Branch, "status": "created"}, nil
+		return map[string]string{"branch": in.Branch, "base": in.Base, "status": "created"}, nil
 	})
 
-	g.RegisterAction("git.open_pr", func(ctx context.Context, _ domain.Workload, _ string, raw json.RawMessage) (any, error) {
-		var in OpenPRInput
-		if err := decodeStrict(raw, &in); err != nil {
-			return nil, err
-		}
-		if err := validateSafeBranch(in.Head); err != nil {
-			return nil, fmt.Errorf("invalid head branch: %w", err)
-		}
-		if strings.TrimSpace(in.Owner) == "" || strings.TrimSpace(in.Repo) == "" || strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Base) == "" {
-			return nil, errors.New("owner, repo, base, and title are required")
-		}
+	RegisterTypedAction(g, "git.open_pr", validateOpenPR, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
 		if err := checkOpenPRTarget(ctx, repoRoot, in.Owner, in.Repo); err != nil {
 			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
 		}
@@ -188,14 +170,7 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 		return map[string]string{"pr_url": prURL, "head": in.Head, "base": in.Base}, nil
 	})
 
-	g.RegisterAction("sandbox.propose_promotion", func(ctx context.Context, _ domain.Workload, _ string, raw json.RawMessage) (any, error) {
-		var in PromoteSandboxInput
-		if err := decodeStrict(raw, &in); err != nil {
-			return nil, err
-		}
-		if err := validateSafeBranch(in.Branch); err != nil {
-			return nil, err
-		}
+	RegisterTypedAction(g, "sandbox.propose_promotion", validatePromotion, func(ctx context.Context, _ domain.Workload, _ string, in PromoteSandboxInput) (any, error) {
 		snap := g.snapshotFromContext(ctx)
 		if snap.bundle == nil {
 			return nil, errors.New("no manifest bundle loaded")
@@ -214,6 +189,42 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) {
 			"next":     "open PR to change metadata.zone from sandbox to runtime",
 		}, nil
 	})
+}
+
+func validateCreateBranch(in CreateBranchInput) error {
+	if err := validateSafeBranch(in.Branch); err != nil {
+		return err
+	}
+	if err := validateRefName(in.Base); err != nil {
+		return fmt.Errorf("invalid base: %w", err)
+	}
+	return nil
+}
+
+func validateOpenPR(in OpenPRInput) error {
+	if err := validateRepoName("owner", in.Owner); err != nil {
+		return err
+	}
+	if err := validateRepoName("repo", in.Repo); err != nil {
+		return err
+	}
+	if err := validateSafeBranch(in.Head); err != nil {
+		return fmt.Errorf("invalid head branch: %w", err)
+	}
+	if err := validateRefName(in.Base); err != nil {
+		return fmt.Errorf("invalid base: %w", err)
+	}
+	if strings.TrimSpace(in.Title) == "" {
+		return errors.New("title is required")
+	}
+	return nil
+}
+
+func validatePromotion(in PromoteSandboxInput) error {
+	if strings.TrimSpace(in.Workload) == "" {
+		return errors.New("workload is required")
+	}
+	return validateSafeBranch(in.Branch)
 }
 
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
@@ -283,25 +294,36 @@ func parseGitHubRemote(remote string) (owner, repo string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-func decodeStrict(raw json.RawMessage, dst any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("invalid action payload: %w", err)
+// refComponent is one slash-separated part of a ref name: it starts with a
+// letter or digit and holds only letters, digits, '.', '_' and '-'.
+var refComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validateRefName accepts a branch name built from refComponent parts, at most
+// 200 bytes, with no "..", no component ending in "." or ".lock", and not
+// HEAD. The value checked is used as given: nothing is trimmed.
+func validateRefName(ref string) error {
+	if ref == "" {
+		return errors.New("ref name is required")
+	}
+	if len(ref) > 200 || strings.Contains(ref, "..") || strings.EqualFold(ref, "HEAD") {
+		return fmt.Errorf("invalid ref name %q", ref)
+	}
+	for _, part := range strings.Split(ref, "/") {
+		if !refComponent.MatchString(part) || strings.HasSuffix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return fmt.Errorf("invalid ref name %q", ref)
+		}
 	}
 	return nil
 }
 
+// validateSafeBranch accepts a ref name under sablecourt/, the only branches
+// the gate writes.
 func validateSafeBranch(branch string) error {
-	b := strings.TrimSpace(branch)
-	if b == "" || b == "main" || b == "master" {
-		return errors.New("protected or empty branch is forbidden")
+	if err := validateRefName(branch); err != nil {
+		return err
 	}
-	if !strings.HasPrefix(b, "sablecourt/") {
+	if !strings.HasPrefix(branch, "sablecourt/") {
 		return errors.New("branch name must start with sablecourt/")
-	}
-	if strings.Contains(b, "..") || strings.ContainsAny(b, " \t\n~^:?*[\\") {
-		return errors.New("branch name contains illegal characters")
 	}
 	return nil
 }
