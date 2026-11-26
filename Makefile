@@ -58,12 +58,13 @@ docs-venv: .venv/docs-requirements.stamp
 	touch $@
 
 # docs-check fails when any reference page is stale, when the Zensical build reports an issue,
-# or when the built site has a broken internal link, broken anchor, missing image or third-party asset.
+# or when the built site has a broken internal link, broken anchor, missing image, third-party asset
+# or mermaid code fence under docs/.
 # The reference tests never write: the block directory variable is cleared so the render step cannot run.
 docs-check: $(DOCS_VENV_DEP)
 	env -u SABLECOURT_CLI_BLOCK_DIR go test -count=1 -run '$(DOCS_TESTS)' $(DOCS_PKGS)
 	$(ZENSICAL) build --clean --strict
-	python3 -I hack/docs-site-check.py check site hack/docs-pages-pending.txt
+	python3 -I hack/docs-site-check.py check site hack/docs-pages-pending.txt docs
 
 build:
 	mkdir -p bin

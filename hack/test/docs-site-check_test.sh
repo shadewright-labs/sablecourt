@@ -26,10 +26,12 @@ build() { # dir: valid site with home page, subpage, local stylesheet, local SVG
     '<h2 id="step">Step</h2><a href="../">Home</a> <a href="../diagrams/ctx.svg"><img src="../diagrams/ctx.svg" alt="ctx"></a>'
 }
 
-# expect <name> <want: pass|fail> <site dir> [pending file]
+# expect <name> <want: pass|fail> <site dir> [pending file] [docs dir]
 expect() {
-  local name="$1" want="$2" site="$3" pending="${4:-}" got rc
-  if [ -n "${pending}" ]; then
+  local name="$1" want="$2" site="$3" pending="${4:-}" docs="${5:-}" got rc
+  if [ -n "${docs}" ]; then
+    python3 -I "${checker}" check "${site}" "${pending}" "${docs}" > "${work}/out" 2>&1 && rc=0 || rc=$?
+  elif [ -n "${pending}" ]; then
     python3 -I "${checker}" check "${site}" "${pending}" > "${work}/out" 2>&1 && rc=0 || rc=$?
   else
     python3 -I "${checker}" check "${site}" > "${work}/out" 2>&1 && rc=0 || rc=$?
@@ -164,6 +166,30 @@ page "${s}/index.html" "./stylesheets/brand.css" '<a href="https://[">bad</a><a 
 expect "malformed URL is reported and the check goes on" fail "${s}"
 mentions "malformed URL" "malformed URL https://"
 mentions "malformed URL, later problem still reported" "broken anchor guide/#nope"
+
+d="${work}/docs"
+rm -rf "${d}"
+mkdir -p "${d}/sub"
+# shellcheck disable=SC2016
+printf '# Page\n\nProse mentioning Mermaid is allowed.\n\n```go\npackage main\n```\n\n````markdown\n```mermaid\ngraph LR\n```\n````\n' > "${d}/clean.md"
+build "${s}"
+expect "docs directory without mermaid fences passes" pass "${s}" "" "${d}"
+
+# shellcheck disable=SC2016
+printf '# Bad\n\n```mermaid\nflowchart LR\n  A --> B\n```\n' > "${d}/sub/bad.md"
+expect "mermaid backtick fence in docs fails" fail "${s}" "" "${d}"
+mentions "mermaid backtick fence" "sub/bad.md:3: mermaid code fence"
+
+rm -f "${d}/sub/bad.md"
+printf '# Bad tilde\n\n~~~Mermaid\nsequenceDiagram\n~~~\n' > "${d}/sub/tilde.md"
+expect "mermaid tilde fence in docs fails" fail "${s}" "" "${d}"
+mentions "mermaid tilde fence" "sub/tilde.md:3: mermaid code fence"
+
+rm -f "${d}/sub/tilde.md"
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<pre><code class="language-mermaid">flowchart LR</code></pre>'
+expect "built HTML with language-mermaid class fails" fail "${s}"
+mentions "built HTML with language-mermaid" "mermaid"
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Checks the built docs site (Zensical output in site/): internal links, heading anchors,
-images, stylesheets, scripts, redirects, and absence of third-party assets.
+images, stylesheets, scripts, redirects, absence of third-party assets, and absence of
+Mermaid code blocks (both in built HTML and in Markdown files under DOCS_DIR).
 
 Usage (run with -I, standard library only):
-  python3 -I hack/docs-site-check.py check SITE_DIR [PENDING_FILE]
+  python3 -I hack/docs-site-check.py check SITE_DIR [PENDING_FILE] [DOCS_DIR]
 
 PENDING_FILE uses the same "<source> -> <target>[#fragment]" format as hack/docs-pages-pending.txt
 (paths relative to the repository root under docs/). Each entry allows one occurrence of that link
 on its source page in the built site. Images, stylesheets, scripts and internal links must resolve
 inside SITE_DIR; links to repository source files outside docs/ must use the repository URL.
+When DOCS_DIR is provided, every Markdown file under it is checked for fenced mermaid code blocks.
 Any broken internal link, broken anchor, missing image, missing stylesheet/script, broken
-meta-refresh redirect, root-relative path outside the site base path, or third-party
-script/stylesheet/image URL exits 1.
+meta-refresh redirect, root-relative path outside the site base path, third-party
+script/stylesheet/image URL, or mermaid code fence exits 1.
 
 Tests: hack/test/docs-site-check_test.sh.
 """
@@ -31,6 +33,8 @@ except ImportError:
 DEFAULT_ZENSICAL_TOML = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zensical.toml"
 )
+
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
 def read_site_url(config_path=DEFAULT_ZENSICAL_TOML):
@@ -88,12 +92,15 @@ class Page(HTMLParser):
         self.images = []
         self.assets = []
         self.refresh = None
+        self.has_mermaid = False
         self._picture_depth = 0
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if a.get("id"):
             self.ids.add(a["id"])
+        if tag in ("code", "pre", "div") and "language-mermaid" in (a.get("class") or "").split():
+            self.has_mermaid = True
         if tag == "a":
             if a.get("name"):
                 self.ids.add(a["name"])
@@ -261,7 +268,38 @@ def read_pending(pending_file):
     return entries
 
 
-def check(site, pending_file=None, site_url=None):
+def check_mermaid_fences(docs_dir):
+    """Reports any Markdown file under docs_dir that opens a mermaid fenced code block."""
+    problems = []
+    for root, dirs, files in os.walk(docs_dir):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(".md"):
+                continue
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, docs_dir).replace(os.sep, "/")
+            in_fence = None
+            with open(full, encoding="utf-8") as f:
+                for line_no, raw in enumerate(f, 1):
+                    m = FENCE_RE.match(raw.rstrip("\r\n"))
+                    if not m:
+                        continue
+                    fence, info = m.group(1), m.group(2).strip()
+                    if in_fence is None:
+                        if fence[0] == "`" and "`" in info:
+                            continue
+                        in_fence = fence
+                        lang = info.split()[0].lower() if info else ""
+                        if lang == "mermaid":
+                            problems.append(
+                                f"{rel}:{line_no}: mermaid code fence is not allowed (use a standalone SVG under docs/diagrams/)"
+                            )
+                    elif fence[0] == in_fence[0] and len(fence) >= len(in_fence) and not info:
+                        in_fence = None
+    return problems
+
+
+def check(site, pending_file=None, site_url=None, docs_dir=None):
     if site_url is None:
         site_url = read_site_url()
     site_url = site_url.rstrip("/")
@@ -351,6 +389,11 @@ def check(site, pending_file=None, site_url=None):
                         continue
                     problems.append(f"{url}: broken anchor {href} (no #{frag} on {path})")
 
+        if p.has_mermaid:
+            problems.append(
+                f"{url}: mermaid code block is not allowed (use a standalone SVG under docs/diagrams/)"
+            )
+
         if p.refresh:
             r = resolve(p.refresh, url, site_parts, base_path)
             if r is not None:
@@ -360,15 +403,19 @@ def check(site, pending_file=None, site_url=None):
                 elif not page_or_file_exists(site, path):
                     problems.append(f"{url}: broken redirect {p.refresh} (no page {path})")
 
+    if docs_dir is not None:
+        problems.extend(check_mermaid_fences(docs_dir))
+
     return problems
 
 
 def main(argv):
-    if len(argv) not in (3, 4) or argv[1] != "check":
+    if len(argv) not in (3, 4, 5) or argv[1] != "check":
         print(__doc__, file=sys.stderr)
         return 2
-    pending = argv[3] if len(argv) == 4 and argv[3] else None
-    problems = check(argv[2], pending)
+    pending = argv[3] if len(argv) >= 4 and argv[3] else None
+    docs_dir = argv[4] if len(argv) == 5 and argv[4] else None
+    problems = check(argv[2], pending, docs_dir=docs_dir)
     for problem in problems:
         print(f"ERROR {problem}", file=sys.stderr)
     if problems:
