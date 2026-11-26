@@ -6,34 +6,35 @@
 </h1>
 
 <p align="center">
-  A control plane that runs coding agents and deterministic programs on one machine under limits you set. Workloads get a short-lived lease instead of provider keys, their model calls, tool calls and approvals go through gates that check the lease, the grant and then the budget or the policy, and most decisions are written to a hash-chained audit log.
+  A control plane that runs coding agents and deterministic programs on one machine under limits you set. Workloads get a task lease instead of provider keys: the Model Gate checks a workload's grant and budget, the MCP Gate its grant and policy, and an action that needs approval waits in a queue until it is approved. The council harnesses are the exception: they use their own subscription login for inference.
 </p>
 
 <p align="center">
   <a href="https://github.com/shadewright-labs/sablecourt/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/shadewright-labs/sablecourt/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="https://codecov.io/gh/shadewright-labs/sablecourt"><img src="https://codecov.io/gh/shadewright-labs/sablecourt/graph/badge.svg" alt="Test coverage on Codecov"></a>
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/shadewright-labs/sablecourt" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
 </p>
 
 > [!WARNING]
-> Nothing is released: there are no tags, binaries or images, and the source is public so you can build it and read it. It runs as one user on one machine and listens on loopback. Host coding runs and the approval dialog work on macOS only. Citadel mode, the Kubernetes runtime, voice and live Takeover are in the tree but parked, and the audit chain is not anchored outside its database, so deleting the last rows goes unnoticed. [SECURITY.md](SECURITY.md) states what the security model holds today.
+> Nothing is released yet: the repository has no tags and no GitHub releases, so you build it from source. The release workflow in the tree could publish binaries and images, but it has never run. By default (Sanctum mode) the daemon runs under your account on one machine and listens on `127.0.0.1:7432`. Host coding runs and the approval dialog need macOS. Citadel mode, the Kubernetes runtime, voice and live Takeover are in the tree but parked, and the audit chain is not anchored outside its database, so deleting the last rows goes unnoticed. [SECURITY.md](SECURITY.md) states what the security model holds today.
 
 ## What it does
 
 1. **Launches** the workloads your manifests declare: a coding CLI on a Git worktree under the macOS Seatbelt sandbox, and long-lived agents and deterministic controllers in Docker containers. Each launched task gets its own lease, revoked when the task ends.
-2. **Gates** model calls: the Model Gate checks the lease, the grant and the budget, then forwards the call to OpenAI, Anthropic, Gemini or a local OpenAI-compatible server with the key it holds. Deterministic controllers are refused there.
+2. **Gates** model calls: for a call through the Model Gate it checks the lease, the provider grant and the budget, then forwards the request to the configured upstream (OpenAI, Anthropic, Gemini, a local OpenAI-compatible server, or one gateway set with `--model-gateway-url`), adding the provider key when one is configured. Deterministic controllers are refused there.
 3. **Checks** tools and actions: the MCP Gate serves the tools a workload is granted and a closed set of typed actions. Deterministic policy decides each call: `allow`, `approve` or `deny`, and no matching rule means deny.
-4. **Asks you** before an action whose effect is `approve`: the payload is pinned by its SHA-256 digest and you confirm it in a native macOS dialog. On other systems approving fails closed and you can only deny.
-5. **Convenes** councils: one question to `claude`, `codex` and `agy`, which answer in rounds on your checkout, each in its own container when a Docker engine is configured.
-6. **Records** policy decisions, approvals, task submission and cancellation, and most model calls in an audit chain that `sablectl audit verify` checks.
+4. **Queues** an action whose effect is `approve`, pinned by the SHA-256 digest of its payload. In Sanctum mode you confirm it in a native macOS dialog. The API also accepts a signature from a device enrolled earlier, but enrolling a device answers `503` today, so on a fresh install outside macOS you can only deny.
+5. **Convenes** councils: one question to `claude`, `codex` and `agy`, which answer in rounds on your checkout, and the room posts each seat's valid final answer. With a Docker engine configured, each turn runs in its own container; without one, turns run on the host under macOS Seatbelt.
+6. **Records** policy and approval outcomes, task submission and cancellation, Model Gate refusals and successful calls in an audit chain that `sablectl audit verify` checks. An upstream error that the Model Gate passes through leaves no row, and council inference does not pass the Model Gate at all.
 
 A model's answer is never authorization: only deterministic policy, or a person confirming a pinned digest, lets an action run.
 
-[![Callers reach the sablecourtd control plane; it launches workloads with leases; workloads reach the Model Gate, MCP Gate and Approval Queue, which reach providers and the Git host.](docs/diagrams/system-context.svg)](docs/diagrams/system-context.svg)
+[![The daemon launches workloads with leases. The Model Gate forwards inference, the MCP Gate handles tools and Git actions, and actions that need approval go to the queue. Council harnesses reach their providers through their proxy.](docs/diagrams/system-context.svg)](docs/diagrams/system-context.svg)
 
 ## State of the areas
 
-The full table, with the open issues behind each gap, is on the [docs home page](docs/index.md#status).
+The [docs home page](docs/index.md#status) has a longer status table with issue references.
 
 | Area | State | Limits |
 | --- | --- | --- |
@@ -41,27 +42,27 @@ The full table, with the open issues behind each gap, is on the [docs home page]
 | Host coding runs | Built | macOS Seatbelt only |
 | Docker workloads and deterministic controllers | Built | |
 | Model Gate, MCP Gate, typed actions, policy | Built | The upstream MCP bridge is parked |
-| Approvals | Partly built | Device pairing answers `503`; approving needs the macOS dialog |
+| Approvals | Partly built | Pairing a device answers `503`, so a fresh install approves only through the macOS dialog; a device enrolled earlier can still sign |
 | Conclaves | Built | Voice and live Takeover are parked |
-| Council | Partly built | The room does not post a harness's final message by itself |
-| Learning | Partly built | Old `learning:` entries still reach context packets; the reviewed learning record is stored but nothing accepts or injects it |
+| Council | Built | The room posts a completed seat's valid final answer; an empty or missing final message gives no answer. Harness inference uses each harness's own login and is not counted by the Model Gate |
+| Learning | Partly built | Matching legacy `learning:` entries still reach context packets. SQLite stores reviewed learning records, but acceptance has no operator interface and packets do not use those records |
 | Audit chain | Built | Misses deletion of the last rows; not anchored outside the database |
-| Shadewright incident intake | Partly built | Incidents and verification reports are accepted; the caller cannot read a status back |
-| Court Memory search | Built | `LIKE` matching, no full-text search |
+| Shadewright incident intake | Partly built | Both POST routes return a result; there is no GET for an incident's later status |
+| Court Memory search | Built | SQLite uses `LIKE`, the parked PostgreSQL store `ILIKE`; no full-text search |
 | Citadel mode, Kubernetes, PostgreSQL, A2A, GitHub webhook, chat alerts | Parked | |
 
 ## Install
 
-Nothing is released, so build it from source. You need the Go version named in [go.mod](go.mod), macOS or Linux, and for councils a macOS host with Docker Engine 28.0 or newer.
+Nothing is released, so build from source with `make install`. You need Go 1.27.4 or newer (the version in [go.mod](go.mod)) on macOS or Linux.
 
 ```bash
 git clone https://github.com/shadewright-labs/sablecourt.git
 cd sablecourt
 make install                                       # sablecourtd and sablectl into ~/.local/bin
-sablecourtd --manifests=examples/local-demo.yaml   # listens on 127.0.0.1:7432
+sablecourtd --manifests=examples/local-demo.yaml   # listens on 127.0.0.1:7432 by default
 ```
 
-The daemon keeps its state, including the operator token, in `$SABLECOURT_STATE_DIR` or `~/.local/share/sablecourt`. Open the web UI at `http://127.0.0.1:7432` and sign in with that token, or use `sablectl`, which reads the token from the same directory:
+The daemon writes `operator.token` to `$SABLECOURT_STATE_DIR`, by default `~/.local/share/sablecourt`. Its SQLite database defaults to `sablecourt.db` in the directory you start it from; `--db` chooses another path. Open the web UI at `http://127.0.0.1:7432` and sign in with the token, or use `sablectl`, which reads the token from the same directory:
 
 ```bash
 sablectl workload list
@@ -69,7 +70,7 @@ sablectl conclave open feature-conclave --title="Fix retry timeout"
 sablectl conclave list
 ```
 
-A council (`sablectl council "<question>"`) needs more setup: the harness images and logins in the [council guide](docs/how-to/run-a-council.md).
+Councils (`sablectl council "<question>"`) need more setup, and the CLI wants `claude`, `codex` and `agy` on its own `PATH` in both modes. In container mode, the daemon needs Docker Engine 28.0 or newer with isolated gateway networking, and each seat needs its harness image (built for `linux/arm64`) from `sablectl harness build <role>` and a login from `sablectl harness login <role>`. Without Docker, the daemon admits a council only on a host where the macOS Seatbelt sandbox works and the three CLIs are on its `PATH`.
 
 ## Guides
 
@@ -79,7 +80,7 @@ A council (`sablectl council "<question>"`) needs more setup: the harness images
 - [Run a council](docs/how-to/run-a-council.md) and [log in to harnesses](docs/how-to/log-in-harnesses.md).
 - [Review an approval](docs/how-to/review-an-approval.md): read the pinned payload, then approve or deny.
 - [Watch and steer](docs/how-to/watch-and-steer.md) and [retry with a handoff](docs/how-to/retry-with-handoff.md).
-- [Reference](docs/reference/index.md): manifests, HTTP API, CLI, configuration, limits and metrics, checked against the code by tests.
+- [Reference](docs/reference/index.md): manifests, HTTP API, CLI, configuration, limits and metrics, with the tested parts checked against the code.
 - [Decision records](docs/adr/README.md) and the [diagram standard](docs/diagrams/README.md).
 
 ## Repositories
@@ -87,8 +88,8 @@ A council (`sablectl council "<question>"`) needs more setup: the harness images
 | Repository | Contents |
 | --- | --- |
 | [sablecourt](https://github.com/shadewright-labs/sablecourt) | The daemon `sablecourtd`, the CLI `sablectl` and these docs |
-| [shadewright](https://github.com/shadewright-labs/shadewright) | The Kubernetes remediation operator. Its one-way handoff of incidents to Sablecourt is decided in its ADR-0049 and not built yet |
-| [shadewright-labs.github.io](https://github.com/shadewright-labs/shadewright-labs.github.io) | The organisation's site, [shadewrightlabs.com](https://shadewrightlabs.com) |
+| [shadewright](https://github.com/shadewright-labs/shadewright) | The Kubernetes remediation operator. Its ADR-0049 decides a one-way handoff of incidents to Sablecourt; its code has no sender yet |
+| [shadewright-labs.github.io](https://github.com/shadewright-labs/shadewright-labs.github.io) | Website repository. Website: [shadewrightlabs.com](https://shadewrightlabs.com) |
 
 ## Development
 
@@ -97,18 +98,18 @@ make test         # go test -race ./...
 make vet          # go vet ./...
 make build        # bin/sablecourtd and bin/sablectl
 make docs         # regenerate the generated blocks of docs/reference/cli.md
-make docs-check   # fail when a reference page no longer matches the code
+make docs-check   # check the generated CLI blocks and the tested parts of the reference pages
 make agent-image  # the built-in agent container image
 make demo         # run the daemon with examples/local-demo.yaml
 ```
 
-On macOS, `make service-install` runs the daemon as a launchd job and `make service-uninstall` removes it. CI runs two jobs on every pull request: `verify` (vet, race tests, a short fuzz run, the binaries and the example manifests) and `security` (govulncheck, gosec and gitleaks).
+On macOS, `make service-install` runs the daemon as a launchd job and `make service-uninstall` removes it. On pull requests targeting `main`, CI runs two jobs: `verify` (vet, race tests, a short fuzz run, the binaries and the example manifests) and `security` (govulncheck, gosec and gitleaks).
 
 Contributor and coding-agent guide: [AGENTS.md](AGENTS.md).
 
 ## The name
 
-*Sable* is heraldic black, the colour of the Shadewright Labs line. A *court* is both a council of separate houses and a tribunal: here, agents and programs of different kinds working side by side under one set of rules, enforced by the policy, the budgets and the gates.
+*Sable* is heraldic black. A *court* is both a council of separate houses and a tribunal: here, agents and programs of different kinds working side by side under one set of rules, enforced by the policy, the budgets and the gates.
 
 ## License
 
