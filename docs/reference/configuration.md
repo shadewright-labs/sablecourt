@@ -97,6 +97,8 @@ Some names are read only to copy them into the environment of a program the daem
 | `GOCACHE`, `TMPDIR` | `sablectl harness build` | `go` when it builds the council proxy |
 | `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH` | `sablectl harness build` | `docker` |
 
+`sablectl harness install` and `sablectl harness login` download the pinned `claude` or `agy` tool with Go's HTTP client, which reads `HTTPS_PROXY` and `NO_PROXY` (either case) from the environment of `sablectl`.
+
 ## Environment passed to workloads
 
 Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/coding`.
@@ -117,6 +119,8 @@ Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/cod
 ## Harness images
 
 Source: `internal/harnessimages`, `cmd/sablectl/harness.go`. `sablectl harness build <role>` builds one image per council member for `linux/arm64`. Each container runs as user 10001:10001 with its state in `/home/harness`. You log each harness in once inside its container, and the login is kept in a Docker volume.
+
+The `claude` and `agy` images carry no vendor tool; the login installs the pinned tool into the tool volume `sablecourt-harness-<role>-tool` ([harness images](../how-to/harness-images.md)).
 
 | Role | Pinned version | Login command | Login volume |
 | --- | --- | --- | --- |

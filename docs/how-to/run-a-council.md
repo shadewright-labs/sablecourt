@@ -8,7 +8,7 @@ Ask `claude`, `codex` and `agy` one question about a repository and read the ans
 
 - The daemon is running in Sanctum mode and `sablectl` can reach it ([install and start](install-and-start.md)).
 - `claude`, `codex` and `agy` are on the `PATH` of both `sablectl` and the daemon, even though turns run in containers.
-- Docker Engine 28.0 or newer, the three harness images built and each harness logged in ([log in to harnesses](log-in-harnesses.md)).
+- Docker Engine 28.0 or newer, the three harness images built and each harness logged in ([log in to harnesses](log-in-harnesses.md)). The `claude` and `agy` images carry no vendor tool: the login installs it ([harness images and tool install](harness-images.md)).
 - A macOS host where Seatbelt works: the daemon probes it when a council opens and refuses the council on any other platform.
 - A Git checkout owned by the daemon's user, with its own `.git` directory (not a linked worktree), outside the daemon state directory and outside credential directories such as `~/.ssh` and `~/.config`.
 
