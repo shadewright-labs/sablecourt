@@ -5,8 +5,9 @@ name: Release assets
 # the tag and publishes it:
 #
 # - gate: checks the tag is on main (hack/require-on-main.sh) and is a tag the release process makes
-#   (hack/check-release-tag.sh), and stops the run when the release is already published (hack/release-state.sh),
-#   so a full rerun after publication skips every other job, ends green and changes nothing.
+#   (hack/check-release-tag.sh), and reads the release state (hack/release-state.sh; any error but "not found"
+#   fails). When the release is already published, no job below writes anything: only verify-published runs,
+#   and the run ends green only if that release passes the full verification.
 # - build: builds sablecourtd and sablectl for darwin
 #   and linux, amd64 and arm64 (hack/package-binaries.sh: sablecourt_<version>_<os>_<arch>.tar.gz and
 #   checksums.txt). No permission beyond contents: read, no Go cache.
@@ -14,14 +15,21 @@ name: Release assets
 #   records a GitHub build provenance attestation per archive, and verifies both against the identity of this
 #   workflow at exactly this tag and commit. The only job with id-token and attestations: write; it sees only the built files.
 # - images: resolves the tag's sablecourt and sablecourt-agent images and verifies their signatures, SBOMs and
-#   build provenance against images.yml on this tag (hack/resolve-image-digests.sh), waiting up to 30 minutes for the Images run.
-# - upload: uploads the archives, checksums.txt and the bundle to the draft release (waits up to five minutes for
-#   it, refuses a published release, re-uploads with --clobber on a rerun).
+#   build provenance against images.yml on this tag and commit (hack/resolve-image-digests.sh), waiting up to 30
+#   minutes for the Images run to promote them.
+# - upload: uploads the archives, checksums.txt and the bundle to the draft release (hack/upload-release-assets.sh:
+#   waits up to five minutes for the draft, reads the draft state before every attempt and refuses anything but a
+#   draft, re-uploads with --clobber on a rerun).
 # - release-notes: appends the image digests and the verify commands to the release body, between markers
 #   (hack/release-verify-notes.sh), so a rerun replaces the section.
 # - publish-release: publishes the draft only when it has a boolean draft state, its pre-release flag matches the
-#   tag, the exact section is present and all six assets are uploaded with the digests of the files the build and
-#   sign jobs made (hack/publish-release.sh); otherwise it fails and leaves the draft unpublished.
+#   tag, the exact section is present and its assets are exactly the six files the build and sign jobs made, with
+#   their digests (hack/publish-release.sh, which reads the draft again just before publishing); otherwise it
+#   fails and leaves the draft unpublished.
+# - verify-published (only when the gate found the release published): downloads the release's assets, verifies
+#   the checksums signature, the checksums and each archive's provenance against release.yml at this tag and
+#   commit, resolves and verifies both images, and requires the exact asset set and the notes section for those
+#   digests (hack/publish-release.sh verify-only). It has no write permission.
 #
 # No `release: published` trigger anywhere: creating a draft emits no such event, and a release published with
 # GITHUB_TOKEN does not trigger other workflows. Only upload, release-notes and publish-release have
@@ -205,7 +213,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" | tee "${RUNNER_TEMP}/digests.txt" >> "${GITHUB_OUTPUT}"
+          hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" "${GITHUB_SHA}" | tee "${RUNNER_TEMP}/digests.txt" >> "${GITHUB_OUTPUT}"
           cat "${RUNNER_TEMP}/digests.txt" >> "${GITHUB_STEP_SUMMARY}"
 
   # The first job with contents: write. It runs no build and no signing: it uploads the files the jobs above made.
@@ -224,45 +232,18 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/dist
 
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Upload the assets
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           DIST: ${{ runner.temp }}/dist
-        run: |
-          set -euo pipefail
-          draft=false
-          for _ in $(seq 1 20); do
-            if state="$(gh release view "${TAG}" --json isDraft --jq .isDraft)"; then
-              if [ "${state}" != true ]; then
-                echo "release ${TAG} is already published; refusing asset upload" >&2
-                exit 1
-              fi
-              draft=true
-              break
-            fi
-            sleep 15
-          done
-          if [ "${draft}" != true ]; then
-            echo "no draft release for ${TAG} after 5 minutes; create the draft, then re-run this job" >&2
-            exit 1
-          fi
-          uploaded=false
-          for _ in $(seq 1 20); do
-            if gh release upload "${TAG}" --clobber \
-              "${DIST}"/sablecourt_*.tar.gz "${DIST}/checksums.txt" "${DIST}/checksums.txt.sigstore.json" 2> "${RUNNER_TEMP}/upload.err"; then
-              uploaded=true
-              break
-            fi
-            echo "could not upload to the release ${TAG} yet ($(tail -n 1 "${RUNNER_TEMP}/upload.err")), retrying in 15 s"
-            sleep 15
-          done
-          if [ "${uploaded}" != true ]; then
-            echo "no upload to the release ${TAG} after 5 minutes (last error: $(cat "${RUNNER_TEMP}/upload.err")); check the draft and re-run this job" >&2
-            exit 1
-          fi
-          echo "release ${TAG}: archives, checksums.txt and its signature uploaded" >> "${GITHUB_STEP_SUMMARY}"
+        run: hack/upload-release-assets.sh "${REPOSITORY}" "${TAG}" "${DIST}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
   release-notes:
     name: Add digests and verify steps to the release
@@ -288,6 +269,8 @@ jobs:
           set -euo pipefail
           body="${RUNNER_TEMP}/body.md"
           notes="${RUNNER_TEMP}/notes.md"
+          # Edit only a draft: a published release is never rewritten.
+          [ "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = true ] || { echo "release ${TAG} is not a draft; not editing it" >&2; exit 1; }
           gh release view "${TAG}" --json body --jq .body > "${body}"
           hack/release-verify-notes.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" < "${body}" > "${notes}"
           gh release edit "${TAG}" --notes-file "${notes}"
@@ -323,3 +306,73 @@ jobs:
           AGENT: ${{ needs.images.outputs.agent }}
           DIST: ${{ runner.temp }}/dist
         run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" "${DIST}"
+
+  # A rerun after publication: nothing is written, and the run is green only if the public release checks out.
+  verify-published:
+    name: Verify the published release
+    needs: [gate]
+    if: needs.gate.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # read the release and download its assets
+      packages: read
+      attestations: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Log in to GHCR
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Verify the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          dist="${RUNNER_TEMP}/published"
+          mkdir -p "${dist}"
+          gh release download "${TAG}" --repo "${REPOSITORY}" --dir "${dist}"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          cosign verify-blob \
+            --bundle "${dist}/checksums.txt.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${dist}/checksums.txt"
+          (cd "${dist}" && sha256sum --check --strict checksums.txt)
+          for archive in "${dist}"/sablecourt_*.tar.gz; do
+            gh attestation verify "${archive}" \
+              --repo "${REPOSITORY}" \
+              --signer-workflow "${REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "${GITHUB_REF}" --source-digest "${GITHUB_SHA}"
+          done
+
+      - name: Verify the images
+        id: images
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
+        run: WAIT_SECONDS=0 hack/resolve-image-digests.sh "${TAG}" "${REPOSITORY}" "${OWNER}" "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      # Exactly the six assets (an extra one fails), each with the digest of the verified download, and the
+      # notes section for the verified image digests. verify-only never writes.
+      - name: Require the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DAEMON: ${{ steps.images.outputs.daemon }}
+          AGENT: ${{ steps.images.outputs.agent }}
+        run: hack/publish-release.sh "${REPOSITORY}" "${TAG}" "${DAEMON}" "${AGENT}" "${RUNNER_TEMP}/published" verify-only

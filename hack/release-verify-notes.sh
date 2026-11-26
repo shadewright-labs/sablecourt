@@ -3,7 +3,9 @@
 # its GitHub release (the release-notes job of .github/workflows/release.yml). Usage:
 #   hack/release-verify-notes.sh <owner/repo> <tag> <daemon image digest> <agent image digest> < body > new body
 # The section sits between two HTML comment markers. A body that already has it gets it replaced, so a rerun
-# of the job leaves exactly one copy; anything else in the body is kept as it is. The identities are pinned to
+# of the job leaves exactly one copy; anything else in the body is kept as it is. A body whose markers are not
+# exactly one start line followed by one end line is refused (exit 1) without output, so no rerun can pair a
+# stray marker with a new one and delete the prose between them. The identities are pinned to
 # the tag, so a signature of another tag or branch does not verify. Digests must be sha256: and 64 lower case
 # hex digits; the repository, the tag and the digests are validated before they reach the text.
 set -euo pipefail
@@ -81,15 +83,27 @@ TEXT
 )"
 
 body="$(cat)"
-# Drop an earlier copy of the section (markers included), then append the current one.
-# An opening marker without a closing one drops nothing: the lines after it are kept as they were.
+# The body may hold the section at most once, as two marker lines in order. Anything else (a lone marker, two
+# sections, the end before the start, a marker inside a line of prose) is refused before anything is changed,
+# because pairing such markers could drop prose that lies between them; fix the release body by hand.
+if ! printf '%s\n' "${body}" | awk -v s="${start}" -v e="${end}" '
+  { line = $0; sub(/\r$/, "", line) }
+  index(line, s) || index(line, e) {
+    if (line == s && !open && !done) { open = 1; next }
+    if (line == e && open) { open = 0; done = 1; next }
+    bad = 1
+  }
+  END { exit (bad || open) ? 1 : 0 }
+'; then
+  echo "the release body has unpaired, repeated or malformed ${start} / ${end} markers; fix the body by hand, then re-run" >&2
+  exit 1
+fi
+# Drop the earlier copy of the section (markers included), then append the current one.
 body="$(printf '%s\n' "${body}" | awk -v s="${start}" -v e="${end}" '
   { line = $0; sub(/\r$/, "", line) }
-  !skip && line == s { skip = 1; held = $0; next }
-  skip && line == e { skip = 0; held = ""; next }
-  skip { held = held "\n" $0; next }
-  { print }
-  END { if (skip) print held }
+  !skip && line == s { skip = 1; next }
+  skip && line == e { skip = 0; next }
+  !skip { print }
 ')"
 # Trim trailing blank lines.
 body="$(printf '%s' "${body}" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')"

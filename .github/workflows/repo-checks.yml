@@ -58,3 +58,6 @@ jobs:
 
       - name: Test the Dockerfile check
         run: hack/test/dockerfiles_test.sh
+
+      - name: Test the publishing workflows' structure
+        run: hack/test/workflows_test.sh
