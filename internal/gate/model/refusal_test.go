@@ -91,7 +91,7 @@ func TestModelGateRefusals(t *testing.T) {
 
 func TestModelGateUpstreamCredentialRefusals(t *testing.T) {
 	ctx := context.Background()
-	body := `{"model":"gpt-4o-mini","messages":[],"max_tokens":5}`
+	body := `{"model":"gpt-4o-mini","messages":[],"max_tokens":300}`
 	cases := []struct {
 		name      string
 		upstreams map[string]UpstreamConfig
@@ -124,7 +124,12 @@ func TestModelGateUpstreamCredentialRefusals(t *testing.T) {
 			if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.msg) || calls != 0 {
 				t.Fatalf("got %d %s (calls %d), want %d %q", rec.Code, rec.Body.String(), calls, tc.code, tc.msg)
 			}
-			// The reservation taken before the refusal is released.
+			// The reservation taken before the refusal is released: a leaked one would
+			// make the same request exceed the per-task output budget the second time.
+			again := doGateRequest(gate.Handler(), http.MethodPost, "/openai/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + tok})
+			if again.Code != tc.code {
+				t.Fatalf("repeated request got %d %s, want %d", again.Code, again.Body.String(), tc.code)
+			}
 			if used, err := st.TaskBudgetTotals(ctx, "t1"); err != nil || used != (domain.BudgetTotals{}) {
 				t.Fatalf("refused request left budget used or reserved: %+v, %v", used, err)
 			}
