@@ -261,14 +261,14 @@ func settleUsageForEntry(activeProvider, reqModel string, parsed parsedUsage, re
 		u.CacheReadTokens = max(u.CacheReadTokens, 0)
 		u.OutputTokens = max(u.OutputTokens, 0)
 		if u.TotalTokens() == 0 {
-			// The response carried all-zero usage. Charge the reserved estimate
-			// so a 2xx call is never free.
+			// The response carried all-zero usage. Charge at least the admitted
+			// reserve estimate so a 2xx call is never free or below admission.
 			u.InputTokens = reserve.TotalInputTokens()
 			u.CacheWriteTokens = 0
 			u.CacheWrite1hTokens = 0
 			u.CacheReadTokens = 0
 			u.OutputTokens = reserve.OutputTokens
-			costMicro := max(estimateReserveMicroUSD(activeProvider, reqModel, u.InputTokens, u.OutputTokens, pricing), 0)
+			costMicro := max(reserve.CostMicroUSD, estimateReserveMicroUSD(activeProvider, reqModel, u.InputTokens, u.OutputTokens, pricing), 0)
 			return u, costMicro
 		}
 		// Price with the admitted request model, the identity the reservation was
@@ -279,7 +279,7 @@ func settleUsageForEntry(activeProvider, reqModel string, parsed parsedUsage, re
 	case usageOutcomePartial:
 		// Partial stream usage is a lower bound (or contradictory on
 		// ErrInconsistent), never final. Fail closed: never settle below the
-		// reserved tokens or cost, and never apply cache-read discounts.
+		// reserved tokens or admitted reserve cost, and never apply cache-read discounts.
 		totalIn := max(u.TotalInputTokens(), reserve.TotalInputTokens())
 		cacheWrite := min(max(u.CacheWriteTokens, 0), totalIn)
 		cacheWrite1h := min(max(u.CacheWrite1hTokens, 0), cacheWrite)
@@ -288,23 +288,24 @@ func settleUsageForEntry(activeProvider, reqModel string, parsed parsedUsage, re
 		u.CacheWrite1hTokens = cacheWrite1h
 		u.CacheReadTokens = 0
 		u.OutputTokens = max(u.OutputTokens, reserve.OutputTokens)
-		costMicro := max(EstimateUsageMicroUSD(activeProvider, reqModel, u, pricing), 0)
-		reserveCost := max(estimateReserveMicroUSD(activeProvider, reqModel, reserve.TotalInputTokens(), reserve.OutputTokens, pricing), 0)
-		if reserveCost > costMicro {
-			costMicro = reserveCost
-		}
+		costMicro := max(
+			EstimateUsageMicroUSD(activeProvider, reqModel, u, pricing),
+			estimateReserveMicroUSD(activeProvider, reqModel, reserve.TotalInputTokens(), reserve.OutputTokens, pricing),
+			reserve.CostMicroUSD,
+			0,
+		)
 		return u, costMicro
 
 	default:
 		// Usage could not be read (ErrNoUsage, ErrMalformed, ErrOutOfRange,
-		// ErrTruncated, or LimitError). Settle the reserved estimate so the
-		// call is never free.
+		// ErrTruncated, or LimitError). Settle at least the admitted reserve
+		// estimate so the call is never free or below admission.
 		u.InputTokens = reserve.TotalInputTokens()
 		u.CacheWriteTokens = 0
 		u.CacheWrite1hTokens = 0
 		u.CacheReadTokens = 0
 		u.OutputTokens = reserve.OutputTokens
-		costMicro := max(estimateReserveMicroUSD(activeProvider, reqModel, u.InputTokens, u.OutputTokens, pricing), 0)
+		costMicro := max(reserve.CostMicroUSD, estimateReserveMicroUSD(activeProvider, reqModel, u.InputTokens, u.OutputTokens, pricing), 0)
 		return u, costMicro
 	}
 }
@@ -314,9 +315,12 @@ func parseGeminiUsage(body []byte, isSSE bool) parsedUsage {
 		return parsedUsage{Outcome: usageOutcomeNone, Err: modelusage.ErrTooLarge}
 	}
 	if !isSSE {
-		u, ok := parseGeminiJSON(body)
+		u, ok, err := parseGeminiJSONChecked(body)
+		if err != nil {
+			return parsedUsage{Usage: u, Outcome: usageOutcomeNone, Err: err}
+		}
 		if !ok {
-			return parsedUsage{Outcome: usageOutcomeNone}
+			return parsedUsage{Usage: u, Outcome: usageOutcomeNone}
 		}
 		return parsedUsage{Usage: u, Outcome: usageOutcomeFinal}
 	}
@@ -333,21 +337,40 @@ func parseGeminiUsage(body []byte, isSSE bool) parsedUsage {
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}
-		u, ok := parseGeminiJSON([]byte(payload))
-		if !ok {
-			continue
+		u, ok, err := parseGeminiJSONChecked([]byte(payload))
+		if err != nil {
+			if errors.Is(err, modelusage.ErrOutOfRange) {
+				return parsedUsage{Usage: Usage{Model: acc.Model}, Outcome: usageOutcomeNone, Err: err}
+			}
+			if seen {
+				return parsedUsage{Usage: acc, Outcome: usageOutcomePartial, Err: err}
+			}
+			return parsedUsage{Usage: acc, Outcome: usageOutcomeNone, Err: err}
 		}
 		if u.Model != "" {
 			acc.Model = u.Model
 		}
-		if u.InputTokens > 0 {
+		if !ok {
+			continue
+		}
+		if u.TotalInputTokens() > 0 {
 			acc.InputTokens = u.InputTokens
+			acc.CacheReadTokens = u.CacheReadTokens
 			seen = true
 		}
 		if u.OutputTokens > 0 {
 			acc.OutputTokens = u.OutputTokens
 			seen = true
 		}
+		if acc.TotalInputTokens() > maxReservedTokens-acc.OutputTokens {
+			return parsedUsage{Usage: Usage{Model: acc.Model}, Outcome: usageOutcomeNone, Err: modelusage.ErrOutOfRange}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if seen {
+			return parsedUsage{Usage: acc, Outcome: usageOutcomePartial, Err: err}
+		}
+		return parsedUsage{Usage: acc, Outcome: usageOutcomeNone, Err: err}
 	}
 	if !seen {
 		return parsedUsage{Usage: acc, Outcome: usageOutcomeNone}
@@ -356,27 +379,57 @@ func parseGeminiUsage(body []byte, isSSE bool) parsedUsage {
 }
 
 func parseGeminiJSON(body []byte) (Usage, bool) {
+	u, ok, err := parseGeminiJSONChecked(body)
+	if err != nil {
+		return Usage{Model: u.Model}, false
+	}
+	return u, ok
+}
+
+func parseGeminiJSONChecked(body []byte) (Usage, bool, error) {
 	var resp struct {
 		ModelVersion  string `json:"modelVersion"`
 		UsageMetadata struct {
-			PromptTokenCount     int64 `json:"promptTokenCount"`
-			CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+			PromptTokenCount        int64 `json:"promptTokenCount"`
+			CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
+			CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
 			// Thinking tokens are reported apart from the candidates and are billed as output.
 			ThoughtsTokenCount int64 `json:"thoughtsTokenCount"`
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return Usage{}, false
+		return Usage{}, false, modelusage.ErrMalformed
 	}
-	output := max(resp.UsageMetadata.CandidatesTokenCount, 0) + max(resp.UsageMetadata.ThoughtsTokenCount, 0)
-	if resp.UsageMetadata.PromptTokenCount <= 0 && output <= 0 {
-		return Usage{Model: resp.ModelVersion}, false
+	meta := resp.UsageMetadata
+	if meta.PromptTokenCount > maxReservedTokens ||
+		meta.CachedContentTokenCount > maxReservedTokens ||
+		meta.CandidatesTokenCount > maxReservedTokens ||
+		meta.ThoughtsTokenCount > maxReservedTokens {
+		return Usage{Model: resp.ModelVersion}, false, modelusage.ErrOutOfRange
+	}
+	prompt := max(meta.PromptTokenCount, 0)
+	cached := max(meta.CachedContentTokenCount, 0)
+	candidates := max(meta.CandidatesTokenCount, 0)
+	thoughts := max(meta.ThoughtsTokenCount, 0)
+	if cached > prompt {
+		return Usage{Model: resp.ModelVersion}, false, modelusage.ErrOutOfRange
+	}
+	if candidates > maxReservedTokens-thoughts {
+		return Usage{Model: resp.ModelVersion}, false, modelusage.ErrOutOfRange
+	}
+	output := candidates + thoughts
+	if prompt > maxReservedTokens-output {
+		return Usage{Model: resp.ModelVersion}, false, modelusage.ErrOutOfRange
+	}
+	if prompt <= 0 && output <= 0 {
+		return Usage{Model: resp.ModelVersion}, false, nil
 	}
 	return Usage{
-		Model:        resp.ModelVersion,
-		InputTokens:  max(resp.UsageMetadata.PromptTokenCount, 0),
-		OutputTokens: output,
-	}, true
+		Model:           resp.ModelVersion,
+		InputTokens:     prompt - cached,
+		CacheReadTokens: cached,
+		OutputTokens:    output,
+	}, true, nil
 }
 
 func extractResponseModel(provider string, body []byte, isSSE bool) string {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -258,8 +259,6 @@ func TestModelGateAccountsAnthropicCacheTokensAndOpenAIShapes(t *testing.T) {
 }
 
 func TestParseUsageOutcomesAndFailClosedSettlement(t *testing.T) {
-	reserve := domain.BudgetTotals{InputTokens: 100, OutputTokens: 50, CostMicroUSD: 1350}
-
 	tests := []struct {
 		name           string
 		provider       string
@@ -476,6 +475,11 @@ func TestParseUsageOutcomesAndFailClosedSettlement(t *testing.T) {
 				if _, ok := errors.AsType[*modelusage.TrailingError](parsed.Err); !ok {
 					t.Fatalf("err = %T (%v), want *modelusage.TrailingError", parsed.Err, parsed.Err)
 				}
+			}
+			reserve := domain.BudgetTotals{
+				InputTokens:  100,
+				OutputTokens: 50,
+				CostMicroUSD: estimateReserveMicroUSD(tc.provider, "model-x", 100, 50, nil),
 			}
 			settled, cost := settleUsageForEntry(tc.provider, "model-x", parsed, reserve, nil)
 			if settled.InputTokens != tc.wantIn || settled.CacheWriteTokens != tc.wantCacheWrite ||
@@ -1092,4 +1096,445 @@ func TestMicroUSDFromFloatRoundsUpAtBoundaries(t *testing.T) {
 	if got := EstimateUsageMicroUSD("anthropic", "claude-sonnet-4-5", Usage{CacheReadTokens: 1}, nil); got != 1 {
 		t.Errorf("1 anthropic cache-read token cost = %d, want 1", got)
 	}
+}
+
+func TestSettlementNeverBelowAdmittedReserve(t *testing.T) {
+	// Admission reserved 103 microUSD (openai rate for 1 input, 10 output).
+	admittedReserve := domain.BudgetTotals{
+		InputTokens:  1,
+		OutputTokens: 10,
+		CostMicroUSD: 103,
+	}
+
+	unitCases := []struct {
+		name           string
+		activeProvider string
+		parsed         parsedUsage
+		wantIn         int64
+		wantOut        int64
+		wantCost       int64
+	}{
+		{
+			name:           "unreadable usage with cheaper active provider settles admitted reserve",
+			activeProvider: "local",
+			parsed:         parsedUsage{Outcome: usageOutcomeNone, Err: modelusage.ErrNoUsage},
+			wantIn:         1,
+			wantOut:        10,
+			wantCost:       103,
+		},
+		{
+			name:           "all-zero usage with cheaper active provider settles admitted reserve",
+			activeProvider: "local",
+			parsed:         parsedUsage{Outcome: usageOutcomeFinal, Usage: Usage{}},
+			wantIn:         1,
+			wantOut:        10,
+			wantCost:       103,
+		},
+		{
+			name:           "partial usage with cheaper active provider floors at admitted reserve",
+			activeProvider: "local",
+			parsed:         parsedUsage{Outcome: usageOutcomePartial, Usage: Usage{InputTokens: 1, OutputTokens: 2}},
+			wantIn:         1,
+			wantOut:        10,
+			wantCost:       103,
+		},
+		{
+			name:           "nonzero final usage keeps active provider rates",
+			activeProvider: "local",
+			parsed:         parsedUsage{Outcome: usageOutcomeFinal, Usage: Usage{InputTokens: 1, OutputTokens: 10}},
+			wantIn:         1,
+			wantOut:        10,
+			wantCost:       0,
+		},
+		{
+			name:           "partial usage above admitted reserve charges higher partial cost",
+			activeProvider: "openai",
+			parsed:         parsedUsage{Outcome: usageOutcomePartial, Usage: Usage{InputTokens: 100, OutputTokens: 50}},
+			wantIn:         100,
+			wantOut:        50,
+			wantCost:       750,
+		},
+	}
+
+	for _, tc := range unitCases {
+		t.Run(tc.name, func(t *testing.T) {
+			settled, cost := settleUsageForEntry(tc.activeProvider, "gpt-5", tc.parsed, admittedReserve, nil)
+			if settled.InputTokens != tc.wantIn || settled.OutputTokens != tc.wantOut {
+				t.Errorf("settled = %+v, want in=%d out=%d", settled, tc.wantIn, tc.wantOut)
+			}
+			if cost != tc.wantCost {
+				t.Errorf("cost = %d, want %d", cost, tc.wantCost)
+			}
+		})
+	}
+
+	// End-to-end through Gate.Handler(): both primary-local-with-openai-fallback and
+	// primary-openai-failing-over-to-local must settle at least the admitted reserve
+	// cost (103 microUSD) when usage is unreadable, all-zero, or partial.
+	e2eCases := []struct {
+		name        string
+		route       string
+		failPrimary bool
+		contentType string
+		respBody    string
+		wantCost    int64
+	}{
+		{
+			name:        "e2e local primary with openai fallback unreadable usage",
+			route:       "/local/v1/chat/completions",
+			contentType: "application/json",
+			respBody:    `{"id":"local-no-usage"}`,
+			wantCost:    103,
+		},
+		{
+			name:        "e2e local primary with openai fallback all-zero usage",
+			route:       "/local/v1/chat/completions",
+			contentType: "application/json",
+			respBody:    `{"model":"gpt-5","usage":{"prompt_tokens":0,"completion_tokens":0}}`,
+			wantCost:    103,
+		},
+		{
+			name:        "e2e local primary with openai fallback partial stream",
+			route:       "/local/v1/chat/completions",
+			contentType: "text/event-stream",
+			respBody:    `data: {"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":2}}` + "\n\n",
+			wantCost:    103,
+		},
+		{
+			name:        "e2e openai fallback to local unreadable usage",
+			route:       "/openai/v1/chat/completions",
+			failPrimary: true,
+			contentType: "application/json",
+			respBody:    `{"id":"fallback-no-usage"}`,
+			wantCost:    103,
+		},
+		{
+			name:        "e2e openai fallback to local all-zero usage",
+			route:       "/openai/v1/chat/completions",
+			failPrimary: true,
+			contentType: "application/json",
+			respBody:    `{"model":"gpt-5","usage":{"prompt_tokens":0,"completion_tokens":0}}`,
+			wantCost:    103,
+		},
+		{
+			name:        "e2e openai fallback to local partial stream",
+			route:       "/openai/v1/chat/completions",
+			failPrimary: true,
+			contentType: "text/event-stream",
+			respBody:    `data: {"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":2}}` + "\n\n",
+			wantCost:    103,
+		},
+		{
+			name:        "e2e openai fallback to local nonzero final usage uses local rate",
+			route:       "/openai/v1/chat/completions",
+			failPrimary: true,
+			contentType: "application/json",
+			respBody:    `{"model":"gpt-5","usage":{"prompt_tokens":1,"completion_tokens":10}}`,
+			wantCost:    0,
+		},
+	}
+
+	for _, tc := range e2eCases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.failPrimary && strings.Contains(r.Host, "openai.com") {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write([]byte(tc.respBody))
+			})
+			c := newChildGate(t, `{"maxCostUSD":0.001}`, upstream)
+			wl := c.gate.bundle.Workloads["ai-agent"]
+			wl.Spec.Grants.ModelGate.Providers = []string{"openai", "local"}
+			c.gate.bundle.Workloads["ai-agent"] = wl
+
+			rec := doGateRequest(c.gate.Handler(), http.MethodPost, tc.route,
+				`{"model":"gpt-5","max_tokens":10}`,
+				map[string]string{"Authorization": "Bearer " + c.token})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
+			}
+			totals, err := c.st.TaskBudgetTotals(t.Context(), "child")
+			if err != nil {
+				t.Fatalf("TaskBudgetTotals: %v", err)
+			}
+			if totals.CostMicroUSD != tc.wantCost {
+				t.Fatalf("settled CostMicroUSD = %d, want %d", totals.CostMicroUSD, tc.wantCost)
+			}
+		})
+	}
+}
+
+func TestParseGeminiSSEScannerErrorReturnsPartialOrNone(t *testing.T) {
+	// An oversized SSE line between maxUsageLineBytes (4 MiB) and maxCapturedResponseBytes (8 MiB)
+	// causes bufio.Scanner to stop with bufio.ErrTooLong.
+	oversizedLine := "data: " + strings.Repeat("x", maxUsageLineBytes+16) + "\n\n"
+	reserve := domain.BudgetTotals{
+		InputTokens:  100,
+		OutputTokens: 50,
+		CostMicroUSD: estimateReserveMicroUSD("gemini", "gemini-2.5-pro", 100, 50, nil),
+	}
+
+	t.Run("usage before scanner error is partial and floors at reserve", func(t *testing.T) {
+		body := []byte(
+			`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}` + "\n\n" +
+				oversizedLine,
+		)
+		parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", body, "text/event-stream")
+		if parsed.Outcome != usageOutcomePartial {
+			t.Fatalf("outcome = %v, want usageOutcomePartial (err=%v)", parsed.Outcome, parsed.Err)
+		}
+		if !errors.Is(parsed.Err, bufio.ErrTooLong) {
+			t.Fatalf("err = %v, want bufio.ErrTooLong", parsed.Err)
+		}
+		settled, cost := settleUsageForEntry("gemini", "gemini-2.5-pro", parsed, reserve, nil)
+		if settled.InputTokens != 100 || settled.CacheReadTokens != 0 || settled.OutputTokens != 50 {
+			t.Fatalf("settled = %+v, want reserve floor in=100 cr=0 out=50", settled)
+		}
+		if cost != reserve.CostMicroUSD {
+			t.Fatalf("cost = %d, want reserve floor %d", cost, reserve.CostMicroUSD)
+		}
+	})
+
+	t.Run("cached usage above reserve before scanner error drops cache-read discount", func(t *testing.T) {
+		body := []byte(
+			`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":500,"cachedContentTokenCount":400,"candidatesTokenCount":80}}` + "\n\n" +
+				oversizedLine,
+		)
+		custom := map[string]PricePerMillionTokens{
+			"gemini": {InputUSD: 1.25, CacheReadUSD: 0.30, OutputUSD: 10.00},
+		}
+		parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", body, "text/event-stream")
+		if parsed.Outcome != usageOutcomePartial {
+			t.Fatalf("outcome = %v, want usageOutcomePartial (err=%v)", parsed.Outcome, parsed.Err)
+		}
+		if !errors.Is(parsed.Err, bufio.ErrTooLong) {
+			t.Fatalf("err = %v, want bufio.ErrTooLong", parsed.Err)
+		}
+		settled, cost := settleUsageForEntry("gemini", "gemini-2.5-pro", parsed, reserve, custom)
+		// 500 * $1.25 + 80 * $10.00 = 625 + 800 = 1425 (no cache-read discount on partial).
+		if settled.InputTokens != 500 || settled.CacheReadTokens != 0 || settled.OutputTokens != 80 {
+			t.Fatalf("settled = %+v, want in=500 cr=0 out=80", settled)
+		}
+		if cost != 1425 {
+			t.Fatalf("cost = %d, want 1425", cost)
+		}
+	})
+
+	t.Run("scanner error before any usage returns none and charges reserve", func(t *testing.T) {
+		body := []byte(oversizedLine)
+		parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", body, "text/event-stream")
+		if parsed.Outcome != usageOutcomeNone {
+			t.Fatalf("outcome = %v, want usageOutcomeNone (err=%v)", parsed.Outcome, parsed.Err)
+		}
+		if !errors.Is(parsed.Err, bufio.ErrTooLong) {
+			t.Fatalf("err = %v, want bufio.ErrTooLong", parsed.Err)
+		}
+		settled, cost := settleUsageForEntry("gemini", "gemini-2.5-pro", parsed, reserve, nil)
+		if settled.InputTokens != 100 || settled.OutputTokens != 50 || cost != reserve.CostMicroUSD {
+			t.Fatalf("settled = %+v cost=%d, want reserve in=100 out=50 cost=%d", settled, cost, reserve.CostMicroUSD)
+		}
+	})
+}
+
+func TestParseGeminiSplitsCachedPromptTokens(t *testing.T) {
+	custom := map[string]PricePerMillionTokens{
+		"gemini": {InputUSD: 1.25, CacheReadUSD: 0.30, OutputUSD: 10.00},
+	}
+	reserve := domain.BudgetTotals{InputTokens: 1, OutputTokens: 1, CostMicroUSD: 12}
+
+	tests := []struct {
+		name          string
+		contentType   string
+		body          string
+		wantIn        int64
+		wantCacheRead int64
+		wantTotalIn   int64
+		wantOut       int64
+		wantCost      int64
+	}{
+		{
+			name:          "json splits cachedContentTokenCount out of promptTokenCount",
+			contentType:   "application/json",
+			body:          `{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":150,"candidatesTokenCount":40,"thoughtsTokenCount":10}}`,
+			wantIn:        50,
+			wantCacheRead: 150,
+			wantTotalIn:   200,
+			wantOut:       50,
+			// 50 * 1.25 + 150 * 0.30 + 50 * 10.00 = 62.5 + 45 + 500 = 607.5 -> ceil 608
+			wantCost: 608,
+		},
+		{
+			name:          "json fully cached prompt",
+			contentType:   "application/json",
+			body:          `{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":200,"candidatesTokenCount":10}}`,
+			wantIn:        0,
+			wantCacheRead: 200,
+			wantTotalIn:   200,
+			wantOut:       10,
+			// 200 * 0.30 + 10 * 10.00 = 60 + 100 = 160
+			wantCost: 160,
+		},
+		{
+			name:          "json fully cached prompt with zero output",
+			contentType:   "application/json",
+			body:          `{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":200}}`,
+			wantIn:        0,
+			wantCacheRead: 200,
+			wantTotalIn:   200,
+			wantOut:       0,
+			// 200 * 0.30 = 60
+			wantCost: 60,
+		},
+		{
+			name:        "sse carries split from same chunk",
+			contentType: "text/event-stream",
+			body: "" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":150,"candidatesTokenCount":10}}` + "\n\n" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":150,"candidatesTokenCount":40}}` + "\n\n",
+			wantIn:        50,
+			wantCacheRead: 150,
+			wantTotalIn:   200,
+			wantOut:       40,
+			// 50 * 1.25 + 150 * 0.30 + 40 * 10.00 = 62.5 + 45 + 400 = 507.5 -> ceil 508
+			wantCost: 508,
+		},
+		{
+			name:        "sse chunk replacing uncached prompt with fully cached prompt does not double count",
+			contentType: "text/event-stream",
+			body: "" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"candidatesTokenCount":10}}` + "\n\n" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":200,"candidatesTokenCount":40}}` + "\n\n",
+			wantIn:        0,
+			wantCacheRead: 200,
+			wantTotalIn:   200,
+			wantOut:       40,
+			// 200 * 0.30 + 40 * 10.00 = 60 + 400 = 460
+			wantCost: 460,
+		},
+		{
+			name:        "sse output-only chunk preserves earlier prompt split",
+			contentType: "text/event-stream",
+			body: "" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":200,"cachedContentTokenCount":150}}` + "\n\n" +
+				`data: {"modelVersion":"gemini-2.5-pro","usageMetadata":{"candidatesTokenCount":40}}` + "\n\n",
+			wantIn:        50,
+			wantCacheRead: 150,
+			wantTotalIn:   200,
+			wantOut:       40,
+			wantCost:      508,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:generateContent", []byte(tc.body), tc.contentType)
+			if parsed.Outcome != usageOutcomeFinal {
+				t.Fatalf("outcome = %v, err = %v, want usageOutcomeFinal", parsed.Outcome, parsed.Err)
+			}
+			if parsed.Usage.InputTokens != tc.wantIn || parsed.Usage.CacheReadTokens != tc.wantCacheRead || parsed.Usage.OutputTokens != tc.wantOut {
+				t.Fatalf("usage = %+v, want in=%d cr=%d out=%d", parsed.Usage, tc.wantIn, tc.wantCacheRead, tc.wantOut)
+			}
+			if parsed.Usage.TotalInputTokens() != tc.wantTotalIn {
+				t.Fatalf("TotalInputTokens = %d, want %d", parsed.Usage.TotalInputTokens(), tc.wantTotalIn)
+			}
+			settled, cost := settleUsageForEntry("gemini", "gemini-2.5-pro", parsed, reserve, custom)
+			if settled.InputTokens != tc.wantIn || settled.CacheReadTokens != tc.wantCacheRead || settled.OutputTokens != tc.wantOut {
+				t.Fatalf("settled = %+v, want in=%d cr=%d out=%d", settled, tc.wantIn, tc.wantCacheRead, tc.wantOut)
+			}
+			if cost != tc.wantCost {
+				t.Fatalf("cost = %d, want %d", cost, tc.wantCost)
+			}
+		})
+	}
+}
+
+func TestParseGeminiRejectsOutOfRangeAndOverflowCounts(t *testing.T) {
+	reserve := domain.BudgetTotals{
+		InputTokens:  100,
+		OutputTokens: 50,
+		CostMicroUSD: estimateReserveMicroUSD("gemini", "gemini-2.5-pro", 100, 50, nil),
+	}
+
+	outOfRangeCases := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{
+			name:        "json candidates plus thoughts overflows int64",
+			contentType: "application/json",
+			body:        fmt.Sprintf(`{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":%d,"thoughtsTokenCount":1}}`, math.MaxInt64),
+		},
+		{
+			name:        "json candidates plus thoughts exceeds maxReservedTokens",
+			contentType: "application/json",
+			body:        fmt.Sprintf(`{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":%d,"thoughtsTokenCount":%d}}`, maxReservedTokens/2+1, maxReservedTokens/2),
+		},
+		{
+			name:        "json prompt exceeds maxReservedTokens",
+			contentType: "application/json",
+			body:        fmt.Sprintf(`{"usageMetadata":{"promptTokenCount":%d,"candidatesTokenCount":10}}`, maxReservedTokens+1),
+		},
+		{
+			name:        "json cached exceeds maxReservedTokens",
+			contentType: "application/json",
+			body:        fmt.Sprintf(`{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":%d}}`, maxReservedTokens+1),
+		},
+		{
+			name:        "json cached exceeds prompt",
+			contentType: "application/json",
+			body:        `{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":150,"candidatesTokenCount":10}}`,
+		},
+		{
+			name:        "json prompt plus output exceeds maxReservedTokens",
+			contentType: "application/json",
+			body:        fmt.Sprintf(`{"usageMetadata":{"promptTokenCount":%d,"candidatesTokenCount":1}}`, maxReservedTokens),
+		},
+		{
+			name:        "sse later chunk overflows after valid chunk",
+			contentType: "text/event-stream",
+			body: "" +
+				`data: {"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}` + "\n\n" +
+				fmt.Sprintf(`data: {"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":%d,"thoughtsTokenCount":10}}`, math.MaxInt64) + "\n\n",
+		},
+		{
+			name:        "sse combined prompt and output across chunks exceeds maxReservedTokens",
+			contentType: "text/event-stream",
+			body: "" +
+				fmt.Sprintf(`data: {"usageMetadata":{"promptTokenCount":%d}}`, maxReservedTokens) + "\n\n" +
+				`data: {"usageMetadata":{"candidatesTokenCount":1}}` + "\n\n",
+		},
+	}
+
+	for _, tc := range outOfRangeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:generateContent", []byte(tc.body), tc.contentType)
+			if parsed.Outcome != usageOutcomeNone {
+				t.Fatalf("outcome = %v (usage=%+v), want usageOutcomeNone", parsed.Outcome, parsed.Usage)
+			}
+			if !errors.Is(parsed.Err, modelusage.ErrOutOfRange) {
+				t.Fatalf("err = %v, want modelusage.ErrOutOfRange", parsed.Err)
+			}
+			settled, cost := settleUsageForEntry("gemini", "gemini-2.5-pro", parsed, reserve, nil)
+			if settled.InputTokens != reserve.InputTokens || settled.OutputTokens != reserve.OutputTokens || cost != reserve.CostMicroUSD {
+				t.Fatalf("settled = %+v cost=%d, want reserve %+v", settled, cost, reserve)
+			}
+		})
+	}
+
+	t.Run("exact maxReservedTokens total is accepted", func(t *testing.T) {
+		body := fmt.Sprintf(
+			`{"usageMetadata":{"promptTokenCount":%d,"cachedContentTokenCount":5,"candidatesTokenCount":6,"thoughtsTokenCount":4}}`,
+			maxReservedTokens-10,
+		)
+		parsed := parseUsage("gemini", "/v1beta/models/gemini-2.5-pro:generateContent", []byte(body), "application/json")
+		if parsed.Outcome != usageOutcomeFinal {
+			t.Fatalf("outcome = %v err = %v, want usageOutcomeFinal", parsed.Outcome, parsed.Err)
+		}
+		if parsed.Usage.InputTokens != maxReservedTokens-15 || parsed.Usage.CacheReadTokens != 5 || parsed.Usage.OutputTokens != 10 {
+			t.Fatalf("usage = %+v, want in=%d cr=5 out=10", parsed.Usage, maxReservedTokens-15)
+		}
+	})
 }
