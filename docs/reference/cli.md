@@ -651,7 +651,7 @@ Generate the autocompletion script for zsh
 
 ## sablecourt-agent
 
-Source: `cmd/sablecourt-agent/main.go`. The program that a Workload image can run as its agent loop; the starter manifest from `sablectl init` names an image `sablecourt-agent:0.1.0` for it. You do not run it by hand. It has no flags and reads its environment: `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` are required (it exits 1 without them), and `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_INPUT_JSON` are optional. The task input may carry `provider` (default `anthropic`), `model` and `prompt`.
+Source: `cmd/sablecourt-agent/main.go`. The program that a Workload image can run as its agent loop; the starter manifest from `sablectl init` names an image `sablecourt-agent:0.1.0` for it, which you build locally with `make agent-image` (`docker build --target agent -t sablecourt-agent:0.1.0 .`). You do not run it by hand. It has no flags and reads its environment: `SABLECOURT_TASK_TOKEN` and `SABLECOURT_MODEL_GATE_URL` are required (it exits 1 without them), and `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_INPUT_JSON` are optional. The task input may carry `provider` (default `anthropic`), `model` and `prompt`.
 
 ## Not built yet
 
