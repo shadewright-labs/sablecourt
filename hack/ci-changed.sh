@@ -51,7 +51,9 @@ fi
 if [ -z "${BASE_SHA:-}" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
   git fetch --no-tags --depth=1 origin "${BASE_SHA:-}" >&2 || true
 fi
-list="$(mktemp "${TMPDIR:-/tmp}/ci-changed.XXXXXX")"
+# The ERR trap is inherited by the command substitution (set -E). Without clearing it there, a failing mktemp
+# would run fail_open inside the subshell and its four lines would become the file name.
+list="$(trap - ERR; mktemp "${TMPDIR:-/tmp}/ci-changed.XXXXXX")"
 trap 'rm -f "${list}"' EXIT
 if ! git diff -z --name-only --no-renames "${BASE_SHA:-}" HEAD -- > "${list}" 2>/dev/null; then
   echo "cannot diff against ${BASE_SHA:-unset}: running everything" >&2
