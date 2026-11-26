@@ -59,6 +59,9 @@ jobs:
       - name: Test the workflows' structure
         run: hack/test/workflows_test.sh
 
+      - name: Test the release verification guide and the release docs
+        run: hack/test/verify-guide_test.sh
+
       - name: Test the release archive packer
         run: hack/test/package-binaries_test.sh
 
