@@ -1,6 +1,6 @@
 # Log in to harnesses
 
-Build the three pinned harness images and sign each CLI in once, inside its own container and volume, so council turns can use your subscription logins. Each login is stored in that harness's own Docker volume. For `claude` and `agy`, whose images carry no vendor software, the login step first installs the pinned tool into a separate tool volume when needed ([harness images and tool install](harness-images.md)).
+Build the three pinned harness images and sign each CLI in once, inside its own container and volume, so council turns can use your subscription logins. Each login is stored in that harness's own Docker volume. For `claude` and `agy`, whose images carry no vendor software, the login step first installs the pinned tool into a separate tool volume when the login volume does not exist yet, or when its check reports the tool volume or tool missing, the tool of another version or not matching its digest ([harness images and tool install](harness-images.md)).
 
 ## Prerequisites
 
@@ -27,13 +27,13 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
    sablectl harness login agy
    ```
 
-   For `claude` and `agy` the command first downloads the pinned tool from the vendor, checks its digest and installs it into `sablecourt-harness-<role>-tool`, unless the login volume exists and the installed tool already has the pinned version and digest. It then creates the labelled login volume `sablecourt-harness-<role>` if needed and starts the login in a container with your terminal attached. If the CLI prints a sign-in address, open it in a browser on your host. In the recorded `agy` flow, finish the sign-in, then type `/exit`.
+   For `claude` and `agy` the command first downloads the pinned tool from the vendor, checks its digest and installs it into `sablecourt-harness-<role>-tool` when the login volume does not exist yet, or when its check reports the tool volume or tool missing, the tool of another version or not matching its digest. For `codex` there is no install step. It then creates the labelled login volume `sablecourt-harness-<role>` if needed and starts the login in a container with your terminal attached. If the CLI prints a sign-in address, open it in a browser on your host. In the recorded `agy` flow, finish the sign-in, then type `/exit`.
 
-3. After a Sablecourt upgrade (of both `sablectl` and `sablecourtd`) that pins a new tool version, the image tag changes too. Run `sablectl harness build <role>` for each role. For `claude` and `agy`, then run `sablectl harness install <role>`: it replaces the tool and keeps the login. If you skip a step, the daemon refuses the council with the command to run: `sablectl harness build <role>` if the image of the new tag is not present locally, and `sablectl harness install <role>` when preflight reaches that role's tool check and finds another version. The steps per role are in [harness images](harness-images.md#upgrade).
+3. After a Sablecourt upgrade (of both `sablectl` and `sablecourtd`) that pins a new tool version, the image tag changes too. Run `sablectl harness build <role>` for `claude`, `codex` and `agy`. For `claude` and `agy`, then run `sablectl harness install <role>`: it replaces the tool and keeps the login. The daemon's preflight checks the state, not which commands ran: it refuses a council with `sablectl harness build <role>` if the image of the new tag is not present locally, and, for `claude` and `agy`, with `sablectl harness install <role>` when it reaches that role's tool check and finds another version. The steps per role are in [harness images](harness-images.md#upgrade).
 
 ## Check it worked
 
-When it succeeds, the login command ends with `Login for <role> is stored in volume sablecourt-harness-<role>`. Then run a [council](run-a-council.md): the daemon's preflight checks the image, the login volume and the credential file before it creates the council, and for `claude` and `agy` also the tool volume and the tool. The preflight does not ask the provider whether the login is still valid.
+When it succeeds, the login command ends with `Login for <role> is stored in volume sablecourt-harness-<role>`. Then run a [council](run-a-council.md): in container mode, the daemon's preflight checks the image, the login volume and the credential file before it creates the council, and for `claude` and `agy` also the tool volume and the tool. The preflight does not ask the provider whether the login is still valid.
 
 ## In depth
 

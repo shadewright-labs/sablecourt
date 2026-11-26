@@ -120,7 +120,7 @@ Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/cod
 
 Source: `internal/harnessimages`, `cmd/sablectl/harness.go`. `sablectl harness build <role>` builds one image per council member for `linux/arm64`. Each container runs as user 10001:10001 with its state in `/home/harness`. You log each harness in once inside its container, and the login is kept in a Docker volume.
 
-The `claude` and `agy` images carry no vendor tool; the login installs the pinned tool into the tool volume `sablecourt-harness-<role>-tool` ([harness images](../how-to/harness-images.md)).
+The `claude` and `agy` images carry no vendor tool; `sablectl harness install <role>` installs the pinned tool into the tool volume `sablecourt-harness-<role>-tool`, and `sablectl harness login <role>` does so when the login volume does not exist yet or the tool is missing, of another version or does not match its digest ([harness images](../how-to/harness-images.md)).
 
 | Role | Pinned version | Login command | Login volume |
 | --- | --- | --- | --- |
