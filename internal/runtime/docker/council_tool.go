@@ -81,13 +81,17 @@ func validateCouncilToolVolume(vol volume.Volume, harness, name string) error {
 	if vol.Name != name || vol.Driver != "local" || len(vol.Options) != 0 {
 		return errors.New("invalid council tool volume")
 	}
-	for k, v := range CouncilToolVolumeLabels(harness) {
+	want := CouncilToolVolumeLabels(harness)
+	for k, v := range want {
 		if vol.Labels[k] != v {
 			return errors.New("tool volume does not belong to this council harness")
 		}
 	}
-	if vol.Labels["sablecourt.io/harness"] != "" {
-		return errors.New("tool volume carries login volume labels")
+	// Labels cannot change after creation and only Sablecourt creates this
+	// volume, so any other label (a login label included) means another
+	// creator. Docker adds no labels to a volume created through its API.
+	if len(vol.Labels) != len(want) {
+		return errors.New("tool volume has other labels than the tool volume labels")
 	}
 	return nil
 }

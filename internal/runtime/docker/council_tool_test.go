@@ -33,6 +33,31 @@ func toolVolume(harness, name string) volume.Volume {
 	return volume.Volume{Name: name, Driver: "local", Labels: CouncilToolVolumeLabels(harness)}
 }
 
+// Volume labels cannot change after creation, and only Sablecourt creates the
+// tool volume, so its label set must be exactly the two tool labels.
+func TestValidateCouncilToolVolumeLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		ok     bool
+	}{
+		{name: "exact tool labels", labels: CouncilToolVolumeLabels("claude"), ok: true},
+		{name: "extra label", labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt", "sablecourt.io/harness-tool": "claude", "extra": "x"}},
+		{name: "login label as well", labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt", "sablecourt.io/harness-tool": "claude", "sablecourt.io/harness": "claude"}},
+		{name: "empty login label as well", labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt", "sablecourt.io/harness-tool": "claude", "sablecourt.io/harness": ""}},
+		{name: "another harness", labels: CouncilToolVolumeLabels("agy")},
+		{name: "one label missing", labels: map[string]string{"sablecourt.io/harness-tool": "claude"}},
+		{name: "no labels"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := volume.Volume{Name: "sablecourt-harness-claude-tool", Driver: "local", Labels: tc.labels}
+			if err := validateCouncilToolVolume(v, "claude", v.Name); (err == nil) != tc.ok {
+				t.Fatalf("err = %v, want ok %v", err, tc.ok)
+			}
+		})
+	}
+}
+
 func TestToolDirMatchesImage(t *testing.T) {
 	if councilToolDir != harnessimages.ToolDir {
 		t.Fatal("runtime mount point differs from the image definition")
@@ -189,7 +214,8 @@ func TestCouncilLaunchWithTool(t *testing.T) {
 		{name: "login", login: true},
 		{name: "tool volume missing labels", setup: func(_ *Adapter, f *councilEngine) { f.tool.Labels = nil }, wantErr: "tool volume does not belong"},
 		{name: "tool volume of another harness", setup: func(_ *Adapter, f *councilEngine) { f.tool.Labels = CouncilToolVolumeLabels("agy") }, wantErr: "tool volume does not belong"},
-		{name: "tool volume with login labels too", setup: func(_ *Adapter, f *councilEngine) { f.tool.Labels["sablecourt.io/harness"] = "claude" }, wantErr: "login volume labels"},
+		{name: "tool volume with login labels too", setup: func(_ *Adapter, f *councilEngine) { f.tool.Labels["sablecourt.io/harness"] = "claude" }, wantErr: "tool volume labels"},
+		{name: "tool volume with an extra label", setup: func(_ *Adapter, f *councilEngine) { f.tool.Labels["com.docker.compose.project"] = "x" }, wantErr: "tool volume labels"},
 		{name: "tool volume is the login volume", setup: func(a *Adapter, _ *councilEngine) {
 			c := a.CouncilHarnesses["claude"]
 			c.Tool.Volume = c.LoginVolume
