@@ -1,8 +1,11 @@
 # gitleaks configuration: the default rules plus the allowlists below. Without [extend] useDefault this file
-# would replace the default rules and detect nothing. Each allowlist names one file AND the synthetic values its
-# tests use (condition = "AND"), so a real secret anywhere else, or a new one in the same file, is still reported.
-# The private-key entries match only a key block that contains a Go string delimiter (a fixture assembled from
-# several literals or followed by code), never a contiguous key. Tests: hack/test/gitleaks_test.sh.
+# would replace the default rules and detect nothing. Each allowlist names one file AND the exact synthetic
+# values its tests use (condition = "AND"; each regex is anchored at both ends), so a real secret anywhere else,
+# or any other token or key block in the same file, is still reported. The private-key entries spell out the
+# whole match of gitleaks' private-key rule (a PEM header and the test code that follows it, with no key body):
+# editing the lines around such a fixture changes the match, and the scan then reports it until the entry is
+# updated. secret-scan.yml also scans the changes that only a merge commit introduces. Tests:
+# hack/test/gitleaks_test.sh.
 [extend]
 useDefault = true
 
@@ -11,21 +14,6 @@ useDefault = true
 condition = "AND"
 paths = ['''^cmd/sablectl/council_test\.go$''']
 regexes = ['''^(ghp_|sk-proj-)SYNTHETIC1234567890abcdefghij$''']
-
-# Malformed PEM boundaries assembled from literals.
-[[allowlists]]
-condition = "AND"
-paths = ['''^internal/conclave/council_results_test\.go$''']
-regexes = [
-  '''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''',
-  '''^-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\nkeep\\n-----BEGIN OPENSSH PRIVATE KEY-----$''',
-]
-
-# Chunked redaction across PEM headers and footers split over literals.
-[[allowlists]]
-condition = "AND"
-paths = ['''^internal/attach/hub_test\.go$''']
-regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
 
 # Upstream response redaction with a fake GitHub token.
 [[allowlists]]
@@ -45,18 +33,6 @@ condition = "AND"
 paths = ['''^internal/ui/ui_test\.go$''']
 regexes = ['''^conclave-msg-1$''']
 
-# Redaction of a private key split around a fixture word.
-[[allowlists]]
-condition = "AND"
-paths = ['''^internal/runtime/coding/hardening_test\.go$''']
-regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
-
-# Redaction corpus: key blocks built from literals.
-[[allowlists]]
-condition = "AND"
-paths = ['''^internal/redact/(linear_test|redacttest/corpus)\.go$''']
-regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
-
 # A fixed JSON secret in redaction structure tests.
 [[allowlists]]
 condition = "AND"
@@ -68,3 +44,55 @@ regexes = ['''^Qv7hTzP2mWx9LkR4nB6c$''']
 condition = "AND"
 paths = ['''^internal/runtime/coding/council_reconcile_test\.go$''']
 regexes = ['''^ccl-reconcile-0123456789abcdef$''']
+
+# A council title redaction test: a bare PEM header followed by test code, no key body.
+[[allowlists]]
+condition = "AND"
+paths = ['''^cmd/sablecourtd/councils_test\.go$''']
+regexes = [
+  '''^-----BEGIN PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 \* time\.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head\},\n\t\t\{name: "embedded credential", bodyExtra: fmt\.Sprintf\(`,"title":%q`, "prefix"\+token\+"suffix"\), rounds: 2, starts: 6, duration: 15 \* time\.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head\},\n\t\} \{\n\t\tt\.Run\(tc\.name, func\(t \*testing\.T\) \{\n\t\t\tst := daemonTestStore\(t\)\n\t\t\th := councilTestHandler\(st, nil, councilTestOptions\(token\)\)\n\t\t\tquestion := "Review this"\n\t\t\tif tc\.name == "redaction" \{\n\t\t\t\tquestion \+= " -----BEGIN PRIVATE KEY-----$''',
+]
+
+# Chunked redaction across PEM headers and footers split over literals, no key body.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/attach/hub_test\.go$''']
+regexes = [
+  '''^-----BEGIN PRIVATE KEY-----\\nMIIE"\),\n\t\t\t\t\[\]byte\("owIBAAK\\n"\),\n\t\t\t\t\[\]byte\("-----END PRIVATE KEY-----$''',
+  '''^-----BEGIN RSA PRIVATE KEY-----\\n"\n\t\tpemFooter = "-----END RSA PRIVATE KEY-----"\n\t\tpemMarker = "\[REDACTED:private_key\]"\n\t\)\n\tlongBody := strings\.Repeat\("synthetic body\\n", limit/14\+1\)\n\tlongToken := strings\.Repeat\("x", limit\)\n\tcases := \[\]struct \{\n\t\tname      string\n\t\tchunks    \[\]string\n\t\twantLive  \[\]string\n\t\twantClose string\n\t\}\{\n\t\t\{\n\t\t\tname:     "complete PEM at EOF",\n\t\t\tchunks:   \[\]string\{pemHeader \+ "synthetic body\\n-----END RSA ", "PRIVATE KEY-----$''',
+]
+
+# Malformed and unclosed PEM boundaries in result replay tests, no key body.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/conclave/council_results_test\.go$''']
+regexes = [
+  '''^-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\nkeep\\n-----BEGIN OPENSSH PRIVATE KEY-----$''',
+  '''^-----BEGIN RSA PRIVATE KEY-----\\nfixture\\ntrailer"\), want: "Before\\n\[REDACTED:private_key\]"\},\n\t\t\{name: "mismatched key footer", artifacts: resultArtifact\("Before\\n-----BEGIN RSA PRIVATE KEY-----$''',
+]
+
+# Redaction of a key block built from literals (the file was removed; its history is still scanned).
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/redact/linear_test\.go$''']
+regexes = [
+  '''^-----BEGIN RSA PRIVATE KEY-----\\nAAAA\\n"\},\n\t\t\{"key headers with stray footers", "-----BEGIN EC PRIVATE KEY-----$''',
+]
+
+# Redaction corpus: key blocks built from literals (the file was removed; its history is still scanned).
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/redact/redacttest/corpus\.go$''']
+regexes = [
+  '''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n", \[\]string\{pem\}\},\n\t\t\{"key header after api_key label", "api_key: -----BEGIN OPENSSH PRIVATE KEY-----$''',
+  '''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n-----END EC PRIVATE KEY-----\\n" \+ pem2 \+ "\\n-----END RSA PRIVATE KEY-----$''',
+  '''^-----BEGIN RSA PRIVATE KEY-----\\n" \+ pem \+ "\\n-----END RSA PRIVATE KEY-----"\n\tescaped := strings\.ReplaceAll\(block, "\\n", `\\n`\)\n\tcases = append\(cases,\n\t\tCase\{"private_key/plain", "key follows\\n" \+ block \+ "\\ndone\\n", \[\]string\{pem\}\},\n\t\tCase\{"private_key/json", `\{"key":"` \+ escaped \+ `"\}` \+ "\\n", \[\]string\{pem\}\},\n\t\tCase\{"private_key/env", `SSH_KEY="` \+ escaped \+ `"` \+ "\\n", \[\]string\{pem\}\},\n\t\)\n\treturn cases\n\}\n\n// UnterminatedKey returns text whose private key block has no END marker, as\n// left by a cut, and the key body\.\nfunc UnterminatedKey\(prefix int\) \(string, string\) \{\n\tpem := body\(14, 1600, alnum\)\n\treturn strings\.Repeat\("p", prefix\) \+ "\\n-----BEGIN OPENSSH PRIVATE KEY-----$''',
+]
+
+# Redaction of a private key split around a fixture word (an earlier version of the file).
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/runtime/coding/hardening_test\.go$''']
+regexes = [
+  '''^-----BEGIN PRIVATE KEY-----fixture", " body-----END PRIVATE KEY----- after\\n"\}, want: "before \[REDACTED:private_key\] after\\n"\},\n\t\t\{name: "oversized line", chunks: \[\]string\{strings\.Repeat\("x", maxSessionLine\), "-----BEGIN PRIVATE KEY-----$''',
+]
