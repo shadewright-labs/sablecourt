@@ -326,8 +326,8 @@ func TestSessionOutputRedactsAcrossWrites(t *testing.T) {
 	}{
 		{name: "split password", chunks: []string{"start\npass", "word=fix", "ture-value\n"}, want: "start\npassword=[REDACTED:secret]\n"},
 		{name: "split key block", chunks: []string{"start\n-----BE", "GIN PRIVATE KEY-----\n", "fixture body\n-----END PRIVATE", " KEY-----\nend\n"}, want: "start\n[REDACTED:private_key]\nend\n"},
-		{name: "one line key", chunks: []string{"before -----BEGIN PRIVATE KEY-----fixture", " body-----END PRIVATE KEY----- after\n"}, want: "before [REDACTED:private_key] after\n"},
-		{name: "oversized line", chunks: []string{strings.Repeat("x", maxSessionLine), "-----BEGIN PRIVATE KEY-----\n", "fixture body\n"}, want: "[REDACTED:output limit]\n"},
+		{name: "one line key", chunks: []string{"before -----BEGIN" + " PRIVATE KEY-----fixture", " body-----END PRIVATE KEY----- after\n"}, want: "before [REDACTED:private_key] after\n"},
+		{name: "oversized line", chunks: []string{strings.Repeat("x", maxSessionLine), "-----BEGIN" + " PRIVATE KEY-----\n", "fixture body\n"}, want: "[REDACTED:output limit]\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log, err := os.CreateTemp(t.TempDir(), "session")
@@ -365,7 +365,7 @@ func TestSessionOutputRedactsAcrossWrites(t *testing.T) {
 func TestSessionOutputFlushesOnExit(t *testing.T) {
 	for _, tc := range []struct{ name, payload, want string }{
 		{name: "unterminated line", payload: "password=fixture-value", want: "password=[REDACTED:secret]"},
-		{name: "unterminated key block", payload: "-----BEGIN PRIVATE KEY-----\nfixture body", want: "[REDACTED:private_key]"},
+		{name: "unterminated key block", payload: "-----BEGIN" + " PRIVATE KEY-----\nfixture body", want: "[REDACTED:private_key]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shellHarness(t, "printf '%s' '"+tc.payload+"'\n")

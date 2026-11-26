@@ -86,9 +86,9 @@ func TestCouncilResultArtifacts(t *testing.T) {
 		state                       domain.TaskState
 	}{
 		{name: "redacts and replays", artifacts: resultArtifact("Use plan one. password=syntheticfixture"), want: "Use plan one. password=[REDACTED:secret]"},
-		{name: "unclosed private key", artifacts: resultArtifact("Before\n-----BEGIN RSA PRIVATE KEY-----\nfixture\ntrailer"), want: "Before\n[REDACTED:private_key]"},
-		{name: "mismatched key footer", artifacts: resultArtifact("Before\n-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END EC PRIVATE KEY-----\ntrailer"), want: "Before\n[REDACTED:private_key]"},
-		{name: "closed then unclosed key", artifacts: resultArtifact("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\nkeep\n-----BEGIN OPENSSH PRIVATE KEY-----\ny"), want: "[REDACTED:private_key]\nkeep\n[REDACTED:private_key]"},
+		{name: "unclosed private key", artifacts: resultArtifact("Before\n-----BEGIN" + " RSA PRIVATE KEY-----\nfixture\ntrailer"), want: "Before\n[REDACTED:private_key]"},
+		{name: "mismatched key footer", artifacts: resultArtifact("Before\n-----BEGIN" + " RSA PRIVATE KEY-----\nfixture\n-----END EC PRIVATE KEY-----\ntrailer"), want: "Before\n[REDACTED:private_key]"},
+		{name: "closed then unclosed key", artifacts: resultArtifact("-----BEGIN" + " PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\nkeep\n-----BEGIN" + " OPENSSH PRIVATE KEY-----\ny"), want: "[REDACTED:private_key]\nkeep\n[REDACTED:private_key]"},
 		{name: "explicit vote", artifacts: resultArtifact(" \n" + CouncilNothingToAdd + "\n"), want: CouncilNothingToAdd, vote: true},
 		{name: "quotes peer", artifacts: resultArtifact("> " + CouncilNothingToAdd + "\nI object."), want: "> " + CouncilNothingToAdd + "\nI object."},
 		{name: "phrase in prose", artifacts: resultArtifact("I read NOTHING TO ADD in the peer answer."), want: "I read NOTHING TO ADD in the peer answer."},

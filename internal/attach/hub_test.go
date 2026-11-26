@@ -98,7 +98,7 @@ func TestHubSplitChunkRedactionAndFlushOnClose(t *testing.T) {
 		{
 			name: "multiline pem private key split across chunks",
 			chunks: [][]byte{
-				[]byte("-----BEGIN PRIVATE KEY-----\nMIIE"),
+				[]byte("-----BEGIN" + " PRIVATE KEY-----\nMIIE"),
 				[]byte("owIBAAK\n"),
 				[]byte("-----END PRIVATE KEY-----\n"),
 			},
@@ -179,7 +179,7 @@ func TestHubSplitChunkRedactionAndFlushOnClose(t *testing.T) {
 func TestHubStreamsRedactedOutput(t *testing.T) {
 	const (
 		limit     = 16 * 1024
-		pemHeader = "-----BEGIN RSA PRIVATE KEY-----\n"
+		pemHeader = "-----BEGIN" + " RSA PRIVATE KEY-----\n"
 		pemFooter = "-----END RSA PRIVATE KEY-----"
 		pemMarker = "[REDACTED:private_key]"
 	)
@@ -334,7 +334,7 @@ func TestStreamRedactorPreservesCredentialRulesAcrossWrites(t *testing.T) {
 		{"AWS", "key ASIASYNTHETIC1234567!", "key [REDACTED:aws_access_key]!"},
 		{"bearer", "AUTHORIZATION \n: bEaReR\t synthetic.token!", "AUTHORIZATION \n: bEaReR\t [REDACTED:bearer_token]!"},
 		{"assignment", "test_api-key\n= 'synthetic'", "test_api-key\n= '[REDACTED:secret]'"},
-		{"PEM", "-----BEGIN EC PRIVATE KEY-----\nsynthetic\n-----END EC PRIVATE KEY-----!", "[REDACTED:private_key]!"},
+		{"PEM", "-----BEGIN" + " EC PRIVATE KEY-----\nsynthetic\n-----END EC PRIVATE KEY-----!", "[REDACTED:private_key]!"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i := range len(tc.input) + 1 {

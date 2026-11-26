@@ -2,10 +2,14 @@
 # Positive and negative controls for the secret scan: runs hack/secret-scan.sh (the command of secret-scan.yml)
 # with this repository's .gitleaks.toml on throwaway repositories.
 #   - A synthetic token in an ordinary file fails the scan (exit 1).
-#   - Every file that has an allowlist passes as it is in this tree (its fixtures are allowed), and fails once a
-#     different private key block (contiguous, or assembled from Go string literals) or a different token is
-#     added to it: an allowlist covers its exact fixture values, nothing else in the file.
+#   - Every file named by an allowlist passes as it is in this tree, in a new commit, with no allowlist applying
+#     (its fixtures are built from split literals, so stock gitleaks finds nothing there), and fails once a
+#     private key block (contiguous, or assembled from Go string literals) or a token is added to it, before or
+#     after its fixtures: a fixture header can no longer swallow a key that follows it.
 #   - Files that only the history still holds fail with a new key block or token at their path.
+#   - The allowlists are scoped: each has exactly one value, and all but the one for a file this repository
+#     cannot change yet name the commits whose history holds that value, so the same value in a new commit is
+#     reported.
 #   - A token that only a merge commit introduces (added while resolving the merge) fails the scan.
 # The secrets are assembled at run time, so this file holds none. Usage: hack/test/gitleaks_test.sh [gitleaks]
 set -euo pipefail
@@ -34,16 +38,25 @@ scan_repo() {
   if [ "${got}" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: exit ${got}, want $2"; fails=$((fails + 1)); fi
 }
 
-# scan <name> <want exit code> <path> <content> [file to start from]
-# The content goes before the copied file. gitleaks' private-key rule matches lazily from a header to the next
-# "KEY-----" at least 64 characters on, so a short fixture header earlier in a file can swallow the header of a
-# key that follows it, and stock gitleaks then reports nothing (seen with internal/attach/hub_test.go). That is
-# a limit of the rule, not of the allowlists; docs/ci.md states it.
+# scan <name> <want exit code> <path> <content> [file to start from]: the content goes before the copied file.
+# scan_after: the same, with the content after the copied file. gitleaks' private-key rule matches lazily from
+# a header to the next "KEY-----" at least 64 characters on, so a fixture header earlier in a file can swallow
+# the header of a key that follows it; an allowlist for that fixture span then hid the key. The fixtures no
+# longer hold a contiguous header, and no allowlist covers these files, so the key after them is reported.
 scan() {
   new_repo
   mkdir -p "${repo}/$(dirname "$3")"
   if [ -n "$4" ]; then printf '%s\n' "$4" > "${repo}/$3"; else : > "${repo}/$3"; fi
   if [ -n "${5:-}" ]; then cat "$5" >> "${repo}/$3"; fi
+  git_q -C "${repo}" add -A
+  git_q -C "${repo}" commit -qm fixture
+  scan_repo "$1" "$2"
+}
+scan_after() {
+  new_repo
+  mkdir -p "${repo}/$(dirname "$3")"
+  cp "$5" "${repo}/$3"
+  printf '\n%s\n' "$4" >> "${repo}/$3"
   git_q -C "${repo}" add -A
   git_q -C "${repo}" commit -qm fixture
   scan_repo "$1" "$2"
@@ -60,7 +73,7 @@ scan "synthetic token in an ordinary file" 1 notes/config.txt "token = ghp_$(aln
 scan "contiguous private key in an ordinary file" 1 notes/key.txt "$(pem_block)"
 
 # Every path that has an allowlist in .gitleaks.toml.
-paths="$(sed -n "s/^paths = \['''^\(.*\)\$'''\]$/\1/p" "${root}/.gitleaks.toml" | sed 's/\\\././g')"
+paths="$(sed -n "s/^paths = \['''^\(.*\)\$'''\]$/\1/p" "${root}/.gitleaks.toml" | sed 's/\\\././g' | LC_ALL=C sort -u)"
 [ -n "${paths}" ] || { echo "FAIL no allowlisted paths read from .gitleaks.toml"; fails=$((fails + 1)); }
 while IFS= read -r path; do
   [ -n "${path}" ] || continue
@@ -69,12 +82,44 @@ while IFS= read -r path; do
     scan "${path}: another key block is found" 1 "${path}" "$(pem_block)" "${root}/${path}"
     scan "${path}: a key built from literals is found" 1 "${path}" "$(pem_literals)" "${root}/${path}"
     scan "${path}: another token is found" 1 "${path}" "$(token_line)" "${root}/${path}"
+    scan_after "${path}: a key block after the fixtures is found" 1 "${path}" "$(pem_block)" "${root}/${path}"
+    scan_after "${path}: a key from literals after the fixtures is found" 1 "${path}" "$(pem_literals)" "${root}/${path}"
+    scan_after "${path}: a token after the fixtures is found" 1 "${path}" "$(token_line)" "${root}/${path}"
   else
     scan "${path} (history only): a key block is found" 1 "${path}" "$(pem_block)"
     scan "${path} (history only): a key built from literals is found" 1 "${path}" "$(pem_literals)"
     scan "${path} (history only): a token is found" 1 "${path}" "$(token_line)"
   fi
 done <<< "${paths}"
+
+# An allowed historic value is reported in any commit but the ones its entry names.
+scan "a value allowed in old commits is found in a new one" 1 cmd/sablectl/council_test.go \
+  "var fixtureToken = \"ghp_""SYNTHETIC1234567890abcdefghij\""
+
+# Every allowlist has one path and one exact value, AND-ed, and names its commits; only the entry for a file
+# this repository has not split yet goes without commits.
+if python3 -I - "${root}/.gitleaks.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    cfg = tomllib.load(f)
+bad, unscoped = [], []
+for a in cfg.get("allowlists", []):
+    paths, regexes = a.get("paths", []), a.get("regexes", [])
+    if set(a) - {"description", "condition", "commits", "paths", "regexes"} or a.get("condition") != "AND" \
+            or len(paths) != 1 or len(regexes) != 1 or not regexes[0].startswith("^") or not regexes[0].endswith("$"):
+        bad.append(paths)
+    elif not a.get("commits"):
+        unscoped.append(paths[0])
+if cfg.get("allowlist") or bad or unscoped != [r"^internal/gate/mcp/upstream_test\.go$"]:
+    print(f"bad entries: {bad}, entries without commits: {unscoped}")
+    sys.exit(1)
+PY
+then
+  echo "ok   every allowlist is one exact value in one file, scoped by commit"
+else
+  echo "FAIL allowlists not scoped"
+  fails=$((fails + 1))
+fi
 
 # merge_only <name> <file> <content>: the secret exists only in the merge commit; neither parent has it.
 merge_only() {
