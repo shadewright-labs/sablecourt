@@ -94,12 +94,12 @@ func TestExecuteDirectiveMCPTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ss.Close() //nolint:errcheck // test cleanup
+	defer ss.Close()
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "agent", Version: "1"}, nil).Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close() //nolint:errcheck // test cleanup
+	defer cs.Close()
 
 	if out := executeDirective(ctx, cs, "", "t", toolCallDirective{MCPTool: "memory.get", Args: map[string]any{"key": "k1"}}); out != "value of k1\nsecond" {
 		t.Fatalf("output = %q", out)

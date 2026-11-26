@@ -49,7 +49,7 @@ func TestLockStateDirRepairsModeAndRefusesUnsafeFiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LockStateDir: %v", err)
 		}
-		defer l.Close() //nolint:errcheck // test cleanup
+		defer l.Close()
 		info, err := os.Stat(lockPath)
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("lock file mode = %v, %v; want 0600", info.Mode(), err)

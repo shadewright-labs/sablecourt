@@ -355,7 +355,7 @@ func TestRegisterUpstreamToolsSkipsIncompleteServers(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		calledTool = body.Params.Name
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"result":{"ok":true}}`))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"result":{"ok":true}}`))}, nil
 	})})
 	gate.RegisterUpstreamTools([]domain.UpstreamMCPServer{
 		{Name: "", URL: "https://a.example", AllowedTools: []string{"t"}},
@@ -425,7 +425,7 @@ func TestUpstreamBridgeRefusals(t *testing.T) {
 		var got http.Header
 		b := NewUpstreamBridge(secret.NewMemoryStore(map[string]string{"api_key": " v1 "}), &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			got = r.Header
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"result":1}`))}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"result":1}`))}, nil
 		})})
 		s := withSecret
 		s.AuthHeader = "X-Api-Key"
