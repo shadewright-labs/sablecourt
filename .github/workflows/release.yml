@@ -272,7 +272,7 @@ jobs:
           # Edit only a draft: a published release is never rewritten.
           [ "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = true ] || { echo "release ${TAG} is not a draft; not editing it" >&2; exit 1; }
           gh release view "${TAG}" --json body --jq .body > "${body}"
-          hack/release-verify-notes.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" < "${body}" > "${notes}"
+          hack/release-verify-notes.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" "${GITHUB_SHA}" < "${body}" > "${notes}"
           gh release edit "${TAG}" --notes-file "${notes}"
           echo "release ${TAG}: digests and verify commands added" >> "${GITHUB_STEP_SUMMARY}"
 
@@ -305,7 +305,7 @@ jobs:
           DAEMON: ${{ needs.images.outputs.daemon }}
           AGENT: ${{ needs.images.outputs.agent }}
           DIST: ${{ runner.temp }}/dist
-        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" "${DIST}"
+        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${DAEMON}" "${AGENT}" "${GITHUB_SHA}" "${DIST}"
 
   # A rerun after publication: nothing is written, and the run is green only if the public release checks out.
   verify-published:
@@ -375,4 +375,4 @@ jobs:
           TAG: ${{ github.ref_name }}
           DAEMON: ${{ steps.images.outputs.daemon }}
           AGENT: ${{ steps.images.outputs.agent }}
-        run: hack/publish-release.sh "${REPOSITORY}" "${TAG}" "${DAEMON}" "${AGENT}" "${RUNNER_TEMP}/published" verify-only
+        run: hack/publish-release.sh "${REPOSITORY}" "${TAG}" "${DAEMON}" "${AGENT}" "${GITHUB_SHA}" "${RUNNER_TEMP}/published" verify-only

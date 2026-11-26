@@ -212,7 +212,7 @@ expect_exit "release-state: a repository not found fails" 1 state 'ERR GraphQL: 
 expect_exit "release-state: not found with more text fails" 1 state 'ERR release not found; token expired'
 
 # --- publish-release.sh
-dA="sha256:$(printf 'a%.0s' $(seq 64))" dB="sha256:$(printf 'b%.0s' $(seq 64))"
+dA="sha256:$(printf 'a%.0s' $(seq 64))" dB="sha256:$(printf 'b%.0s' $(seq 64))" shaN="$(printf 'f%.0s' $(seq 40))"
 dist="${work}/dist"
 mkdir -p "${dist}"
 make_dist() { # version
@@ -223,7 +223,7 @@ make_dist() { # version
 }
 release_json() { # tag isDraft isPrerelease [tamper]
   local notes assets f
-  notes="$("${hack}/release-verify-notes.sh" o/r "$1" "${dA}" "${dB}" < /dev/null)"
+  notes="$("${hack}/release-verify-notes.sh" o/r "$1" "${dA}" "${dB}" "${shaN}" < /dev/null)"
   assets="[]"
   for f in "${dist}"/*; do
     sum="$(sha256sum "${f}")"
@@ -241,7 +241,7 @@ publish() { # tag [verify-only] -- views...
   shift # --
   reset_stub
   views "$@"
-  RELEASE_WAIT_SECONDS=0 RELEASE_POLL_SECONDS=0 run "${hack}/publish-release.sh" o/r "${tag}" "${dA}" "${dB}" "${dist}" ${mode:+"${mode}"} > "${work}/out" 2> "${work}/err"
+  RELEASE_WAIT_SECONDS=0 RELEASE_POLL_SECONDS=0 run "${hack}/publish-release.sh" o/r "${tag}" "${dA}" "${dB}" "${shaN}" "${dist}" ${mode:+"${mode}"} > "${work}/out" 2> "${work}/err"
 }
 make_dist 0.1.0
 complete_draft="$(release_json v0.1.0 true false)"
@@ -294,7 +294,7 @@ if ! upload '{"isDraft":true}' && [ "$(uploads)" = 0 ]; then pass "upload: missi
 make_dist 0.1.0
 
 # --- release-verify-notes.sh
-notes() { "${hack}/release-verify-notes.sh" o/r v0.1.0 "${dA}" "${dB}"; }
+notes() { "${hack}/release-verify-notes.sh" o/r v0.1.0 "${dA}" "${dB}" "${shaN}"; }
 start='<!-- sablecourt:verify:start -->' end='<!-- sablecourt:verify:end -->'
 first="$(printf 'intro\n' | notes)"
 again="$(printf '%s\n' "${first}" | notes)"
@@ -314,7 +314,10 @@ for case in "end marker only:intro\n${end}\nprose" "end before start:${end}\npro
   # shellcheck disable=SC2059
   if ! printf "${text}\n" | notes > /dev/null 2>&1; then pass "notes: ${name} refused"; else fail "notes: ${name} accepted"; fi
 done
-expect_exit "notes: bad digest refused" 1 "${hack}/release-verify-notes.sh" o/r v0.1.0 bad "${dB}"
+expect_exit "notes: bad digest refused" 1 "${hack}/release-verify-notes.sh" o/r v0.1.0 bad "${dB}" "${shaN}"
+expect_exit "notes: short commit refused" 1 "${hack}/release-verify-notes.sh" o/r v0.1.0 "${dA}" "${dB}" abc123
+grep -q -- "--source-digest ${shaN}" <<< "${first}" && pass "notes: consumer provenance commands bind the commit" || fail "notes: no --source-digest in the notes"
+if ! publish v0.1.0 -- "$(jq -c --arg b "$(printf 'x' | "${hack}/release-verify-notes.sh" o/r v0.1.0 "${dA}" "${dB}" "$(printf '9%.0s' $(seq 40))")" '.body = $b' <<< "${complete_draft}")" && [ "$(writes)" = 0 ]; then pass "publish: notes for another commit refused"; else fail "publish: notes for another commit accepted"; fi
 
 # --- resolve-image-digests.sh and verify-image.sh
 shaA="$(printf 'c%.0s' $(seq 40))" shaB="$(printf 'd%.0s' $(seq 40))"

@@ -9,20 +9,20 @@
 # it is still a draft and still passes. Missing or different pieces leave the release a draft and fail the job
 # (a draft is waited for up to RELEASE_WAIT_SECONDS, 300, for the other jobs to finish). A release that is
 # already published is never written: complete, it passes (exit 0); incomplete, it fails at once.
-# With `verify-only` as the sixth argument nothing is ever written: the release must already be published and
+# With `verify-only` as the seventh argument nothing is ever written: the release must already be published and
 # complete (the verify-published job of release.yml, whose local directory holds the downloaded assets after
 # their signature, checksums and provenance were verified). Usage:
-#   hack/publish-release.sh <owner/repo> <tag> <daemon image digest> <agent image digest> <local dir> [verify-only]
+#   hack/publish-release.sh <owner/repo> <tag> <daemon digest> <agent digest> <commit sha> <local dir> [verify-only]
 # Tests: hack/test/release-scripts_test.sh (with a gh stub).
 set -euo pipefail
 
-if [ "$#" -lt 5 ] || [ "$#" -gt 6 ] || { [ "$#" -eq 6 ] && [ "$6" != verify-only ]; }; then
-  echo "usage: $0 <owner/repo> <tag> <daemon image digest> <agent image digest> <local dist dir> [verify-only]" >&2
+if [ "$#" -lt 6 ] || [ "$#" -gt 7 ] || { [ "$#" -eq 7 ] && [ "$7" != verify-only ]; }; then
+  echo "usage: $0 <owner/repo> <tag> <daemon digest> <agent digest> <commit sha> <local dist dir> [verify-only]" >&2
   exit 2
 fi
-repo="$1" tag="$2" dist="$5" mode="${6:-publish}"
-# Reuse the argument validation and require the exact verification section for this tag and these digests.
-expected="$("$(dirname "$0")/release-verify-notes.sh" "$1" "$2" "$3" "$4" < /dev/null)"
+repo="$1" tag="$2" dist="$6" mode="${7:-publish}"
+# Reuse the argument validation and require the exact verification section for this tag, digests and commit.
+expected="$("$(dirname "$0")/release-verify-notes.sh" "$1" "$2" "$3" "$4" "$5" < /dev/null)"
 version="${tag#v}"
 prerelease=false
 if [ "${version}" != "${version%%-*}" ]; then prerelease=true; fi
