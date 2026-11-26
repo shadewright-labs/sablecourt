@@ -1,20 +1,26 @@
 name: Release
 
-# Builds, scans, signs, verifies and publishes a release for a pushed v* tag (docs/ci.md, "Releases"):
-#   1. check: the tag is X.Y.Z or X.Y.Z-rc.N, its commit is on main, ci-ok passed on main for that commit and no
-#      published release exists for it (hack/release-state.sh and hack/release-ci-ok.sh fail closed).
-#   2. binaries: four archives (hack/package-binaries.sh) and an SPDX SBOM of the binaries.
+# Builds, scans, signs, verifies and publishes a release for a pushed v* tag (docs/ci.md, "Releases"). Each job
+# starts only when every job in its needs succeeded; what can exist outside the run before each gate:
+#   1. check: the tag is X.Y.Z or X.Y.Z-rc.N, its commit is on main, the newest push run of ci.yml on main for that
+#      commit passed with a passed ci-ok, and no published release exists for it (hack/release-state.sh and
+#      hack/release-ci-ok.sh fail closed). Before it passes, nothing.
+#   2. binaries: four archives (hack/package-binaries.sh) and an SPDX SBOM of the binaries, kept as run artifacts.
 #      images: the daemon and agent images for linux/amd64 and linux/arm64, pushed by digest with no tag.
-#   3. scan-images: Trivy on every platform image by digest; HIGH and CRITICAL findings fail unless
-#      .trivyignore.yaml accepts them. No signing or write permission.
-#      sign-images: a cosign keyless signature of each image index, an SPDX SBOM attestation per platform image
-#      (the SBOM files are also release assets) and build provenance for each index.
-#      sign-binaries (after sign-images): checksums.txt over the archives and the five SBOMs, a cosign keyless
-#      signature of it (bundle file) and build provenance for every file, also saved as .intoto.jsonl assets.
-#      Keyless means a short-lived certificate for this workflow from GitHub's OIDC token: there is no key to store.
-#   4. verify: the commands of docs/how-to/verify-a-release.md, pinned to this tag's exact identity and commit. It
-#      has no write permission, and nothing public changes before it passed.
-#   5. publish (environment release): refuses a moved tag, a published release and a version image tag on another
+#   3. scan-images (after images): Trivy on every platform image by digest, with a database pinned by digest;
+#      HIGH and CRITICAL findings fail unless .trivyignore.yaml accepts them. No signing or write permission.
+#      Before check, binaries, images and scan-images have all passed, only untagged image digests can exist.
+#   4. sign-images (after check, binaries, images and scan-images): a cosign keyless signature of each image
+#      index, an SPDX SBOM attestation per platform image (the SBOM files are also release assets) and build
+#      provenance for each index.
+#      sign-binaries (after the same jobs and sign-images): checksums.txt over the archives and the five SBOMs, a
+#      cosign keyless signature of it (bundle file) and build provenance for every file, also saved as
+#      .intoto.jsonl assets. Keyless means a short-lived certificate for this workflow from GitHub's OIDC token.
+#   5. verify: the checks of docs/how-to/verify-a-release.md on the run's files and digests, pinned to this tag's
+#      exact identity and commit, with no write permission. Before it passes, untagged image digests and the
+#      signatures, attestations and provenance records of steps 3 and 4 can exist (in GHCR, the Sigstore
+#      transparency log and GitHub's attestation store), but no release and no image tag.
+#   6. publish (environment release): refuses a moved tag, a published release and a version image tag on another
 #      digest before it writes anything, then a draft release with every file, checked byte for byte
 #      (hack/release-assets.sh), then the version tag (and latest, see hack/release-latest.sh) on the verified
 #      image digests, then the draft is published.
@@ -43,7 +49,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      checks: read # the ci-ok check run of the tagged commit
+      checks: read # the ci-ok check runs of the tagged commit
+      actions: read # the CI workflow runs of the tagged commit
     outputs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -83,14 +90,15 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
-      # Read-only: the check runs and check suites of the tagged commit. No ci-ok from a run on main, a pending
-      # one or a failed one stops the release with the reason.
+      # Read-only: the push runs of ci.yml on main and the ci-ok check runs of the tagged commit. The script filters
+      # again on workflow path, event, branch and repository, whatever the query returns; a newest run that is
+      # missing, pending or not a success stops the release with the reason.
       - name: Require a passed ci-ok on main for the tagged commit
         run: |
           set -euo pipefail
-          gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-runs?check_name=ci-ok&per_page=100" > "${RUNNER_TEMP}/runs.json"
-          gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-suites?per_page=100" > "${RUNNER_TEMP}/suites.json"
-          hack/release-ci-ok.sh "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/suites.json"
+          gh api "repos/${GH_REPO}/actions/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=100" > "${RUNNER_TEMP}/runs.json"
+          gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/check-runs?check_name=ci-ok&per_page=100" > "${RUNNER_TEMP}/checks.json"
+          hack/release-ci-ok.sh "${GH_REPO}" "${GITHUB_SHA}" "${RUNNER_TEMP}/runs.json" "${RUNNER_TEMP}/checks.json"
 
   binaries:
     name: Build the archives
@@ -191,7 +199,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           outputs: type=image,name=${{ env.AGENT_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
-  # A gate before publish, with read permissions only. The policy is the sister project's: HIGH and CRITICAL
+  # A gate before any signature and before publish, with read permissions only. The policy is the sister project's: HIGH and CRITICAL
   # findings fail the release whether a fix exists or not, unless .trivyignore.yaml (read from the tagged commit)
   # accepts them with a statement; a scanner error fails it too, so a failed scan never looks clean.
   scan-images:
@@ -205,6 +213,9 @@ jobs:
     env:
       DAEMON_DIGEST: ${{ needs.images.outputs.daemon-digest }}
       AGENT_DIGEST: ${{ needs.images.outputs.agent-digest }}
+      # The vulnerability database, pinned by digest so every scan of a release reads the same one. To update it,
+      # see docs/ci.md, "Releases".
+      TRIVY_DB: ghcr.io/aquasecurity/trivy-db@sha256:20195fed64a14e349f8d59b06a7a74a200cdc250b30849a9f4554264e7e3eba6
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -231,14 +242,16 @@ jobs:
                 '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest] | if length == 1 then .[0] else error("not one \($a) image") end')"
               "${RUNNER_TEMP}/trivy-bin/trivy" image --image-src remote --scanners vuln \
                 --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml --skip-version-check \
+                --cache-dir "${RUNNER_TEMP}/trivy-cache" --db-repository "${TRIVY_DB}" \
                 "${image}@${child}"
               echo "scanned ${image}@${child} (linux/${arch})" >> "$GITHUB_STEP_SUMMARY"
             done
           done
+          jq -r '"Trivy database \(env.TRIVY_DB), built \(.UpdatedAt)"' "${RUNNER_TEMP}/trivy-cache/db/metadata.json" >> "$GITHUB_STEP_SUMMARY"
 
   sign-images:
     name: Sign and attest the images
-    needs: [check, images]
+    needs: [check, binaries, images, scan-images]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -326,7 +339,7 @@ jobs:
 
   sign-binaries:
     name: Sign and attest the release files
-    needs: [check, binaries, sign-images]
+    needs: [check, binaries, scan-images, sign-images]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -388,8 +401,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The public commands of docs/how-to/verify-a-release.md, with the exact identity of this tag and the provenance
-  # bound to this commit. No write permission: a failure here leaves no release and no image tag.
+  # The checks of docs/how-to/verify-a-release.md on the run's artifacts and digests, with the exact identity of
+  # this tag and the provenance bound to this commit. No write permission: a failure here leaves no release and no
+  # image tag.
   verify:
     name: Verify everything
     needs: [check, images, sign-binaries, sign-images]
@@ -399,8 +413,8 @@ jobs:
       contents: read
       packages: read # read the images and their signatures from GHCR
       attestations: read
+    # GH_TOKEN is set only on the two steps that call gh, not on the step that runs the built sablectl.
     env:
-      GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.check.outputs.version }}
@@ -443,6 +457,7 @@ jobs:
 
       - name: Verify the archives
         env:
+          GH_TOKEN: ${{ github.token }}
           DIST: ${{ runner.temp }}/dist
         run: |
           set -euo pipefail
@@ -475,11 +490,10 @@ jobs:
               --source-digest "${GITHUB_SHA}" \
               --deny-self-hosted-runners > /dev/null
           done
-          tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl
-          "${RUNNER_TEMP}/sablectl" version | grep -F -- "${VERSION}"
 
       - name: Verify the images
         env:
+          GH_TOKEN: ${{ github.token }}
           DIST: ${{ runner.temp }}/dist
         run: |
           set -euo pipefail
@@ -520,6 +534,23 @@ jobs:
               --deny-self-hosted-runners > /dev/null
             echo "verified ${ref}" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      # The freshly built binary runs last: after the GHCR login is removed, in an empty environment with an empty
+      # home, so no token is in its reach through the environment or the Docker config. It must print exactly
+      # "sablectl <version>".
+      - name: Run the stamped sablectl
+        env:
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          mkdir "${RUNNER_TEMP}/empty-home"
+          tar -xzf "${DIST}/sablecourt_${VERSION}_linux_amd64.tar.gz" -C "${RUNNER_TEMP}" sablectl
+          got="$(env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}/empty-home" "${RUNNER_TEMP}/sablectl" version)"
+          if [ "${got}" != "sablectl ${VERSION}" ]; then
+            echo "sablectl version printed '${got}', not 'sablectl ${VERSION}'" >&2
+            exit 1
+          fi
 
   # The only job with contents: write. It builds and signs nothing: it publishes what verify checked. The
   # environment lets a maintainer require a reviewer before it starts; it has no protection until one is set.
