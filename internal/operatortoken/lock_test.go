@@ -128,7 +128,7 @@ func TestStateDir(t *testing.T) {
 	}{
 		{"absolute override is cleaned", "/srv/sc/../state/", "", "/srv/state", ""},
 		{"relative override refused", "state", "", "", "absolute"},
-		{"default under home", "", "/home/op", "/home/op/.local/share/sablecourt", ""},
+		{"default under home", "", "/srv/op", "/srv/op/.local/share/sablecourt", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

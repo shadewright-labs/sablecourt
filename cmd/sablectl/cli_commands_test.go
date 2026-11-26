@@ -400,7 +400,7 @@ func TestArgumentValidationSendsNoRequest(t *testing.T) {
 		{"relic get missing name", []string{"conclave", "relic", "get", "c1"}, "accepts 2 arg(s)"},
 		{"unknown digest flag spelling", []string{"approval", "approve", "a1", "--sha", "x"}, "unknown flag"},
 		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1"}, "invalid daemon API URL"},
-		{"api url with user info", []string{"--api", "http://user:pass@daemon.invalid", "approval", "deny", "a1"}, "invalid daemon API URL"},
+		{"api url with user info", []string{"--api", "http://user:pass@example.com", "approval", "deny", "a1"}, "invalid daemon API URL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

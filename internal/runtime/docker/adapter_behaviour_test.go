@@ -386,7 +386,7 @@ func TestHarnessErrorAndPreflightRefusals(t *testing.T) {
 	// Engine missing councilEngineAPI refuses CheckCouncilHarness and EnsureCouncilLoginVolume.
 	plain := NewAdapter(&fakeEngine{}, "")
 	plain.CouncilHarnesses = map[string]CouncilHarness{
-		"claude": {Image: "img", LoginVolume: "sablecourt-claude", LoginFiles: []string{"/home/harness/c"}},
+		"claude": {Image: "img", LoginVolume: "sablecourt-claude", LoginFiles: []string{"/data/harness/c"}},
 	}
 	var he *HarnessError
 	if err := plain.CheckCouncilHarness(context.Background(), "claude"); !errors.As(err, &he) || he.Fault != FaultBackend {
