@@ -110,3 +110,24 @@ func TestRenderListsCompletion(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderEscapesPipesInDefaults checks that a default with a pipe stays
+// in its cell: every row of the flag table keeps four cells.
+func TestRenderEscapesPipesInDefaults(t *testing.T) {
+	root := &cobra.Command{Use: "tool", Run: func(*cobra.Command, []string) {}}
+	root.Flags().String("format", "json|yaml", "Output format, json|yaml")
+	root.Flags().String("plain", "text", "Plain default")
+	out := Render(root)
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "| `--") {
+			continue
+		}
+		unescaped := strings.Count(line, "|") - strings.Count(line, `\|`)
+		if unescaped != 5 {
+			t.Errorf("row %q has %d cell separators, want 5", line, unescaped)
+		}
+	}
+	if !strings.Contains(out, "| `--format` | string | `json\\|yaml` |") || !strings.Contains(out, "| `--plain` | string | `text` |") {
+		t.Errorf("defaults not rendered as expected:\n%s", out)
+	}
+}

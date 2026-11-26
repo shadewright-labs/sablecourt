@@ -76,12 +76,13 @@ func TestMetricsReferenceListsEveryMetric(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	doc := map[string]string{}
 	docLabels := map[string]string{}
-	inTable := false
+	// state: 0 outside a metric table, 1 after its header, 2 in its rows.
+	state, width := 0, 0
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "|") {
-			inTable = false
+			state = 0
 			continue
 		}
 		cells := strings.Split(strings.Trim(line, "|"), "|")
@@ -89,9 +90,16 @@ func TestMetricsReferenceListsEveryMetric(t *testing.T) {
 			cells[i] = strings.TrimSpace(cells[i])
 		}
 		switch {
-		case cells[0] == "Name":
-			inTable = true
-		case !inTable || strings.HasPrefix(cells[0], "---") || len(cells) < 2:
+		case state == 0 && cells[0] == "Name":
+			state, width = 1, len(cells)
+		case state == 1:
+			if !isDelimiterRow(cells, width) {
+				t.Errorf("metrics.md: the header must be followed by a delimiter row, or the table does not render: %q", line)
+				state = 3 // skip the rest of this block
+				continue
+			}
+			state = 2
+		case state != 2 || len(cells) < 2:
 		default:
 			name := strings.Trim(cells[0], "`")
 			if _, dup := doc[name]; dup {
@@ -101,6 +109,16 @@ func TestMetricsReferenceListsEveryMetric(t *testing.T) {
 			if len(cells) > 2 {
 				docLabels[name] = labelsCell(cells[2])
 			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("metrics.md: %v", err)
+	}
+	// A family with samples but no "# TYPE" line is untyped in the
+	// exposition format; it still needs a row.
+	for name := range codeLabels {
+		if _, ok := code[name]; !ok {
+			code[name] = "untyped"
 		}
 	}
 	for name, typ := range code {
@@ -147,6 +165,21 @@ func sampleLabels(line string) (name string, labels []string, ok bool) {
 		labels = append(labels, l[1])
 	}
 	return m[1], labels, true
+}
+
+// isDelimiterRow reports a Markdown table delimiter row of width cells,
+// such as "| --- | :---: |".
+func isDelimiterRow(cells []string, width int) bool {
+	if len(cells) != width {
+		return false
+	}
+	for _, c := range cells {
+		c = strings.TrimSuffix(strings.TrimPrefix(c, ":"), ":")
+		if len(c) < 3 || strings.Trim(c, "-") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // labelsCell reads the label names of a Labels cell: the names in backticks

@@ -4,7 +4,7 @@ Limits, ceilings and timeouts that refuse, cut or time out a request, a task or 
 
 Status: built.
 
-The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdocs`, which `go test ./...` runs. It finds each named constant in the source, evaluates it, and fails when the value or the unit differs from the Value column, or when the constant no longer exists. The test also holds a list of the limit constants, so a row removed from this page fails it too; a new limit constant is listed there and here. A time unit needs a `time.Duration` constant; sizes use B, KiB (1024 bytes), MiB and GiB. A limit that is a literal in the code, with no constant, is not listed here; the [how it works](../how-it-works/index.md) pages describe those where they matter.
+The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdocs`, which `go test ./...` runs. It finds each named constant in the source and evaluates it with the Go type checker, from the files the go tool selects for the platform the test runs on, and fails when the value or the unit differs from the Value column, or when the constant no longer exists. The test also holds a list of the limit constants, so a row removed from this page fails it too; a new limit constant is listed there and here. A time unit needs a `time.Duration` constant; sizes use B, KiB (1024 bytes), MiB and GiB. A limit that is a literal in the code, with no constant, is not listed here; the [how it works](../how-it-works/index.md) pages describe those where they matter.
 
 ## HTTP server
 

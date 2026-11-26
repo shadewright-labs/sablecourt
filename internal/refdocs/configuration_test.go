@@ -95,8 +95,19 @@ var configPage = filepath.Join(repoRoot, "docs", "reference", "configuration.md"
 // unobservedStateEntries are state directory entries that the test cannot
 // see after LoadOrCreate and LockStateDir return, with the source text that
 // names each one.
-var unobservedStateEntries = map[string]struct{ file, source string }{
-	"operator.token.pending": {"internal/operatortoken/token.go", `const pending = Filename + ".pending"`},
+var unobservedStateEntries = map[string]struct {
+	file, source string
+	// modeSource is the code that creates the entry, and mode the mode it
+	// gives, which the row must state.
+	modeSource string
+	mode       os.FileMode
+}{
+	"operator.token.pending": {
+		file:       "internal/operatortoken/token.go",
+		source:     `const pending = Filename + ".pending"`,
+		modeSource: `root.OpenFile(pending, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)`,
+		mode:       0o600,
+	},
 }
 
 // TestConfigurationStateDirectory fails when the State directory section of
@@ -181,13 +192,18 @@ func TestConfigurationStateDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(body), src.source) {
-			t.Errorf("%s no longer contains %q; update unobservedStateEntries", src.file, src.source)
+		if !strings.Contains(string(body), src.source) || !strings.Contains(string(body), src.modeSource) {
+			t.Errorf("%s no longer contains %q and %q; update unobservedStateEntries", src.file, src.source, src.modeSource)
 			continue
 		}
 		accounted[name] = true
-		if _, ok := rows[name]; !ok {
+		row, ok := rows[name]
+		if !ok {
 			t.Errorf("State directory: the daemon creates %s (%s); it is missing from the table", name, src.file)
+			continue
+		}
+		if want := fmt.Sprintf("mode %04o", src.mode.Perm()); !strings.Contains(row, want) {
+			t.Errorf("State directory: %s is created with %s; its row must say so", name, want)
 		}
 	}
 	for name := range rows {
