@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fails when a tracked file names an image under ghcr.io/shadewright-labs/ that the Images workflow does not
-# publish, or a tag form it never pushes. Published: ghcr.io/shadewright-labs/sablecourt and
-# ghcr.io/shadewright-labs/sablecourt-agent, tagged X.Y.Z, X.Y.Z-rc.N, X.Y, latest, main or sha-<commit> (never
-# with a leading v), or referenced by digest (@sha256: and exactly 64 lower-case hex digits; a short, upper-case or
+# Fails when a tracked file names an image under ghcr.io/shadewright-labs/ that release.yml does not publish, or
+# a tag form it never pushes. Published on a v* tag: ghcr.io/shadewright-labs/sablecourt and
+# ghcr.io/shadewright-labs/sablecourt-agent, tagged X.Y.Z or X.Y.Z-rc.N (the Git tag without its v) and latest,
+# or referenced by digest (@sha256: and exactly 64 lower-case hex digits; a short, upper-case or
 # other-algorithm digest, an empty tag or a trailing colon fail). Run by repo-checks.yml. Usage: hack/check-image-refs.sh [repository root]
 # Tests: hack/test/check-image-refs_test.sh.
 set -euo pipefail
@@ -18,7 +18,7 @@ if [ "${rc}" -gt 1 ]; then
   exit 1
 fi
 name_re='^ghcr\.io/shadewright-labs/(sablecourt|sablecourt-agent)$'
-tag_re='^(latest|main|sha-[0-9a-f]{7,40}|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?)?)$'
+tag_re='^(latest|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?)$'
 bad=0
 while IFS= read -r line; do
   where="${line%:ghcr.io/*}" ref="ghcr.io/${line#*:ghcr.io/}"
@@ -38,7 +38,7 @@ while IFS= read -r line; do
       ;;
     :*)
       if ! [[ "${rest#:}" =~ ${tag_re} ]]; then
-        echo "${where}: ${ref}: the Images workflow never pushes the tag '${rest#:}'" >&2
+        echo "${where}: ${ref}: release.yml never pushes the tag '${rest#:}'" >&2
         bad=$((bad + 1))
       fi
       ;;

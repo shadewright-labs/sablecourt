@@ -2,9 +2,9 @@ name: Repo checks
 
 # Checks that run on every pull request whatever changed, because they are cheap and a change anywhere can break
 # them: the internal links of the tracked Markdown files (a renamed source file can break a docs link), the image
-# references under ghcr.io/shadewright-labs/ (they must name images and tags the Images workflow publishes), the
+# references under ghcr.io/shadewright-labs/ (they must name images and tags release.yml publishes), the
 # Dockerfiles' workspace policy (GOWORK=off, as in CI), and the offline tests of the scripts under hack/ that CI
-# and the release rely on. Go is set up for the fuzz target list, which asks the go command.
+# relies on. Go is set up for the fuzz target list, which asks the go command.
 # Called by ci.yml (the only trigger); always runs.
 on:
   workflow_call:
@@ -44,9 +44,6 @@ jobs:
       - name: Test the ci-ok predicate
         run: hack/test/ci-ok_test.sh
 
-      - name: Test the release helpers
-        run: hack/test/release-scripts_test.sh
-
       - name: Test the fuzz target list
         run: hack/test/fuzz-targets_test.sh
 
@@ -59,5 +56,5 @@ jobs:
       - name: Test the Dockerfile check
         run: hack/test/dockerfiles_test.sh
 
-      - name: Test the publishing workflows' structure
+      - name: Test the workflows' structure
         run: hack/test/workflows_test.sh

@@ -28,8 +28,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
-// version is what `sablectl version` prints. Release builds set it to the tag without the v
-// (hack/package-binaries.sh, -ldflags -X main.version=...).
+// version is what `sablectl version` prints. A build can set it with -ldflags -X main.version=...
 var version = "0.1.0-dev"
 
 func main() {

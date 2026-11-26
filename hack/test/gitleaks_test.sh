@@ -38,7 +38,7 @@ scan_repo() {
 # The content goes before the copied file. gitleaks' private-key rule matches lazily from a header to the next
 # "KEY-----" at least 64 characters on, so a short fixture header earlier in a file can swallow the header of a
 # key that follows it, and stock gitleaks then reports nothing (seen with internal/attach/hub_test.go). That is
-# a limit of the rule, not of the allowlists; docs/ci-and-releases.md states it.
+# a limit of the rule, not of the allowlists; docs/ci.md states it.
 scan() {
   new_repo
   mkdir -p "${repo}/$(dirname "$3")"

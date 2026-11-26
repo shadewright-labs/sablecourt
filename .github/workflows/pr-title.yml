@@ -1,7 +1,7 @@
 name: PR title
 
-# Squash merges use the pull request title as the commit message on main, and release-please builds the
-# changelog from those messages, so the title must follow Conventional Commits (see AGENTS.md, "Working rules").
+# Squash merges use the pull request title as the commit message on main, so the title must follow Conventional
+# Commits (see AGENTS.md, "Working rules").
 # pull_request_target runs this file from the base branch, so a pull request cannot weaken its own check.
 # That is safe only because the job never checks out or runs pull request code and has read-only
 # permissions: keep it that way.

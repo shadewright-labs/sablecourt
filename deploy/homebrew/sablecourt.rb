@@ -1,6 +1,5 @@
-# Homebrew formula template for github.com/shadewright-labs/homebrew-tap. Not maintained by the release yet:
-# the release workflow does not update the version or the checksums below, and no tap publishes it. Before
-# use, copy it to the tap and fill in the sha256 of each archive from the release's checksums.txt.
+# Homebrew formula template for github.com/shadewright-labs/homebrew-tap
+# Install after publishing a GitHub release:
 #   brew install shadewright-labs/tap/sablecourt
 class Sablecourt < Formula
   desc "Active orchestrator for heterogeneous AI and non-LLM workloads"

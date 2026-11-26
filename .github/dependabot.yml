@@ -1,5 +1,5 @@
 # Weekly dependency updates. Titles follow Conventional Commits (chore(deps), ci(deps)) so they pass the
-# PR title check and stay out of the changelog. A person reviews and merges every update.
+# PR title check. A person reviews and merges every update.
 version: 2
 updates:
   - package-ecosystem: gomod

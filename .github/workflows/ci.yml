@@ -11,8 +11,7 @@ name: CI
 # Never add trigger-level `paths` here: a workflow that never starts leaves its required check pending forever.
 # A new job goes into the `needs` of `ci-ok` and into the table in hack/ci-ok.sh.
 #
-# Images are published from images.yml on main and v* tags; release.yml builds the binaries on v* tags;
-# vulncheck.yml also has its weekly schedule. Cancelling superseded runs is safe only here, so the concurrency
+# release.yml (v* tags) builds and publishes the binaries and images; vulncheck.yml also has its weekly schedule. Cancelling superseded runs is safe only here, so the concurrency
 # group is only in this file (in a called workflow github.workflow is the caller's name, and a second group
 # there could deadlock the run).
 on:
@@ -83,7 +82,7 @@ jobs:
     with:
       run: ${{ needs.changes.outputs.go == 'true' }}
 
-  # Pull request build only (amd64, no push); main and tags publish from images.yml.
+  # Pull request build only (amd64, no push); v* tags publish from release.yml.
   images:
     needs: changes
     if: ${{ github.event_name == 'pull_request' }}
@@ -113,7 +112,7 @@ jobs:
     uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
 
   # Always runs: the internal docs link check, the image reference check and the offline tests of the scripts
-  # under hack/ (detector, ci-ok predicate, release helpers, fuzz enumerator, link checker).
+  # under hack/ (detector, ci-ok predicate, fuzz enumerator, link checker, image reference and workflow checks).
   repo-checks:
     permissions:
       contents: read

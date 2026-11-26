@@ -1,4 +1,4 @@
-<!-- Title: Conventional Commits, it becomes the squash commit and the changelog entry (see AGENTS.md "Working rules"). -->
+<!-- Title: Conventional Commits, it becomes the squash commit on main (see AGENTS.md "Working rules"). -->
 
 ## Why
 

@@ -35,9 +35,9 @@ build_paths='.*\.go|go\.mod|go\.sum|go\.work|go\.work\.sum|cmd/.*|internal/.*|ex
 # The reference pages under docs/reference are checked against the code by go test, so they are Go inputs too.
 go_paths="${build_paths}|Makefile|hack/.*|\.golangci\.yml|docs/reference/.*"
 # Go workflows that ci.yml does not call; a change to one runs the Go checks.
-go_workflows='\.github/workflows/(fuzz|release|images)\.yml'
+go_workflows='\.github/workflows/(fuzz|release)\.yml'
 go_re="^(${go_paths}|${go_workflows})$"
-images_re="^(${build_paths}|LICENSE|\.github/workflows/images\.yml)$"
+images_re="^(${build_paths}|LICENSE)$"
 # The reference pages and what renders or checks them.
 docs_re='^(docs/reference/.*|cmd/.*|internal/.*|Makefile)$'
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.
