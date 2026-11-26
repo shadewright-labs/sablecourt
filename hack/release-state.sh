@@ -4,7 +4,7 @@
 # <tag>. A token with contents: read sees published releases only; one with contents: write also sees drafts.
 #   exit 0: no published release of <tag>; prints the id of each draft release of <tag>, one per line
 #   exit 3: a published release of <tag> exists (prints nothing)
-#   exit 1: the lookup failed or did not return a list of releases
+#   exit 1: the lookup failed or did not return at least one page that is a list of releases
 # Usage: hack/release-state.sh <tag>    (gh needs GH_REPO and GH_TOKEN)
 set -euo pipefail
 
@@ -21,9 +21,11 @@ if ! gh api --paginate "repos/${GH_REPO}/releases?per_page=100" > "${work}/pages
   echo "could not list the releases of ${GH_REPO}; refusing to go on without knowing whether ${tag} is published" >&2
   exit 1
 fi
-# Each page must be a JSON array of objects with a numeric id, a tag_name and a boolean draft.
-if ! jq -r --arg tag "${tag}" '
-    if type != "array" then error("not a list of releases") else .[] end
+# At least one page, and each page a JSON array of objects with a numeric id, a tag_name and a boolean draft. An
+# empty answer (no page at all) is not an empty list: gh prints [] for a repository without releases.
+if ! jq -rs --arg tag "${tag}" '
+    if length == 0 then error("no page in the answer") else .[] end
+    | if type != "array" then error("not a list of releases") else .[] end
     | if (.id | type) != "number" or (.tag_name | type) != "string" or (.draft | type) != "boolean"
       then error("a release without id, tag_name or draft") else . end
     | select(.tag_name == $tag) | "\(.id) \(.draft)"' "${work}/pages" > "${work}/found"; then
