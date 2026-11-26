@@ -327,7 +327,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
 				return
 			}
-			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest, g.now()); err != nil {
+			if err := g.store.ConsumeApproval(ctx, req.ApprovalID, ac.Lease.TaskID, capability, digest, g.now); err != nil {
 				reason := "approval_mismatch_or_unapproved"
 				switch {
 				case errors.Is(err, store.ErrExpired):

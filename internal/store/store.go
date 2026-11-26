@@ -38,12 +38,15 @@ type Store interface {
 	GetApproval(ctx context.Context, id string) (domain.Approval, error)
 	ListApprovals(ctx context.Context, status domain.ApprovalStatus) ([]domain.Approval, error)
 	DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error
-	// ConsumeApproval moves an approved approval to consumed in one transaction,
-	// after checking it belongs to taskID and capability, pins payloadSHA256 and
-	// has not expired at now. A row past its expiry is marked expired and
-	// ErrExpired is returned; any other mismatch or a row that is not approved
-	// returns ErrConflict. A consumed row never becomes usable again.
-	ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error
+	// ConsumeApproval spends an approval: one UPDATE moves the row from
+	// approved to consumed only where it belongs to taskID and capability, pins
+	// payloadSHA256 and expires later than the time now returns, read just
+	// before that UPDATE. Exactly one affected row means the caller may act. A
+	// matching approved row past its expiry is marked expired and ErrExpired is
+	// returned; a missing row returns ErrNotFound; any other mismatch, or a row
+	// that is not approved, returns ErrConflict. A consumed row never becomes
+	// usable again.
+	ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error
 
 	CreateLease(ctx context.Context, lease domain.Lease) error
 	GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error)

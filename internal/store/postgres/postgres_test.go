@@ -84,7 +84,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 
 	live := "apr-live-" + suffix
 	seed(live, now.Add(time.Minute))
-	if err := st.ConsumeApproval(ctx, live, taskID, "action:git.open_pr", "d2", now); !errors.Is(err, store.ErrConflict) {
+	if err := st.ConsumeApproval(ctx, live, taskID, "action:git.open_pr", "d2", fixed(now)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("wrong digest: err %v, want ErrConflict", err)
 	}
 	var wg sync.WaitGroup
@@ -93,7 +93,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if st.ConsumeApproval(ctx, live, taskID, "action:git.open_pr", "d1", now) == nil {
+			if st.ConsumeApproval(ctx, live, taskID, "action:git.open_pr", "d1", fixed(now)) == nil {
 				ok.Add(1)
 			}
 		}()
@@ -108,10 +108,26 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 
 	old := "apr-old-" + suffix
 	seed(old, now.Add(-time.Second))
-	if err := st.ConsumeApproval(ctx, old, taskID, "action:git.open_pr", "d1", now); !errors.Is(err, store.ErrExpired) {
+	if err := st.ConsumeApproval(ctx, old, taskID, "action:git.open_pr", "d1", fixed(now)); !errors.Is(err, store.ErrExpired) {
 		t.Fatalf("expired: err %v, want ErrExpired", err)
 	}
 	if got, _ := st.GetApproval(ctx, old); got.Status != domain.ApprovalExpired {
 		t.Fatalf("status %q, want expired", got.Status)
 	}
+
+	// The expiry is compared as a time, not as text: "...:05Z" sorts after
+	// "...:05.5Z" as text although it is earlier.
+	whole := time.Date(2026, 11, 26, 12, 0, 5, 0, time.UTC)
+	textTrap := "apr-text-" + suffix
+	seed(textTrap, whole)
+	if err := st.ConsumeApproval(ctx, textTrap, taskID, "action:git.open_pr", "d1", fixed(whole.Add(500*time.Millisecond))); !errors.Is(err, store.ErrExpired) {
+		t.Fatalf("use after a whole-second expiry: err %v, want ErrExpired", err)
+	}
+	fraction := "apr-frac-" + suffix
+	seed(fraction, whole.Add(500*time.Millisecond))
+	if err := st.ConsumeApproval(ctx, fraction, taskID, "action:git.open_pr", "d1", fixed(whole)); err != nil {
+		t.Fatalf("use before a fractional expiry: %v", err)
+	}
 }
+
+func fixed(t time.Time) func() time.Time { return func() time.Time { return t } }

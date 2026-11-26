@@ -453,18 +453,56 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
-func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error {
+	if now == nil {
+		return errors.New("consume approval: no clock")
+	}
+	// The store has one connection. Holding it first means a wait for another
+	// call of this process happens before the clock is read, not after.
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = conn.Close() }()
 
-	var rowTask, rowCapability, rowDigest, status, expires string
-	err = tx.QueryRowContext(ctx, `
-		SELECT task_id, capability, payload_sha256, status, expires_at
-		FROM approvals WHERE id = ?
-	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
+	// One statement in the driver's own autocommit transaction, with the clock
+	// read immediately before it. Residual window: the statement may still
+	// wait for the database write lock held by another process, up to
+	// busy_timeout (5 s, set in Open), and the time it compares against was
+	// read before that wait. An approval can therefore be consumed at most
+	// that long after its expiry, never longer: a statement that cannot take
+	// the lock within busy_timeout fails and nothing is consumed. If the
+	// connection was ever reopened without the pragma, busy_timeout is zero and
+	// a held lock fails the statement at once.
+	//
+	// julianday rounds both sides to the millisecond. The rounding is
+	// monotonic, so a time at or after the expiry never compares as earlier; a
+	// use less than a millisecond before the expiry may be refused.
+	at := now().UTC().Format(time.RFC3339Nano)
+	res, err := conn.ExecContext(ctx, `
+		UPDATE approvals SET status = ?
+		WHERE id = ? AND status = ? AND task_id = ? AND capability = ? AND payload_sha256 = ?
+		  AND julianday(expires_at) > julianday(?)
+	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256, at)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return nil
+	}
+	if n != 0 {
+		return fmt.Errorf("consume approval: %d rows updated", n)
+	}
+	// Nothing was consumed. Say why: a matching approved row can only have
+	// failed the expiry clause, and is marked expired.
+	var rowTask, rowCapability, rowDigest, status string
+	err = conn.QueryRowContext(ctx, `
+		SELECT task_id, capability, payload_sha256, status FROM approvals WHERE id = ?
+	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ErrNotFound
 	}
@@ -474,29 +512,12 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capabilit
 	if status != string(domain.ApprovalApproved) || rowTask != taskID || rowCapability != capability || rowDigest != payloadSHA256 {
 		return store.ErrConflict
 	}
-	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
-	if err != nil {
-		return fmt.Errorf("parse approval expiry: %w", err)
-	}
-	next, outcome := domain.ApprovalConsumed, error(nil)
-	if !now.Before(expiresAt) {
-		next, outcome = domain.ApprovalExpired, store.ErrExpired
-	}
-	res, err := tx.ExecContext(ctx, `
+	if _, err := conn.ExecContext(ctx, `
 		UPDATE approvals SET status = ? WHERE id = ? AND status = ?
-	`, string(next), id, string(domain.ApprovalApproved))
-	if err != nil {
-		return err
+	`, string(domain.ApprovalExpired), id, string(domain.ApprovalApproved)); err != nil {
+		return fmt.Errorf("%w (marking it expired failed: %v)", store.ErrExpired, err)
 	}
-	if n, err := res.RowsAffected(); err != nil {
-		return err
-	} else if n != 1 {
-		return store.ErrConflict
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return outcome
+	return store.ErrExpired
 }
 
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {

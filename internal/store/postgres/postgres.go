@@ -389,50 +389,68 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 	return nil
 }
 
-func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now time.Time) error {
+func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string, now func() time.Time) error {
+	if now == nil {
+		return errors.New("consume approval: no clock")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var rowTask, rowCapability, rowDigest, status, expires string
-	err = tx.QueryRowContext(ctx, `
-		SELECT task_id, capability, payload_sha256, status, expires_at
-		FROM approvals WHERE id = $1 FOR UPDATE
-	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status, &expires)
+	// Lock the row before reading the clock, so a wait behind a concurrent use
+	// of the same approval cannot carry a time from before its expiry past it.
+	var locked string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM approvals WHERE id = $1 FOR UPDATE`, id).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	// expires_at is RFC 3339 text; both sides are compared as timestamptz,
+	// which rounds to microseconds. The rounding is monotonic, so a time at
+	// or after the expiry never compares as earlier.
+	at := now().UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE approvals SET status = $1
+		WHERE id = $2 AND status = $3 AND task_id = $4 AND capability = $5 AND payload_sha256 = $6
+		  AND expires_at::timestamptz > $7::timestamptz
+	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256, at)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return tx.Commit()
+	}
+	if n != 0 {
+		return fmt.Errorf("consume approval: %d rows updated", n)
+	}
+	// Nothing was consumed. Say why: a matching approved row can only have
+	// failed the expiry clause, and is marked expired.
+	var rowTask, rowCapability, rowDigest, status string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT task_id, capability, payload_sha256, status FROM approvals WHERE id = $1
+	`, id).Scan(&rowTask, &rowCapability, &rowDigest, &status); err != nil {
+		return err
+	}
 	if status != string(domain.ApprovalApproved) || rowTask != taskID || rowCapability != capability || rowDigest != payloadSHA256 {
 		return store.ErrConflict
 	}
-	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
-	if err != nil {
-		return fmt.Errorf("parse approval expiry: %w", err)
-	}
-	next, outcome := domain.ApprovalConsumed, error(nil)
-	if !now.Before(expiresAt) {
-		next, outcome = domain.ApprovalExpired, store.ErrExpired
-	}
-	res, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE approvals SET status = $1 WHERE id = $2 AND status = $3
-	`, string(next), id, string(domain.ApprovalApproved))
-	if err != nil {
-		return err
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return err
-	} else if n != 1 {
-		return store.ErrConflict
+	`, string(domain.ApprovalExpired), id, string(domain.ApprovalApproved)); err != nil {
+		return fmt.Errorf("%w (marking it expired failed: %v)", store.ErrExpired, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return fmt.Errorf("%w (marking it expired failed: %v)", store.ErrExpired, err)
 	}
-	return outcome
+	return store.ErrExpired
 }
 
 func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) error {
