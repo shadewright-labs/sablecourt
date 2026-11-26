@@ -11,7 +11,10 @@
 # report as scanned: those with a text hunk in a file that is not deleted (gitleaks skips deleted and binary
 # files, so an empty commit, a mode change, a pure rename, a binary change or a deletion is not counted). The
 # scan fails when gitleaks reports fewer, or no count at all, or when the git process gitleaks started did not
-# exit 0 (a read cut short inside a commit). Usage:
+# exit 0 (a read cut short inside a commit).
+#
+# Known limit: a git process that stops part way through a commit and still exits 0 is not detected, because
+# gitleaks counts commits, not bytes. No ordinary failure ends that way. Usage:
 #   hack/secret-scan.sh <gitleaks binary> [repository, default .]
 set -euo pipefail
 
@@ -23,6 +26,7 @@ gitleaks="$1" repo="${2:-.}"
 range=(--all --full-history)
 log_opts=("${range[@]}" --diff-merges=first-parent)
 work="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")"
+work="$(cd "${work}" && pwd)" # absolute, so the shim directory in PATH survives a change of directory
 trap 'rm -rf "${work}"' EXIT
 
 fail() {
@@ -49,21 +53,30 @@ read -r listed want < <(awk '
 # harmlessly); any status but 0, or no `git log` at all, fails the scan.
 real_git="$(command -v git)" || fail "git not found"
 mkdir "${work}/bin"
-# shellcheck disable=SC2016 # the shim's own variables must reach the file unexpanded
-{
-  printf '#!/bin/sh\n'
-  printf 'is_log=0\n'
-  printf 'for a in "$@"; do [ "$a" = log ] && is_log=1; done\n'
-  printf '"%s" "$@"\n' "${real_git}"
-  printf 'rc=$?\n'
-  printf '[ "$is_log" = 1 ] && echo "$rc" >> "%s"\n' "${work}/git-status"
-  printf 'exit "$rc"\n'
-} > "${work}/bin/git"
+# The shim takes the real git and the status file from its environment, so no path is written into its text. It
+# records a call only when the git subcommand is log (the first word that is not an option or the value of -C or -c).
+cat > "${work}/bin/git" <<'SHIM'
+#!/bin/sh
+sub="" skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    -C|-c) skip=1 ;;
+    -*) ;;
+    *) sub="$a"; break ;;
+  esac
+done
+"$SECRET_SCAN_REAL_GIT" "$@"
+rc=$?
+[ "$sub" = log ] && echo "$rc" >> "$SECRET_SCAN_GIT_STATUS"
+exit "$rc"
+SHIM
 chmod +x "${work}/bin/git"
 : > "${work}/git-status"
 
 rc=0
-PATH="${work}/bin:${PATH}" "${gitleaks}" git "${repo}" --redact --no-banner --exit-code 1 \
+SECRET_SCAN_REAL_GIT="${real_git}" SECRET_SCAN_GIT_STATUS="${work}/git-status" PATH="${work}/bin:${PATH}" \
+  "${gitleaks}" git "${repo}" --redact --no-banner --exit-code 1 \
   --log-opts="${log_opts[*]}" > "${work}/out" 2>&1 || rc=$?
 cat "${work}/out"
 if [ "${rc}" -ne 0 ]; then

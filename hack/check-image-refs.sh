@@ -39,6 +39,8 @@ while IFS= read -r line; do
     echo "${where}: ${ref}: release.yml never pushes the tag '${tag#:}'" >&2
     bad=$((bad + 1))
   fi
+  # Prose can end a sentence right after a digest: one closing full stop, comma, semicolon or bracket is not part of it.
+  if [[ "${digest}" =~ ^(@sha256:[a-f0-9]{64})[.,\;\)]$ ]]; then digest="${BASH_REMATCH[1]}"; fi
   if [ "${has_digest}" = 1 ] && ! [[ "${digest}" =~ ^@sha256:[a-f0-9]{64}$ ]]; then
     echo "${where}: ${ref}: not a sha256 digest (@sha256: and 64 lower-case hex digits)" >&2
     bad=$((bad + 1))

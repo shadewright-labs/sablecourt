@@ -34,6 +34,8 @@ case_ "digest one digit short" 1 "image: ${reg}/sablecourt@sha256:$(printf 'a%.0
 case_ "upper-case digest" 1 "image: ${reg}/sablecourt-agent@sha256:$(printf 'A%.0s' $(seq 64))"
 case_ "digest followed by a tag" 1 "image: ${reg}/sablecourt@sha256:$(printf 'a%.0s' $(seq 64)):0.1.0"
 case_ "tag and digest" 0 "image: ${reg}/sablecourt:0.1.0@sha256:$(printf 'a%.0s' $(seq 64))"
+case_ "tag and digest at the end of a sentence" 0 "Pull ${reg}/sablecourt:0.1.0@sha256:$(printf 'a%.0s' $(seq 64))."
+case_ "digest with two trailing dots" 1 "Pull ${reg}/sablecourt@sha256:$(printf 'a%.0s' $(seq 64)).."
 case_ "valid tag, short digest" 1 "image: ${reg}/sablecourt:0.1.0@sha256:short"
 case_ "valid tag, upper-case digest" 1 "image: ${reg}/sablecourt-agent:latest@sha256:$(printf 'A%.0s' $(seq 64))"
 case_ "bad tag, valid digest" 1 "image: ${reg}/sablecourt:main@sha256:$(printf 'a%.0s' $(seq 64))"
