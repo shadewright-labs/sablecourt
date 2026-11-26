@@ -96,3 +96,23 @@ func TestUnknownCommitOutcomeIsNotReportedAsUnused(t *testing.T) {
 		})
 	}
 }
+
+// Low 7: a body longer than the limit is refused, not cut at the limit. A
+// valid envelope padded to exactly the limit and followed by more data must
+// not pass as the envelope alone.
+func TestBodyPastTheLimitIsRefused(t *testing.T) {
+	tg := setupTypedGate(t, typedGateOptions{effect: "allow"})
+	env := `{"payload":` + validOpenPR + `}`
+	padded := env + strings.Repeat(" ", maxActionBody-len(env))
+	for _, tail := range []string{"null", "{}", " "} {
+		if rec := tg.post("ops-agent", "git.open_pr", padded+tail); rec.Code == http.StatusOK {
+			t.Fatalf("envelope padded to the limit plus %q accepted", tail)
+		}
+	}
+	if n := len(tg.pr.calls()); n != 0 {
+		t.Fatalf("%d requests reached GitHub", n)
+	}
+	if rec := tg.post("ops-agent", "git.open_pr", padded); rec.Code != http.StatusOK {
+		t.Fatalf("envelope padded to exactly the limit: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

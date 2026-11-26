@@ -18,6 +18,13 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
+// The typed inputs below are the canonical encoding of each action: the
+// approval digest is the SHA-256 of json.Marshal of the value, so field names,
+// their order and omitempty are part of what an approver approved. Changing
+// any of them changes the digest of every payload, and approvals pending
+// across the upgrade then fail at consumption and need a new approval.
+// TestCanonicalEncodingOfTypedActionsIsFixed holds a golden digest per action.
+
 type CreateBranchInput struct {
 	Branch string `json:"branch"`
 	Base   string `json:"base"`

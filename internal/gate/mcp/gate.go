@@ -296,6 +296,9 @@ type actionRequest struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
+// maxActionBody is the largest action request body the gate reads.
+const maxActionBody = 2 << 20
+
 // ActionHandler serves the closed catalog of typed mutating actions at POST /{actionName}.
 func (g *Gate) ActionHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -324,9 +327,16 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 
-		rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		// One byte past the limit is read so that a longer body is refused
+		// instead of cut at the limit: a cut could drop trailing data the
+		// strict decoder would otherwise refuse.
+		rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxActionBody+1))
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+			return
+		}
+		if len(rawBody) > maxActionBody {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "action request larger than 2 MiB"})
 			return
 		}
 		req, err := decodeTyped[actionRequest](rawBody)
