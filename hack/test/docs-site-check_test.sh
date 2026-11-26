@@ -28,12 +28,15 @@ build() { # dir: valid site with home page, subpage, local stylesheet, local SVG
 
 # expect <name> <want: pass|fail> <site dir> [pending file]
 expect() {
-  local name="$1" want="$2" site="$3" pending="${4:-}" got
+  local name="$1" want="$2" site="$3" pending="${4:-}" got rc
   if [ -n "${pending}" ]; then
-    if python3 -I "${checker}" check "${site}" "${pending}" > "${work}/out" 2>&1; then got=pass; else got=fail; fi
+    python3 -I "${checker}" check "${site}" "${pending}" > "${work}/out" 2>&1 && rc=0 || rc=$?
   else
-    if python3 -I "${checker}" check "${site}" > "${work}/out" 2>&1; then got=pass; else got=fail; fi
+    python3 -I "${checker}" check "${site}" > "${work}/out" 2>&1 && rc=0 || rc=$?
   fi
+  # 0 is a clean site and 1 a reported problem; a usage error or a traceback (which also exits 1) is neither.
+  case "${rc}" in 0) got=pass ;; 1) got=fail ;; *) got="exit ${rc}" ;; esac
+  if grep -q '^Traceback' "${work}/out"; then got="crash"; fi
   if [ "${got}" = "${want}" ]; then
     echo "ok   ${name}"
   else
@@ -154,6 +157,13 @@ mentions "link escaping site" "repository URL"
 build "${s}"
 page "${s}/guide/index.html" "../stylesheets/brand.css" '<h2 id="step">Step</h2><img src="../../cmd/app/main.go" alt="bad">'
 expect "image escaping site fails" fail "${s}"
+mentions "image escaping site" "../../cmd/app/main.go"
+
+build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<a href="https://[">bad</a><a href="guide/#nope">also bad</a><img src="https://[" alt="bad">'
+expect "malformed URL is reported and the check goes on" fail "${s}"
+mentions "malformed URL" "malformed URL https://"
+mentions "malformed URL, later problem still reported" "broken anchor guide/#nope"
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2

@@ -289,7 +289,21 @@ def check(site, pending_file=None, site_url=None):
                 return True
         return False
 
+    def well_formed(url, ref):
+        """Reports a reference urlsplit cannot parse as a problem of its page; the check goes on."""
+        try:
+            urllib.parse.urlsplit(ref)
+        except ValueError:
+            problems.append(f"{url}: malformed URL {ref}")
+            return False
+        return True
+
     for url, p in sorted(parsed.items()):
+        p.images = [r for r in p.images if well_formed(url, r)]
+        p.assets = [(k, r) for k, r in p.assets if well_formed(url, r)]
+        p.links = [r for r in p.links if well_formed(url, r)]
+        if p.refresh and not well_formed(url, p.refresh):
+            p.refresh = None
         for src in p.images:
             if is_external_http(src, site_parts, base_path):
                 problems.append(f"{url}: third-party image {src}")
