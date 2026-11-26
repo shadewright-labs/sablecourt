@@ -35,6 +35,20 @@ type Definition struct {
 	// Tool is set for a role whose vendor tool is not in the image. The tool
 	// is installed on the user's machine into its own volume (see tool.go).
 	Tool *Tool
+	// Bundled is set for a role whose image carries its tool. The Dockerfile
+	// repeats these values, and a test keeps the two in step.
+	Bundled *Bundled
+}
+
+// Bundled pins the release archive that the Dockerfile downloads into an image.
+type Bundled struct {
+	Version  string
+	Platform string
+	// Target is the vendor's name for the platform in the asset name.
+	Target string
+	// SHA256 is the digest of the release archive for Platform. The build
+	// checks it before extracting and fails on a mismatch.
+	SHA256 string
 }
 
 // Docker is the only boundary that communicates with the local engine.
@@ -61,6 +75,11 @@ func Lookup(role string) (Definition, error) {
 		}
 	case "codex":
 		d.Version, d.LoginArgv = "0.172.0", []string{"codex", "login", "--device-auth"}
+		// The SHA-256 is the digest GitHub lists for the release asset
+		// codex-aarch64-unknown-linux-musl.tar.gz of tag rust-v0.172.0, read
+		// from the release API on 2026-11-26 and checked against a download.
+		d.Bundled = &Bundled{Version: d.Version, Platform: Platform, Target: "aarch64-unknown-linux-musl",
+			SHA256: "0b99526c185a4425fe96a2214fb7b6a6a7f7c1471883b7afbebe97e15e83e79e"}
 		d.LoginFiles = []string{StateDir + "/.codex/auth.json"}
 	case "agy":
 		d.Version, d.LoginArgv = "1.5.17", []string{"agy"}

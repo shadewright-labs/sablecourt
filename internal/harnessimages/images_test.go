@@ -130,6 +130,39 @@ func TestVersionCheckIdentity(t *testing.T) {
 	}
 }
 
+// The Dockerfile and images.go pin the same Codex CLI: the version in the
+// catalog, the release asset and its SHA-256 for the one pinned architecture.
+// Bumping the version in one place without the other, or without a checksum
+// recorded for that version, fails here; a wrong checksum fails the build.
+func TestCodexPinMatchesDockerfile(t *testing.T) {
+	d, err := Lookup("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := d.Bundled
+	if b == nil || b.Version != d.Version || b.Platform != Platform || !strings.HasPrefix(Platform, "linux/") || len(b.SHA256) != 64 || b.Target == "" {
+		t.Fatalf("codex bundled pin %+v does not match version %s and platform %s", b, d.Version, Platform)
+	}
+	arch := strings.TrimPrefix(Platform, "linux/")
+	stage := dockerStage(t, "codex")
+	for _, want := range []string{
+		"ARG TARGETARCH",
+		"releases/download/rust-v" + d.Version + "/codex-${codex_target}.tar.gz",
+		arch + ") codex_target=" + b.Target + " codex_sha256=" + b.SHA256 + " ;;",
+		"*) echo \"no Codex CLI is pinned for ${TARGETARCH}\" >&2; exit 1 ;;",
+		"OpenAI Codex CLI " + d.Version + ", unmodified.",
+		"test \"$(codex --version)\" = 'codex-cli " + d.Version + "'",
+	} {
+		if !strings.Contains(stage, want) {
+			t.Fatalf("codex stage lacks %q", want)
+		}
+	}
+	download, check, extract := strings.Index(stage, "curl "), strings.Index(stage, "sha256sum --check --strict"), strings.Index(stage, "tar -xzf")
+	if download < 0 || check < download || extract < check {
+		t.Fatal("the codex stage must check the SHA-256 after the download and before extracting")
+	}
+}
+
 // The published images for the proprietary tools must carry no vendor
 // software: no download, no copy of a binary, only the base and a README.
 func TestToolLessStages(t *testing.T) {

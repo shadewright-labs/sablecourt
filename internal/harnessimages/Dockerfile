@@ -35,11 +35,24 @@ LABEL org.opencontainers.image.title="sablecourt-harness-agy" \
       org.opencontainers.image.licenses="NOASSERTION"
 
 FROM base AS codex
-RUN mkdir -p /opt/codex \
-    && curl -fsSL https://github.com/openai/codex/releases/download/rust-v0.172.0/codex-aarch64-unknown-linux-musl.tar.gz -o /scratch/codex.tar.gz \
-    && tar -xzf /scratch/codex.tar.gz -C /opt/codex \
-    && install -m 0755 /opt/codex/codex-aarch64-unknown-linux-musl /usr/local/bin/codex \
-    && rm -rf /scratch/codex.tar.gz /opt/codex
+ARG TARGETARCH
+# The Codex CLI release archive is pinned by SHA-256 per architecture, with the
+# same values as the codex entry in images.go. The arm64 digest is the one
+# GitHub lists for the asset codex-aarch64-unknown-linux-musl.tar.gz of tag
+# rust-v0.172.0, read from the release API on 2026-11-26 and checked against a
+# download. No other architecture is pinned, so any other target fails here.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      arm64) codex_target=aarch64-unknown-linux-musl codex_sha256=0b99526c185a4425fe96a2214fb7b6a6a7f7c1471883b7afbebe97e15e83e79e ;; \
+      *) echo "no Codex CLI is pinned for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' "https://github.com/openai/codex/releases/download/rust-v0.172.0/codex-${codex_target}.tar.gz" -o /scratch/codex.tar.gz; \
+    printf '%s  %s\n' "${codex_sha256}" /scratch/codex.tar.gz | sha256sum --check --strict --quiet \
+      || { echo 'the Codex CLI download does not match its pinned SHA-256' >&2; exit 1; }; \
+    mkdir -p /opt/codex; \
+    tar -xzf /scratch/codex.tar.gz -C /opt/codex; \
+    install -m 0755 "/opt/codex/codex-${codex_target}" /usr/local/bin/codex; \
+    rm -rf /scratch/codex.tar.gz /opt/codex
 COPY licenses/codex/LICENSE licenses/codex/NOTICE /licenses/codex/
 COPY licenses/image/codex.txt /licenses/README
 LABEL org.opencontainers.image.title="sablecourt-harness-codex" \
