@@ -4,7 +4,7 @@ Build the three pinned harness images and sign each CLI in once, inside its own 
 
 ## Prerequisites
 
-- Docker Engine 28.0 or newer that can build and run `linux/arm64` images (the images are `linux/arm64`): an arm64 host, or emulation you set up yourself.
+- Docker Engine 28.0 or newer that can build and run `linux/arm64` images: an arm64 engine, or one with emulation available.
 - The Go toolchain, and a Sablecourt source checkout: the build compiles the council proxy locally.
 - Network access from `sablectl` to `downloads.claude.ai` (for `claude`) and `storage.googleapis.com` (for `agy`), for the tool download.
 - A way to sign in to each vendor CLI. The sign-in is each vendor CLI's own flow, which Sablecourt forwards to your terminal; the [spike notes](../harnesses.md#harnesses-in-containers) record flows that print an address to open in a browser on the host. Sablecourt does not check that a provider's terms allow a subscription login from a container. For `agy`, read the note on Google's terms in [harness images](harness-images.md#antigravity-terms).
