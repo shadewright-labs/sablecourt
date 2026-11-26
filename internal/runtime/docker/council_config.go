@@ -28,6 +28,9 @@ type CouncilHarness struct {
 	// LoginFiles are the credential files whose presence in the login volume
 	// means the user has logged in. Only the preflight uses them, by path, and it does not open them.
 	LoginFiles []string
+	// Tool is set when the image carries no vendor tool. The tool then comes
+	// from its own volume, mounted read-only, and is checked before each run.
+	Tool *CouncilTool
 }
 
 // CouncilLoginVolumeLabels identifies the managed volume when provisioning login state.
@@ -42,13 +45,35 @@ var modelName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$`)
 // script and the public command. The CLI receives EOF on its first read.
 const bootstrap = `IFS= read -r -d '' SABLECOURT_TASK_TOKEN || exit 125
 IFS= read -r -d '' prompt || exit 125
-SABLECOURT_TASK_TOKEN_FILE="$TMPDIR/task.lease"
+` + bootstrapTail
+
+const bootstrapTail = `SABLECOURT_TASK_TOKEN_FILE="$TMPDIR/task.lease"
 (umask 077; printf '%s' "$SABLECOURT_TASK_TOKEN" > "$SABLECOURT_TASK_TOKEN_FILE") || exit 125
 unset SABLECOURT_TASK_TOKEN
 export SABLECOURT_TASK_TOKEN_FILE
 exec "$@" "$prompt" </dev/null`
 
-func councilCommand(s rt.CouncilLaunch, login bool) ([]string, error) {
+func councilCommand(s rt.CouncilLaunch, login bool, tool *CouncilTool) ([]string, error) {
+	cmd, err := councilArgv(s, login)
+	if err != nil || tool == nil {
+		return cmd, err
+	}
+	// The vendor tool lives in the read-only tool volume. A guard checks it
+	// before it runs; the bootstrap form reads stdin first, so the runner's
+	// write of the lease and prompt never meets a closed container.
+	path := councilToolDir + "/" + tool.Binary
+	if login {
+		cmd[0] = path
+		return append([]string{"/bin/bash", "--noprofile", "--norc", "-c", toolGuardLogin, "guard"}, append(tool.guardArgs(), cmd...)...), nil
+	}
+	if len(cmd) < 7 || cmd[4] != bootstrap {
+		return nil, errors.New("unexpected council bootstrap")
+	}
+	argv := append([]string{path}, cmd[7:]...)
+	return append([]string{"/bin/bash", "--noprofile", "--norc", "-c", toolBootstrap, "bootstrap"}, append(tool.guardArgs(), argv...)...), nil
+}
+
+func councilArgv(s rt.CouncilLaunch, login bool) ([]string, error) {
 	var cmd []string
 	switch s.Harness {
 	case "claude":
@@ -171,6 +196,9 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 			return o, errors.New("council harnesses require separate login volumes")
 		}
 	}
+	if err := a.validateCouncilTool(s.Harness, cfg); err != nil {
+		return o, err
+	}
 	if !councilName.MatchString(s.TaskID) || !councilName.MatchString(s.Workload) {
 		return o, errors.New("invalid council task or workload name")
 	}
@@ -178,7 +206,7 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	if l.NanoCPUs <= 0 || l.MemoryBytes <= 0 || l.PIDs <= 0 || l.WallTime <= 0 {
 		return o, errors.New("council requires positive CPU, memory, PID and wall-time limits")
 	}
-	cmd, err := councilCommand(s, login)
+	cmd, err := councilCommand(s, login, cfg.Tool)
 	if err != nil {
 		return o, err
 	}
@@ -240,6 +268,10 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 		return o, err
 	}
 	mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: "/home/harness"})
+	if cfg.Tool != nil {
+		// Read-only, and NoCopy so the engine never fills it from the image.
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
+	}
 	// timeout also bounds the workload if the daemon exits mid-run.
 	seconds := strconv.FormatFloat(l.WallTime.Seconds(), 'f', 9, 64)
 	o.Name = "sablecourt-council-" + s.TaskID
@@ -285,6 +317,11 @@ func (a *Adapter) inspectCouncilHarness(ctx context.Context, engine councilEngin
 	}
 	if err := inspectCouncilLoginVolume(ctx, engine, harness, cfg.LoginVolume); err != nil {
 		return "", err
+	}
+	if cfg.Tool != nil {
+		if err := inspectCouncilToolVolume(ctx, engine, harness, cfg.Tool.Volume); err != nil {
+			return "", err
+		}
 	}
 	return id, nil
 }
