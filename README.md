@@ -80,6 +80,8 @@ Councils (`sablectl council "<question>"`) need more setup, and the CLI wants `c
 
 ## Guides
 
+Published docs site: [shadewrightlabs.com/sablecourt](https://shadewrightlabs.com/sablecourt/) (available once GitHub Pages is published).
+
 - [Overview](docs/overview.md): what Sablecourt is and is not, why it starts on one machine, and the parked parts.
 - [Concepts](docs/concepts.md) and the [glossary](docs/glossary.md): workloads, leases, gates, Conclaves and the court vocabulary.
 - [How it works](docs/how-it-works/index.md): the path of a request and where each invariant is enforced.

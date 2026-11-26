@@ -6,7 +6,7 @@
 #   EVENT_NAME  github.event_name; anything but "pull_request" (push to main, manual run) runs everything
 #   BASE_SHA    base commit of the pull request; HEAD is compared with it (the checkout is the merge commit)
 # Groups: go (lint, test, govulncheck, gosec), images (build of the daemon and agent targets of the root
-# Dockerfile), docs (the reference pages check), codeql (CodeQL analysis of Go code and workflows). The internal
+# Dockerfile), docs (the reference pages check and docs site build), codeql (CodeQL analysis of Go code and workflows). The internal
 # link check, workflow lint, the script tests and the secret scan run on every pull request.
 # A change to ci.yml, to a workflow it calls or to this script runs every group. Fails open: when the diff
 # cannot be computed, or anything in the classification fails, every group runs, so a problem here never lets
@@ -41,8 +41,8 @@ go_workflows='\.github/workflows/(fuzz|release)\.yml'
 go_re="^(${go_paths}|${go_workflows})$"
 # The image build also runs hack/setup-buildx.sh (images-build.yml); hack/test/ci-changed_test.sh lists every input.
 images_re="^(${build_paths}|LICENSE|hack/setup-buildx\.sh)$"
-# The reference pages and what renders or checks them.
-docs_re='^(docs/reference/.*|cmd/.*|internal/.*|Makefile|GNUmakefile|makefile)$'
+# The docs pages, site config, locked docs requirements, template overrides, built-site checker, reference pages and what renders or checks them.
+docs_re='^(docs/.*|zensical\.toml|requirements-docs\.(in|txt)|overrides/.*|hack/docs-site-check\.py|hack/docs-pages-pending\.txt|cmd/.*|internal/.*|Makefile|GNUmakefile|makefile)$'
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.
 codeql_re='^(.*\.go|go\.mod|go\.sum|\.github/workflows/.*|\.github/actions/.*|\.github/codeql/.*)$'
 # ci.yml and the workflows it calls, and this script.

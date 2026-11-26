@@ -95,7 +95,25 @@ new_repo; echo 'FROM scratch AS x' >> cmd/sablecourt-agent/Dockerfile; commit
 expect "nested Dockerfile (not built; Go group runs)" true true true false
 
 new_repo; echo 'more' >> docs/how-to/a.md; commit
-expect "docs page only (link check runs anyway)" false false false false
+expect "docs page only" false false true false
+
+new_repo; echo 'site_name = "Sablecourt"' > zensical.toml; commit
+expect "zensical.toml only" false false true false
+
+new_repo; echo 'zensical==0.1.1' > requirements-docs.in; commit
+expect "requirements-docs.in only" false false true false
+
+new_repo; echo 'zensical==0.1.1' > requirements-docs.txt; commit
+expect "requirements-docs.txt only" false false true false
+
+new_repo; mkdir -p overrides; echo '<!-- x -->' > overrides/main.html; commit
+expect "overrides file only" false false true false
+
+new_repo; mkdir -p hack; echo '# checker' > hack/docs-site-check.py; commit
+expect "built-site checker script" true false true false
+
+new_repo; mkdir -p hack; echo '# pending' > hack/docs-pages-pending.txt; commit
+expect "docs pending list" true false true false
 
 new_repo; echo 'more' >> docs/reference/cli.md; commit
 expect "reference page" true false true false

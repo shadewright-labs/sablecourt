@@ -1,8 +1,9 @@
 name: Docs check
 
-# Checks that the reference pages under docs/reference match the code (make docs-check, the same tests go test
-# runs). The internal link check runs on every pull request in repo-checks.yml; external links are reported
-# weekly by docs-links.yml.
+# Checks that the reference pages under docs/reference match the code, builds the Zensical docs site with the
+# hash-locked requirements, and checks the built site's internal links, anchors, images and assets
+# (make docs-check). The Markdown link check runs on every pull request in repo-checks.yml; external links are
+# reported weekly by docs-links.yml.
 # Called by ci.yml (the only trigger), which decides from the changed files whether it runs.
 on:
   workflow_call:
@@ -36,5 +37,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check the reference pages
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Install docs requirements
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-docs.txt
+
+      - name: Check the reference pages and build the docs site
         run: make -f Makefile docs-check
