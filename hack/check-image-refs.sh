@@ -2,7 +2,8 @@
 # Fails when a tracked file names an image under ghcr.io/shadewright-labs/ that the Images workflow does not
 # publish, or a tag form it never pushes. Published: ghcr.io/shadewright-labs/sablecourt and
 # ghcr.io/shadewright-labs/sablecourt-agent, tagged X.Y.Z, X.Y.Z-rc.N, X.Y, latest, main or sha-<commit> (never
-# with a leading v), or referenced by digest. Run by repo-checks.yml. Usage: hack/check-image-refs.sh [repository root]
+# with a leading v), or referenced by digest (@sha256: and exactly 64 lower-case hex digits; a short, upper-case or
+# other-algorithm digest, an empty tag or a trailing colon fail). Run by repo-checks.yml. Usage: hack/check-image-refs.sh [repository root]
 # Tests: hack/test/check-image-refs_test.sh.
 set -euo pipefail
 
@@ -10,7 +11,7 @@ cd "${1:-.}"
 hits="$(mktemp "${TMPDIR:-/tmp}/image-refs.XXXXXX")"
 trap 'rm -f "${hits}"' EXIT
 rc=0
-git grep -nIoE 'ghcr\.io/shadewright-labs/[A-Za-z0-9._/-]+((:|@)[A-Za-z0-9._:-]+)?' -- . \
+git grep -nIoE 'ghcr\.io/shadewright-labs/[A-Za-z0-9._/-]+([:@][A-Za-z0-9._:-]*)?' -- . \
   ':(exclude)hack/check-image-refs.sh' ':(exclude)hack/test/check-image-refs_test.sh' > "${hits}" || rc=$?
 if [ "${rc}" -gt 1 ]; then
   echo "git grep failed (exit ${rc})" >&2
@@ -28,7 +29,13 @@ while IFS= read -r line; do
     continue
   fi
   case "${rest}" in
-    "" | @sha256:*) ;;
+    "") ;;
+    @*)
+      if ! [[ "${rest}" =~ ^@sha256:[a-f0-9]{64}$ ]]; then
+        echo "${where}: ${ref}: not a sha256 digest (@sha256: and 64 lower-case hex digits)" >&2
+        bad=$((bad + 1))
+      fi
+      ;;
     :*)
       if ! [[ "${rest#:}" =~ ${tag_re} ]]; then
         echo "${where}: ${ref}: the Images workflow never pushes the tag '${rest#:}'" >&2

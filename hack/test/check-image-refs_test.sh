@@ -23,6 +23,14 @@ case_ "no tag" 0 "see ${reg}/sablecourt-agent for details"
 case_ "unpublished name" 1 "image: ${reg}/sablecourtd:0.1.0"
 case_ "tag with a v" 1 "image: ${reg}/sablecourt-agent:v0.1.0"
 case_ "unknown fictional image" 1 "image: ${reg}/triage:0.1.0"
+case_ "short digest" 1 "image: ${reg}/sablecourt@sha256:short"
+case_ "unknown digest algorithm" 1 "image: ${reg}/sablecourt@bogus:07"
+case_ "trailing colon" 1 "image: ${reg}/sablecourt:"
+case_ "digest one digit short" 1 "image: ${reg}/sablecourt@sha256:$(printf 'a%.0s' $(seq 63))"
+case_ "upper-case digest" 1 "image: ${reg}/sablecourt-agent@sha256:$(printf 'A%.0s' $(seq 64))"
+case_ "digest followed by a tag" 1 "image: ${reg}/sablecourt@sha256:$(printf 'a%.0s' $(seq 64)):0.1.0"
+case_ "empty digest" 1 "image: ${reg}/sablecourt@"
+case_ "colon at the end of a sentence" 1 "pull ${reg}/sablecourt-agent: it is published"
 
 if [ "${fails}" -ne 0 ]; then
   echo "${fails} case(s) failed" >&2
