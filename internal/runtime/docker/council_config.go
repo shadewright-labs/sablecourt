@@ -235,6 +235,11 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 		"http_proxy="+proxyRaw, "https_proxy="+proxyRaw,
 		"NO_PROXY="+gate.Hostname(), "no_proxy="+gate.Hostname(),
 	)
+	if s.Harness == "claude" {
+		// Claude Code's documented switch that blocks every update, background
+		// and manual. A new version arrives only as a new pin in a release.
+		env = append(env, "DISABLE_UPDATES=1")
+	}
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {

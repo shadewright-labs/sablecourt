@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -246,7 +247,42 @@ func TestCouncilLaunchWithTool(t *testing.T) {
 			if slices.Contains(c.Cmd, "/usr/local/bin/claude") {
 				t.Fatal("command still runs a tool from the image")
 			}
+			if !slices.Contains(c.Env, "DISABLE_UPDATES=1") {
+				t.Fatalf("claude may update itself: env = %v", c.Env)
+			}
 		})
+	}
+}
+
+// Claude Code must never replace itself: DISABLE_UPDATES=1 blocks background
+// and manual updates. Only the claude seat gets it, in turns and at login.
+func TestCouncilDisablesClaudeSelfUpdate(t *testing.T) {
+	for _, harness := range []string{"claude", "codex", "agy"} {
+		for _, login := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/login=%v", harness, login), func(t *testing.T) {
+				a, f, s := fixtureRun(t)
+				cfg := a.CouncilHarnesses["claude"]
+				delete(a.CouncilHarnesses, "claude")
+				f.vol.Name = "sablecourt-login-" + harness
+				cfg.LoginVolume = f.vol.Name
+				f.vol.Labels = CouncilLoginVolumeLabels(harness)
+				a.CouncilHarnesses[harness] = cfg
+				s.Harness = harness
+				var err error
+				if login {
+					s.Checkout, s.Prompt, s.TaskToken, s.Model = rt.CouncilCheckout{}, "", "", ""
+					_, err = a.RunCouncilLogin(t.Context(), s, func(context.Context, io.Reader, io.Writer) error { return nil }, discardResult)
+				} else {
+					_, err = a.RunCouncil(t.Context(), s, discardResult)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := slices.Contains(f.createdOpts.Config.Env, "DISABLE_UPDATES=1"); got != (harness == "claude") {
+					t.Fatalf("DISABLE_UPDATES=1 set = %v for %s: env = %v", got, harness, f.createdOpts.Config.Env)
+				}
+			})
+		}
 	}
 }
 
