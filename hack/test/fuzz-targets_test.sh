@@ -77,7 +77,7 @@ c="${work}/collect"
 mkdir -p "${c}/testdata/fuzz/FuzzRoot" "${c}/internal/a/testdata/fuzz/FuzzOne" "${c}/internal/b/testdata/fuzz/FuzzOld"
 printf 'go test fuzz v1\n' | tee "${c}/testdata/fuzz/FuzzRoot/r1" "${c}/internal/a/testdata/fuzz/FuzzOne/a1" \
   "${c}/internal/b/testdata/fuzz/FuzzOld/seed" "${c}/other.txt" > /dev/null
-git -C "${c}" init -q && git -C "${c}" add internal/b && git -C "${c}" -c user.name=t -c user.email=t@example.invalid commit -qm seed
+git -C "${c}" init -q && git -C "${c}" add internal/b && git -C "${c}" -c user.name=t -c user.email= commit -qm seed
 (cd "${c}" && "${root}/hack/fuzz-failures.sh" out) > /dev/null 2>&1 || true
 got="$(cd "${c}/out" 2> /dev/null && find . -type f | LC_ALL=C sort | tr '\n' ' ')" || got="no output"
 want="./internal/a/testdata/fuzz/FuzzOne/a1 ./testdata/fuzz/FuzzRoot/r1 "
