@@ -248,7 +248,7 @@ func (a *Adapter) councilExit(ctx context.Context, engine councilEngineAPI, resu
 	done := make(chan waitOutcome, 1)
 	go func() {
 		select {
-		case <-wait.Error:
+		case <-wait.Error: //nolint:errcheck // any wait error leaves the exit unverified, which is returned below
 			done <- waitOutcome{errored: true}
 		case status, ok := <-wait.Result:
 			done <- waitOutcome{status: status, ok: ok}

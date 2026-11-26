@@ -348,7 +348,7 @@ func TestLearningOperatorBoundary(t *testing.T) {
 		{"public", "/healthz", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tc.path, nil)
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			if tc.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tc.token)
 			}

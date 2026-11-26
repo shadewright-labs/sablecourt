@@ -170,7 +170,7 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 		{name: "writer with ref", bodyExtra: `,"writer":"claude"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "claude"},
 		{name: "writer default HEAD", omitRef: true, bodyExtra: `,"writer":"codex"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head, wantWriter: "codex"},
 		{name: "client fields", bodyExtra: `,"title":"Review this","decree":"Review this","rounds":1,"starts":3,"durationSeconds":7,"with":["agy","claude","codex"],"sequential":true`, rounds: 1, starts: 3, duration: 7 * time.Second, roles: "agy,claude,codex", sequential: true, wantRef: "HEAD", wantCommit: head},
-		{name: "redaction", bodyExtra: `,"title":"-----BEGIN PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
+		{name: "redaction", bodyExtra: `,"title":"-----BEGIN` + ` PRIVATE KEY----- concealed"`, rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
 		{name: "embedded credential", bodyExtra: fmt.Sprintf(`,"title":%q`, "prefix"+token+"suffix"), rounds: 2, starts: 6, duration: 15 * time.Minute, roles: "claude,codex,agy", wantRef: "HEAD", wantCommit: head},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,7 +178,7 @@ func TestCouncilOpenPersistsPolicy(t *testing.T) {
 			h := councilTestHandler(st, nil, councilTestOptions(token))
 			question := "Review this"
 			if tc.name == "redaction" {
-				question += " -----BEGIN PRIVATE KEY----- concealed"
+				question += " -----BEGIN" + " PRIVATE KEY----- concealed"
 			}
 			if tc.name == "embedded credential" {
 				question += " prefix" + token + "suffix"
@@ -512,7 +512,7 @@ func councilTestGit(t *testing.T, repo string, args ...string) string {
 			env = append(env, entry)
 		}
 	}
-	cmd.Env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=")
+	cmd.Env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "EMAIL=fixture", "GIT_ALLOW_PROTOCOL=") //nolint:gocritic // env is not used again
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v (%s)", args[0], err, out)

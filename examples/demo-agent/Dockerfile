@@ -1,5 +1,6 @@
 FROM golang:1.27-alpine AS build
 WORKDIR /src
+ENV GOWORK=off
 COPY go.mod go.sum ./
 COPY examples/demo-agent ./examples/demo-agent
 RUN CGO_ENABLED=0 go build -o /demo-agent ./examples/demo-agent

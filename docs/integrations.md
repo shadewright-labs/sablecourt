@@ -22,7 +22,7 @@ spec:
   class: long-lived-agent
   runtime:
     type: k8s-deployment
-    image: ghcr.io/shadewright-labs/sablecourt-agent:v0.1.0
+    image: ghcr.io/shadewright-labs/sablecourt-agent:0.1.0
     readOnlyRootfs: true
   grants:
     modelGate:

@@ -694,7 +694,7 @@ func isShadewrightConclaveID(id string) bool {
 	if len(hexPart) != sha256.Size*2 {
 		return false
 	}
-	for i := 0; i < len(hexPart); i++ {
+	for i := range len(hexPart) {
 		c := hexPart[i]
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false

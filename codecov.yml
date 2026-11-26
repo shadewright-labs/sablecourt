@@ -1,0 +1,17 @@
+# Coverage is reported, never a gate: CI does not fail on it (see the coverage job in .github/workflows/test.yml,
+# which uploads the profile of the race test run).
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# No comment on pull requests; the numbers are on the Codecov page of each commit.
+comment: false
+
+# The scripts under hack/ are not Go code under test.
+ignore:
+  - "hack/**"

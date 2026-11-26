@@ -129,7 +129,7 @@ func fieldTypes(t reflect.Type) map[string]string {
 	out := map[string]string{}
 	var walk func(t reflect.Type, prefix string)
 	walk = func(t reflect.Type, prefix string) {
-		for i := 0; i < t.NumField(); i++ {
+		for i := range t.NumField() {
 			f := t.Field(i)
 			tag := f.Tag.Get("json")
 			name, opts, _ := strings.Cut(tag, ",")

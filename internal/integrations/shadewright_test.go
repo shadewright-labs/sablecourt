@@ -872,7 +872,7 @@ func TestReservedIntegrationCredentials(t *testing.T) {
 	for name, token := range map[string]string{"operator": "op_" + strings.Repeat("1", 64), "task": "sc_task_example"} {
 		t.Run(name, func(t *testing.T) {
 			h := ShadewrightHandler{secrets: secret.NewMemoryStore(map[string]string{ShadewrightTokenSecretName: token}), secretName: ShadewrightTokenSecretName}
-			r := httptest.NewRequest("POST", "/", nil)
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
 			r.Header.Set("Authorization", "Bearer "+token)
 			w := httptest.NewRecorder()
 			if h.authenticate(w, r) || w.Code != 401 {

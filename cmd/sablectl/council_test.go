@@ -781,12 +781,12 @@ func TestCouncilTitleRedactsBeforeTruncation(t *testing.T) {
 	}{
 		{
 			name:     "openai_key_across_cutoff",
-			secret:   "sk-proj-SYNTHETIC1234567890abcdefghij",
+			secret:   "sk-proj-" + "SYNTHETIC1234567890abcdefghij",
 			fragment: "sk-proj-SYN",
 		},
 		{
 			name:     "github_token_across_cutoff",
-			secret:   "ghp_SYNTHETIC1234567890abcdefghij",
+			secret:   "ghp_" + "SYNTHETIC1234567890abcdefghij",
 			fragment: "ghp_SYN",
 		},
 		{

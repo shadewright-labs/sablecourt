@@ -532,11 +532,11 @@ func Routes() []string {
 	return out
 }
 
-// routeProvider finds the route of path in routes, the one list of providers
+// routeProvider finds the route of requestPath in routes, the one list of providers
 // and paths the gate dispatches and documents.
-func routeProvider(path string) (provider, upstreamPath string, ok bool) {
+func routeProvider(requestPath string) (provider, upstreamPath string, ok bool) {
 	for _, r := range routes {
-		rest, found := strings.CutPrefix(path, "/"+r.provider)
+		rest, found := strings.CutPrefix(requestPath, "/"+r.provider)
 		if found && strings.HasPrefix(rest, "/") && matchRoute(r.path, rest) {
 			return r.provider, rest, true
 		}
@@ -544,12 +544,12 @@ func routeProvider(path string) (provider, upstreamPath string, ok bool) {
 	return "", "", false
 }
 
-func matchRoute(pattern, path string) bool {
+func matchRoute(pattern, rest string) bool {
 	before, after, wildcard := strings.Cut(pattern, modelPlaceholder)
 	if !wildcard {
-		return path == pattern
+		return rest == pattern
 	}
-	return len(path) >= len(before)+len(after) && strings.HasPrefix(path, before) && strings.HasSuffix(path, after)
+	return len(rest) >= len(before)+len(after) && strings.HasPrefix(rest, before) && strings.HasSuffix(rest, after)
 }
 
 func extractTaskToken(r *http.Request) string {

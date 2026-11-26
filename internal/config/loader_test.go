@@ -77,7 +77,7 @@ spec:
   class: long-lived-agent
   runtime:
     type: docker
-    image: ghcr.io/shadewright-labs/triage:0.1.0
+    image: registry.example/triage:0.1.0
     readOnlyRootfs: true
   agentCard:
     description: Triages issues.
@@ -99,7 +99,7 @@ spec:
   class: deterministic-controller
   runtime:
     type: docker
-    image: ghcr.io/shadewright-labs/health-ctrl:0.1.0
+    image: registry.example/health-ctrl:0.1.0
   agentCard:
     description: Deterministic health check loop.
   grants:

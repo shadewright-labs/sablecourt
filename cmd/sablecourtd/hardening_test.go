@@ -81,7 +81,7 @@ func TestDaemonReadTimeoutDoesNotCutStreamingResponse(t *testing.T) {
 	ctxErr := make(chan error, 1)
 	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher := w.(http.Flusher)
-		for i := 0; i < chunks; i++ {
+		for i := range chunks {
 			if _, err := fmt.Fprintf(w, "chunk %d\n", i); err != nil {
 				ctxErr <- err
 				return
@@ -102,7 +102,7 @@ func TestDaemonReadTimeoutDoesNotCutStreamingResponse(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestCouncilGateVirtualHostIsNotOnTheNetworkMux(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, target := range []string{"/gate/mcp", "/gate/task/messages", "/api/v1/tasks", "/healthz"} {
-				r := httptest.NewRequest("POST", target, strings.NewReader("body"))
+				r := httptest.NewRequest(http.MethodPost, target, strings.NewReader("body"))
 				r.Host = authority
 				w := httptest.NewRecorder()
 				h.ServeHTTP(w, r)

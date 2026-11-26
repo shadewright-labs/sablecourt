@@ -286,7 +286,7 @@ func TestModelGateChildBudgetConcurrentReservation(t *testing.T) {
 			start := make(chan struct{})
 			var okCount, deniedCount, otherCount atomic.Int32
 			var wg sync.WaitGroup
-			for i := 0; i < tc.workers; i++ {
+			for range tc.workers {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()

@@ -770,7 +770,7 @@ func TestBlockedClaimAllowsCompletion(t *testing.T) {
 		a.mu.Unlock()
 		finished <- r.ReconcileOnce(ctx)
 	}()
-	defer func() { close(s.release); <-done; _ = waitForLaunches(t, r) }()
+	defer func() { close(s.release); <-done; _ = waitForLaunches(t, r) }() //nolint:errcheck // only waits for the blocked pass to end; this test checks the second pass
 	select {
 	case err := <-finished:
 		if err != nil {

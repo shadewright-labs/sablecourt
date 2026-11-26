@@ -307,10 +307,10 @@ func TestDuplicateSubmission(t *testing.T) {
 			}
 			if parallel {
 				results := make(chan error, 8)
-				for i := 0; i < 8; i++ {
+				for range 8 {
 					go func() { results <- call() }()
 				}
-				for i := 0; i < 8; i++ {
+				for range 8 {
 					if err := <-results; err != nil {
 						t.Error(err)
 					}
@@ -422,12 +422,12 @@ func TestReloadConcurrentReaders(t *testing.T) {
 			go func() {
 				defer close(done)
 				<-start
-				for i := 0; i < 1000; i++ {
+				for range 1000 {
 					r.Reload(b, p)
 				}
 			}()
 			close(start)
-			for i := 0; i < 20; i++ {
+			for i := range 20 {
 				var err error
 				switch reader {
 				case "reconcile":
@@ -478,14 +478,14 @@ func TestConcurrentRetries(t *testing.T) {
 				err  error
 			}
 			results := make(chan result, 8)
-			for i := 0; i < 8; i++ {
+			for range 8 {
 				go func() {
 					task, err := r.RetryTaskWithHandoff(ctx, task.ID, handoff, "retry")
 					results <- result{task, err}
 				}()
 			}
 			id := ""
-			for i := 0; i < 8; i++ {
+			for range 8 {
 				got := <-results
 				if got.err != nil {
 					t.Error(got.err)
