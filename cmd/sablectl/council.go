@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 		rounds     int
 		withRaw    string
 		sequential bool
+		writer     councilWriterFlag
 	)
 
 	cmd := &cobra.Command{
@@ -112,6 +114,9 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 			if err != nil {
 				return err
 			}
+			if err := validateCouncilWriter(writer, harnesses, liveMode); err != nil {
+				return err
+			}
 			for _, h := range harnesses {
 				if _, err := exec.LookPath(h); err != nil {
 					return fmt.Errorf("required harness %q not found on PATH: %w", h, err)
@@ -126,6 +131,7 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 				Rounds:     rounds,
 				Harnesses:  harnesses,
 				Sequential: sequential,
+				Writer:     strings.TrimSpace(writer.value),
 				JSONOut:    *jsonOut,
 				PollEvery:  defaultCouncilPollEvery,
 			})
@@ -138,6 +144,7 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 	cmd.Flags().IntVar(&rounds, "rounds", defaultCouncilRounds, "Maximum council rounds")
 	cmd.Flags().StringVar(&withRaw, "with", strings.Join(defaultCouncilHarnesses, ","), "Comma-separated participant harnesses (claude,codex,agy)")
 	cmd.Flags().BoolVar(&sequential, "sequential", false, "Run participants sequentially within each round")
+	cmd.Flags().Var(&writer, "writer", "Give one panel seat (claude, codex or agy) a writable worktree; without --ref it pins HEAD (excludes --live)")
 	return cmd
 }
 
@@ -149,13 +156,14 @@ type councilRunParams struct {
 	Rounds     int
 	Harnesses  []string
 	Sequential bool
+	Writer     string
 	JSONOut    bool
 	PollEvery  time.Duration
 }
 
 func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*http.Client, string), out io.Writer, params councilRunParams) error {
 	cli, base := httpClient(15 * time.Second)
-	payload := buildCouncilOpenPayload(params.Question, params.Repo, params.Ref, params.Live, params.Rounds, params.Harnesses, params.Sequential)
+	payload := buildCouncilOpenPayload(params.Question, params.Repo, params.Ref, params.Live, params.Rounds, params.Harnesses, params.Sequential, params.Writer)
 
 	raw, err := postCouncilOpen(ctx, cli, base, payload)
 	if err != nil {
@@ -404,7 +412,7 @@ func readLineContext(ctx context.Context, r io.Reader, maxBytes int64) (string, 
 	}
 }
 
-func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, harnesses []string, sequential bool) map[string]any {
+func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, harnesses []string, sequential bool, writer string) map[string]any {
 	redactedQuestion := store.RedactCouncilAnswer(question)
 	payload := map[string]any{
 		"title":      singleLineSummary(redactedQuestion, 120),
@@ -423,7 +431,49 @@ func buildCouncilOpenPayload(question, repo, ref string, live bool, rounds int, 
 	if live {
 		payload["live"] = true
 	}
+	if writer != "" {
+		payload["writer"] = writer
+	}
 	return payload
+}
+
+// councilWriterFlag holds --writer. It refuses a second value instead of
+// letting the last one win silently.
+type councilWriterFlag struct {
+	value string
+	set   bool
+}
+
+func (f *councilWriterFlag) String() string { return f.value }
+
+func (f *councilWriterFlag) Type() string { return "seat" }
+
+func (f *councilWriterFlag) Set(v string) error {
+	if f.set {
+		return errors.New("--writer can be given only once")
+	}
+	f.value = v
+	f.set = true
+	return nil
+}
+
+// validateCouncilWriter checks --writer against the panel the command sends,
+// before any request.
+func validateCouncilWriter(writer councilWriterFlag, harnesses []string, live bool) error {
+	if !writer.set {
+		return nil
+	}
+	seat := strings.TrimSpace(writer.value)
+	if seat == "" {
+		return errors.New("--writer cannot be empty")
+	}
+	if !slices.Contains(harnesses, seat) {
+		return fmt.Errorf("--writer %q is not a seat on the panel (%s)", writer.value, strings.Join(harnesses, ", "))
+	}
+	if live {
+		return errors.New("--writer and --live are mutually exclusive")
+	}
+	return nil
 }
 
 func watchCouncilStream(ctx context.Context, httpClient func(time.Duration) (*http.Client, string), base, conclaveID string, notifyCh chan<- struct{}) {

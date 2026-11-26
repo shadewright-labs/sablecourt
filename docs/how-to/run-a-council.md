@@ -34,7 +34,7 @@ Ask `claude`, `codex` and `agy` one question about a repository and read the ans
 
 The output ends with `=== Digest ===`. For a closed council that is the stop reason (`nothing_to_add`, `round_cap`, `start_cap`, `deadline`, `owner_stop` after Ctrl-C, or `owner_close`), then each round and seat. A council paused by a Ward has no digest yet, and the CLI prints `no digest recorded`. `Missing answer` means that seat has no recorded answer for that round. The command exits with an error when no seat answered, when the council was cancelled, or when a Ward paused it. A paused council stays open: resume it with `sablectl conclave decree <id> "<message>"`, or close it with `sablectl conclave close <id>`. Inspect any council later with `sablectl conclave inspect <id>`.
 
-The writer mode (one seat gets a writable worktree) is available through the API field `writer` only.
+The writer mode (one seat gets a writable worktree) is available with `--writer <seat>` (one of `claude`, `codex` or `agy`, not with `--live`), which the CLI sends as the API field `writer`.
 
 ## In depth
 

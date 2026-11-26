@@ -256,7 +256,7 @@ func newMCPServer(clientFactory func(time.Duration) (*http.Client, string)) *mcp
 			if repo != "" && hasControlChars(repo) {
 				return nil, errors.New("invalid repo path")
 			}
-			payload := buildCouncilOpenPayload(question, repo, ref, in.Live, rounds, harnesses, in.Sequential)
+			payload := buildCouncilOpenPayload(question, repo, ref, in.Live, rounds, harnesses, in.Sequential, "")
 			cli, base := clientFactory(15 * time.Second)
 			return postCouncilOpen(ctx, cli, base, payload)
 		},
