@@ -14,7 +14,7 @@ Sablecourt is designed as a policy-governed control plane that isolates untruste
 
 ## Verifying a release
 
-Release archives and images are signed keyless with cosign and carry build provenance and SBOM attestations. [Verify a release](docs/how-to/verify-a-release.md) gives the commands.
+[Verify a release](docs/how-to/verify-a-release.md) lists the commands that check the signatures and provenance of a release.
 
 ## Reporting a vulnerability
 
