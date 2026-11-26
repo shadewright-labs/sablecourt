@@ -405,13 +405,13 @@ func providerConnect(w http.ResponseWriter, r *http.Request, hosts []string, tun
 		http.Error(w, "provider unavailable", http.StatusBadGateway)
 		return
 	}
-	defer upstream.Close()
+	defer upstream.Close() //nolint:errcheck // tunnel connection teardown; the copy already reported its error
 	client, stream, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		http.Error(w, "provider tunnel unavailable", http.StatusBadGateway)
 		return
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck // tunnel connection teardown; the copy already reported its error
 	deadline := time.Now().Add(tunnelLifetime)
 	if client.SetDeadline(deadline) != nil || upstream.SetDeadline(deadline) != nil {
 		return

@@ -444,7 +444,7 @@ func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
 
 func integrationSocketRoot(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "g")
+	dir, err := os.MkdirTemp("/tmp", "g")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -263,7 +263,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer stateLock.Close() //nolint:errcheck // lock handle released at exit; the lock holds no data
 	logger := telemetry.NewLogger()
 
 	var gitSyncer *config.GitSyncer
@@ -301,7 +301,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer st.Close() //nolint:errcheck // the store's close error at daemon exit is dropped; reporting it is a separate change
 
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -1895,7 +1895,7 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		if err != nil {
 			return nil, "", "", fmt.Errorf("missing audio form field 'file': %w", err)
 		}
-		defer f.Close()
+		defer f.Close() //nolint:errcheck // uploaded form file, read only
 		data, err := io.ReadAll(f)
 		if err != nil {
 			return nil, "", "", err

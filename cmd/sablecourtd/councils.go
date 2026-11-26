@@ -398,7 +398,7 @@ func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool
 	if !ok || stat.Uid != euid {
 		return 0, 0, false
 	}
-	return uint64(stat.Dev), uint64(stat.Ino), true //nolint:unconvert // Stat_t field types differ between darwin and linux
+	return uint64(stat.Dev), stat.Ino, true
 }
 
 func resolveExistingPath(path string) (string, error) {

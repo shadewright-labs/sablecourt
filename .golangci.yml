@@ -26,12 +26,19 @@ linters:
     - whitespace
   settings:
     errcheck:
-      # Writes to a terminal or a response writer. Close, Rollback and Remove are excluded by the rule under
-      # exclusions below; any other unchecked error is still reported.
+      # Writes to a terminal or a response writer, and cleanup calls whose error has nowhere to go: closing a
+      # read side (a query result, a response body, a reader), rolling back a transaction that already failed,
+      # and removing a temporary path. A Close that finalizes a write ((*os.File).Close, a writer, a listener,
+      # a database handle) is still checked; test files get the rule under exclusions below.
       exclude-functions:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (io.ReadCloser).Close
+        - os.Remove
+        - os.RemoveAll
     errorlint:
       # fmt.Errorf with %v keeps an error opaque on purpose (the store packages do this), and switching it to
       # %w changes what errors.Is matches for callers. Comparisons and type assertions on errors are still checked.
@@ -66,11 +73,16 @@ linters:
       allow-unused: false
   exclusions:
     rules:
-      # Close, Rollback and Remove on cleanup paths (mostly deferred): the path already returns its own error,
-      # or there is nothing left to report. A Close whose error matters is checked in the code by hand.
-      - linters:
+      # Tests: an unchecked Close or cleanup call in a test cannot hide a product fault.
+      - path: _test\.go$
+        linters:
           - errcheck
-        text: "^Error return value of `[A-Za-z0-9_.]*\\.(Close|Rollback|Remove|RemoveAll)` is not checked$"
+        text: "^Error return value of `[A-Za-z0-9_.()*]*\\.(Close|Rollback|Remove|RemoveAll)` is not checked$"
+      # Stat_t.Dev is int32 on darwin and uint64 on linux, so the conversion is needed on one and redundant on
+      # the other. Stat_t.Ino is uint64 on both and is never converted.
+      - linters:
+          - unconvert
+        source: uint64\(stat\.Dev\)
 issues:
   # The defaults (50 per linter, 3 of the same text) hide repeats; report every finding.
   max-issues-per-linter: 0
@@ -85,8 +97,16 @@ formatters:
 #   a second copy here, at another version, would need a second set of exclusions kept in step.
 # - lll (1,523), goconst (933), gocyclo (63), modernize (78), prealloc (15): style and size rules the code
 #   base was never written to; they find no faults.
-# - noctx (161, 154 in tests): the listeners, dialers and test requests predate it.
-# - unparam (14, 11 in tests): test helpers with fixed arguments, and three signatures kept for symmetry.
-# - usetesting (7): every finding is a deliberate os.MkdirTemp under /tmp, to keep Unix socket paths
-#   short enough on macOS; t.TempDir would make them too long.
+# - noctx (213 on darwin and linux, 189 in tests): exec.Command, http.NewRequest, net.Listen, net.Dial and
+#   net.DialTimeout without a context. The 24 outside tests are in cmd/sablectl (8), cmd/sablecourt-agent (5),
+#   cmd/sablecourtd (2), internal/gate/councilproxy (3), internal/runtime/coding (3), examples/demo-agent,
+#   internal/clidoc and internal/store/sqlite (1 each).
+# - unparam (18, 15 in tests): test helpers with fixed arguments; newLoginLimiter always gets a one-minute
+#   window; (*tlsGate).close always returns nil; removeSharedWorktree always gets verifySaved=false, so its
+#   verification branch is unreachable. Removing that parameter changes council worktree code and belongs in
+#   a change of its own, not in this tooling change.
+# - usetesting (7, all in tests): each one is an os.MkdirTemp under /tmp on purpose, to keep Unix socket
+#   paths short enough on macOS; t.TempDir would make them too long.
+# - ginkgolinter: the tests use the standard testing package, not Ginkgo and Gomega, so it has nothing to check.
+# - logcheck: written for Kubernetes klog and logr call conventions; this code logs with log/slog.
 # - depguard: Shadewright's only rule bans package sort, a project choice Sablecourt has not made.

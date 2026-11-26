@@ -90,7 +90,7 @@ func runWrapper() error {
 		return err
 	}
 	ready := os.NewFile(3, "ready")
-	defer ready.Close()
+	defer ready.Close() //nolint:errcheck // readiness pipe; a lost status is seen by the reader as a closed pipe
 	syscall.CloseOnExec(3)
 	// A live attach reader may disappear when the daemon exits.
 	signal.Ignore(syscall.SIGPIPE)
@@ -104,12 +104,12 @@ func runWrapper() error {
 	if err != nil {
 		return err
 	}
-	defer stdout.Close()
+	defer stdout.Close() //nolint:errcheck // the output log's close error is dropped; checking it changes the wrapper's exit result, a separate change
 	stderr, err := os.OpenFile(filepath.Join(run, "stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	defer stderr.Close()
+	defer stderr.Close() //nolint:errcheck // the output log's close error is dropped; checking it changes the wrapper's exit result, a separate change
 	if spec.Target != "" && spec.Target != spec.Args[0] {
 		if err := checkWrappedTarget(spec.Target, spec.Dir); err != nil {
 			_ = json.NewEncoder(ready).Encode(readyStatus{
@@ -203,8 +203,8 @@ func launchWrapper(cmd *exec.Cmd, stateBase, scratch, taskID string, limit time.
 	if err != nil {
 		return nil, id, err
 	}
-	defer ready.Close()
-	defer child.Close()
+	defer ready.Close() //nolint:errcheck // read end of the readiness pipe
+	defer child.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
 	wrapper := exec.Command(exe, wrapperArg)
 	wrapper.Dir = filepath.Dir(stateBase)
 	wrapper.Env = []string{}
@@ -287,7 +287,7 @@ func shebangInterpreter(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	var buf [512]byte
 	n, err := io.ReadFull(f, buf[:])
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -327,7 +327,7 @@ func readBounded(path string, limit int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if len(b) > limit {
 		return nil, errors.New("oversized coding worker record")

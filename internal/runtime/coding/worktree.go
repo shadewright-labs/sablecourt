@@ -277,7 +277,7 @@ func readMetadata(path string) ([]byte, fileStamp, error) {
 	if err != nil {
 		return nil, stamp, err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	info, err := file.Stat()
 	if err != nil {
 		return nil, stamp, err
@@ -294,7 +294,7 @@ func readMetadata(path string) ([]byte, fileStamp, error) {
 	if len(data) > limit {
 		return nil, stamp, fmt.Errorf("oversized Git metadata file %s", path)
 	}
-	stamp.gitFileIdentity = gitFileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)} //nolint:unconvert // Stat_t field types differ between darwin and linux
+	stamp.gitFileIdentity = gitFileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}
 	stamp.Digest = sha256.Sum256(data)
 	stamp.Mode = info.Mode()
 	stamp.Modified = info.ModTime().UnixNano()

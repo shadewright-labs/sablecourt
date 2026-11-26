@@ -179,7 +179,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 				return wl, errors.New("council checkout isolation unavailable")
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || uint64(stat.Dev) != c.SourceDev || uint64(stat.Ino) != c.SourceIno { //nolint:unconvert // Stat_t field types differ between darwin and linux
+			if !ok || uint64(stat.Dev) != c.SourceDev || stat.Ino != c.SourceIno {
 				return wl, errors.New("council checkout isolation unavailable")
 			}
 		} else if filepath.IsAbs(admitted) {

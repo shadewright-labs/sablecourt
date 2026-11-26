@@ -500,7 +500,7 @@ func (a *Adapter) verifyPrimaryRepo(ctx context.Context, repo, expectedID string
 			return "", gitRepo{}, errors.New("configured repository is unavailable")
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino)) != expectedID { //nolint:unconvert // Stat_t field types differ between darwin and linux
+		if !ok || fmt.Sprintf("%d:%d", uint64(stat.Dev), stat.Ino) != expectedID {
 			return "", gitRepo{}, errors.New("configured repository directory identity changed")
 		}
 	}
@@ -2004,7 +2004,7 @@ func copyRegularFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer in.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	info, err := in.Stat()
 	if err != nil {
 		return err

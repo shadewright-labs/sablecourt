@@ -62,13 +62,13 @@ func startProcess(cmd *exec.Cmd, dir, scratch string, limit time.Duration, live 
 	if err != nil {
 		return nil, err
 	}
-	defer stdoutChild.Close()
+	defer stdoutChild.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
 	stderr, stderrChild, err := os.Pipe()
 	if err != nil {
 		_ = stdout.Close()
 		return nil, err
 	}
-	defer stderrChild.Close()
+	defer stderrChild.Close() //nolint:errcheck // child end of a pipe, closed after the child inherited it
 	defer func() {
 		if !started {
 			_ = stdout.Close()
@@ -146,7 +146,7 @@ func (p *codingProcess) cleanScratch() error {
 func copyOutput(pipe *os.File, writer io.Writer, output *sessionOutput) <-chan error {
 	done := make(chan error, 1)
 	go func() {
-		defer pipe.Close()
+		defer pipe.Close() //nolint:errcheck // read end of an output pipe
 		_, err := io.Copy(writer, pipe)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			// An inherited descriptor can outlive its owner. Discard any

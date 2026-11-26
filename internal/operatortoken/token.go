@@ -94,7 +94,7 @@ func Read(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	return readToken(root)
 }
 
@@ -108,7 +108,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	token, err := readToken(root)
 	if !errors.Is(err, os.ErrNotExist) {
 		return token, err
@@ -119,7 +119,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer lock.Close()
+	defer lock.Close() //nolint:errcheck // lock handle on a directory; it holds no data
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return "", fmt.Errorf("lock operator state: %w", err)
 	}
@@ -139,7 +139,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer root.Remove(pending)
+	defer root.Remove(pending) //nolint:errcheck // removes a pending file only if the rename did not happen; nothing to report
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		return "", err
@@ -214,7 +214,7 @@ func mkdirBelow(ancestor, rel string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	actual, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, actual) || !safeAncestor(actual) {
 		return errors.New("operator state parent directory changed while opening it")
@@ -334,7 +334,7 @@ func readToken(root *os.Root) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	actual, err := f.Stat()
 	if err != nil {
 		return "", err

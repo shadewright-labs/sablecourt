@@ -107,7 +107,7 @@ func main() {
 	if dataGate != "" {
 		if sess, toolNames, err := connectMCP(ctx, dataGate, token); err == nil {
 			mcpSession = sess
-			defer mcpSession.Close()
+			defer mcpSession.Close() //nolint:errcheck // session teardown at exit; nothing left to report to
 			if len(toolNames) > 0 {
 				history = append([]chatMessage{{
 					Role: "user",
