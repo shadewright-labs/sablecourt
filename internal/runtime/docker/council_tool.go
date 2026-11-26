@@ -134,21 +134,25 @@ shift 3
 ` + loginProbeScript
 
 // toolInstallScript writes stdin to a temporary name in the tool volume, checks
-// the bytes against the pin, and renames them into place, then VERSION.
+// the bytes against the pin, and renames them into place, then VERSION. The
+// temporary names are unique to the run, so an install running at the same
+// time cannot write the file this run checked before it is renamed.
 const toolInstallScript = `set -eu
 dir=` + councilToolDir + ` b=$1 v=$2 d=$3
 umask 022
-rm -f "$dir/.tool.partial" "$dir/.version.partial"
-cat > "$dir/.tool.partial"
-if test "$(sha256sum < "$dir/.tool.partial" | head -c 64)" != "$d"; then
-  rm -f "$dir/.tool.partial"
+tool=$(mktemp "$dir/.tool.XXXXXXXX")
+ver=$(mktemp "$dir/.version.XXXXXXXX")
+trap 'rm -f "$tool" "$ver"' EXIT
+cat > "$tool"
+if test "$(sha256sum < "$tool" | head -c 64)" != "$d"; then
   echo 'the bytes written to the tool volume do not match the pinned SHA-256' >&2
   exit 3
 fi
-chmod 0555 "$dir/.tool.partial"
-printf '%s\n' "$v" > "$dir/.version.partial"
-mv -f "$dir/.tool.partial" "$dir/$b"
-mv -f "$dir/.version.partial" "$dir/VERSION"`
+chmod 0555 "$tool"
+printf '%s\n' "$v" > "$ver"
+chmod 0644 "$ver"
+mv -f "$tool" "$dir/$b"
+mv -f "$ver" "$dir/VERSION"`
 
 const (
 	toolInstallTimeout = 10 * time.Minute

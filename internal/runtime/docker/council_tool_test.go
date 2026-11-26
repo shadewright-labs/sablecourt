@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
@@ -200,6 +201,83 @@ func TestToolInstallScript(t *testing.T) {
 				t.Fatalf("partial files left: %v", entries)
 			}
 		})
+	}
+}
+
+// Two installs for one role can overlap. Run A pauses after its own checksum
+// check while run B is still streaming a truncated input. A must not rename
+// B's unchecked bytes into place and report success.
+func TestToolInstallScriptConcurrent(t *testing.T) {
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		t.Skip("sha256sum unavailable")
+	}
+	realChmod, err := exec.LookPath("chmod")
+	if err != nil {
+		t.Skip("chmod unavailable")
+	}
+	dir, shim := t.TempDir(), t.TempDir()
+	reached, release := filepath.Join(shim, "reached"), filepath.Join(shim, "release")
+	// A chmod that stops run A between its checksum check and its renames.
+	writeFile(t, filepath.Join(shim, "chmod"), "#!/bin/sh\n: > "+reached+"\nwhile ! test -e "+release+"; do sleep 0.01; done\nexec "+realChmod+" \"$@\"\n", 0755)
+	script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+dir, 1)
+	install := func(path string) *exec.Cmd {
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script, "install", "claude", "2.1.332", digest(fixtureToolBody))
+		cmd.Env = []string{"PATH=" + path}
+		return cmd
+	}
+	waitFor := func(cond func() bool) {
+		t.Helper()
+		for range 500 {
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("timed out")
+	}
+
+	a := install(shim + ":" + os.Getenv("PATH"))
+	a.Stdin = strings.NewReader(fixtureToolBody)
+	var aOut bytes.Buffer
+	a.Stdout, a.Stderr = &aOut, &aOut
+	must(t, a.Start())
+	waitFor(func() bool { _, err := os.Stat(reached); return err == nil })
+
+	b := install(os.Getenv("PATH"))
+	bIn, err := b.StdinPipe()
+	must(t, err)
+	must(t, b.Start())
+	_, err = io.WriteString(bIn, fixtureToolBody[:5])
+	must(t, err)
+	// B has opened its staging file and written the first bytes.
+	waitFor(func() bool {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if info, err := e.Info(); err == nil && strings.HasPrefix(e.Name(), ".tool") && info.Size() == 5 {
+				return true
+			}
+		}
+		return false
+	})
+
+	writeFile(t, release, "", 0644)
+	aErr := a.Wait()
+	must(t, bIn.Close())
+	bErr := b.Wait()
+
+	bin, _ := os.ReadFile(filepath.Join(dir, "claude"))
+	if aErr == nil && string(bin) != fixtureToolBody {
+		t.Fatalf("install A reported success but the volume holds unchecked bytes %q (A: %s)", bin, aOut.String())
+	}
+	if aErr != nil || exitCode(bErr) != 3 {
+		t.Fatalf("A: %v %q, B: %v", aErr, aOut.String(), bErr)
+	}
+	ver, _ := os.ReadFile(filepath.Join(dir, "VERSION"))
+	if string(ver) != "2.1.332\n" {
+		t.Fatalf("VERSION %q", ver)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("staging files left: %v", entries)
 	}
 }
 
