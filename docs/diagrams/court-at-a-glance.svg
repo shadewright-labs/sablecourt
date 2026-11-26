@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 432" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">The court at a glance</title>
+  <desc id="d">The operator, a person, sits outside sablecourtd. The operator sends a Decree to the Conclave. Inside sablecourtd a Conclave holds two Vassals, Wards and Relics. The two Vassals send messages to each other, and the Vassals put and get Relics. A Vassal reaches the Model Gate for inference and the MCP Gate for tools and actions. The Model Gate forwards inference to a model provider outside the court. The MCP Gate runs allowed actions against a Git host outside the court and reaches Court Memory through memory tools. When a Ward trips, the Conclave pauses and waits for the operator.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f0b86a"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .wf{stroke:#f0b86a;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="432" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="180" height="352" rx="14"/>
+  <text class="lanet" x="44" y="54">OPERATOR</text>
+  <rect class="lane" x="284" y="24" width="596" height="352" rx="14"/>
+  <text class="lanet" x="304" y="54">SABLECOURTD, THE COURT</text>
+  <rect class="lane" x="960" y="24" width="296" height="352" rx="14"/>
+  <text class="lanet" x="980" y="54">OUTSIDE</text>
+
+  <rect class="box" x="44" y="162" width="140" height="56" rx="10"/>
+  <text class="h" x="60" y="187">Operator</text>
+  <text class="s" x="60" y="207">a person</text>
+
+  <rect class="frame" x="304" y="76" width="308" height="288" rx="12"/>
+  <text class="pn" x="320" y="96">CONCLAVE</text>
+  <rect class="key" x="324" y="112" width="272" height="56" rx="12"/>
+  <text class="h" x="340" y="137">Vassal</text>
+  <text class="s" x="340" y="157">a role bound to a workload</text>
+  <rect class="key" x="324" y="208" width="272" height="56" rx="12"/>
+  <text class="h" x="340" y="233">Vassal</text>
+  <text class="s" x="340" y="253">another role, same room</text>
+  <rect class="box" x="324" y="292" width="130" height="56" rx="10"/>
+  <text class="h" x="340" y="317">Wards</text>
+  <text class="s" x="340" y="337">limits</text>
+  <rect class="box" x="466" y="292" width="130" height="56" rx="10"/>
+  <text class="h" x="482" y="317">Relics</text>
+  <text class="s" x="482" y="337">shared files</text>
+
+  <rect class="box" x="684" y="112" width="176" height="56" rx="10"/>
+  <text class="h" x="700" y="137">Model Gate</text>
+  <text class="s" x="700" y="157">lease, grant, budget</text>
+  <rect class="box" x="684" y="208" width="176" height="56" rx="10"/>
+  <text class="h" x="700" y="233">MCP Gate</text>
+  <text class="s" x="700" y="253">tools, actions, approval</text>
+  <rect class="box" x="684" y="292" width="176" height="56" rx="10"/>
+  <text class="h" x="700" y="317">Court Memory</text>
+  <text class="s" x="700" y="337">shared notes</text>
+
+  <rect class="ext" x="996" y="112" width="220" height="56" rx="10"/>
+  <text class="h" x="1012" y="137">Model provider</text>
+  <text class="s" x="1012" y="157">upstream API</text>
+  <rect class="ext" x="996" y="208" width="220" height="56" rx="10"/>
+  <text class="h" x="1012" y="233">Git host</text>
+  <text class="s" x="1012" y="253">branch, pull request</text>
+
+  <path class="f" d="M184 190H298" marker-end="url(#a)"/>
+  <text class="lbl" x="244" y="182" text-anchor="middle">Decree</text>
+  <path class="f" d="M460 208V174" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="lbl" x="472" y="196">messages</text>
+  <path class="f" d="M530 264V286" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="lbl" x="542" y="281">put, get</text>
+  <path class="f" d="M596 140H678" marker-end="url(#a)"/>
+  <text class="lbl" x="646" y="132" text-anchor="middle">inference</text>
+  <path class="f" d="M596 236H678" marker-end="url(#a)"/>
+  <text class="lbl" x="646" y="228" text-anchor="middle">tools</text>
+  <path class="f" d="M772 264V286" marker-end="url(#a)"/>
+  <text class="lbl" x="784" y="281">memory tools</text>
+  <path class="f" d="M860 140H990" marker-end="url(#a)"/>
+  <text class="lbl" x="920" y="132" text-anchor="middle">forwards</text>
+  <path class="f" d="M860 236H990" marker-end="url(#a)"/>
+  <text class="lbl" x="920" y="228" text-anchor="middle">opens PR</text>
+  <path class="wf" d="M324 320H114V224" marker-end="url(#w)"/>
+  <text class="lbl" x="44" y="312">Ward trips:</text>
+  <text class="lbl" x="44" y="332">room waits</text>
+  <rect class="ext" x="44" y="392" width="24" height="14" rx="4"/>
+  <text class="lbl" x="78" y="404">outside the court</text>
+  <path class="wf" d="M236 399H268"/>
+  <text class="lbl" x="278" y="404">waits for the operator</text>
+  <rect class="key" x="468" y="392" width="24" height="14" rx="4"/>
+  <text class="lbl" x="502" y="404">members of a Conclave</text>
+</svg>
