@@ -10,7 +10,7 @@ require (
 	github.com/moby/moby/client v0.6.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/shadewright-labs/armory v0.0.0-20261126164822-e847f97b4626
+	github.com/shadewright-labs/armory v0.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/zalando/go-keyring v0.2.8
