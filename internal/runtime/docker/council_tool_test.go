@@ -198,7 +198,7 @@ func TestToolInstallScript(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "claude"), "old tool", 0555)
 			writeFile(t, filepath.Join(dir, "VERSION"), "2.1.300\n", 0644)
-			script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+dir, 1)
+			script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+shQuote(dir), 1)
 			cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script, "install", "claude", "2.1.332", digest(fixtureToolBody))
 			cmd.Stdin = strings.NewReader(tc.input)
 			out, err := cmd.CombinedOutput()
@@ -243,7 +243,7 @@ func TestToolInstallScriptDestinationNotRegular(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			tc.setup(t, dir)
-			script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+dir, 1)
+			script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+shQuote(dir), 1)
 			cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script, "install", "claude", "2.1.332", digest(fixtureToolBody))
 			cmd.Stdin = strings.NewReader(fixtureToolBody)
 			out, err := cmd.CombinedOutput()
@@ -277,8 +277,8 @@ func TestToolInstallScriptConcurrent(t *testing.T) {
 	dir, shim := t.TempDir(), t.TempDir()
 	reached, release := filepath.Join(shim, "reached"), filepath.Join(shim, "release")
 	// A chmod that stops run A between its checksum check and its renames.
-	writeFile(t, filepath.Join(shim, "chmod"), "#!/bin/sh\n: > "+reached+"\nwhile ! test -e "+release+"; do sleep 0.01; done\nexec "+realChmod+" \"$@\"\n", 0755)
-	script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+dir, 1)
+	writeFile(t, filepath.Join(shim, "chmod"), "#!/bin/sh\n: > "+shQuote(reached)+"\nwhile ! test -e "+shQuote(release)+"; do sleep 0.01; done\nexec "+shQuote(realChmod)+" \"$@\"\n", 0755)
+	script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+shQuote(dir), 1)
 	install := func(path string) *exec.Cmd {
 		cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script, "install", "claude", "2.1.332", digest(fixtureToolBody))
 		cmd.Env = []string{"PATH=" + path}
@@ -593,4 +593,9 @@ func exitCode(err error) int {
 		return -1
 	}
 	return 0
+}
+
+// shQuote returns s as one single-quoted shell word, so a temporary path with spaces stays one argument.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
