@@ -97,6 +97,11 @@ page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" sr
 expect "comma inside a srcset URL stays in the URL" pass "${s}"
 
 build "${s}"
+page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg ((x), diagrams/missing.svg 2x" alt="ctx">'
+expect "candidate after unbalanced parentheses is still checked" fail "${s}"
+mentions "candidate after unbalanced parentheses" "diagrams/missing.svg"
+
+build "${s}"
 page "${s}/index.html" "./stylesheets/brand.css" '<img src="diagrams/ctx.svg" srcset="diagrams/ctx.svg 1x, https://img.example.invalid/x.png 2x" alt="ctx">'
 expect "third-party img srcset candidate fails" fail "${s}"
 mentions "third-party img srcset candidate" "third-party image https://img.example.invalid/x.png"

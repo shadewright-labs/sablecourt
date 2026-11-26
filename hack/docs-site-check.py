@@ -50,7 +50,7 @@ def parse_srcset(value):
     """Extracts candidate URLs from an HTML srcset attribute, as the HTML parsing rules split it.
 
     A URL is a run of characters with no white space, so a comma inside it belongs to it. Commas at its
-    end close the candidate; otherwise the descriptors run to the next comma outside parentheses.
+    end close the candidate; otherwise the descriptors run to the next comma outside parentheses, which do not nest.
     """
     urls, i, n = [], 0, len(value)
     while True:
@@ -66,15 +66,15 @@ def parse_srcset(value):
             urls.append(url.rstrip(","))
             continue
         urls.append(url)
-        depth = 0
+        in_parens = False
         while i < n:
             c = value[i]
             i += 1
             if c == "(":
-                depth += 1
-            elif c == ")" and depth:
-                depth -= 1
-            elif c == "," and not depth:
+                in_parens = True
+            elif c == ")":
+                in_parens = False
+            elif c == "," and not in_parens:
                 break
 
 
