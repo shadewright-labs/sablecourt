@@ -96,12 +96,7 @@ jobs:
       # Also when the job timed out (cancelled), so an input written before that is not lost.
       - name: Collect failing inputs
         if: failure() || cancelled()
-        run: |
-          mkdir -p fuzz-failures
-          git ls-files --others --exclude-standard -- '*/testdata/fuzz/*' | while read -r f; do
-            mkdir -p "fuzz-failures/$(dirname "$f")"
-            cp "$f" "fuzz-failures/$f"
-          done
+        run: hack/fuzz-failures.sh fuzz-failures
 
       - name: Upload failing inputs
         if: failure() || cancelled()
