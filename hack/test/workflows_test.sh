@@ -161,7 +161,7 @@ def release_checks(text):
         out.append((f"{name}: needs {', '.join(sorted(want)) or 'nothing'}", needs(j.get(name, "")) == want))
     out += [
         ("check: version is X.Y.Z or X.Y.Z-rc.N",
-         r"'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'" in chk),
+         r"=~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]" in chk),
         ("check: the tagged commit is on main",
          'git merge-base --is-ancestor "${GITHUB_SHA}" origin/main' in chk and "fetch-depth: 0" in chk),
         ("check: refuses a published release", '[ "${state}" = false ]' in chk),
@@ -234,7 +234,7 @@ MUTATIONS = [
     ("runs only on a pushed v* tag", 'tags: ["v*"]\n', 'tags: ["v*"]\n  workflow_dispatch:\n'),
     ("one run per tag, never cancelled", "cancel-in-progress: false", "cancel-in-progress: true"),
     ("exactly the seven jobs", "\n  verify:\n", "\n  verify-all:\n"),
-    ("check: version is X.Y.Z or X.Y.Z-rc.N", "(-rc\\.[1-9][0-9]*)?$'", "(-.*)?$'"),
+    ("check: version is X.Y.Z or X.Y.Z-rc.N", "(-rc\\.[1-9][0-9]*)?$ ]]", "(-.*)?$ ]]"),
     ("check: the tagged commit is on main", 'git merge-base --is-ancestor "${GITHUB_SHA}" origin/main', "true"),
     ("check: refuses a published release", '[ "${state}" = false ]', "false"),
     ("binaries: the pinned package script, no Go cache, no target override", "cache: false #", "cache: true #"),
