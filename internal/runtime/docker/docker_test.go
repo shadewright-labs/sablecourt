@@ -86,7 +86,7 @@ func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 				Class: domain.ClassLongLivedAgent,
 				Runtime: domain.RuntimeConfig{
 					Type:           "docker",
-					Image:          "ghcr.io/shadewright-labs/triage:0.1.0",
+					Image:          "registry.example/triage:0.1.0",
 					ReadOnlyRootfs: true,
 				},
 			},

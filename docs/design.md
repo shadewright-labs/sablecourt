@@ -43,7 +43,7 @@ spec:
   class: long-lived-agent # coding-agent | long-lived-agent | deterministic-controller
   runtime:
     type: docker # docker | worktree-cli
-    image: ghcr.io/shadewright-labs/triage-agent:0.1.0
+    image: registry.example/triage-agent:0.1.0
     readOnlyRootfs: true
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
