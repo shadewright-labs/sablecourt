@@ -73,7 +73,6 @@ func TestDoctorReportsDaemonState(t *testing.T) {
 }
 
 func TestDoctorFlagsBrokenAuditChainFromDaemon(t *testing.T) {
-	t.Skip("defect: sablecourtd answers a broken audit chain with HTTP 409, and doctor drops the error, printing no audit line at all")
 	t.Setenv("PATH", t.TempDir())
 	d := newCLIDaemon().
 		on("GET /healthz", http.StatusOK, "ok").
