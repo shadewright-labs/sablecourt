@@ -96,6 +96,21 @@ func TestToolRuntimeCheck(t *testing.T) {
 		{name: "wrong version", setup: func(t *testing.T, dir string) { writeFile(t, filepath.Join(dir, "VERSION"), "2.1.300\n", 0644) }, fault: 4,
 			message: "council tool claude is not the pinned version 2.1.332: run sablectl harness install claude"},
 		{name: "version file missing", setup: func(t *testing.T, dir string) { must(t, os.Remove(filepath.Join(dir, "VERSION"))) }, fault: 4, message: "is not the pinned version"},
+		// The marker must be exactly the pinned version and one newline.
+		{name: "version without newline", setup: func(t *testing.T, dir string) { writeFile(t, filepath.Join(dir, "VERSION"), "2.1.332", 0644) }, fault: 4, message: "is not the pinned version"},
+		{name: "version with trailing text after 64 bytes", setup: func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "VERSION"), "2.1.332\n"+strings.Repeat("x", 80), 0644)
+		}, fault: 4, message: "is not the pinned version"},
+		{name: "version with a second line", setup: func(t *testing.T, dir string) { writeFile(t, filepath.Join(dir, "VERSION"), "2.1.332\nextra\n", 0644) }, fault: 4, message: "is not the pinned version"},
+		{name: "version with two newlines", setup: func(t *testing.T, dir string) { writeFile(t, filepath.Join(dir, "VERSION"), "2.1.332\n\n", 0644) }, fault: 4, message: "is not the pinned version"},
+		{name: "version is a directory", setup: func(t *testing.T, dir string) {
+			must(t, os.Remove(filepath.Join(dir, "VERSION")))
+			must(t, os.Mkdir(filepath.Join(dir, "VERSION"), 0755))
+		}, fault: 4, message: "is not the pinned version"},
+		{name: "version is a symlink to a matching file", setup: func(t *testing.T, dir string) {
+			must(t, os.Rename(filepath.Join(dir, "VERSION"), filepath.Join(dir, "realversion")))
+			must(t, os.Symlink(filepath.Join(dir, "realversion"), filepath.Join(dir, "VERSION")))
+		}, fault: 4, message: "is not the pinned version"},
 		{name: "checksum mismatch", setup: func(t *testing.T, dir string) {
 			writeFile(t, filepath.Join(dir, "claude"), fixtureToolBody+"# changed\n", 0755)
 		}, fault: 5,
@@ -199,6 +214,50 @@ func TestToolInstallScript(t *testing.T) {
 			}
 			if entries, _ := os.ReadDir(dir); len(entries) != 2 {
 				t.Fatalf("partial files left: %v", entries)
+			}
+		})
+	}
+}
+
+// A destination that exists but is not a regular file must fail the install:
+// mv would move the checked file inside a directory and report success.
+func TestToolInstallScriptDestinationNotRegular(t *testing.T) {
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		t.Skip("sha256sum unavailable")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{name: "binary is a directory", setup: func(t *testing.T, dir string) { must(t, os.Mkdir(filepath.Join(dir, "claude"), 0755)) }},
+		{name: "version is a directory", setup: func(t *testing.T, dir string) { must(t, os.Mkdir(filepath.Join(dir, "VERSION"), 0755)) }},
+		{name: "binary is a symlink to a directory", setup: func(t *testing.T, dir string) {
+			must(t, os.Mkdir(filepath.Join(dir, "elsewhere"), 0755))
+			must(t, os.Symlink(filepath.Join(dir, "elsewhere"), filepath.Join(dir, "claude")))
+		}},
+		{name: "version is a symlink to a file", setup: func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "other"), "2.1.332\n", 0644)
+			must(t, os.Symlink(filepath.Join(dir, "other"), filepath.Join(dir, "VERSION")))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			script := strings.Replace(toolInstallScript, "dir="+councilToolDir, "dir="+dir, 1)
+			cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script, "install", "claude", "2.1.332", digest(fixtureToolBody))
+			cmd.Stdin = strings.NewReader(fixtureToolBody)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("install succeeded with a destination that is not a regular file: %q", out)
+			}
+			if !strings.Contains(string(out), "not a regular file") {
+				t.Fatalf("err=%v out=%q", err, out)
+			}
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".tool") || strings.HasPrefix(e.Name(), ".version") {
+					t.Fatalf("staging file left: %s", e.Name())
+				}
 			}
 		})
 	}

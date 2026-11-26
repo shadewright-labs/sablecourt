@@ -99,8 +99,12 @@ func validateCouncilToolVolume(vol volume.Volume, harness, name string) error {
 // toolCheck sets tool_fault from $t (path), $v (version) and $d (SHA-256):
 // 0 when the tool is the pinned one, 3 when missing, 4 when another version is
 // installed, 5 when the bytes differ from the pin. It never runs the tool.
-const toolCheck = `if ! test -f "$t" || test -L "$t" || ! test -x "$t"; then tool_fault=3
-elif test "$(head -c 64 "${t%/*}/VERSION" 2>/dev/null)" != "$v"; then tool_fault=4
+// VERSION must be a regular file, not a symlink, holding exactly the version
+// and one newline: reading two bytes more than that shows any extra content,
+// and the trailing x keeps command substitution from dropping the newline.
+const toolCheck = `vf=${t%/*}/VERSION
+if ! test -f "$t" || test -L "$t" || ! test -x "$t"; then tool_fault=3
+elif ! test -f "$vf" || test -L "$vf" || test "$(head -c $((${#v} + 2)) "$vf" 2>/dev/null; echo x)" != "$v"$'\n'x; then tool_fault=4
 elif test "$(sha256sum < "$t" | head -c 64)" != "$d"; then tool_fault=5
 else tool_fault=0; fi
 `
@@ -136,10 +140,19 @@ shift 3
 // toolInstallScript writes stdin to a temporary name in the tool volume, checks
 // the bytes against the pin, and renames them into place, then VERSION. The
 // temporary names are unique to the run, so an install running at the same
-// time cannot write the file this run checked before it is renamed.
+// time cannot write the file this run checked before it is renamed. A
+// destination that exists as anything but a regular file fails the install,
+// because mv would move the file inside a directory; after the renames both
+// final paths are checked again.
 const toolInstallScript = `set -eu
 dir=` + councilToolDir + ` b=$1 v=$2 d=$3
 umask 022
+for f in "$dir/$b" "$dir/VERSION"; do
+  if test -L "$f" || { test -e "$f" && ! test -f "$f"; }; then
+    echo "$f exists and is not a regular file: remove the tool volume and install again" >&2
+    exit 4
+  fi
+done
 tool=$(mktemp "$dir/.tool.XXXXXXXX")
 ver=$(mktemp "$dir/.version.XXXXXXXX")
 trap 'rm -f "$tool" "$ver"' EXIT
@@ -152,7 +165,12 @@ chmod 0555 "$tool"
 printf '%s\n' "$v" > "$ver"
 chmod 0644 "$ver"
 mv -f "$tool" "$dir/$b"
-mv -f "$ver" "$dir/VERSION"`
+mv -f "$ver" "$dir/VERSION"
+if test -L "$dir/$b" || ! test -f "$dir/$b" || test "$(sha256sum < "$dir/$b" | head -c 64)" != "$d" ||
+  test -L "$dir/VERSION" || ! test -f "$dir/VERSION" || test "$(head -c $((${#v} + 2)) "$dir/VERSION"; echo x)" != "$v"$'\n'x; then
+  echo 'the installed tool or VERSION is not a regular file with the pinned content' >&2
+  exit 4
+fi`
 
 const (
 	toolInstallTimeout = 10 * time.Minute
