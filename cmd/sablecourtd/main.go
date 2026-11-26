@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -171,6 +172,8 @@ type daemonConfig struct {
 	allowedHosts         []string
 	incidentTemplate     string
 	branchRetention      time.Duration
+	openStore            func() (store.Store, error)
+	logger               *slog.Logger
 }
 
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
@@ -232,7 +235,7 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
-func runDaemon(ctx context.Context, cfg daemonConfig) error {
+func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
 		if envMode := strings.ToLower(strings.TrimSpace(os.Getenv("SABLECOURT_MODE"))); envMode != "" {
@@ -269,7 +272,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		return err
 	}
 	defer stateLock.Close() //nolint:errcheck // lock handle released at exit; the lock holds no data
-	logger := telemetry.NewLogger()
+	logger := cfg.logger
+	if logger == nil {
+		logger = telemetry.NewLogger()
+	}
 
 	var gitSyncer *config.GitSyncer
 	if cfg.manifestsGitRepo != "" {
@@ -295,7 +301,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
 	var st store.Store
-	if pgDSN != "" {
+	if cfg.openStore != nil {
+		st, err = cfg.openStore()
+	} else if pgDSN != "" {
 		st, err = postgres.Open(pgDSN)
 		if err == nil {
 			logger.Info("using postgres store")
@@ -306,7 +314,17 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // the store's close error at daemon exit is dropped; reporting it is a separate change
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			safeClose := sanitizeStoreCloseError(closeErr)
+			if runErr != nil {
+				logger.Error("close store failed after daemon error", "error", safeClose, "daemon_error", sanitizeStoreCloseError(runErr))
+				return
+			}
+			logger.Error("close store failed", "error", safeClose)
+			runErr = &redactedStoreCloseError{msg: "close store: " + safeClose, err: closeErr}
+		}
+	}()
 
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -701,6 +719,29 @@ var daemonReadTimeout = 60 * time.Second
 
 // maxListenerConns caps open connections on each listener (TCP and Unix socket).
 const maxListenerConns = 256
+
+// maxStoreCloseErrorBytes bounds redacted store-close errors in daemon logs and exit output.
+const maxStoreCloseErrorBytes = 1024
+
+type redactedStoreCloseError struct {
+	msg string
+	err error
+}
+
+func (e *redactedStoreCloseError) Error() string { return e.msg }
+func (e *redactedStoreCloseError) Unwrap() error { return e.err }
+
+func sanitizeStoreCloseError(err error) string {
+	s := strings.TrimSpace(store.RedactLearningText(err.Error()))
+	if len(s) <= maxStoreCloseErrorBytes {
+		return s
+	}
+	n := maxStoreCloseErrorBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 func newDaemonServer(handler http.Handler) *http.Server {
 	return &http.Server{

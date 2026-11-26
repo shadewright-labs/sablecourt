@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -20,7 +21,11 @@ import (
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
-const wrapperArg = "--sablecourt-coding-wrapper"
+const (
+	wrapperArg              = "--sablecourt-coding-wrapper"
+	wrapperLogCloseExitCode = scruntime.ExitCodeLogClose
+	maxExitRecordBytes      = 512
+)
 
 type wrapperSpec struct {
 	Args         []string
@@ -45,7 +50,9 @@ type readyStatus struct {
 
 type exitRecord struct {
 	workerIdentity
-	Code *int
+	Code     *int
+	LogClose bool   `json:",omitempty"`
+	Reason   string `json:",omitempty"`
 }
 
 func init() {
@@ -57,11 +64,64 @@ func init() {
 	}
 }
 
+type wrapperLogFile interface {
+	io.StringWriter
+	io.Closer
+}
+
+type wrapperIO struct {
+	stdin        io.Reader
+	ready        io.WriteCloser
+	openReady    func() (io.WriteCloser, error)
+	live         io.Writer
+	term         <-chan os.Signal
+	setupSignals func() (<-chan os.Signal, func())
+	openLog      func(path string) (wrapperLogFile, error)
+	writeFile    func(name string, data []byte, perm os.FileMode) error
+}
+
+func openWrapperLog(path string) (wrapperLogFile, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+}
+
+// runWrapper runs the detached coding harness inside a wrapper process.
 // The harness receives the original sandbox command and its stripped environment.
 // Only its parent opens the sibling state directory and publishes the exit.
+//
+// Exit status contract: the harness's own exit code wins whenever it is
+// non-zero (including -1 from timeout, stop, or output capture errors). When
+// the harness exits 0 and closing or finalizing its stdout or stderr log
+// fails, the wrapper records exit code -2 (wrapperLogCloseExitCode, which a
+// harness cannot return), sets LogClose on the exit record, omits stdout as a
+// final response, and records an error naming the failed log(s) so callers
+// fail the task without auto-remediation. When the harness already exited
+// non-zero and a log close or post-close write also fails, the harness exit
+// code stays, LogClose is set, and the error is prepended to the diagnostic
+// message so it stays within the task record's reason bound.
 func runWrapper() error {
+	return runWrapperWith(wrapperIO{
+		stdin: os.Stdin,
+		openReady: func() (io.WriteCloser, error) {
+			ready := os.NewFile(3, "ready")
+			syscall.CloseOnExec(3)
+			return ready, nil
+		},
+		live: os.Stdout,
+		setupSignals: func() (<-chan os.Signal, func()) {
+			// A live attach reader may disappear when the daemon exits.
+			signal.Ignore(syscall.SIGPIPE)
+			term := make(chan os.Signal, 1)
+			signal.Notify(term, syscall.SIGTERM)
+			return term, func() { signal.Stop(term) }
+		},
+		openLog:   openWrapperLog,
+		writeFile: os.WriteFile,
+	})
+}
+
+func runWrapperWith(ioDeps wrapperIO) (runErr error) {
 	var spec wrapperSpec
-	if err := json.NewDecoder(os.Stdin).Decode(&spec); err != nil {
+	if err := json.NewDecoder(ioDeps.stdin).Decode(&spec); err != nil {
 		return err
 	}
 	if len(spec.Args) == 0 {
@@ -89,27 +149,56 @@ func runWrapper() error {
 	if err := writeWorktreeState(base, state); err != nil {
 		return err
 	}
-	ready := os.NewFile(3, "ready")
-	defer ready.Close() //nolint:errcheck // readiness pipe; a lost status is seen by the reader as a closed pipe
-	syscall.CloseOnExec(3)
-	// A live attach reader may disappear when the daemon exits.
-	signal.Ignore(syscall.SIGPIPE)
-	term := make(chan os.Signal, 1)
-	signal.Notify(term, syscall.SIGTERM)
-	defer signal.Stop(term)
+	ready := ioDeps.ready
+	if ready == nil && ioDeps.openReady != nil {
+		opened, err := ioDeps.openReady()
+		if err != nil {
+			return err
+		}
+		ready = opened
+		defer ready.Close() //nolint:errcheck // readiness pipe; a lost status is seen by the reader as a closed pipe
+	}
+	term := ioDeps.term
+	if term == nil && ioDeps.setupSignals != nil {
+		ch, stop := ioDeps.setupSignals()
+		term = ch
+		if stop != nil {
+			defer stop()
+		}
+	}
+	openLog := ioDeps.openLog
+	if openLog == nil {
+		openLog = openWrapperLog
+	}
+	writeFile := ioDeps.writeFile
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
 	cmd := exec.Command(spec.Args[0], spec.Args[1:]...)
 	cmd.Dir, cmd.Env = spec.Dir, spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdout, err := os.OpenFile(filepath.Join(run, "stdout"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	stdoutPath := filepath.Join(run, "stdout")
+	stdout, err := openLog(stdoutPath)
 	if err != nil {
 		return err
 	}
-	defer stdout.Close() //nolint:errcheck // the output log's close error is dropped; checking it changes the wrapper's exit result, a separate change
-	stderr, err := os.OpenFile(filepath.Join(run, "stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	stdoutClosed := false
+	defer func() {
+		if !stdoutClosed {
+			runErr = errors.Join(runErr, stdout.Close())
+		}
+	}()
+	stderrPath := filepath.Join(run, "stderr")
+	stderr, err := openLog(stderrPath)
 	if err != nil {
 		return err
 	}
-	defer stderr.Close() //nolint:errcheck // the output log's close error is dropped; checking it changes the wrapper's exit result, a separate change
+	stderrClosed := false
+	defer func() {
+		if !stderrClosed {
+			runErr = errors.Join(runErr, stderr.Close())
+		}
+	}()
 	if spec.Target != "" && spec.Target != spec.Args[0] {
 		if err := checkWrappedTarget(spec.Target, spec.Dir); err != nil {
 			_ = json.NewEncoder(ready).Encode(readyStatus{
@@ -120,7 +209,7 @@ func runWrapper() error {
 			return err
 		}
 	}
-	p, err := startProcess(cmd, base, spec.Scratch, spec.Limit, os.Stdout, &boundedLog{file: stdout}, &boundedLog{file: stderr})
+	p, err := startProcess(cmd, base, spec.Scratch, spec.Limit, ioDeps.live, &boundedLog{file: stdout}, &boundedLog{file: stderr})
 	if err != nil {
 		_ = json.NewEncoder(ready).Encode(readyStatus{
 			Error:    redact.String(err.Error()),
@@ -137,30 +226,145 @@ func runWrapper() error {
 		<-p.done
 	case <-p.done:
 	}
+	stdoutCloseErr := stdout.Close()
+	stdoutClosed = true
+	stderrCloseErr := stderr.Close()
+	stderrClosed = true
 	if p.stopErr != nil {
-		return p.stopErr
+		return errors.Join(p.stopErr, stdoutCloseErr, stderrCloseErr)
+	}
+	var postCloseErrs []error
+	if stdoutCloseErr != nil {
+		postCloseErrs = append(postCloseErrs, fmt.Errorf("close coding stdout log: %w", stdoutCloseErr))
+	}
+	if stderrCloseErr != nil {
+		postCloseErrs = append(postCloseErrs, fmt.Errorf("close coding stderr log: %w", stderrCloseErr))
+	}
+	logCloseFailed := stdoutCloseErr != nil || stderrCloseErr != nil
+	closeMsg := formatLogCloseError(stdoutCloseErr, stderrCloseErr)
+	if closeMsg != "" {
+		if p.result.ExitCode == 0 {
+			p.result.ExitCode = wrapperLogCloseExitCode
+			p.result.Response = ""
+		}
+		p.result.Message = prependDiagnostic(closeMsg, p.result.Message)
 	}
 	// Finalize the response and diagnostic tail before making the exit visible.
+	var writeFailMsgs []string
 	if p.result.ExitCode == 0 {
 		if len(p.result.Response) > 64*1024 {
 			p.result.Response = ""
 		}
-		if err := os.WriteFile(stdout.Name(), []byte(p.result.Response), 0600); err != nil {
-			return err
+		if err := writeFile(stdoutPath, []byte(p.result.Response), 0600); err != nil {
+			postCloseErrs = append(postCloseErrs, fmt.Errorf("write coding stdout log: %w", err))
+			logCloseFailed = true
+			p.result.ExitCode = wrapperLogCloseExitCode
+			p.result.Response = ""
+			msg := fmt.Sprintf("write coding stdout log: %s", redact.String(err.Error()))
+			writeFailMsgs = append(writeFailMsgs, msg)
+			p.result.Message = prependDiagnostic(msg, p.result.Message)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(run, "stderr"), []byte(p.result.Message), 0600); err != nil {
-		return err
+	stderrWriteFailed := false
+	if err := writeFile(stderrPath, []byte(p.result.Message), 0600); err != nil {
+		stderrWriteFailed = true
+		postCloseErrs = append(postCloseErrs, fmt.Errorf("write coding stderr log: %w", err))
+		logCloseFailed = true
+		if p.result.ExitCode == 0 {
+			p.result.ExitCode = wrapperLogCloseExitCode
+			p.result.Response = ""
+		}
+		msg := fmt.Sprintf("write coding stderr log: %s", redact.String(err.Error()))
+		writeFailMsgs = append(writeFailMsgs, msg)
+		p.result.Message = prependDiagnostic(msg, p.result.Message)
 	}
-	raw, err := json.Marshal(exitRecord{id, &p.result.ExitCode})
+	rec := exitRecord{
+		workerIdentity: id,
+		Code:           &p.result.ExitCode,
+		LogClose:       logCloseFailed,
+	}
+	var inlineReason string
+	if stderrWriteFailed {
+		var parts []string
+		if closeMsg != "" {
+			parts = append(parts, closeMsg)
+		}
+		parts = append(parts, writeFailMsgs...)
+		inlineReason = redact.String(strings.Join(parts, "; "))
+	}
+	raw, err := marshalExitRecord(rec, inlineReason)
 	if err != nil {
-		return err
+		return errors.Join(append(postCloseErrs, err)...)
 	}
 	tmp := filepath.Join(run, "exit.tmp")
-	if err := os.WriteFile(tmp, raw, 0600); err != nil {
-		return err
+	if err := writeFile(tmp, raw, 0600); err != nil {
+		return errors.Join(append(postCloseErrs, err)...)
 	}
-	return os.Rename(tmp, filepath.Join(run, "exit"))
+	if err := os.Rename(tmp, filepath.Join(run, "exit")); err != nil {
+		return errors.Join(append(postCloseErrs, err)...)
+	}
+	if len(writeFailMsgs) > 0 {
+		return errors.Join(postCloseErrs...)
+	}
+	return nil
+}
+
+func marshalExitRecord(rec exitRecord, inlineReason string) ([]byte, error) {
+	if inlineReason == "" {
+		return json.Marshal(rec)
+	}
+	rec.Reason = inlineReason
+	raw, err := json.Marshal(rec)
+	if err != nil || len(raw) <= maxExitRecordBytes {
+		return raw, err
+	}
+	// Shrink inlineReason on UTF-8 boundaries until the encoded record fits maxExitRecordBytes.
+	hi := len(inlineReason)
+	lo := 0
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		rec.Reason = truncateUTF8Prefix(inlineReason, mid)
+		candidate, err := json.Marshal(rec)
+		if err != nil {
+			return nil, err
+		}
+		if len(candidate) <= maxExitRecordBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	rec.Reason = truncateUTF8Prefix(inlineReason, lo)
+	return json.Marshal(rec)
+}
+
+func formatLogCloseError(stdoutErr, stderrErr error) string {
+	var parts []string
+	if stdoutErr != nil {
+		parts = append(parts, fmt.Sprintf("close coding stdout log: %s", redact.String(stdoutErr.Error())))
+	}
+	if stderrErr != nil {
+		parts = append(parts, fmt.Sprintf("close coding stderr log: %s", redact.String(stderrErr.Error())))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func prependDiagnostic(prefix, existing string) string {
+	const limit = maxDiagnosticTail + 128
+	if len(prefix) > limit {
+		prefix = truncateUTF8Prefix(prefix, limit)
+	}
+	if existing == "" {
+		return prefix
+	}
+	if len(prefix)+1+len(existing) <= limit {
+		return prefix + "\n" + existing
+	}
+	keep := limit - len(prefix) - 1
+	if keep <= 0 {
+		return prefix
+	}
+	return prefix + "\n" + truncateUTF8Prefix(existing, keep)
 }
 
 type attachWriter struct {
@@ -341,7 +545,7 @@ func recordedExit(h scruntime.Handle) (*processResult, error) {
 
 func recordedExitAt(stateBase string, h scruntime.Handle) (*processResult, error) {
 	dir := stateBase + ".run"
-	raw, err := readBounded(filepath.Join(dir, "exit"), 512)
+	raw, err := readBounded(filepath.Join(dir, "exit"), maxExitRecordBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -349,14 +553,29 @@ func recordedExitAt(stateBase string, h scruntime.Handle) (*processResult, error
 		return nil, err
 	}
 	var rec exitRecord
-	if err := json.Unmarshal(raw, &rec); err != nil || rec.Code == nil || *rec.Code < -1 || *rec.Code > 255 || rec.PID != h.PID || rec.Start.IsZero() || !rec.Start.Equal(h.ProcessStartTime) {
+	if err := json.Unmarshal(raw, &rec); err != nil || rec.Code == nil ||
+		(*rec.Code < -1 && *rec.Code != wrapperLogCloseExitCode) || *rec.Code > 255 ||
+		rec.PID != h.PID || rec.Start.IsZero() || !rec.Start.Equal(h.ProcessStartTime) {
 		return nil, errors.New("invalid coding exit record")
 	}
 	diag, err := readBounded(filepath.Join(dir, "stderr"), maxDiagnosticTail+128)
 	if err != nil {
-		return nil, err
+		if rec.Reason == "" {
+			return nil, err
+		}
+		diag = nil
 	}
-	result := &processResult{PID: h.PID, Start: rec.Start, ExitCode: *rec.Code, Message: redact.String(string(diag))}
+	msg := redact.String(string(diag))
+	if rec.Reason != "" {
+		msg = prependDiagnostic(redact.String(rec.Reason), msg)
+	}
+	result := &processResult{
+		PID:      h.PID,
+		Start:    rec.Start,
+		ExitCode: *rec.Code,
+		LogClose: rec.LogClose || *rec.Code == wrapperLogCloseExitCode,
+		Message:  msg,
+	}
 	if result.ExitCode == 0 {
 		out, err := readBounded(filepath.Join(dir, "stdout"), 64*1024)
 		if err != nil {

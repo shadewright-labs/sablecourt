@@ -11,6 +11,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Limit | Constant | Value |
 | --- | --- | --- |
 | Open connections on each listener (the TCP listener and the Unix socket each) | `cmd/sablecourtd.maxListenerConns` | 256 |
+| Store-close error message kept in daemon logs and exit output | `cmd/sablecourtd.maxStoreCloseErrorBytes` | 1 KiB |
 | Idle keep-alive connection timeout | `cmd/sablecourtd.daemonIdleTimeout` | 60 s |
 | Request body of a write, except under `/gate/model/` and `POST /api/v1/voice/transcribe` | `cmd/sablecourtd.maxOperatorWriteBody` | 2 MiB |
 | Request body of `POST /api/v1/voice/transcribe` | `cmd/sablecourtd.voiceTranscribeMaxBytes` | 24 MiB |
@@ -36,6 +37,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Timeout of a runtime adapter start call | `internal/controlplane.adapterStartTimeout` | 30 s |
 | Task lease lifetime | `internal/controlplane.taskLeaseTTL` | 1 h |
 | Persisted runtime handle | `internal/controlplane.maxPersistedHandleBytes` | 16 KiB |
+| Diagnostic reason kept on a failed task's exit event | `internal/controlplane.maxRuntimeExitReasonBytes` | 1 KiB |
 | Workflow step final message; a longer one is not used | `internal/controlplane.maxFinalMessage` | 64 KiB |
 | Scry ring buffer per task | `internal/attach.defaultRingSize` | 64 KiB |
 | Redaction pending buffer of a live session | `internal/attach.maxPendingBytes` | 16 KiB |
@@ -133,6 +135,8 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Wall time of a coding task or council container when the adapter sets none | `internal/runtime/coding.defaultWallTime` | 15 min |
 | Process grace period: the wait after `SIGTERM` before `SIGKILL`, the wait after `SIGKILL`, and the deadline for reading standard output and error after exit (the result is marked invalid when standard output is not read by then) | `internal/runtime/coding.processGracePeriod` | 1 s |
 | Diagnostic tail kept from a failed harness | `internal/runtime/coding.maxDiagnosticTail` | 4 KiB |
+| Wrapper exit record file size | `internal/runtime/coding.maxExitRecordBytes` | 512 B |
+| Distinct exit code recorded when a harness exits `0` but closing or finalizing its output log fails | `internal/runtime.ExitCodeLogClose` | -2 |
 | Context pack pre-check timeout | `internal/contextpack.precheckTimeout` | 10 s |
 | Context pack pre-check output kept | `internal/contextpack.maxPrecheckBytes` | 16 KiB |
 

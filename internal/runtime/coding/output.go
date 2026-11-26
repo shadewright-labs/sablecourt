@@ -3,7 +3,6 @@ package coding
 import (
 	"bytes"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -129,7 +128,7 @@ func (s *sessionOutput) emit(clean string) error {
 type boundedLog struct {
 	live    io.Writer
 	mu      sync.Mutex
-	file    *os.File
+	file    io.StringWriter
 	written int
 	full    bool
 	partial bool
