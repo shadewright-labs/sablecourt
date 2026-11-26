@@ -1128,7 +1128,7 @@ func runtimeExitFacts(target domain.TaskState, obs scruntime.Observation) string
 		return fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)
 	}
 	logClose := obs.LogCloseFailed || obs.ExitCode == scruntime.ExitCodeLogClose
-	reason := strings.TrimSpace(store.RedactLearningText(obs.Message))
+	reason := strings.ToValidUTF8(strings.TrimSpace(store.RedactLearningText(obs.Message)), "\uFFFD")
 	if len(reason) > maxRuntimeExitReasonBytes {
 		reason = truncateUTF8(reason, maxRuntimeExitReasonBytes)
 	}

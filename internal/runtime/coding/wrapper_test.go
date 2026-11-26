@@ -229,6 +229,7 @@ func TestWrapperPostCloseWriteErrors(t *testing.T) {
 			t.Fatalf("marshal spec: %v", err)
 		}
 
+		errStderrWrite := errors.New("stderr write failed")
 		readyBuf := &discardWriteCloser{}
 		err = runWrapperWith(wrapperIO{
 			stdin: bytes.NewReader(rawSpec),
@@ -236,12 +237,7 @@ func TestWrapperPostCloseWriteErrors(t *testing.T) {
 			live:  io.Discard,
 			term:  make(chan os.Signal, 1),
 			openLog: func(path string) (wrapperLogFile, error) {
-				perm := os.FileMode(0o600)
-				if filepath.Base(path) == "stderr" {
-					// Creating 0400 succeeds for the open fd, then os.WriteFile fails with EACCES.
-					perm = 0o400
-				}
-				f, openErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+				f, openErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 				if openErr != nil {
 					return nil, openErr
 				}
@@ -250,9 +246,15 @@ func TestWrapperPostCloseWriteErrors(t *testing.T) {
 				}
 				return f, nil
 			},
+			writeFile: func(name string, data []byte, perm os.FileMode) error {
+				if name == filepath.Join(runDir, "stderr") {
+					return errStderrWrite
+				}
+				return os.WriteFile(name, data, perm)
+			},
 		})
-		if err == nil {
-			t.Fatalf("expected non-nil error when stderr write fails")
+		if !errors.Is(err, errStderrWrite) {
+			t.Fatalf("runWrapperWith = %v, want injected stderr write error %v", err, errStderrWrite)
 		}
 		if !errors.Is(err, errStdout) {
 			t.Fatalf("returned error %v dropped stdout close error %v", err, errStdout)
@@ -346,22 +348,22 @@ func TestWrapperPostCloseWriteErrors(t *testing.T) {
 			t.Fatalf("marshal spec: %v", err)
 		}
 
+		errStdoutWrite := errors.New("stdout write failed")
 		readyBuf := &discardWriteCloser{}
 		err = runWrapperWith(wrapperIO{
 			stdin: bytes.NewReader(rawSpec),
 			ready: readyBuf,
 			live:  io.Discard,
 			term:  make(chan os.Signal, 1),
-			openLog: func(path string) (wrapperLogFile, error) {
-				perm := os.FileMode(0o600)
-				if filepath.Base(path) == "stdout" {
-					perm = 0o400
+			writeFile: func(name string, data []byte, perm os.FileMode) error {
+				if name == filepath.Join(runDir, "stdout") {
+					return errStdoutWrite
 				}
-				return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+				return os.WriteFile(name, data, perm)
 			},
 		})
-		if err == nil {
-			t.Fatalf("expected non-nil error when stdout write fails")
+		if !errors.Is(err, errStdoutWrite) {
+			t.Fatalf("runWrapperWith = %v, want injected stdout write error %v", err, errStdoutWrite)
 		}
 
 		var status readyStatus
@@ -543,7 +545,7 @@ func TestWrapperSIGTERMDuringSetupExitsImmediately(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		_ = cmd.Process.Kill()
-		<-done
-		t.Fatal("wrapper ignored/queued SIGTERM during setup instead of exiting")
+		waitErr := <-done
+		t.Fatalf("wrapper ignored/queued SIGTERM during setup instead of exiting (after kill: %v)", waitErr)
 	}
 }

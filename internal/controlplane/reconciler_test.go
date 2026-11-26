@@ -229,6 +229,22 @@ func TestReconcilerRecordsFailureReasonOnRuntimeExit(t *testing.T) {
 			wantReasonSub: strings.Repeat("a", 100),
 		},
 		{
+			name:          "failed_exit_normalizes_invalid_utf8_before_1024_limit",
+			obsState:      scruntime.StateFailed,
+			exitCode:      1,
+			message:       strings.Repeat("a\xff", 400),
+			wantTaskState: domain.TaskStateFailed,
+			wantReasonSub: "a\uFFFDa",
+		},
+		{
+			name:          "failed_exit_normalizes_invalid_utf8_at_1024_boundary",
+			obsState:      scruntime.StateFailed,
+			exitCode:      1,
+			message:       strings.Repeat("a", 1022) + "\xff\xff",
+			wantTaskState: domain.TaskStateFailed,
+			wantReasonSub: strings.Repeat("a", 100),
+		},
+		{
 			name:          "failed_exit_redacts_secret_straddling_1024",
 			obsState:      scruntime.StateFailed,
 			exitCode:      1,
