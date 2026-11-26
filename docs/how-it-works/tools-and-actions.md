@@ -19,7 +19,7 @@ Each action payload is decoded once, strictly, into the action's typed input: a 
 
 ## Which repository `git.open_pr` may target
 
-When the daemon starts it reads the `origin` remote of its repo root once and pins that GitHub `owner/repo`. `git.open_pr` refuses any other target, refuses every call when the origin read at call time differs from the pin, and refuses every call when nothing could be pinned (no origin, or an origin that is not on github.com). Each action's audit row names the pin as `allowed_repo`. A reload (`POST /api/v1/reload`, a manifest saved in the web UI, or a manifests git sync) never changes the pin: it reads the origin again only to compare it. A changed or unreadable origin logs a warning on each reload and writes one `denied` audit row with reason `repo_origin_changed` or `repo_origin_unreadable` each time the observed origin changes. To point `git.open_pr` at another repository, change the origin and restart the daemon.
+When the daemon starts it reads the `origin` remote of its repo root once and pins that GitHub `owner/repo`. `git.open_pr` refuses any other target, refuses every call when the origin read at call time differs from the pin, and refuses every call when nothing could be pinned (no origin, or an origin that is not on github.com). Each action's audit row names the pin as `allowed_repo`. A reload (`POST /api/v1/reload`, a manifest saved in the web UI, or a manifests git sync) never changes the pin: it reads the origin again only to compare it. A changed or unreadable origin logs a warning on each reload and writes one `denied` audit row with reason `repo_origin_changed` or `repo_origin_unreadable` each time the observed origin changes. When that row cannot be written, the next reload tries again. To point `git.open_pr` at another repository, change the origin and restart the daemon.
 
 ## How a call is decided
 
@@ -35,7 +35,7 @@ A rule names a workload and a capability, each exact, `*`, or a prefix ending in
 
 ## Circuit breaker
 
-Each action that fails records a failure for its capability; three in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see [Known gaps](#known-gaps)).
+Each action that fails records a failure for its capability, including a refused target and, on an allowed request, a refused payload; three in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see [Known gaps](#known-gaps)).
 
 ## Redaction
 

@@ -198,13 +198,23 @@ func (b *RepoBinding) Recheck(ctx context.Context) error {
 		err = fmt.Errorf("origin of the repo root is %s but %s was pinned at start; git.open_pr stays refused, restart the daemon to change the repository", observed, b.pin)
 	}
 	b.mu.Lock()
-	changed := observed != b.drift
-	b.drift = observed
-	b.mu.Unlock()
-	if err != nil && changed {
-		raw, _ := json.Marshal(detail)
-		b.gate.audit(ctx, "", "", "action:git.open_pr", "denied", string(raw))
+	defer b.mu.Unlock()
+	if observed == b.drift {
+		return err
 	}
+	if err != nil {
+		raw, _ := json.Marshal(detail)
+		if appendErr := b.gate.store.AppendAudit(ctx, domain.AuditRecord{
+			Category:   "data_action_gate",
+			Action:     "action:git.open_pr",
+			Outcome:    "denied",
+			DetailJSON: string(raw),
+			CreatedAt:  b.gate.now(),
+		}); appendErr != nil {
+			return err // not recorded as seen, so the next reload writes the row again
+		}
+	}
+	b.drift = observed
 	return err
 }
 

@@ -12,8 +12,8 @@ import (
 
 // errInvalidPayload marks input the gate refuses before policy effects run: a
 // payload that does not decode to exactly one typed value, or a value that
-// fails the action's own checks. It is the caller's fault, so it never counts
-// on the circuit breaker.
+// fails the action's own checks. On an allowed request it counts on the
+// circuit breaker, as the executor's own checks did before.
 var errInvalidPayload = errors.New("invalid action payload")
 
 func invalidPayload(format string, args ...any) error {

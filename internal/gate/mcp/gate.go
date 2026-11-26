@@ -374,6 +374,11 @@ func (g *Gate) ActionHandler() http.Handler {
 		// approval's canonical JSON) and the executor all work from value.
 		value, err := def.decode(req.Payload)
 		if err != nil {
+			// The executor checked the payload before the typed catalog, so an
+			// allowed request it refused counted on the breaker. It still does.
+			if decision.Effect == domain.EffectAllow && g.breaker != nil {
+				g.breaker.RecordFailure(capability)
+			}
 			auditAction("denied", map[string]any{"reason": "invalid_payload", "error": redact.String(err.Error())})
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": redact.String(err.Error())})
 			return
@@ -427,8 +432,9 @@ func (g *Gate) ActionHandler() http.Handler {
 			approvalUsed = req.ApprovalID
 			// Consumption and its audit row are two steps. The order fails
 			// closed: the approval is spent first, and the action runs only once
-			// the record of that use is written. A failed write stops here and
-			// the approval stays spent.
+			// the record of that use is written and the request is still live. A
+			// failed write or a cancelled request stops here, and the approval
+			// stays spent.
 			consumed := map[string]string{"approval_id": req.ApprovalID, "payload_sha256": digest}
 			if snap.allowedRepo != "" {
 				consumed["allowed_repo"] = snap.allowedRepo
@@ -442,7 +448,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				Outcome:      "consumed",
 				DetailJSON:   string(consumedJSON),
 				CreatedAt:    g.now(),
-			}); err != nil {
+			}); err != nil || ctx.Err() != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording the approval use failed; the approval is spent and the action did not run, request a new approval"})
 				return
 			}
@@ -455,16 +461,16 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 
 		result, err := def.run(ctx, ac.Workload, ac.Lease.TaskID, value)
-		if errors.Is(err, errToolRefused) {
-			// A refused target is a policy outcome, not a failing dependency: the
-			// breaker does not count it.
-			auditAction("denied", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
-			return
-		}
 		if err != nil {
+			// Every error of the executor counts on the breaker, as before the
+			// typed catalog, a refused target included.
 			if g.breaker != nil {
 				g.breaker.RecordFailure(capability)
+			}
+			if errors.Is(err, errToolRefused) {
+				auditAction("denied", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
+				return
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})

@@ -71,6 +71,7 @@ type typedGateOptions struct {
 	workloads []string
 	wrapStore func(store.Store) store.Store
 	opener    PROpener // replaces the recording opener when set
+	breaker   *policy.CircuitBreaker
 }
 
 type typedGate struct {
@@ -148,7 +149,7 @@ func setupTypedGate(t *testing.T, opts typedGateOptions) *typedGate {
 		gateStore = opts.wrapStore(st)
 	}
 	engine := policy.NewEngine([]domain.Policy{pol}, nil)
-	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue})
+	gate := New(Options{Store: gateStore, Bundle: bundle, Policy: engine, Approvals: queue, Breaker: opts.breaker})
 	pr := &recordingPROpener{}
 	var opener PROpener = pr
 	if opts.opener != nil {
