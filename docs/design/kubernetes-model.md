@@ -258,7 +258,7 @@ The model follows [ADR-0014](../adr/0014-identity-and-authentication.md), which 
 
 ### People
 
-ADR-0014 Stage 3: one `sablecourtd` per team, OIDC sign-in (Microsoft Entra ID first), `viewer`, `operator` and `approver` from `RoleBinding` manifests, principals as `oidc:<issuer>:<subject>`. Approvals need fresh proof over the approval ID and payload digest from a user-verified passkey or a paired device (Stage 1). Until that lands, Citadel cannot approve anything, as it cannot today. This design adds nothing to the human side.
+ADR-0014 Stage 3: one `sablecourtd` per team, OIDC sign-in (Microsoft Entra ID first), `viewer`, `operator` and `approver` from `RoleBinding` manifests, principals as `oidc:<issuer>:<subject>`. Approvals need fresh proof over the approval ID and payload digest from a user-verified passkey or a paired device (Stage 1). Until that lands, Citadel can approve only with a paired device record that already exists in the store: pairing returns 503 today, so no new device can be enrolled, as described above. This design adds nothing to the human side.
 
 ### Machines
 
