@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +36,13 @@ func buildDXCommands(httpClient func(time.Duration) (*http.Client, string), json
 				fmt.Fprintf(out, "  %s sablecourtd (%s): unreachable (%v)\n", errMark, base, err)
 			} else {
 				fmt.Fprintf(out, "  %s sablecourtd (%s): healthy\n", okMark, base)
-				if body, err := fetchGET(cli, base+"/api/v1/audit/verify"); err == nil {
+				// The daemon answers a broken chain with HTTP 409 and the verify result as the body.
+				body, err := fetchGET(cli, base+"/api/v1/audit/verify")
+				var statusErr *httpStatusError
+				if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
+					body, err = []byte(statusErr.Body), nil
+				}
+				if err == nil {
 					var res struct {
 						Valid        bool `json:"valid"`
 						VerifiedRows int  `json:"verifiedRows"`

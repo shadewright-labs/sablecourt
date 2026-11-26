@@ -1,0 +1,6 @@
+# zizmor for workflow-lint.yml, installed with pip --require-hashes. The hashes are those PyPI publishes for
+# the linux x86_64 wheel and the source archive of this version; zizmor has no Python dependencies. To bump,
+# change the version and both hashes together (https://pypi.org/pypi/zizmor/<version>/json).
+zizmor==1.32.0 \
+    --hash=sha256:84a6acb975accc13408786a2bd274b572537ca19c933ebbc13e78f3988562071 \
+    --hash=sha256:f0b664d394576e08605fe8094e8e992056d74b808f30c0c9ca9ed227001dcf67

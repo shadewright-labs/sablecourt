@@ -193,7 +193,7 @@ func TestConnectTunnelsAreCappedBelowListenerCeiling(t *testing.T) {
 	}
 	dial := func(context.Context, string, string) (net.Conn, error) { return nil, io.ErrClosedPipe }
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
 	})
 	h, err := newProxy(Config{
 		Harness: "claude", DaemonListen: loopbackAddress(),
@@ -248,7 +248,7 @@ func TestConnectTunnelsAreCappedBelowListenerCeiling(t *testing.T) {
 	}
 
 	// A gate call still gets a listener slot while every tunnel slot is held.
-	req, _ := http.NewRequest("GET", "http://"+ln.Addr().String()+"/gate/task/messages", nil)
+	req, _ := http.NewRequest(http.MethodGet, "http://"+ln.Addr().String()+"/gate/task/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	gateResp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -781,12 +782,12 @@ func TestCouncilTitleRedactsBeforeTruncation(t *testing.T) {
 	}{
 		{
 			name:     "openai_key_across_cutoff",
-			secret:   "sk-proj-SYNTHETIC1234567890abcdefghij",
+			secret:   "sk-proj-" + "SYNTHETIC1234567890abcdefghij",
 			fragment: "sk-proj-SYN",
 		},
 		{
 			name:     "github_token_across_cutoff",
-			secret:   "ghp_SYNTHETIC1234567890abcdefghij",
+			secret:   "ghp_" + "SYNTHETIC1234567890abcdefghij",
 			fragment: "ghp_SYN",
 		},
 		{
@@ -799,7 +800,7 @@ func TestCouncilTitleRedactsBeforeTruncation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			q := prefix + " " + tc.secret + " trailing context"
-			payload := buildCouncilOpenPayload(q, "/repo", "", false, 2, []string{"claude"}, false)
+			payload := buildCouncilOpenPayload(q, "/repo", "", false, 2, []string{"claude"}, false, "")
 			if _, hasTemplate := payload["template"]; hasTemplate {
 				t.Fatalf("council open payload must not include legacy template field: %+v", payload)
 			}
@@ -1095,6 +1096,88 @@ func TestCouncilStdinMaxQuestionPreserved(t *testing.T) {
 			}
 			if got != exact {
 				t.Fatalf("got len=%d, want %d", len(got), len(exact))
+			}
+		})
+	}
+}
+
+func TestCouncilWriterFlag(t *testing.T) {
+	installStubHarnesses(t, "claude", "codex", "agy")
+	repoDir := t.TempDir()
+	repoJSON, err := json.Marshal(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Today's request body, byte for byte, with optional ref and writer fields.
+	wantBody := func(ref, writer string) string {
+		return `{"decree":"Review this","question":"Review this",` + ref + `"repo":` + string(repoJSON) +
+			`,"rounds":2,"sequential":false,"title":"Review this","with":["claude","codex","agy"]` + writer + `}`
+	}
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantBody string
+		wantErr  string
+	}{
+		{name: "absent", wantBody: wantBody("", "")},
+		{name: "valid_seat", args: []string{"--writer", "codex"}, wantBody: wantBody("", `,"writer":"codex"`)},
+		{name: "valid_seat_trimmed_with_ref", args: []string{"--writer", " agy ", "--ref", "main"}, wantBody: wantBody(`"ref":"main",`, `,"writer":"agy"`)},
+		{name: "seat_not_in_panel", args: []string{"--writer", "bash"}, wantErr: `--writer "bash" is not a seat on the panel (claude, codex, agy)`},
+		{name: "empty_value", args: []string{"--writer", " "}, wantErr: "--writer cannot be empty"},
+		{name: "given_twice", args: []string{"--writer", "claude", "--writer", "codex"}, wantErr: "--writer can be given only once"},
+		{name: "with_live", args: []string{"--writer", "claude", "--live"}, wantErr: "--writer and --live are mutually exclusive"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			posts := 0
+			rt := &handlerRoundTripper{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/councils":
+					posts++
+					var err error
+					if gotBody, err = io.ReadAll(r.Body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"id":"ccl-w-1","title":"Review","state":"active"}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-w-1/stream":
+					w.Header().Set("Content-Type", "text/event-stream")
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conclaves/ccl-w-1":
+					_, _ = w.Write([]byte(`{"conclave":{"id":"ccl-w-1","state":"completed"},"messages":[{"id":1,"conclaveId":"ccl-w-1","fromRole":"claude","toRole":"all","kind":"proposal","body":"ok","round":1}],"relics":[{"name":"digest","authorRole":"system","body":"ok"}],"turns":[{"round":1,"role":"claude","state":"completed"}]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			})}
+
+			root := newRootCmdWithTransport(rt)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(append([]string{"--api", "http://unix", "council", "Review this", "--repo", repoDir}, tc.args...))
+
+			err := root.ExecuteContext(context.Background())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if posts != 0 {
+					t.Fatalf("expected no request on a usage error, got %d", posts)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("council command failed: %v (stderr=%s)", err, stderr.String())
+			}
+			if posts != 1 {
+				t.Fatalf("expected one open request, got %d", posts)
+			}
+			if string(gotBody) != tc.wantBody {
+				t.Fatalf("request body\n got: %s\nwant: %s", gotBody, tc.wantBody)
 			}
 		})
 	}

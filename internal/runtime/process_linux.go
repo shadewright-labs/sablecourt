@@ -63,7 +63,7 @@ func linuxBootTime() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file; its close error cannot lose data
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()

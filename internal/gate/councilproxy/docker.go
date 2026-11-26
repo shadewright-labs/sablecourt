@@ -202,11 +202,11 @@ func Provision(ctx context.Context, docker Docker, imageID string, cfg Config) (
 	case GateModeUnixSocket:
 		spec.GateSocketHostPath = ug.sockPath
 		spec.GateSocketContainerPath = ContainerGateSocket
-		spec.Args = append(args, "-gate-socket", ContainerGateSocket)
+		spec.Args = append(args, "-gate-socket", ContainerGateSocket) //nolint:gocritic // args is not used again, so sharing its array is safe
 	case GateModeHostGateway:
 		spec.HostGateway = DockerHostGateway
 		spec.HostGatewayTarget = defaultHostGatewayTarget
-		spec.Args = append(args, "-gate-tls-port", tg.port, "-gate-spki-sha256", tg.spkiSHA256)
+		spec.Args = append(args, "-gate-tls-port", tg.port, "-gate-spki-sha256", tg.spkiSHA256) //nolint:gocritic // args is not used again, so sharing its array is safe
 	default:
 		spec.Args = args
 	}

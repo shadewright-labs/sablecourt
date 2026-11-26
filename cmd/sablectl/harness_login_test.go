@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,16 +26,22 @@ func (s *fakeSession) Workload() councilproxy.WorkloadEndpoint {
 func (s *fakeSession) Close(context.Context) error { s.closed = true; return nil }
 
 type fakeLogin struct {
-	checks                []error // consumed one per CheckCouncilHarness call
-	ensureErr, proxyErr   error
-	imageErr, runErr      error
-	calls                 []string
-	session               *fakeSession
-	launch                rt.CouncilLaunch
-	terminalIn            string
-	terminalOut           string
-	proxyConfig           councilproxy.Config
-	sawOutput, sawRawEcho string
+	checks              []error // consumed one per CheckCouncilHarness call
+	ensureErr, proxyErr error
+	imageErr, runErr    error
+	calls               []string
+	session             *fakeSession
+	launch              rt.CouncilLaunch
+	proxyConfig         councilproxy.Config
+	sawRawEcho          string
+	installErr          error
+	installed           []byte
+}
+
+func (f *fakeLogin) InstallCouncilTool(_ context.Context, _ string, r io.Reader) error {
+	f.calls = append(f.calls, "install")
+	f.installed, _ = io.ReadAll(r)
+	return f.installErr
 }
 
 func (f *fakeLogin) CheckCouncilHarness(context.Context, string) error {
@@ -87,17 +95,24 @@ func TestHarnessLogin(t *testing.T) {
 		wantCalls string
 		notErr    string
 	}{
-		{name: "new volume", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing), nil}}, wantCalls: "check image volume proxy run check"},
+		{name: "new volume installs the tool first", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing), nil}}, wantCalls: "check install image volume proxy run check"},
+		{name: "new codex volume needs no install", role: "codex", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing), nil}}, wantCalls: "check image volume proxy run check"},
+		{name: "tool missing", role: "agy", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolMissing), nil}}, wantCalls: "check install image volume proxy run check"},
+		{name: "tool wrong version", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolVersion), nil}}, wantCalls: "check install image volume proxy run check"},
+		{name: "tool checksum mismatch", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolChecksum), nil}}, wantCalls: "check install image volume proxy run check"},
+		{name: "tool install fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolMissing)}, installErr: errors.New("exit 3")}, wantErr: "install claude into volume sablecourt-harness-claude-tool", wantCalls: "check install"},
+		{name: "tool download fails", role: "agy", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolMissing)}}, wantErr: "download refused", wantCalls: "check"},
+		{name: "tool volume unlabelled", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultToolInvalid)}}, wantErr: "not a local Sablecourt tool volume", wantCalls: "check"},
 		{name: "login absent then stored", role: "codex", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultLoginMissing), nil}}, wantCalls: "check image volume proxy run check"},
 		{name: "already logged in", role: "agy", fake: &fakeLogin{}, wantCalls: "check image volume proxy run check"},
 		{name: "image missing", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultImageMissing)}}, wantErr: "sablectl harness build claude", wantCalls: "check"},
 		{name: "unlabelled volume", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeInvalid)}}, wantErr: "not a local Sablecourt volume", wantCalls: "check"},
 		{name: "engine failure", role: "claude", fake: &fakeLogin{checks: []error{&docker.HarnessError{Harness: "claude", Fault: docker.FaultBackend, Err: errors.New("sk-ant-secret")}}}, wantErr: "unavailable", notErr: "secret", wantCalls: "check"},
 		{name: "proxy image missing", role: "codex", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultLoginMissing)}, imageErr: errNotFound{}}, wantErr: "sablectl harness build codex", wantCalls: "check image"},
-		{name: "volume create fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, ensureErr: errors.New("denied")}, wantErr: "prepare login volume", wantCalls: "check image volume"},
-		{name: "proxy fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, proxyErr: errors.New("no network")}, wantErr: "start login proxy", wantCalls: "check image volume proxy"},
-		{name: "session fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, runErr: errors.New("create failed")}, wantErr: "login session for claude failed", wantCalls: "check image volume proxy run"},
-		{name: "no credential after session", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing), harnessErr(docker.FaultLoginMissing)}}, wantErr: "sablectl harness login claude", wantCalls: "check image volume proxy run check"},
+		{name: "volume create fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, ensureErr: errors.New("denied")}, wantErr: "prepare login volume", wantCalls: "check install image volume"},
+		{name: "proxy fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, proxyErr: errors.New("no network")}, wantErr: "start login proxy", wantCalls: "check install image volume proxy"},
+		{name: "session fails", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing)}, runErr: errors.New("create failed")}, wantErr: "login session for claude failed", wantCalls: "check install image volume proxy run"},
+		{name: "no credential after session", role: "claude", fake: &fakeLogin{checks: []error{harnessErr(docker.FaultVolumeMissing), harnessErr(docker.FaultLoginMissing)}}, wantErr: "sablectl harness login claude", wantCalls: "check install image volume proxy run check"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			def, _ := harnessimages.Lookup(tc.role)
@@ -105,6 +120,7 @@ func TestHarnessLogin(t *testing.T) {
 			var got harnessimages.Definition
 			newLoginRuntime = func(d harnessimages.Definition) (loginRuntime, error) { got = d; return tc.fake, nil }
 			t.Cleanup(func() { newLoginRuntime = old })
+			stubFetch(t, tc.name == "tool download fails")
 			var out, errOut bytes.Buffer
 			err := runHarnessLogin(t.Context(), tc.role, strings.NewReader("code123\n"), &out, &errOut)
 			if got.Image != def.Image || got.Volume != def.Volume {
@@ -143,6 +159,54 @@ func TestHarnessLogin(t *testing.T) {
 	}
 }
 
+// stubFetch replaces the download with a local file, so no test reaches the network.
+func stubFetch(t *testing.T, fail bool) {
+	t.Helper()
+	oldFetch, oldDL := fetchTool, newToolDownloader
+	t.Cleanup(func() { fetchTool, newToolDownloader = oldFetch, oldDL })
+	newToolDownloader = func() harnessimages.Downloader { return nil }
+	fetchTool = func(_ context.Context, _ harnessimages.Downloader, role string) (*harnessimages.VerifiedTool, error) {
+		if fail {
+			return nil, errors.New("download refused")
+		}
+		path := filepath.Join(t.TempDir(), role)
+		if err := os.WriteFile(path, []byte("verified "+role), 0600); err != nil {
+			return nil, err
+		}
+		return &harnessimages.VerifiedTool{Path: path}, nil
+	}
+}
+
+func TestHarnessInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name, role, wantErr string
+		fake                *fakeLogin
+		fail                bool
+	}{
+		{name: "claude", role: "claude", fake: &fakeLogin{}},
+		{name: "agy", role: "agy", fake: &fakeLogin{}},
+		{name: "codex carries its tool", role: "codex", fake: &fakeLogin{}, wantErr: "carries its tool"},
+		{name: "download failure", role: "claude", fake: &fakeLogin{}, fail: true, wantErr: "download refused"},
+		{name: "image missing", role: "agy", fake: &fakeLogin{installErr: errNotFound{}}, wantErr: "sablectl harness build agy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubFetch(t, tc.fail)
+			def, _ := harnessimages.Lookup(tc.role)
+			var errOut bytes.Buffer
+			err := installHarnessTool(t.Context(), def, tc.fake, &errOut)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v", err)
+				}
+				return
+			}
+			if err != nil || string(tc.fake.installed) != "verified "+tc.role || !strings.Contains(errOut.String(), def.Tool.Volume) {
+				t.Fatalf("err=%v installed=%q out=%q", err, tc.fake.installed, errOut.String())
+			}
+		})
+	}
+}
+
 type errNotFound struct{}
 
 func (errNotFound) Error() string { return "no such image" }
@@ -150,6 +214,10 @@ func (errNotFound) NotFound()     {}
 
 func TestHarnessLoginCommandRegistered(t *testing.T) {
 	root := newRootCmd()
+	install, _, err := root.Find([]string{"harness", "install"})
+	if err != nil || install.Name() != "install" {
+		t.Fatalf("harness install is not registered: %v", err)
+	}
 	cmd, _, err := root.Find([]string{"harness", "login"})
 	if err != nil || cmd.Name() != "login" {
 		t.Fatalf("harness login is not registered: %v", err)

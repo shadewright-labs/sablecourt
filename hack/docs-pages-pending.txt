@@ -1,0 +1,43 @@
+# Links to pages and headings that are not written yet, one per line as "<source> -> <target>[#fragment]",
+# paths from the repository root. hack/docs-links.py allows exactly that link from that source, one occurrence
+# per line (a page that links the same pending target twice has two lines), and fails when the target exists or
+# a line is no longer used, so remove the lines in the pull request that adds the page or heading.
+docs/concepts.md -> docs/how-it-works/audit.md
+docs/glossary.md -> docs/how-it-works/audit.md
+docs/glossary.md -> docs/how-it-works/identity-and-access.md
+docs/how-it-works/index.md -> docs/how-it-works/audit.md
+docs/how-it-works/index.md -> docs/how-it-works/identity-and-access.md
+docs/how-it-works/index.md -> docs/design/architecture.md
+docs/how-it-works/index.md -> docs/threat-model.md
+docs/how-it-works/integrations.md -> docs/how-it-works/identity-and-access.md
+docs/how-it-works/model-gate.md -> docs/how-it-works/audit.md
+docs/how-it-works/tasks.md -> docs/glossary.md#conclave
+docs/how-it-works/workloads-and-runtimes.md -> docs/glossary.md#session-marker
+docs/how-to/retry-with-handoff.md -> docs/how-to/install-and-start.md
+docs/how-to/retry-with-handoff.md -> docs/how-to/find-why-refused.md
+docs/how-to/run-a-council.md -> docs/how-to/install-and-start.md
+docs/how-to/watch-and-steer.md -> docs/how-to/write-manifests.md
+docs/index.md -> docs/how-it-works/audit.md
+docs/index.md -> docs/how-it-works/audit.md
+docs/index.md -> docs/how-it-works/identity-and-access.md
+docs/index.md -> docs/how-it-works/identity-and-access.md
+docs/index.md -> docs/how-to/install-and-start.md
+docs/index.md -> docs/how-to/write-manifests.md
+docs/index.md -> docs/threat-model.md
+docs/index.md -> docs/threat-model.md
+docs/index.md -> docs/troubleshooting.md
+docs/index.md -> docs/design/index.md
+docs/index.md -> docs/design/index.md
+docs/index.md -> docs/how-to/index.md
+docs/index.md -> docs/design/architecture.md
+docs/index.md -> docs/design/storage.md
+docs/index.md -> docs/design/v0.1-baseline.md
+docs/overview.md -> docs/how-to/install-and-start.md
+docs/reference/cli.md -> docs/how-to/index.md
+docs/reference/cli.md -> docs/how-to/install-and-start.md
+docs/reference/cli.md -> docs/troubleshooting.md
+docs/reference/configuration.md -> docs/how-to/install-and-start.md
+docs/reference/configuration.md -> docs/how-it-works/identity-and-access.md
+docs/reference/http-api.md -> docs/how-it-works/identity-and-access.md
+docs/reference/limits.md -> docs/troubleshooting.md
+docs/reference/metrics.md -> docs/how-it-works/audit.md

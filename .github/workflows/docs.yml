@@ -1,0 +1,70 @@
+name: Docs
+
+# Builds docs/ with Zensical and publishes the static site to GitHub Pages at
+# https://shadewrightlabs.com/sablecourt/. Repository Pages settings must be enabled with
+# "GitHub Actions" as the source.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "overrides/**"
+      - "zensical.toml"
+      - "requirements-docs.in"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Install docs requirements
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-docs.txt
+
+      - name: Build the site
+        run: .venv/bin/zensical build --clean --strict
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

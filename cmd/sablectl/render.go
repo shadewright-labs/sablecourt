@@ -113,7 +113,7 @@ func renderTaskDetail(w io.Writer, task domain.Task, events []domain.TaskEvent, 
 	lines := []string{
 		fmt.Sprintf("%s  %s", stTitle.Render("Task"), stJade.Render(task.ID)),
 		fmt.Sprintf("%s  %s   %s  %s", stMuted.Render("Workload:"), task.WorkloadName, stMuted.Render("State:"), styleTaskState(task.State)),
-		fmt.Sprintf("%s  $%.4f (%d in / %d out)", stMuted.Render("Spend:   "), costUSD, budget.InputTokens, budget.OutputTokens),
+		fmt.Sprintf("%s  $%.4f (%d in / %d out)", stMuted.Render("Spend:   "), costUSD, budget.TotalInputTokens(), budget.OutputTokens),
 		fmt.Sprintf("%s  %s", stMuted.Render("Input:   "), truncate(task.InputJSON, 80)),
 	}
 	fmt.Fprintln(w, stBox.Render(strings.Join(lines, "\n")))
@@ -143,9 +143,11 @@ func renderBudget(w io.Writer, totals domain.BudgetTotals) {
 	costUSD := float64(totals.CostMicroUSD) / 1_000_000.0
 	content := strings.Join([]string{
 		stTitle.Render("Sablecourt Observed Model Budget"),
-		fmt.Sprintf("%s  %d", stMuted.Render("Input tokens: "), totals.InputTokens),
-		fmt.Sprintf("%s  %d", stMuted.Render("Output tokens:"), totals.OutputTokens),
-		fmt.Sprintf("%s  %s", stMuted.Render("Total spend:  "), stJade.Render(fmt.Sprintf("$%.4f", costUSD))),
+		fmt.Sprintf("%s  %d", stMuted.Render("Input tokens:      "), totals.InputTokens),
+		fmt.Sprintf("%s  %d", stMuted.Render("Cache write tokens:"), totals.CacheWriteTokens),
+		fmt.Sprintf("%s  %d", stMuted.Render("Cache read tokens: "), totals.CacheReadTokens),
+		fmt.Sprintf("%s  %d", stMuted.Render("Output tokens:     "), totals.OutputTokens),
+		fmt.Sprintf("%s  %s", stMuted.Render("Total spend:       "), stJade.Render(fmt.Sprintf("$%.4f", costUSD))),
 	}, "\n")
 	fmt.Fprintln(w, stBox.Render(content))
 }

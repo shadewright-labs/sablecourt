@@ -512,10 +512,10 @@ func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) error
 func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
-			task_id, workload_name, provider, model, input_tokens, output_tokens, cost_microusd, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			task_id, workload_name, provider, model, input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_microusd, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, entry.TaskID, entry.WorkloadName, entry.Provider, entry.Model,
-		entry.InputTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt))
+		entry.InputTokens, entry.CacheWriteTokens, entry.CacheReadTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt))
 	return err
 }
 
@@ -530,10 +530,10 @@ func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID
 func (s *SQLiteStore) TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger
 		WHERE task_id = ?
-	`, taskID).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`, taskID).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 
@@ -541,19 +541,19 @@ func (s *SQLiteStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadNam
 	var totals domain.BudgetTotals
 	start := dayStartUTC.UTC().Format(time.RFC3339Nano)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger
 		WHERE workload_name = ? AND created_at >= ?
-	`, workloadName, start).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`, workloadName, start).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 
 func (s *SQLiteStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger
-	`).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 

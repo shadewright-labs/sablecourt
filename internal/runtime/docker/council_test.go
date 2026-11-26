@@ -57,6 +57,7 @@ type councilEngine struct {
 	channel fixtureConn
 	output  []byte
 	vol     volume.Volume
+	tool    *volume.Volume
 	exists  bool
 }
 
@@ -66,9 +67,12 @@ func newCouncilEngine() *councilEngine {
 	f.imageID = "sha256:" + strings.Repeat("b", 64)
 	return f
 }
-func (f *councilEngine) VolumeInspect(context.Context, string, client.VolumeInspectOptions) (client.VolumeInspectResult, error) {
+func (f *councilEngine) VolumeInspect(_ context.Context, name string, _ client.VolumeInspectOptions) (client.VolumeInspectResult, error) {
 	if f.step == "missing volume" {
 		return client.VolumeInspectResult{}, missing{errors.New("missing")}
+	}
+	if f.tool != nil && name == f.tool.Name {
+		return client.VolumeInspectResult{Volume: *f.tool}, nil
 	}
 	return client.VolumeInspectResult{Volume: f.vol}, nil
 }
@@ -703,7 +707,7 @@ func TestCouncilHeadlessCommandArgv(t *testing.T) {
 				Harness:  tc.harness,
 				Model:    tc.model,
 				Checkout: rt.CouncilCheckout{Kind: tc.kind},
-			}, false)
+			}, false, nil)
 			if err != nil {
 				t.Fatalf("councilCommand: %v", err)
 			}

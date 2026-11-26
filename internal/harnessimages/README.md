@@ -40,12 +40,18 @@ A gate client reads its bearer token from the private scratch file named by
 stdin and disables Docker logs for the harness, socket probe, and proxy.
 
 All targets derive from the spike's digest-pinned Debian base. A dated Debian
-snapshot fixes the package index. The CLI installation steps select exact
-versions and reject unexpected version output. Installation downloads happen
-only during an explicit build. The proxy is compiled locally from source.
+snapshot fixes the package index. The codex target installs the Codex CLI at
+an exact version, rejects unexpected version output, and adds its LICENSE and
+NOTICE under /licenses/codex. The claude and agy targets derive from the
+tool-less stage and contain no vendor software: `FetchTool` (tool.go) downloads
+the pinned tool on the user's machine from a fixed vendor host with no
+redirects, checks its digests, and the Docker runtime installs it into the
+volume named by `Tool.Volume`, which harness containers mount read-only at
+`ToolDir`. Every image has a /licenses/README; licenses/README.md names the
+source of each vendored licence file. The proxy is compiled locally from source.
 
-The Docker build context contains only the embedded Dockerfile and compiled
-proxy. It contains no source checkout, client configuration, or login volume.
+The Docker build context contains only the embedded Dockerfile, the licence
+files and the compiled proxy. It contains no source checkout, client configuration, or login volume.
 The Docker subprocess receives Docker connection settings and basic process
 settings, with no provider keys or task leases. Child diagnostics are discarded
 so they cannot expose build credentials in command output.
@@ -61,7 +67,7 @@ On an arm64 Mac with Docker available, run the native acceptance test explicitly
 SABLECOURT_DOCKER_TEST=1 go test -race ./internal/harnessimages -run '^TestDockerImages$' -v
 ```
 
-It builds all three roles and checks their exact versions and default non-root
+It builds all three roles and checks the codex version, that the claude and agy images carry no vendor tool, and the default non-root
 identity under a read-only root, dropped capabilities, and no network. It also
 checks the proxy executable and default identity. Test containers use private
 tmpfs state and scratch, with cleanup registered before launch. The test skips

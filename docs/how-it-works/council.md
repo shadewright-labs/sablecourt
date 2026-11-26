@@ -58,7 +58,7 @@ A failed, cancelled or answerless turn is retried as the next attempt while star
 
 ## Checkouts
 
-`--live` (the default) mounts a read-only view of the working tree, uncommitted changes included. `--ref <ref>` pins a branch, tag, `HEAD` or full commit ID to one commit and mounts a read-only checkout of it. The two flags cannot be combined. The API also takes `writer`, one of the three roles, never with `live`; without `ref` it pins `HEAD`. That role gets a writable worktree on a branch `sablecourt/council-<key>`, the others a read-only review checkout, and the writer's redacted diff is stored as a Relic that later packets include. There is no CLI flag for the writer.
+`--live` (the default) mounts a read-only view of the working tree, uncommitted changes included. `--ref <ref>` pins a branch, tag, `HEAD` or full commit ID to one commit and mounts a read-only checkout of it. The two flags cannot be combined. The API also takes `writer`, one of the three roles, never with `live`; without `ref` it pins `HEAD`. That role gets a writable worktree on a branch `sablecourt/council-<key>`, the others a read-only review checkout, and the writer's redacted diff is stored as a Relic that later packets include. `sablectl council --writer <seat>` sends that field.
 
 The daemon refuses a repository that is not owned by the daemon's user, that has no `.git` directory of its own or is not the primary worktree, or that overlaps the daemon state directory or a credential directory under the home directory (such as `.ssh`, `.config`, `.claude`, `.codex` or `Library/Keychains`). It refuses a ref name that is both a branch and a tag on different commits. A second writer role for the same council is refused when its turn launches.
 

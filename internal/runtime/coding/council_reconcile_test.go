@@ -14,7 +14,7 @@ import (
 func TestReconcileIgnoresJournalCommittedAfterOpen(t *testing.T) {
 	root := t.TempDir()
 	const (
-		key    = "ccl-reconcile-0123456789abcdef"
+		key    = "ccl-reconcile-" + "0123456789abcdef"
 		taskID = "writer-r2-a1"
 	)
 	commit := strings.Repeat("a", 40)

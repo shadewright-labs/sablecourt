@@ -28,7 +28,8 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
-const version = "0.1.0-dev"
+// version is what `sablectl version` prints. A build can set it with -ldflags -X main.version=...
+var version = "0.1.0-dev"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -37,7 +38,7 @@ func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, stRed.Render("error: ")+err.Error())
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // stop only releases the signal handler, which exiting releases too
 	}
 }
 
@@ -861,6 +862,10 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 				return err
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				_, err := readBoundedHTTPResponse(resp)
+				return err
+			}
 			sc := bufio.NewScanner(resp.Body)
 			for sc.Scan() {
 				if strings.HasPrefix(sc.Text(), "data: ") {
@@ -1284,8 +1289,8 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r)
 }
 
-func streamScry(ctx context.Context, client *http.Client, url string, out io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func streamScry(ctx context.Context, client *http.Client, target string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
 	}

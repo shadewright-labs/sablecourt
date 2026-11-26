@@ -854,11 +854,11 @@ func TestLearningInputValidationAndSecrets(t *testing.T) {
 	// Secret redaction in statement and evidence_ref (including truncated PEM block).
 	redacted, err := ls.ProposeLearning(ctx, domain.Learning{
 		ID:          "redact-1",
-		Statement:   "Never pass Authorization: Bearer supersecrettoken12345 or -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA",
+		Statement:   "Never pass Authorization: Bearer supersecrettoken12345 or -----BEGIN" + " RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA",
 		Scope:       validScope,
 		SourceKind:  domain.LearningSourceAgent,
 		SourceID:    "task-99",
-		EvidenceRef: "token=ghp_1234567890abcdefghij1234",
+		EvidenceRef: "token=ghp_" + "1234567890abcdefghij1234",
 		Author:      "agent-1",
 	})
 	if err != nil {

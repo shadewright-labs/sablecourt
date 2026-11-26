@@ -101,6 +101,8 @@ Tested on macOS (`darwin`) on 2026-11-25 against the installed binaries (`claude
 
 Tested on Docker Desktop (`linux/arm64`, Docker Engine `29.9.3`, Linux kernel `7.0.14-linuxkit`) on 2026-11-25 without logging in to any provider and without mounting any host profile, credential file, Keychain, or Docker socket. Every container ran as non-root (`10001:10001`) with `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, a named Docker volume at `/home/harness`, a throwaway Git repository bind-mounted read-only at `/workspace:ro`, a writable scratch mount at `/scratch` (`TMPDIR=/scratch`), no other mounts, and stdin closed (`</dev/null`).
 
+<a id="summary-table-1"></a>
+
 ### Summary table
 
 | Field | `claude` | `codex` | `agy` |

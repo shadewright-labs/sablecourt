@@ -42,7 +42,7 @@ func TestCouncilRoundsWithStubCLI(t *testing.T) {
 			c := testCouncil()
 			c.Sequential = seq
 			var calls []string
-			for i := 0; i < 8; i++ {
+			for range 8 {
 				step, err := c.Next(opened)
 				if err != nil {
 					t.Fatal(err)

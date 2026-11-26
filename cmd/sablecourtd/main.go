@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -55,6 +56,20 @@ import (
 )
 
 func main() {
+	rootCmd := newRootCmd()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1) //nolint:gocritic // stop only releases the signal handler, which exiting releases too
+	}
+}
+
+// newRootCmd builds the daemon command and its flags. The CLI reference is
+// generated from it.
+func newRootCmd() *cobra.Command {
 	var (
 		dbPath               string
 		postgresDSN          string
@@ -132,14 +147,7 @@ func main() {
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
 	rootCmd.Flags().Bool("operator-auth-required", true, "Require operator authentication")
 	_ = rootCmd.Flags().MarkDeprecated("operator-auth-required", "operator authentication is always required")
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 type daemonConfig struct {
@@ -164,6 +172,8 @@ type daemonConfig struct {
 	allowedHosts         []string
 	incidentTemplate     string
 	branchRetention      time.Duration
+	openStore            func() (store.Store, error)
+	logger               *slog.Logger
 }
 
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
@@ -202,11 +212,16 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 		if lookupErr != nil {
 			continue
 		}
-		harnesses[role] = docker.CouncilHarness{
+		h := docker.CouncilHarness{
 			Image:       def.Image,
 			LoginVolume: def.Volume,
 			LoginFiles:  def.LoginFiles,
 		}
+		if t := def.Tool; t != nil {
+			// The image carries no vendor tool: it comes from the read-only tool volume.
+			h.Tool = &docker.CouncilTool{Volume: t.Volume, Binary: t.Binary, Version: t.Version, SHA256: t.SHA256, InstallCommand: harnessimages.InstallCommand(role)}
+		}
+		harnesses[role] = h
 	}
 	dockerAdapter.CouncilHarnesses = harnesses
 	codingAdapter, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
@@ -220,7 +235,7 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
-func runDaemon(ctx context.Context, cfg daemonConfig) error {
+func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
 		if envMode := strings.ToLower(strings.TrimSpace(os.Getenv("SABLECOURT_MODE"))); envMode != "" {
@@ -256,8 +271,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
-	logger := telemetry.NewLogger()
+	defer stateLock.Close() //nolint:errcheck // lock handle released at exit; the lock holds no data
+	logger := cfg.logger
+	if logger == nil {
+		logger = telemetry.NewLogger()
+	}
 
 	var gitSyncer *config.GitSyncer
 	if cfg.manifestsGitRepo != "" {
@@ -283,7 +301,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
 	var st store.Store
-	if pgDSN != "" {
+	if cfg.openStore != nil {
+		st, err = cfg.openStore()
+	} else if pgDSN != "" {
 		st, err = postgres.Open(pgDSN)
 		if err == nil {
 			logger.Info("using postgres store")
@@ -294,7 +314,17 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			safeClose := sanitizeStoreCloseError(closeErr)
+			if runErr != nil {
+				logger.Error("close store failed after daemon error", "error", safeClose, "daemon_error", sanitizeStoreCloseError(runErr))
+				return
+			}
+			logger.Error("close store failed", "error", safeClose)
+			runErr = &redactedStoreCloseError{msg: "close store: " + safeClose, err: closeErr}
+		}
+	}()
 
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -631,7 +661,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", listenAddr, err)
 	}
-	limitedTCPLn := councilproxy.LimitListener(tcpLn, 256)
+	limitedTCPLn := councilproxy.LimitListener(tcpLn, maxListenerConns)
 
 	var unixSrv *http.Server
 	if socketPath != "" {
@@ -650,7 +680,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) error {
 		unixSrv = newDaemonServer(unixMux)
 		go func() {
 			logger.Info("sablecourtd unix socket listening", "path", socketPath)
-			_ = unixSrv.Serve(councilproxy.LimitListener(uln, 256))
+			_ = unixSrv.Serve(councilproxy.LimitListener(uln, maxListenerConns))
 		}()
 	}
 
@@ -686,6 +716,32 @@ const daemonIdleTimeout = 60 * time.Second
 // variable so tests can shorten it. No write timeout is set, so streaming
 // responses are not cut.
 var daemonReadTimeout = 60 * time.Second
+
+// maxListenerConns caps open connections on each listener (TCP and Unix socket).
+const maxListenerConns = 256
+
+// maxStoreCloseErrorBytes bounds redacted store-close errors in daemon logs and exit output.
+const maxStoreCloseErrorBytes = 1024
+
+type redactedStoreCloseError struct {
+	msg string
+	err error
+}
+
+func (e *redactedStoreCloseError) Error() string { return e.msg }
+func (e *redactedStoreCloseError) Unwrap() error { return e.err }
+
+func sanitizeStoreCloseError(err error) string {
+	s := strings.TrimSpace(store.RedactLearningText(err.Error()))
+	if len(s) <= maxStoreCloseErrorBytes {
+		return s
+	}
+	n := maxStoreCloseErrorBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 func newDaemonServer(handler http.Handler) *http.Server {
 	return &http.Server{
@@ -732,6 +788,9 @@ type handlerConfig struct {
 	councilPrivateDirs  []string
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
+	// routeSink, when set, is told every route pattern the handler registers.
+	// The HTTP API reference test uses it; routing does not depend on it.
+	routeSink func(pattern string)
 	// preflightCouncilHarness is set in container mode. It replaces the host
 	// executable and sandbox checks with image, volume and login checks.
 	preflightCouncilHarness func(context.Context, string) error
@@ -744,7 +803,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	if len(options) > 0 {
 		cfg = options[0]
 	}
-	mux := http.NewServeMux()
+	serveMux := http.NewServeMux()
+	mux := recordingMux{serveMux, cfg.routeSink}
 	if dash != nil {
 		dash.RegisterRoutes(mux)
 	}
@@ -1393,7 +1453,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DeviceID       string `json:"deviceId"`
 			Signature      string `json:"signature"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		// An empty body approves without a pin; a malformed one must not drop the pin silently.
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid approval body"})
+			return
+		}
 		if body.DeviceID != "" && body.Signature != "" {
 			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
 			if err != nil {
@@ -1775,9 +1839,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		})
 	}
 	auth := newOperatorAuth(cfg.operatorToken)
+	auth.onRoute = cfg.routeSink
 	mux.HandleFunc("GET /login", operatorLoginPage)
 	mux.HandleFunc("POST /login", auth.login)
-	return securityHeadersMiddleware(auth.requireOperatorAuth(mux, guardOperatorRequest(mux), secrets))
+	return securityHeadersMiddleware(auth.requireOperatorAuth(serveMux, guardOperatorRequest(serveMux), secrets))
 }
 
 // Gate requests can arrive after a terminal transition and before lease cleanup.
@@ -1880,7 +1945,7 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		if err != nil {
 			return nil, "", "", fmt.Errorf("missing audio form field 'file': %w", err)
 		}
-		defer f.Close()
+		defer f.Close() //nolint:errcheck // uploaded form file, read only
 		data, err := io.ReadAll(f)
 		if err != nil {
 			return nil, "", "", err

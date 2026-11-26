@@ -223,7 +223,7 @@ func TestIncidentStorageFailuresFailClosed(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			st := daemonTestStore(t)
 			h := incidentTestHandler(incidentFailureStore{Store: st, failure: failure}, "")
-			for attempt := 0; attempt < 2; attempt++ {
+			for attempt := range 2 {
 				w := postIncident(h, "INC-42", "primary")
 				if w.Code < 500 {
 					t.Errorf("attempt %d: status = %d, want server refusal", attempt, w.Code)

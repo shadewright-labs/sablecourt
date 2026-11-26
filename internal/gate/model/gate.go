@@ -222,7 +222,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqBody, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	reqBody, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "failed to read request body")
 		return
@@ -317,7 +317,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var captured bytes.Buffer
 	flusher, canFlush := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, upstreamReadChunkBytes)
 	for {
 		n, readErr := upResp.Body.Read(buf)
 		if n > 0 {
@@ -326,8 +326,15 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			if canFlush {
 				flusher.Flush()
 			}
-			if captured.Len() < 8<<20 {
-				captured.Write(chunk)
+			// Keep up to maxCapturedResponseBytes + 1 bytes so oversized
+			// responses are detected deterministically by modelusage.Limits.
+			if captured.Len() <= maxCapturedResponseBytes {
+				remain := maxCapturedResponseBytes + 1 - captured.Len()
+				if len(chunk) > remain {
+					captured.Write(chunk[:remain])
+				} else {
+					captured.Write(chunk)
+				}
 			}
 		}
 		if readErr != nil {
@@ -338,39 +345,31 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
 		// Keep the reservation if actual usage cannot be recorded.
 		releaseReservation = false
-		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
-		inTokens := max(usage.InputTokens, 0)
-		outTokens := max(usage.OutputTokens, 0)
-		if inTokens == 0 && outTokens == 0 {
-			// The response carried no usage (for example a stream without a usage
-			// event). Charge the reserved estimate so the call is never free.
-			inTokens = reserve.InputTokens
-			outTokens = reserve.OutputTokens
-		}
-		modelName := usage.Model
+		parsed := parseUsage(activeProvider, upstreamPath, captured.Bytes(), upResp.Header.Get("Content-Type"))
+		settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
+		modelName := settled.Model
 		if modelName == "" {
 			modelName = reqModel
 		}
-		// Price with the admitted request model, the identity the reservation was
-		// sized for, so a reported model name cannot settle above the reserve.
-		costMicro := max(EstimateMicroUSD(activeProvider, reqModel, inTokens, outTokens, g.pricing), 0)
 		entry := domain.BudgetEntry{
-			TaskID:       lease.TaskID,
-			WorkloadName: lease.WorkloadName,
-			Provider:     activeProvider,
-			Model:        modelName,
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			CostMicroUSD: costMicro,
-			CreatedAt:    g.now(),
+			TaskID:           lease.TaskID,
+			WorkloadName:     lease.WorkloadName,
+			Provider:         activeProvider,
+			Model:            modelName,
+			InputTokens:      settled.InputTokens,
+			CacheWriteTokens: settled.CacheWriteTokens,
+			CacheReadTokens:  settled.CacheReadTokens,
+			OutputTokens:     settled.OutputTokens,
+			CostMicroUSD:     costMicro,
+			CreatedAt:        g.now(),
 		}
 		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
 			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
 			return
 		}
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
-			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, inTokens, outTokens, costMicro))
+			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
+				modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
 	}
 }
 
@@ -496,30 +495,60 @@ func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, det
 	})
 }
 
-func routeProvider(path string) (provider, upstreamPath string, ok bool) {
-	for _, p := range []string{"openai", "anthropic", "gemini", "local"} {
-		prefix := "/" + p + "/"
-		if strings.HasPrefix(path, prefix) {
-			rest := strings.TrimPrefix(path, "/"+p)
-			switch p {
-			case "openai", "local":
-				if rest == "/v1/chat/completions" || rest == "/v1/responses" {
-					return p, rest, true
-				}
-			case "anthropic":
-				if rest == "/v1/messages" {
-					return p, rest, true
-				}
-			case "gemini":
-				if strings.HasPrefix(rest, "/v1beta/models/") &&
-					(strings.HasSuffix(rest, ":generateContent") || strings.HasSuffix(rest, ":streamGenerateContent")) {
-					return p, rest, true
-				}
-			}
-			return "", "", false
+const (
+	// maxRequestBodyBytes is how much of a request body the gate reads.
+	maxRequestBodyBytes = 16 << 20
+	// maxCapturedResponseBytes is how much of a response the gate parses for
+	// token usage. One additional sentinel byte is retained so responses past
+	// the limit are reported as oversized.
+	maxCapturedResponseBytes = 8 << 20
+	// upstreamReadChunkBytes is the size of one read from the upstream response.
+	upstreamReadChunkBytes = 32 << 10
+)
+
+// modelPlaceholder in a route stands for any model name.
+const modelPlaceholder = "{model}"
+
+// routes lists, per provider and in matching order, the upstream paths the
+// gate forwards. The gate forwards the request method unchanged.
+var routes = []struct{ provider, path string }{
+	{"openai", "/v1/chat/completions"},
+	{"openai", "/v1/responses"},
+	{"anthropic", "/v1/messages"},
+	{"gemini", "/v1beta/models/" + modelPlaceholder + ":generateContent"},
+	{"gemini", "/v1beta/models/" + modelPlaceholder + ":streamGenerateContent"},
+	{"local", "/v1/chat/completions"},
+	{"local", "/v1/responses"},
+}
+
+// Routes returns the paths the gate serves, relative to its mount point, as
+// "/<provider><upstream path>". A {model} segment matches any model name.
+func Routes() []string {
+	out := make([]string, 0, len(routes))
+	for _, r := range routes {
+		out = append(out, "/"+r.provider+r.path)
+	}
+	return out
+}
+
+// routeProvider finds the route of requestPath in routes, the one list of providers
+// and paths the gate dispatches and documents.
+func routeProvider(requestPath string) (provider, upstreamPath string, ok bool) {
+	for _, r := range routes {
+		rest, found := strings.CutPrefix(requestPath, "/"+r.provider)
+		if found && strings.HasPrefix(rest, "/") && matchRoute(r.path, rest) {
+			return r.provider, rest, true
 		}
 	}
 	return "", "", false
+}
+
+func matchRoute(pattern, rest string) bool {
+	before, after, wildcard := strings.Cut(pattern, modelPlaceholder)
+	if !wildcard {
+		return rest == pattern
+	}
+	return len(rest) >= len(before)+len(after) && strings.HasPrefix(rest, before) && strings.HasSuffix(rest, after)
 }
 
 func extractTaskToken(r *http.Request) string {
@@ -539,7 +568,7 @@ func copySafeRequestHeaders(dst, src http.Header) {
 	for k, vals := range src {
 		lower := strings.ToLower(k)
 		switch lower {
-		case "authorization", "x-api-key", "x-goog-api-key", "host", "content-length", "connection":
+		case "authorization", "x-api-key", "x-goog-api-key", "host", "content-length", "connection", "accept-encoding":
 			continue
 		}
 		for _, v := range vals {

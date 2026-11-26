@@ -33,6 +33,14 @@ func TestCouncilHarnessRefusal(t *testing.T) {
 			[]string{"sablectl harness login claude"}, nil},
 		{"volume without labels", &docker.HarnessError{Harness: "claude", Fault: docker.FaultVolumeInvalid}, http.StatusConflict,
 			[]string{"not a local Sablecourt volume", "sablectl harness login claude"}, nil},
+		{"tool missing", &docker.HarnessError{Harness: "claude", Fault: docker.FaultToolMissing}, http.StatusPreconditionFailed,
+			[]string{"tool for claude is not installed", "sablectl harness install claude"}, []string{"build"}},
+		{"tool wrong version", &docker.HarnessError{Harness: "agy", Fault: docker.FaultToolVersion}, http.StatusPreconditionFailed,
+			[]string{"not the pinned version", "sablectl harness install agy"}, nil},
+		{"tool checksum mismatch", &docker.HarnessError{Harness: "claude", Fault: docker.FaultToolChecksum}, http.StatusPreconditionFailed,
+			[]string{"pinned SHA-256", "sablectl harness install claude"}, nil},
+		{"tool volume without labels", &docker.HarnessError{Harness: "claude", Fault: docker.FaultToolInvalid}, http.StatusConflict,
+			[]string{"not a local Sablecourt tool volume", "sablectl harness install claude"}, nil},
 		{"backend", &docker.HarnessError{Harness: "claude", Fault: docker.FaultBackend, Err: errors.New("token=sk-secret-value")}, http.StatusServiceUnavailable,
 			[]string{"runtime failed"}, []string{"sablectl", "secret"}},
 		{"unknown error", errors.New("surprise sk-secret-value"), http.StatusServiceUnavailable,
@@ -42,7 +50,8 @@ func TestCouncilHarnessRefusal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			role := "claude"
-			if he, ok := tc.err.(*docker.HarnessError); ok {
+			he := &docker.HarnessError{}
+			if errors.As(tc.err, &he) {
 				role = he.Harness
 			}
 			status, msg := councilHarnessRefusal(role, tc.err)

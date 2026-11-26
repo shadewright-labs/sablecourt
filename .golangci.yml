@@ -1,0 +1,117 @@
+version: "2"
+# Started from Shadewright's configuration. Linters that are off here, and why, are listed under
+# "Not enabled" at the end of this file; turning one on is a change of its own that fixes its findings first.
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck
+    - errorlint
+    - exptostd
+    - gocritic
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - nakedret
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+    - whitespace
+  settings:
+    errcheck:
+      # Excluded everywhere, whatever the receiver: fmt.Fprint, Fprintf and Fprintln to any io.Writer (used for
+      # terminal output and HTTP responses, but a write through them to a file is not checked either), closing a
+      # query result or an io.ReadCloser, rolling back a transaction, and os.Remove and os.RemoveAll on any path
+      # (mostly temporary and stale paths; a removal that must succeed has to check the error itself, and
+      # (*os.Root).Remove is not excluded). A Close that finalizes a write ((*os.File).Close, a writer, a
+      # listener, a database handle) is still checked; test files get the rule under exclusions below.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (io.ReadCloser).Close
+        - os.Remove
+        - os.RemoveAll
+    errorlint:
+      # fmt.Errorf with %v keeps an error opaque on purpose (the store packages do this), and switching it to
+      # %w changes what errors.Is matches for callers. Comparisons and type assertions on errors are still checked.
+      errorf: false
+    gocritic:
+      disabled-checks:
+        # Style rewrites (an if-else chain to a switch, else { if } to else if, a wrapper func to the function
+        # itself); off as a style choice. Their findings were not reviewed one by one.
+        - ifElseChain
+        - elseif
+        - unlambda
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+    staticcheck:
+      checks:
+        - all
+        # The golangci-lint defaults.
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Error strings that start with a capital are product names and messages that tests and operators match.
+        - -ST1005
+        # Quick-fix suggestions (De Morgan, tagged switch, Fprintf) are style, not faults.
+        - -QF*
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+  exclusions:
+    rules:
+      # Tests: an unchecked Close or cleanup call in a test cannot hide a product fault.
+      - path: _test\.go$
+        linters:
+          - errcheck
+        text: "^Error return value of `[A-Za-z0-9_.()*]*\\.(Close|Rollback|Remove|RemoveAll)` is not checked$"
+      # Stat_t.Dev is int32 on darwin and uint64 on linux, so the conversion is needed on one and redundant on
+      # the other. Stat_t.Ino is uint64 on both and is never converted.
+      - linters:
+          - unconvert
+        source: uint64\(stat\.Dev\)
+issues:
+  # The defaults (50 per linter, 3 of the same text) hide repeats; report every finding.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+# Not enabled, with the reason (counts are the findings on the code when this file was added):
+# - gosec: gosec.yml runs the pinned standalone gosec with its own exclusions and load-error check;
+#   a second copy here, at another version, would need a second set of exclusions kept in step.
+# - lll (1,523), goconst (933), gocyclo (63), modernize (78), prealloc (15): style and size rules the code
+#   base was never written to. Their findings were counted, not reviewed one by one; gocyclo and prealloc in
+#   particular can point at functions worth splitting and slices worth sizing.
+# - noctx (213 on darwin and linux, 189 in tests): calls without a context. The 24 outside tests are
+#   exec.Command, http.NewRequest, net.Listen, net.DialTimeout and (*sql.DB).Exec, in cmd/sablectl (8),
+#   cmd/sablecourt-agent (5), cmd/sablecourtd (2), internal/gate/councilproxy (3), internal/runtime/coding (3),
+#   examples/demo-agent, internal/clidoc and internal/store/sqlite (1 each). The tests add
+#   httptest.NewRequest, net.Dial, (*http.Client).Get and Post, and (*sql.DB).QueryRow to the same kinds.
+# - unparam (18, 15 in tests): test helpers with fixed arguments; newLoginLimiter always gets a one-minute
+#   window; (*tlsGate).close always returns nil; removeSharedWorktree always gets verifySaved=false, so its
+#   verification branch is unreachable. Removing that parameter changes council worktree code and belongs in
+#   a change of its own, not in this tooling change.
+# - usetesting (7, all in tests): each one is an os.MkdirTemp under /tmp on purpose, to keep Unix socket
+#   paths short enough on macOS; t.TempDir would make them too long.
+# - ginkgolinter: the tests use the standard testing package, not Ginkgo and Gomega, so it has nothing to check.
+# - logcheck: written for Kubernetes klog and logr call conventions; this code logs with log/slog.
+# - depguard: Shadewright's only rule bans package sort, a project choice Sablecourt has not made.

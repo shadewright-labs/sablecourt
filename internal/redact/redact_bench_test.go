@@ -14,7 +14,7 @@ func BenchmarkTextOperatorTokens(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(input)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		Text(input)
 	}
 }
