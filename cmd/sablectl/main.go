@@ -28,7 +28,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
-const version = "0.1.0-dev"
+// version is what `sablectl version` prints. Release builds set it to the tag without the v
+// (hack/package-binaries.sh, -ldflags -X main.version=...).
+var version = "0.1.0-dev"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
