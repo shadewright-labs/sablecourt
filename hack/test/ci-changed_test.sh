@@ -10,7 +10,8 @@ work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 fails=0 n=0
 
-git_q() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false "$@"; }
+test_email="detector-test@example.invalid"
+git_q() { git -c user.name=test -c user.email="${test_email}" -c commit.gpgsign=false "$@"; }
 
 # new_repo: a repository whose base commit holds a few files of every group.
 new_repo() {
@@ -67,6 +68,18 @@ expect "Go file deleted" true true true true
 
 new_repo; echo 'go 1.27' >> go.mod; commit
 expect "go.mod only" true true false true
+
+new_repo; printf 'go 1.27\nuse ./absent\n' > go.work; commit
+expect "go.work only" true true false false
+
+new_repo; echo 'example.invalid/m v1.0.0 h1:x=' > go.work.sum; commit
+expect "go.work.sum only" true true false false
+
+new_repo; echo 'go 1.27' > go.work; commit; git_q rm -q go.work; commit; base="$(git rev-parse HEAD~1)"
+expect "go.work deleted" true true false false
+
+new_repo; mkdir -p tools; echo 'go 1.27' > tools/go.work.bak; commit
+expect "a file that only looks like go.work" false false false false
 
 new_repo; echo 'bin/' > .dockerignore; commit
 expect ".dockerignore" true true false false

@@ -1,5 +1,6 @@
 FROM golang:1.27-alpine AS build
 WORKDIR /src
+ENV GOWORK=off
 COPY go.mod go.sum ./
 COPY cmd/sablecourt-agent ./cmd/sablecourt-agent
 RUN CGO_ENABLED=0 go build -o /sablecourt-agent ./cmd/sablecourt-agent

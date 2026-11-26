@@ -28,8 +28,10 @@ fail_open() {
 }
 trap 'fail_open "$LINENO"' ERR
 
-# What the binaries and the images are built from; each group below that builds or runs them includes it.
-build_paths='.*\.go|go\.mod|go\.sum|cmd/.*|internal/.*|examples/.*|Dockerfile|\.dockerignore'
+# What the binaries and the images are built from; each group below that builds or runs them includes it. The
+# workspace files go.work and go.work.sum count too: CI and the root Dockerfile build with GOWORK=off, but a
+# change to them still runs the Go checks and the image build, so nothing that can change a build is skipped.
+build_paths='.*\.go|go\.mod|go\.sum|go\.work|go\.work\.sum|cmd/.*|internal/.*|examples/.*|Dockerfile|\.dockerignore'
 # The reference pages under docs/reference are checked against the code by go test, so they are Go inputs too.
 go_paths="${build_paths}|Makefile|hack/.*|\.golangci\.yml|docs/reference/.*"
 # Go workflows that ci.yml does not call; a change to one runs the Go checks.

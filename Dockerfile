@@ -3,6 +3,8 @@ FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cd
 ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
+# The same workspace policy as CI: build this module alone, never a go.work that the context may hold.
+ENV GOWORK=off
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
