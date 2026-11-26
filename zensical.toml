@@ -21,11 +21,10 @@ nav = [
   { "Overview" = [
     { "Sablecourt" = "index.md" },
     { "Overview" = "overview.md" },
-    { "Concepts" = "concepts.md" },
-    { "Glossary" = "glossary.md" },
   ] },
   { "How it works" = [
     { "How it works" = "how-it-works/index.md" },
+    { "Concepts" = "concepts.md" },
     { "Tasks" = "how-it-works/tasks.md" },
     { "Workloads and runtimes" = "how-it-works/workloads-and-runtimes.md" },
     { "Model Gate" = "how-it-works/model-gate.md" },
@@ -54,6 +53,7 @@ nav = [
     { "Configuration reference" = "reference/configuration.md" },
     { "Limits reference" = "reference/limits.md" },
     { "Metrics reference" = "reference/metrics.md" },
+    { "Glossary" = "glossary.md" },
   ] },
   { "Design and decisions" = [
     { "Sablecourt v0.1 design" = "design.md" },

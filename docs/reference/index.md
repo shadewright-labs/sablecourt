@@ -10,6 +10,7 @@ Status: built.
 - [Configuration](configuration.md): the state directory, secret names, environment variables and files the daemon writes.
 - [Limits](limits.md): limits, ceilings and timeouts that refuse, cut or time out a request, a task or a stored value, each with the constant that sets it. Tested against those constants.
 - [Metrics](metrics.md): the Prometheus metrics at `GET /metrics`. Names and types tested against the handler.
+- [Glossary](../glossary.md): short definitions of the terms used in code, manifests and commands (written by hand).
 
 ## Status values in the tables
 
