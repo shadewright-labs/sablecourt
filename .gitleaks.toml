@@ -1,27 +1,70 @@
-# Tests malformed PEM boundaries with synthetic key contents.
-[[allowlists]]
-paths = ['''^internal/conclave/council_results_test\.go$''']
+# gitleaks configuration: the default rules plus the allowlists below. Without [extend] useDefault this file
+# would replace the default rules and detect nothing. Each allowlist names one file AND the synthetic values its
+# tests use (condition = "AND"), so a real secret anywhere else, or a new one in the same file, is still reported.
+# The private-key entries match only a key block that contains a Go string delimiter (a fixture assembled from
+# several literals or followed by code), never a contiguous key. Tests: hack/test/gitleaks_test.sh.
+[extend]
+useDefault = true
 
-# Exercises URL validation using deliberately fake credential values.
+# Synthetic provider tokens in task metadata parsing tests.
 [[allowlists]]
-paths = ['''^internal/store/sqlite/learning_test\.go$''']
-
-# Covers parsing synthetic task metadata that resembles a generic API key.
-[[allowlists]]
+condition = "AND"
 paths = ['''^cmd/sablectl/council_test\.go$''']
+regexes = ['''^(ghp_|sk-proj-)SYNTHETIC1234567890abcdefghij$''']
 
-# Tests chunked redaction with placeholder PEM and token strings.
+# Malformed PEM boundaries assembled from literals.
 [[allowlists]]
+condition = "AND"
+paths = ['''^internal/conclave/council_results_test\.go$''']
+regexes = [
+  '''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''',
+  '''^-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\nkeep\\n-----BEGIN OPENSSH PRIVATE KEY-----$''',
+]
+
+# Chunked redaction across PEM headers and footers split over literals.
+[[allowlists]]
+condition = "AND"
 paths = ['''^internal/attach/hub_test\.go$''']
+regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
 
-# Uses fixed hash-shaped values to test worktree state validation.
+# Upstream response redaction with a fake GitHub token.
 [[allowlists]]
-paths = ['''^internal/runtime/coding/hardening_test\.go$''']
-
-# Tests rendering and redaction of synthetic credentials in UI data.
-[[allowlists]]
-paths = ['''^internal/ui/ui_test\.go$''']
-
-# Tests upstream response redaction with a fake GitHub token.
-[[allowlists]]
+condition = "AND"
 paths = ['''^internal/gate/mcp/upstream_test\.go$''']
+regexes = ['''^ghp_1234567890abcdefghijklmnop1234567890$''']
+
+# URL validation with a fake credential.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/store/sqlite/learning_test\.go$''']
+regexes = ['''^ghp_1234567890abcdefghij1234$''']
+
+# A message key in UI tests that the generic rule takes for an API key.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/ui/ui_test\.go$''']
+regexes = ['''^conclave-msg-1$''']
+
+# Redaction of a private key split around a fixture word.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/runtime/coding/hardening_test\.go$''']
+regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
+
+# Redaction corpus: key blocks built from literals.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/redact/(linear_test|redacttest/corpus)\.go$''']
+regexes = ['''(?s)^-----BEGIN [A-Z ]*PRIVATE KEY-----.*"''']
+
+# A fixed JSON secret in redaction structure tests.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/redact/json_structure_test\.go$''']
+regexes = ['''^Qv7hTzP2mWx9LkR4nB6c$''']
+
+# A deterministic council key in reconcile tests.
+[[allowlists]]
+condition = "AND"
+paths = ['''^internal/runtime/coding/council_reconcile_test\.go$''']
+regexes = ['''^ccl-reconcile-0123456789abcdef$''']
