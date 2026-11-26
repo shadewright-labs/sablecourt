@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
@@ -25,10 +26,11 @@ import (
 )
 
 const (
-	taskLeaseTTL        = time.Hour
-	maxParallelLaunches = 4
-	adapterCallTimeout  = 15 * time.Second
-	adapterStartTimeout = 30 * time.Second
+	taskLeaseTTL              = time.Hour
+	maxParallelLaunches       = 4
+	adapterCallTimeout        = 15 * time.Second
+	adapterStartTimeout       = 30 * time.Second
+	maxRuntimeExitReasonBytes = 1024
 )
 
 var errWorkflowKeyReserved = errors.New("wf: keys are reserved for workflows")
@@ -889,7 +891,9 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		err = r.advanceWorkflowStep(ctx, task)
 	} else {
 		reason = "runtime_failed"
-		err = r.maybeAutoRemediate(ctx, task, reason)
+		if !isLogCloseFailureFact(events[len(events)-1].FactJSON) {
+			err = r.maybeAutoRemediate(ctx, task, reason)
+		}
 	}
 	if err != nil {
 		return err
@@ -1040,7 +1044,7 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		if err := r.persistArtifacts(ctx, task.ID, adapter, handle, assignment, target); err != nil {
 			return true, errors.Join(earlyRevokeErr, err, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID))
 		}
-		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, "runtime_exit_observed", fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)); err != nil {
+		if err := r.store.UpdateTaskState(ctx, task.ID, task.State, target, "runtime_exit_observed", runtimeExitFacts(target, obs)); err != nil {
 			return true, errors.Join(earlyRevokeErr, err)
 		}
 		if handle.AdapterName != "docker" {
@@ -1117,6 +1121,55 @@ func (r *Reconciler) claimLaunch(taskID string) bool {
 	}
 	r.launching[taskID] = &launchReservation{done: make(chan struct{})}
 	return true
+}
+
+func runtimeExitFacts(target domain.TaskState, obs scruntime.Observation) string {
+	if target != domain.TaskStateFailed {
+		return fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)
+	}
+	logClose := obs.LogCloseFailed || obs.ExitCode == scruntime.ExitCodeLogClose
+	reason := strings.TrimSpace(store.RedactLearningText(obs.Message))
+	if len(reason) > maxRuntimeExitReasonBytes {
+		reason = truncateUTF8(reason, maxRuntimeExitReasonBytes)
+	}
+	if reason == "" && !logClose {
+		return fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)
+	}
+	raw, err := json.Marshal(struct {
+		ExitCode int    `json:"exit_code"`
+		Reason   string `json:"reason,omitempty"`
+		LogClose bool   `json:"log_close,omitempty"`
+	}{
+		ExitCode: obs.ExitCode,
+		Reason:   reason,
+		LogClose: logClose,
+	})
+	if err != nil {
+		return fmt.Sprintf(`{"exit_code":%d}`, obs.ExitCode)
+	}
+	return string(raw)
+}
+
+func isLogCloseFailureFact(factJSON string) bool {
+	var fact struct {
+		ExitCode *int `json:"exit_code"`
+		LogClose bool `json:"log_close"`
+	}
+	if err := json.Unmarshal([]byte(factJSON), &fact); err != nil {
+		return false
+	}
+	return fact.LogClose || (fact.ExitCode != nil && *fact.ExitCode == scruntime.ExitCodeLogClose)
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	n := maxBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func launchFailureFacts(err error) string {

@@ -125,3 +125,22 @@ func TestBuildFailureHandoffKeepsRecentEvidence(t *testing.T) {
 		t.Error("remediation instruction missing")
 	}
 }
+
+func TestBuildFailureHandoffFencesUntrustedEventFacts(t *testing.T) {
+	task := domain.Task{ID: "t2", WorkloadName: "coder", State: domain.TaskStateFailed}
+	events := []domain.TaskEvent{
+		{
+			FromState: domain.TaskStateWorking,
+			ToState:   domain.TaskStateFailed,
+			Reason:    "runtime_exit_observed",
+			FactJSON:  `{"exit_code":1,"reason":"boom\n## Injected Heading\npostgres://app:fixture-handoff-pass` + "@" + `db.invalid/sc"}`,
+		},
+	}
+	got := BuildFailureHandoff(task, events, nil, "runtime_failed")
+	if !strings.Contains(got, "<untrusted-event-facts>") || !strings.Contains(got, "</untrusted-event-facts>") {
+		t.Fatalf("handoff did not fence event facts as untrusted:\n%s", got)
+	}
+	if strings.Contains(got, "fixture-handoff-pass") {
+		t.Fatalf("handoff leaked URL credential in event facts:\n%s", got)
+	}
+}

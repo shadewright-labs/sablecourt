@@ -3,13 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
 	"github.com/shadewright-labs/sablecourt/internal/attach"
@@ -359,6 +365,200 @@ func TestLearningOperatorBoundary(t *testing.T) {
 			h.ServeHTTP(rec, req)
 			if rec.Code != 200 || rec.Body.String() != tc.want {
 				t.Errorf("status %d, identity %q, want %q", rec.Code, rec.Body.String(), tc.want)
+			}
+		})
+	}
+}
+
+type failingCloseStore struct {
+	store.Store
+	migrateErr error
+	closeErr   error
+}
+
+func (s *failingCloseStore) Migrate(ctx context.Context) error {
+	if s.migrateErr != nil {
+		return s.migrateErr
+	}
+	return s.Store.Migrate(ctx)
+}
+
+func (s *failingCloseStore) Close() error {
+	_ = s.Store.Close()
+	return s.closeErr
+}
+
+type capturedLog struct {
+	level slog.Level
+	msg   string
+	attrs string
+}
+
+type testLogHandler struct {
+	mu          sync.Mutex
+	entries     []capturedLog
+	onListening func()
+}
+
+func (h *testLogHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *testLogHandler) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Fprintf(&b, "%s=%v ", a.Key, a.Value)
+		return true
+	})
+	h.mu.Lock()
+	h.entries = append(h.entries, capturedLog{level: r.Level, msg: r.Message, attrs: b.String()})
+	onListening := h.onListening
+	if r.Message == "sablecourtd listening" {
+		h.onListening = nil
+	}
+	h.mu.Unlock()
+	if r.Message == "sablecourtd listening" && onListening != nil {
+		onListening()
+	}
+	return nil
+}
+
+func (h *testLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *testLogHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *testLogHandler) hasErrorContaining(substrings ...string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, entry := range h.entries {
+		if entry.level < slog.LevelError {
+			continue
+		}
+		combined := entry.msg + " " + entry.attrs
+		all := true
+		for _, sub := range substrings {
+			if !strings.Contains(combined, sub) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDaemonStoreCloseErrors(t *testing.T) {
+	errClose := errors.New("store close flush failed")
+	errMigrate := errors.New("schema migrate failed")
+	errCloseSecret := errors.New("close postgres://app:fixture-dsn-pass" + "@" + "db.invalid/sc -----BEGIN " + "PRIVATE KEY-----\nMIIEfixturepembody")
+	errCloseHuge := errors.New(strings.Repeat("z", 2048) + "\U0001F680")
+
+	for _, tc := range []struct {
+		name             string
+		migrateErr       error
+		closeErr         error
+		wantErr          error
+		wantNotErr       error
+		wantErrorLogSubs []string
+		forbidSubs       []string
+		maxErrLen        int
+	}{
+		{
+			name: "clean_shutdown_close_succeeds",
+		},
+		{
+			name:             "clean_shutdown_close_fails",
+			closeErr:         errClose,
+			wantErr:          errClose,
+			wantErrorLogSubs: []string{"store close flush failed"},
+		},
+		{
+			name:             "earlier_error_wins_close_logged",
+			migrateErr:       errMigrate,
+			closeErr:         errClose,
+			wantErr:          errMigrate,
+			wantNotErr:       errClose,
+			wantErrorLogSubs: []string{"store close flush failed", "schema migrate failed"},
+		},
+		{
+			name:             "close_error_redacts_dsn_and_unclosed_pem",
+			closeErr:         errCloseSecret,
+			wantErr:          errCloseSecret,
+			wantErrorLogSubs: []string{"[REDACTED:userinfo]", "[REDACTED:private_key]"},
+			forbidSubs:       []string{"fixture-dsn-pass", "MIIEfixturepembody"},
+		},
+		{
+			name:             "close_error_bounded_and_valid_utf8",
+			closeErr:         errCloseHuge,
+			wantErr:          errCloseHuge,
+			wantErrorLogSubs: []string{strings.Repeat("z", 100)},
+			maxErrLen:        1024 + len("close store: "),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SABLECOURT_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			handler := &testLogHandler{onListening: cancel}
+			probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("reserve loopback port: %v", err)
+			}
+			listenAddr := probeLn.Addr().String()
+			_ = probeLn.Close()
+
+			dbPath := filepath.Join(t.TempDir(), "sablecourt.db")
+			err = runDaemon(ctx, daemonConfig{
+				dbPath:         dbPath,
+				listenAddr:     listenAddr,
+				runtimeBackend: "k8s",
+				logger:         slog.New(handler),
+				openStore: func() (store.Store, error) {
+					realStore, openErr := sqlite.Open(dbPath)
+					if openErr != nil {
+						return nil, openErr
+					}
+					return &failingCloseStore{
+						Store:      realStore,
+						migrateErr: tc.migrateErr,
+						closeErr:   tc.closeErr,
+					}, nil
+				},
+			})
+
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("runDaemon = %v, want nil", err)
+				}
+				if handler.hasErrorContaining("close") {
+					t.Fatalf("unexpected error log on clean close: %+v", handler.entries)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("runDaemon = %v, want error matching %v", err, tc.wantErr)
+			}
+			if tc.wantNotErr != nil && errors.Is(err, tc.wantNotErr) {
+				t.Fatalf("runDaemon = %v, should not replace earlier error with %v", err, tc.wantNotErr)
+			}
+			if !handler.hasErrorContaining(tc.wantErrorLogSubs...) {
+				t.Fatalf("expected error log containing %v, got %+v", tc.wantErrorLogSubs, handler.entries)
+			}
+			for _, forbid := range tc.forbidSubs {
+				if strings.Contains(err.Error(), forbid) {
+					t.Fatalf("runDaemon error leaked %q: %v", forbid, err)
+				}
+				if handler.hasErrorContaining(forbid) {
+					t.Fatalf("error log leaked %q: %+v", forbid, handler.entries)
+				}
+			}
+			if tc.maxErrLen > 0 {
+				if len(err.Error()) > tc.maxErrLen {
+					t.Fatalf("runDaemon error length = %d, want <= %d", len(err.Error()), tc.maxErrLen)
+				}
+				if !utf8.ValidString(err.Error()) {
+					t.Fatalf("runDaemon error is not valid UTF-8: %q", err.Error())
+				}
 			}
 		})
 	}

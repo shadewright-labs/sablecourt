@@ -41,7 +41,7 @@ The daemon runs a pass every 2 seconds. ADR-0002 calls the loop observe, update,
 - Observe: the adapter reports `running`, `suspended`, `completed` or `failed`. A running answer with a fresh timestamp is recorded as a heartbeat and extends the task's leases to one hour past the observation.
 - Stale: a working task with no heartbeat for more than 2 minutes, whose runtime has not exited, fails with `lost_on_restart`. Three observation errors in a row fail it with the error reason.
 - Launch: at most 4 tasks run at once by default (`--max-concurrent`, 0 means no limit) and at most 4 launches are in flight. A launch mints a lease valid for one hour, builds the input and calls the adapter with a 30 second start timeout.
-- Terminal: when the exit is observed the reconciler stores artifacts, sets `completed` or `failed`, revokes leases and stops what is left of the runtime. A completed workflow step submits the next step here.
+- Terminal: when the exit is observed the reconciler stores artifacts, sets `completed` or `failed`, revokes leases and stops what is left of the runtime. Completed tasks record only `{"exit_code":0}`. On failure, `runtime_exit_observed` carries `exit_code`, adds the redacted diagnostic `reason` when non-empty (cut to 1024 bytes on a UTF-8 boundary), and sets `log_close: true` when a runtime output log failed to close or write; those fields are copied onto `runtime_failed`. Tasks with `log_close: true` or exit code `-2` end `failed` without auto-remediation so side effects are not rerun. A completed workflow step submits the next step here.
 
 ## Restart recovery
 
@@ -53,6 +53,8 @@ Each running task has a handle (process ID and OS start time, or container ident
 - A claim record keeps two daemons from recovering the same task.
 
 `submitted` tasks need no recovery; the next pass launches them. Because `submitted` to `working` is a compare-and-swap, no pass can launch a task twice, and the worktree and branch names are derived from the task ID (`sablecourt/<task id>`), so a repeat cannot create a second checkout.
+
+When the daemon exits, it closes the store once. Any store-close error is redacted, cut to 1024 bytes on a UTF-8 boundary, and logged at error level. If the daemon was otherwise exiting cleanly, the close error becomes the exit error and the process exits non-zero; if an earlier daemon error already occurred, that earlier error stays the return value and both errors are logged.
 
 ## Child tasks and sub-budgets
 

@@ -25,6 +25,7 @@ type processResult struct {
 	Start    time.Time
 	PID      int
 	ExitCode int
+	LogClose bool
 	Message  string
 	Response string
 }
