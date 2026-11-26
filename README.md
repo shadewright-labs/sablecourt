@@ -57,15 +57,23 @@ The [docs home page](docs/index.md#status) has a longer status table with issue 
 
 ## Install
 
-Nothing is released, so build from source with `make install`. You need Go 1.27.4 or newer (the version in [go.mod](go.mod)) on macOS or Linux.
-
-[Verify a release](docs/how-to/verify-a-release.md) lists the commands that check a signed release.
+Nothing is released yet, and there is no Homebrew formula. Today, build from source with `make install`; you need Go 1.27.4 or newer (the version in [go.mod](go.mod)) on macOS or Linux.
 
 ```bash
 git clone https://github.com/shadewright-labs/sablecourt.git
 cd sablecourt
 make install                                       # sablecourtd and sablectl into ~/.local/bin
 sablecourtd --manifests=examples/local-demo.yaml   # listens on 127.0.0.1:7432 by default
+```
+
+Once a release is published, you can install `sablecourtd` and `sablectl` from a release archive (`sablecourt_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux`, `amd64` or `arm64`). First download and verify the signatures, checksums, and provenance following [Verify a release](docs/how-to/verify-a-release.md), then unpack the archive into `~/.local/bin`:
+
+```bash
+VERSION=0.1.0   # the release you verified
+OS=darwin        # or linux
+ARCH=arm64       # or amd64
+mkdir -p ~/.local/bin
+tar -xzf "sablecourt_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin sablecourtd sablectl
 ```
 
 The daemon writes `operator.token` to `$SABLECOURT_STATE_DIR`, by default `~/.local/share/sablecourt`. Its SQLite database defaults to `sablecourt.db` in the directory you start it from; `--db` chooses another path. Open the web UI at `http://127.0.0.1:7432` and sign in with the token, or use `sablectl`, which reads the token from the same directory:
