@@ -107,7 +107,7 @@ make agent-image  # the built-in agent container image
 make demo         # run the daemon with examples/local-demo.yaml
 ```
 
-On macOS, `make service-install` runs the daemon as a launchd job and `make service-uninstall` removes it. On pull requests targeting `main`, CI runs two jobs: `verify` (vet, race tests, a short fuzz run, the binaries and the example manifests) and `security` (govulncheck, gosec and gitleaks).
+On macOS, `make service-install` runs the daemon as a launchd job and `make service-uninstall` removes it. On pull requests, CI picks the checks from the changed files and ends in one job, `ci-ok`; the [CI guide](docs/ci.md) lists them.
 
 Contributor and coding-agent guide: [AGENTS.md](AGENTS.md).
 
