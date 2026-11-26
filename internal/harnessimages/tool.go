@@ -33,9 +33,10 @@ type Tool struct {
 	Volume string
 	// URL is the vendor artefact. Its host must be in downloadHosts.
 	URL string
-	// ArchiveSHA512 and ArchiveMember are set when URL is a gzip tar archive:
-	// the archive is checked first, then the one member is extracted.
+	// ArchiveSHA512, ArchiveSize and ArchiveMember are set when URL is a gzip
+	// tar archive: the archive is checked first, then the one member is extracted.
 	ArchiveSHA512 string
+	ArchiveSize   int64
 	ArchiveMember string
 	// SHA256 and Size describe the executable itself. The install container
 	// and every run check SHA256 again.
@@ -53,9 +54,6 @@ var downloadHosts = map[string]bool{
 	"downloads.claude.ai":    true, // Anthropic's release bucket for Claude Code
 	"storage.googleapis.com": true, // Google's public bucket for the Antigravity CLI
 }
-
-// maxArtefact bounds any download, archive or extracted binary.
-const maxArtefact = 1 << 30
 
 // HTTPDownloader fetches over HTTPS from a fixed host, follows no redirect,
 // and sends no credentials or cookies.
@@ -140,6 +138,9 @@ func fetchTool(ctx context.Context, d Downloader, pin Tool) (_ *VerifiedTool, er
 	if err := checkDownloadURL(pin.URL); err != nil {
 		return nil, err
 	}
+	if pin.Size <= 0 || (pin.ArchiveSHA512 != "" && pin.ArchiveSize <= 0) {
+		return nil, errors.New("tool pin has no pinned size")
+	}
 	dir, err := os.MkdirTemp("", "sablecourt-tool-")
 	if err != nil {
 		return nil, fmt.Errorf("create tool download scratch: %w", err)
@@ -162,7 +163,7 @@ func fetchTool(ctx context.Context, d Downloader, pin Tool) (_ *VerifiedTool, er
 		return &VerifiedTool{Path: binary, Tool: pin, dir: dir}, nil
 	}
 	archive := filepath.Join(dir, "archive.tar.gz")
-	if err := writeChecked(archive, body, sha512.New(), pin.ArchiveSHA512, -1); err != nil {
+	if err := writeChecked(archive, body, sha512.New(), pin.ArchiveSHA512, pin.ArchiveSize); err != nil {
 		return nil, fmt.Errorf("%s %s archive: %w", pin.Binary, pin.Version, err)
 	}
 	if err := extractMember(ctx, archive, pin, binary); err != nil {
@@ -176,8 +177,9 @@ func fetchTool(ctx context.Context, d Downloader, pin Tool) (_ *VerifiedTool, er
 
 var errChecksum = errors.New("checksum mismatch: the download is not the pinned artefact")
 
-// writeChecked copies at most maxArtefact bytes into a new private file and
-// compares the digest (and the size, when size >= 0).
+// writeChecked copies at most size+1 bytes into a new private file, so a
+// server cannot make it write much more than the pinned artefact, and compares
+// the size and the digest. The extra byte is how a longer body shows up.
 func writeChecked(path string, r io.Reader, h hash.Hash, want string, size int64) (err error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -188,14 +190,11 @@ func writeChecked(path string, r io.Reader, h hash.Hash, want string, size int64
 			err = cerr
 		}
 	}()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, maxArtefact+1))
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, size+1))
 	if err != nil {
 		return fmt.Errorf("download interrupted: %w", err)
 	}
-	if n > maxArtefact {
-		return errors.New("download is larger than any pinned artefact")
-	}
-	if (size >= 0 && n != size) || hex.EncodeToString(h.Sum(nil)) != want {
+	if n != size || hex.EncodeToString(h.Sum(nil)) != want {
 		return errChecksum
 	}
 	return nil

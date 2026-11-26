@@ -69,6 +69,7 @@ func Lookup(role string) (Definition, error) {
 			Binary: "agy", Version: d.Version, Volume: d.Volume + "-tool",
 			URL:           "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-arm/cli_linux_arm64.tar.gz",
 			ArchiveSHA512: "e4f086d0730b325cfd438ea90396ee78eb23a3110ef7f792824c8817b8d0432462b7b5f91b3d933fc1932a6f4ba73de505e2e96f44448c9fb2427292ead716f7",
+			ArchiveSize:   93662528,
 			ArchiveMember: "antigravity",
 			SHA256:        "ea65d564db41f7f16b6efc423ab9abe7b0778c1da0157167b5284b5563131b47",
 			Size:          260657840,

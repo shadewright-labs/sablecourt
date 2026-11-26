@@ -76,11 +76,14 @@ func TestFetchTool(t *testing.T) {
 	other := []byte("#!/bin/sh\necho other version\n")
 	direct := Tool{Binary: "claude", Version: "1.0.0", URL: "https://downloads.claude.ai/claude-code-releases/1.0.0/linux-arm64/claude", SHA256: sum256(binary), Size: int64(len(binary))}
 	good := tarGz(t, map[string][]byte{"antigravity": binary, "README": []byte("x")}, "")
-	archived := Tool{Binary: "agy", Version: "1.0.0", URL: "https://storage.googleapis.com/antigravity-public/x.tar.gz", ArchiveSHA512: sum512(good), ArchiveMember: "antigravity", SHA256: sum256(binary), Size: int64(len(binary))}
+	archived := Tool{Binary: "agy", Version: "1.0.0", URL: "https://storage.googleapis.com/antigravity-public/x.tar.gz", ArchiveSHA512: sum512(good), ArchiveSize: int64(len(good)), ArchiveMember: "antigravity", SHA256: sum256(binary), Size: int64(len(binary))}
 	wrongMember := tarGz(t, map[string][]byte{"antigravity": other}, "")
 	noMember := tarGz(t, map[string][]byte{"other": binary}, "")
 	linkMember := tarGz(t, nil, "antigravity")
-	withPin := func(base Tool, archive []byte) Tool { base.ArchiveSHA512 = sum512(archive); return base }
+	withPin := func(base Tool, archive []byte) Tool {
+		base.ArchiveSHA512, base.ArchiveSize = sum512(archive), int64(len(archive))
+		return base
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -98,8 +101,8 @@ func TestFetchTool(t *testing.T) {
 		{name: "archive pinned but member is another version", pin: withPin(archived, wrongMember), dl: &fakeDownloader{body: wrongMember}, wantErr: "checksum mismatch"},
 		{name: "archive without the member", pin: withPin(archived, noMember), dl: &fakeDownloader{body: noMember}, wantErr: "archive has no antigravity"},
 		{name: "member is a symlink", pin: withPin(archived, linkMember), dl: &fakeDownloader{body: linkMember}, wantErr: "not a regular file"},
-		{name: "host not allowed", pin: Tool{Binary: "claude", URL: "https://example.invalid/claude", SHA256: direct.SHA256}, dl: &fakeDownloader{body: binary}, wantErr: "fixed vendor download host"},
-		{name: "plain http", pin: Tool{Binary: "claude", URL: "http://downloads.claude.ai/claude", SHA256: direct.SHA256}, dl: &fakeDownloader{body: binary}, wantErr: "fixed vendor download host"},
+		{name: "host not allowed", pin: Tool{Binary: "claude", URL: "https://example.invalid/claude", SHA256: direct.SHA256, Size: direct.Size}, dl: &fakeDownloader{body: binary}, wantErr: "fixed vendor download host"},
+		{name: "plain http", pin: Tool{Binary: "claude", URL: "http://downloads.claude.ai/claude", SHA256: direct.SHA256, Size: direct.Size}, dl: &fakeDownloader{body: binary}, wantErr: "fixed vendor download host"},
 		{name: "no downloader", pin: direct, wantErr: "downloader is required"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,6 +129,72 @@ func TestFetchTool(t *testing.T) {
 			}
 			if _, err := os.Stat(v.Path); !os.IsNotExist(err) {
 				t.Fatal("Close kept the download")
+			}
+		})
+	}
+}
+
+// endlessDownloader serves far more bytes than any pin and counts what was read.
+type endlessDownloader struct{ read int64 }
+
+func (e *endlessDownloader) Get(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(&countingReader{n: &e.read, left: 16 << 20}), nil
+}
+
+type countingReader struct {
+	n    *int64
+	left int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.left == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+	clear(p)
+	c.left -= int64(len(p))
+	*c.n += int64(len(p))
+	return len(p), nil
+}
+
+// A hostile or broken server must not make sablectl read or write more than
+// one byte past the pinned size of the artefact it asked for.
+func TestFetchToolReadsAtMostThePinnedSize(t *testing.T) {
+	binary := []byte("#!/bin/sh\necho pinned\n")
+	archive := tarGz(t, map[string][]byte{"antigravity": binary}, "")
+	for _, pin := range []Tool{
+		{Binary: "claude", Version: "1.0.0", URL: "https://downloads.claude.ai/x/claude", SHA256: sum256(binary), Size: int64(len(binary))},
+		{Binary: "agy", Version: "1.0.0", URL: "https://storage.googleapis.com/x.tar.gz", ArchiveSHA512: sum512(archive), ArchiveSize: int64(len(archive)),
+			ArchiveMember: "antigravity", SHA256: sum256(binary), Size: int64(len(binary))},
+	} {
+		t.Run(pin.Binary, func(t *testing.T) {
+			limit := pin.Size
+			if pin.ArchiveSHA512 != "" {
+				limit = pin.ArchiveSize
+			}
+			dl := &endlessDownloader{}
+			if _, err := fetchTool(t.Context(), dl, pin); !errors.Is(err, errChecksum) {
+				t.Fatalf("err = %v, want a checksum mismatch", err)
+			}
+			if dl.read > limit+1 {
+				t.Fatalf("read %d bytes for a pinned size of %d", dl.read, limit)
+			}
+		})
+	}
+}
+
+func TestFetchToolRefusesPinWithoutSize(t *testing.T) {
+	binary := []byte("x")
+	for name, pin := range map[string]Tool{
+		"binary size":  {Binary: "claude", URL: "https://downloads.claude.ai/x/claude", SHA256: sum256(binary)},
+		"archive size": {Binary: "agy", URL: "https://storage.googleapis.com/x.tar.gz", ArchiveSHA512: sum512(binary), ArchiveMember: "antigravity", SHA256: sum256(binary), Size: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dl := &fakeDownloader{body: binary}
+			if _, err := fetchTool(t.Context(), dl, pin); err == nil || !strings.Contains(err.Error(), "pinned size") || len(dl.urls) != 0 {
+				t.Fatalf("err = %v, urls %v", err, dl.urls)
 			}
 		})
 	}
@@ -161,8 +230,8 @@ func TestFetchToolRoles(t *testing.T) {
 			t.Fatalf("%s: err=%v urls=%v", role, err, dl.urls)
 		}
 	}
-	if d, _ := Lookup("agy"); d.Tool.ArchiveSHA512 == "" || d.Tool.ArchiveMember != "antigravity" {
-		t.Fatal("agy must keep the archive SHA-512 pin")
+	if d, _ := Lookup("agy"); d.Tool.ArchiveSHA512 == "" || d.Tool.ArchiveSize <= 0 || d.Tool.ArchiveMember != "antigravity" {
+		t.Fatal("agy must keep the archive SHA-512 and size pins")
 	}
 }
 
