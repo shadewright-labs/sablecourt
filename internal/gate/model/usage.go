@@ -386,6 +386,30 @@ func parseGeminiJSON(body []byte) (Usage, bool) {
 	return u, ok
 }
 
+// integerOverflow reports whether a decode failed because an integer literal does not fit the field, so a count
+// above int64 takes the same path as any other out-of-range count. Fractions, exponents and other type
+// mismatches stay malformed.
+func integerOverflow(err error) bool {
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		return false
+	}
+	digits, ok := strings.CutPrefix(typeErr.Value, "number ")
+	if !ok {
+		return false
+	}
+	digits = strings.TrimPrefix(digits, "-")
+	if digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseGeminiJSONChecked(body []byte) (Usage, bool, error) {
 	var resp struct {
 		ModelVersion  string `json:"modelVersion"`
@@ -398,6 +422,9 @@ func parseGeminiJSONChecked(body []byte) (Usage, bool, error) {
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
+		if integerOverflow(err) {
+			return Usage{}, false, modelusage.ErrOutOfRange
+		}
 		return Usage{}, false, modelusage.ErrMalformed
 	}
 	meta := resp.UsageMetadata

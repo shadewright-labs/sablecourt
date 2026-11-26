@@ -31,12 +31,10 @@ The five budget series are computed from the ledger totals on each scrape, so th
 
 `sablecourt_budget_input_tokens_total` now counts uncached input tokens only. Cached prompt tokens are recorded in `sablecourt_budget_cache_write_tokens_total` and `sablecourt_budget_cache_read_tokens_total` instead. For example, an OpenAI response with 100 prompt tokens and 80 cached tokens adds 20 to `sablecourt_budget_input_tokens_total` and 80 to `sablecourt_budget_cache_read_tokens_total`, whereas earlier releases added 100 to `sablecourt_budget_input_tokens_total`.
 
-The counter stays monotonic, so existing dashboards and alerts that treat `sablecourt_budget_input_tokens_total` as total input will see a lower rate on cached traffic. Sum all three input counters to query the total input token rate:
+The counter stays monotonic, so existing dashboards and alerts that treat `sablecourt_budget_input_tokens_total` as total input will see a lower rate on cached traffic. Query the total input token rate with one selector over the three counters. It also returns the earlier input series from before the upgrade, when the cache counters did not exist (adding three `sum(rate(...))` terms returns nothing while one of them is empty):
 
 ```promql
-sum(rate(sablecourt_budget_input_tokens_total[5m]))
-  + sum(rate(sablecourt_budget_cache_write_tokens_total[5m]))
-  + sum(rate(sablecourt_budget_cache_read_tokens_total[5m]))
+sum(rate({__name__=~"sablecourt_budget_(input|cache_write|cache_read)_tokens_total"}[5m]))
 ```
 
 ## In depth
