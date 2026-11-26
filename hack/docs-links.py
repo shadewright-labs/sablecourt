@@ -5,15 +5,20 @@ Usage:
   python3 -I hack/docs-links.py check      internal links: fail on a link to a missing file or heading
   python3 -I hack/docs-links.py external   external links: report the ones that do not answer, never fail
 
-"check" reads every tracked *.md file, follows each relative link (inline and reference style, outside code
-blocks and code spans) and fails when the target file does not exist or, for a link to a Markdown file with a
-#fragment, when that file has no heading with that anchor (GitHub's anchor rules). Pages that are linked but
-not written yet are listed in hack/docs-pages-pending.txt (a path, or a path#anchor for a heading not written
-yet); a link to one of them is allowed, and an entry that now exists or that nothing links to fails the check,
-so the list cannot go stale.
+"check" reads every tracked *.md file and follows each relative link outside fenced code blocks and code
+spans: inline links (also the <angle bracket> form), full and collapsed reference links ([text][ref], [text][]),
+reference definitions, and HTML href and src attributes. It fails when a target file does not exist, when a
+link to a Markdown file names a #fragment that no heading of that file has (GitHub's anchor rules, inline code
+in headings included), or when a reference link has no definition.
+
+Links to pages or headings that are not written yet are listed in hack/docs-pages-pending.txt, one per line as
+"<source file> -> <target>[#fragment]" (paths from the repository root). An entry allows exactly that link from
+that source; a link from another file, or to another fragment, still fails. An entry whose target now exists, or
+that no link uses any more, fails the check, so the list cannot go stale.
 
 "external" sends one request per distinct http(s) URL and prints a warning for each one that fails. It is run
-weekly by docs-links.yml, never on pull requests, so a pull request does not depend on third-party sites.
+weekly by docs-links.yml, never on pull requests. DOCS_ROOT overrides the repository root (tests).
+Tests: hack/test/docs-links_test.sh.
 """
 
 import os
@@ -24,12 +29,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.environ.get("DOCS_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING = os.path.join(ROOT, "hack", "docs-pages-pending.txt")
 
 FENCE = re.compile(r"^\s*(```|~~~)")
-INLINE = re.compile(r"!?\[(?:[^\[\]]|\[[^\]]*\])*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-REFDEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+.*)?$")
+# [text](<target with spaces>) or [text](target "title")
+INLINE = re.compile(r"!?\[(?:[^\[\]]|\[[^\]]*\])*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)")
+# [text][ref] and [text][]
+REFLINK = re.compile(r"\[((?:[^\[\]]|\[[^\]]*\])+)\]\[([^\]]*)\]")
+REFDEF = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]*)>|(\S+))")
 HTML_LINK = re.compile(r"<(?:a|img)\s[^>]*?(?:href|src)=\"([^\"]+)\"", re.IGNORECASE)
 CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
@@ -41,8 +49,8 @@ def tracked_markdown():
     return sorted(p for p in out.decode().split("\0") if p)
 
 
-def lines_outside_code(path):
-    """Yields (line number, text) for lines outside fenced code blocks, with code spans removed."""
+def lines_outside_fences(path):
+    """Yields (line number, raw text) for lines outside fenced code blocks."""
     in_fence = None
     with open(os.path.join(ROOT, path), encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
@@ -54,17 +62,31 @@ def lines_outside_code(path):
                     in_fence = None
                 continue
             if in_fence is None:
-                yield n, CODE_SPAN.sub("", line.rstrip("\n"))
+                yield n, line.rstrip("\n")
 
 
-def links(path):
-    for n, line in lines_outside_code(path):
-        for rx in (INLINE, HTML_LINK):
-            for m in rx.finditer(line):
-                yield n, m.group(1)
+def norm_label(label):
+    return " ".join(label.lower().split())
+
+
+def scan(path):
+    """Returns (links, reference uses, definitions): links as (line, target)."""
+    links, uses, defs = [], [], {}
+    for n, raw in lines_outside_fences(path):
+        line = CODE_SPAN.sub("", raw)
         m = REFDEF.match(line)
         if m:
-            yield n, m.group(1)
+            defs[norm_label(m.group(1))] = True
+            links.append((n, m.group(2) if m.group(2) is not None else m.group(3)))
+            continue
+        for m in INLINE.finditer(line):
+            links.append((n, m.group(1) if m.group(1) is not None else m.group(2)))
+        for m in HTML_LINK.finditer(line):
+            links.append((n, m.group(1)))
+        for m in REFLINK.finditer(INLINE.sub("", line)):
+            label = m.group(2) or m.group(1)
+            uses.append((n, norm_label(label)))
+    return links, uses, defs
 
 
 def slug(text):
@@ -82,10 +104,10 @@ _anchors = {}
 def anchors(path):
     if path not in _anchors:
         found, seen = set(), {}
-        for _, line in lines_outside_code(path):
-            for m in EXPLICIT_ANCHOR.finditer(line):
+        for _, raw in lines_outside_fences(path):
+            for m in EXPLICIT_ANCHOR.finditer(raw):
                 found.add(m.group(1))
-            m = HEADING.match(line)
+            m = HEADING.match(raw)
             if not m:
                 continue
             base = slug(m.group(1))
@@ -97,53 +119,76 @@ def anchors(path):
 
 
 def read_pending():
+    entries = {}
     if not os.path.exists(PENDING):
-        return set()
+        return entries
     with open(PENDING, encoding="utf-8") as f:
-        return {s for s in (line.strip() for line in f) if s and not s.startswith("#")}
+        for n, line in enumerate(f, 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            source, sep, target = (p.strip() for p in s.partition("->"))
+            if not sep or not source or not target:
+                entries[("", f"line {n}")] = f"malformed entry on line {n}: {s!r}"
+                continue
+            entries[(source, target)] = None
+    return entries
+
+
+def target_exists(target):
+    page, _, frag = target.partition("#")
+    full = os.path.join(ROOT, page)
+    if not os.path.exists(full):
+        return False
+    return not frag or (page.endswith(".md") and frag in anchors(page))
 
 
 def check():
     pending = read_pending()
-    used_pending = set()
-    errors = []
+    used = set()
+    errors = [msg for msg in pending.values() if msg]
     for path in tracked_markdown():
         base_dir = os.path.dirname(path)
-        for n, target in links(path):
+        links, uses, defs = scan(path)
+        for n, label in uses:
+            if label not in defs:
+                errors.append(f"{path}:{n}: reference link [{label}] has no definition")
+        for n, target in links:
             parsed = urllib.parse.urlsplit(target)
             if parsed.scheme or target.startswith("//"):
                 continue
             file_part = urllib.parse.unquote(parsed.path)
             fragment = urllib.parse.unquote(parsed.fragment)
-            if file_part:
-                rel = os.path.normpath(os.path.join(base_dir, file_part)) if not file_part.startswith("/") \
-                    else os.path.normpath(file_part.lstrip("/"))
+            if file_part.startswith("/"):
+                rel = os.path.normpath(file_part.lstrip("/"))
+            elif file_part:
+                rel = os.path.normpath(os.path.join(base_dir, file_part))
             else:
                 rel = path
             if rel.startswith(".."):
                 errors.append(f"{path}:{n}: {target}: points outside the repository")
                 continue
+            key = (path, rel + (f"#{fragment}" if fragment else ""))
             full = os.path.join(ROOT, rel)
             if not os.path.exists(full):
-                if rel in pending:
-                    used_pending.add(rel)
+                if key in pending:
+                    used.add(key)
                     continue
                 errors.append(f"{path}:{n}: {target}: no such file {rel}")
                 continue
-            if fragment and rel.endswith(".md") and os.path.isfile(full):
-                if fragment not in anchors(rel):
-                    if f"{rel}#{fragment}" in pending:
-                        used_pending.add(f"{rel}#{fragment}")
-                        continue
-                    errors.append(f"{path}:{n}: {target}: {rel} has no heading with the anchor #{fragment}")
-    for rel in sorted(pending):
-        page, _, frag = rel.partition("#")
-        if frag and os.path.isfile(os.path.join(ROOT, page)) and frag in anchors(page):
-            errors.append(f"hack/docs-pages-pending.txt: {rel} exists now; remove it from the list")
-        elif not frag and os.path.exists(os.path.join(ROOT, rel)):
-            errors.append(f"hack/docs-pages-pending.txt: {rel} exists now; remove it from the list")
-        elif rel not in used_pending:
-            errors.append(f"hack/docs-pages-pending.txt: nothing links to {rel}; remove it from the list")
+            if fragment and rel.endswith(".md") and os.path.isfile(full) and fragment not in anchors(rel):
+                if key in pending:
+                    used.add(key)
+                    continue
+                errors.append(f"{path}:{n}: {target}: {rel} has no heading with the anchor #{fragment}")
+    for key, msg in sorted(pending.items()):
+        if msg:
+            continue
+        source, target = key
+        if target_exists(target):
+            errors.append(f"hack/docs-pages-pending.txt: {source} -> {target} exists now; remove the entry")
+        elif key not in used:
+            errors.append(f"hack/docs-pages-pending.txt: no link from {source} to {target}; remove the entry")
     for e in errors:
         print(e, file=sys.stderr)
     if errors:
@@ -156,7 +201,7 @@ def check():
 def external():
     urls = {}
     for path in tracked_markdown():
-        for n, target in links(path):
+        for n, target in scan(path)[0]:
             if urllib.parse.urlsplit(target).scheme in ("http", "https"):
                 urls.setdefault(target, f"{path}:{n}")
     bad = 0
