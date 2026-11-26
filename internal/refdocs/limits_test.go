@@ -4,15 +4,18 @@ package refdocs
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"math/big"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,253 +32,125 @@ type value struct {
 	duration bool
 }
 
-// evaluator resolves named constants in the module's packages from source.
-// It understands literals, arithmetic, shifts, parentheses, references to
-// other constants (in the same package or another package of the module),
-// the time unit constants, conversions such as int64(x) or
-// time.Duration(x), and len of a string constant.
+// evaluator resolves named constants in the module's packages with the Go
+// type checker, so a value is what the compiler computes: typed constants,
+// implicit and explicit conversions, float32 rounding, iota and omitted
+// initializers all follow the language. A package of the module is checked
+// from the files the go tool selects for the current platform; any other
+// package comes from the compiler's export data. Errors outside constant
+// declarations are ignored: a constant that cannot be computed is reported
+// when it is looked up.
 type evaluator struct {
-	fset  *token.FileSet
-	pkgs  map[string]map[string]*constDecl // package dir -> name -> decl
-	cache map[string]value
-}
-
-type constDecl struct {
-	file    *ast.File
-	typ     ast.Expr
-	value   ast.Expr
-	pkgDir  string
-	pending bool
+	fset *token.FileSet
+	std  types.Importer
+	pkgs map[string]*types.Package // absolute dir -> package, nil while checking
 }
 
 func newEvaluator() *evaluator {
-	return &evaluator{fset: token.NewFileSet(), pkgs: map[string]map[string]*constDecl{}, cache: map[string]value{}}
+	fset := token.NewFileSet()
+	return &evaluator{fset: fset, std: importer.ForCompiler(fset, "gc", nil), pkgs: map[string]*types.Package{}}
 }
 
-func (e *evaluator) load(dir string) (map[string]*constDecl, error) {
-	if decls, ok := e.pkgs[dir]; ok {
-		return decls, nil
+// Import implements types.Importer.
+func (e *evaluator) Import(path string) (*types.Package, error) {
+	if rel, ok := strings.CutPrefix(path, modulePath+"/"); ok {
+		return e.check(filepath.Join(repoRoot, filepath.FromSlash(rel)), path)
 	}
-	entries, err := os.ReadDir(filepath.Join(repoRoot, dir))
+	return e.std.Import(path)
+}
+
+// goFiles returns the non-test Go files of dir that the build context
+// selects, so a file for another platform or behind a build tag is left out.
+func goFiles(ctx build.Context, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	decls := map[string]*constDecl{}
+	var out []string
 	for _, ent := range entries {
 		name := ent.Name()
 		if ent.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(e.fset, filepath.Join(repoRoot, dir, name), nil, 0)
+		ok, err := ctx.MatchFile(dir, name)
 		if err != nil {
 			return nil, err
 		}
-		for _, d := range f.Decls {
-			g, ok := d.(*ast.GenDecl)
-			if !ok || g.Tok != token.CONST {
-				continue
-			}
-			for _, s := range g.Specs {
-				vs := s.(*ast.ValueSpec)
-				for i, n := range vs.Names {
-					if i < len(vs.Values) {
-						decls[n.Name] = &constDecl{file: f, typ: vs.Type, value: vs.Values[i], pkgDir: dir}
-					}
-				}
-			}
+		if ok {
+			out = append(out, filepath.Join(dir, name))
 		}
 	}
-	e.pkgs[dir] = decls
-	return decls, nil
+	return out, nil
 }
 
-func (e *evaluator) resolve(dir, name string) (value, error) {
-	key := dir + "." + name
-	if v, ok := e.cache[key]; ok {
-		return v, nil
+func (e *evaluator) check(dir, path string) (*types.Package, error) {
+	if pkg, ok := e.pkgs[dir]; ok {
+		if pkg == nil {
+			return nil, fmt.Errorf("import cycle through %s", path)
+		}
+		return pkg, nil
 	}
-	decls, err := e.load(dir)
+	e.pkgs[dir] = nil
+	names, err := goFiles(build.Default, dir)
+	if err != nil {
+		delete(e.pkgs, dir)
+		return nil, err
+	}
+	var files []*ast.File
+	for _, name := range names {
+		f, err := parser.ParseFile(e.fset, name, nil, 0)
+		if err != nil {
+			delete(e.pkgs, dir)
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	conf := types.Config{Importer: e, IgnoreFuncBodies: true, FakeImportC: true, Error: func(error) {}}
+	pkg, _ := conf.Check(path, e.fset, files, nil)
+	e.pkgs[dir] = pkg
+	return pkg, nil
+}
+
+// resolve returns the value of constant name in the module package dir.
+func (e *evaluator) resolve(dir, name string) (value, error) {
+	pkg, err := e.check(filepath.Join(repoRoot, filepath.FromSlash(dir)), modulePath+"/"+dir)
 	if err != nil {
 		return value{}, err
 	}
-	d, ok := decls[name]
+	return constValue(pkg, name)
+}
+
+func constValue(pkg *types.Package, name string) (value, error) {
+	c, ok := pkg.Scope().Lookup(name).(*types.Const)
 	if !ok {
-		return value{}, fmt.Errorf("no constant %s in %s", name, dir)
+		return value{}, fmt.Errorf("no constant %s in %s", name, pkg.Path())
 	}
-	if d.pending {
-		return value{}, fmt.Errorf("constant %s refers to itself", key)
+	if c.Val().Kind() == constant.Unknown {
+		return value{}, fmt.Errorf("constant %s.%s cannot be computed", pkg.Path(), name)
 	}
-	d.pending = true
-	defer func() { d.pending = false }()
-	v, err := e.eval(d, d.value)
+	return value{v: c.Val(), duration: isDuration(c.Type())}, nil
+}
+
+func isDuration(t types.Type) bool {
+	n, ok := t.(*types.Named)
+	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "time" && n.Obj().Name() == "Duration"
+}
+
+var errNoFiles = errors.New("no Go files")
+
+// evalSource type-checks one file of source as package p and returns the
+// value of constant name, for tests of the evaluator itself.
+func (e *evaluator) evalSource(src, name string) (value, error) {
+	f, err := parser.ParseFile(e.fset, "p.go", src, 0)
 	if err != nil {
-		return value{}, fmt.Errorf("%s: %w", key, err)
+		return value{}, err
 	}
-	if isTimeDuration(d.typ) {
-		v.duration = true
+	conf := types.Config{Importer: e, Error: func(error) {}}
+	pkg, _ := conf.Check("p", e.fset, []*ast.File{f}, nil)
+	if pkg == nil {
+		return value{}, errNoFiles
 	}
-	e.cache[key] = v
-	return v, nil
-}
-
-func isTimeDuration(x ast.Expr) bool {
-	sel, ok := x.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "time" && sel.Sel.Name == "Duration"
-}
-
-var timeUnits = map[string]int64{
-	"Nanosecond": 1, "Microsecond": 1e3, "Millisecond": 1e6,
-	"Second": 1e9, "Minute": 60e9, "Hour": 3600e9,
-}
-
-var conversions = map[string]bool{
-	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
-	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
-	"float32": true, "float64": true,
-}
-
-// convert applies a numeric conversion as Go does for a constant, so that
-// arithmetic after it uses the operand type: int(1025.0) / 2 is 512 and
-// float64(3) / 2 is 1.5. A value the type cannot hold exactly is an error.
-func convert(typ string, a value) (value, error) {
-	if strings.HasPrefix(typ, "float") {
-		a.v = constant.ToFloat(a.v)
-	} else {
-		a.v = constant.ToInt(a.v)
-	}
-	if a.v.Kind() == constant.Unknown {
-		return value{}, fmt.Errorf("%s: constant not representable", typ)
-	}
-	return a, nil
-}
-
-func (e *evaluator) eval(d *constDecl, x ast.Expr) (value, error) {
-	switch x := x.(type) {
-	case *ast.BasicLit:
-		return value{v: constant.MakeFromLiteral(x.Value, x.Kind, 0)}, nil
-	case *ast.ParenExpr:
-		return e.eval(d, x.X)
-	case *ast.Ident:
-		return e.resolve(d.pkgDir, x.Name)
-	case *ast.SelectorExpr:
-		pkg, ok := x.X.(*ast.Ident)
-		if !ok {
-			return value{}, fmt.Errorf("unsupported selector %T", x.X)
-		}
-		if pkg.Name == "time" {
-			if n, ok := timeUnits[x.Sel.Name]; ok {
-				return value{v: constant.MakeInt64(n), duration: true}, nil
-			}
-		}
-		dir, err := importDir(d.file, pkg.Name)
-		if err != nil {
-			return value{}, err
-		}
-		return e.resolve(dir, x.Sel.Name)
-	case *ast.UnaryExpr:
-		v, err := e.eval(d, x.X)
-		if err != nil {
-			return value{}, err
-		}
-		return value{v: constant.UnaryOp(x.Op, v.v, 0), duration: v.duration}, nil
-	case *ast.BinaryExpr:
-		l, err := e.eval(d, x.X)
-		if err != nil {
-			return value{}, err
-		}
-		r, err := e.eval(d, x.Y)
-		if err != nil {
-			return value{}, err
-		}
-		var v constant.Value
-		switch x.Op {
-		case token.SHL, token.SHR:
-			s, ok := constant.Uint64Val(r.v)
-			if !ok {
-				return value{}, fmt.Errorf("bad shift count")
-			}
-			v = constant.Shift(l.v, x.Op, uint(s))
-		case token.QUO:
-			if l.v.Kind() == constant.Int && r.v.Kind() == constant.Int {
-				v = constant.BinaryOp(l.v, token.QUO_ASSIGN, r.v)
-			} else {
-				v = constant.BinaryOp(l.v, token.QUO, r.v)
-			}
-		case token.ADD, token.SUB, token.MUL, token.REM:
-			v = constant.BinaryOp(l.v, x.Op, r.v)
-		default:
-			return value{}, fmt.Errorf("unsupported operator %s", x.Op)
-		}
-		return value{v: v, duration: l.duration || r.duration}, nil
-	case *ast.CallExpr:
-		if len(x.Args) != 1 {
-			return value{}, fmt.Errorf("unsupported call")
-		}
-		if fn, ok := x.Fun.(*ast.Ident); ok && fn.Name == "len" {
-			if lit, ok := x.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				s, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					return value{}, err
-				}
-				return value{v: constant.MakeInt64(int64(len(s)))}, nil
-			}
-			if id, ok := x.Args[0].(*ast.Ident); ok {
-				decls, _ := e.load(d.pkgDir)
-				if sd, ok := decls[id.Name]; ok {
-					if lit, ok := sd.value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						s, err := strconv.Unquote(lit.Value)
-						if err != nil {
-							return value{}, err
-						}
-						return value{v: constant.MakeInt64(int64(len(s)))}, nil
-					}
-				}
-			}
-			return value{}, fmt.Errorf("unsupported len argument")
-		}
-		arg, err := e.eval(d, x.Args[0])
-		if err != nil {
-			return value{}, err
-		}
-		switch fn := x.Fun.(type) {
-		case *ast.Ident:
-			if conversions[fn.Name] {
-				return convert(fn.Name, arg)
-			}
-		case *ast.SelectorExpr:
-			if isTimeDuration(fn) {
-				arg, err := convert("int64", arg)
-				arg.duration = true
-				return arg, err
-			}
-		}
-		return value{}, fmt.Errorf("unsupported call")
-	}
-	return value{}, fmt.Errorf("unsupported expression %T", x)
-}
-
-// importDir maps a package name used in file to its directory in the module.
-func importDir(f *ast.File, name string) (string, error) {
-	for _, imp := range f.Imports {
-		path, _ := strconv.Unquote(imp.Path.Value)
-		local := path[strings.LastIndex(path, "/")+1:]
-		if imp.Name != nil {
-			local = imp.Name.Name
-		}
-		if local != name {
-			continue
-		}
-		rel, ok := strings.CutPrefix(path, modulePath+"/")
-		if !ok {
-			return "", fmt.Errorf("package %s is outside the module", path)
-		}
-		return rel, nil
-	}
-	return "", fmt.Errorf("no import for %s", name)
+	return constValue(pkg, name)
 }
 
 // Units allowed in the Value column, with their size in bytes or nanoseconds.
@@ -328,7 +203,10 @@ func documentedLimits(t *testing.T, page string) []limitRow {
 	}
 	defer func() { _ = f.Close() }()
 	var rows []limitRow
-	section, inTable, n := "", false, 0
+	// pos is the line's place in the current table: 0 outside a table, 1
+	// for the header, 2 for the delimiter row, 3 for data rows.
+	// A table without its delimiter row is reported once and skipped.
+	section, pos, n, broken := "", 0, 0, false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		n++
@@ -337,20 +215,29 @@ func documentedLimits(t *testing.T, page string) []limitRow {
 			section = s
 		}
 		if !strings.HasPrefix(line, "|") {
-			inTable = false
+			pos, broken = 0, false
 			continue
+		}
+		if broken {
+			continue
+		}
+		if pos < 3 {
+			pos++
 		}
 		cells := strings.Split(strings.Trim(line, "|"), "|")
 		for i := range cells {
 			cells[i] = strings.TrimSpace(cells[i])
 		}
-		switch {
-		case !inTable:
+		switch pos {
+		case 1:
 			if len(cells) != 3 || cells[0] != "Limit" || cells[1] != "Constant" || cells[2] != "Value" {
 				t.Errorf("limits.md:%d: table header must be Limit | Constant | Value", n)
 			}
-			inTable = true
-		case strings.HasPrefix(cells[0], "---"):
+		case 2:
+			if !isDelimiterRow(cells, 3) {
+				t.Errorf("limits.md:%d: the header must be followed by a delimiter row of 3 cells, or the table does not render", n)
+				broken = true
+			}
 		default:
 			if len(cells) != 3 {
 				t.Errorf("limits.md:%d: row must have 3 cells", n)
@@ -363,6 +250,21 @@ func documentedLimits(t *testing.T, page string) []limitRow {
 		t.Fatal(err)
 	}
 	return rows
+}
+
+// isDelimiterRow reports a Markdown table delimiter row of width cells,
+// such as "| --- | :---: |".
+func isDelimiterRow(cells []string, width int) bool {
+	if len(cells) != width {
+		return false
+	}
+	for _, c := range cells {
+		c = strings.TrimSuffix(strings.TrimPrefix(c, ":"), ":")
+		if len(c) < 3 || strings.Trim(c, "-") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // TestLimitsReferenceMatchesConstants checks that docs/reference/limits.md
@@ -446,36 +348,78 @@ func TestLimitsReferenceMatchesConstants(t *testing.T) {
 	}
 }
 
-// TestEvalConversions checks that a conversion sets the operand type of the
-// arithmetic that follows it.
-func TestEvalConversions(t *testing.T) {
+// TestEvaluatorFollowsGo checks constant forms whose value depends on Go's
+// typing rules, each with the value the compiler gives.
+func TestEvaluatorFollowsGo(t *testing.T) {
 	for _, tc := range []struct {
-		expr, want string
-		duration   bool
+		name, src, want string
+		duration        bool
 	}{
-		{"int(1025.0) / 2", "512", false},
-		{"int64(7) / 2", "3", false},
-		{"float64(3) / 2", "1.5", false},
-		{"7 / 2", "3", false},
-		{"7.0 / 2", "3.5", false},
-		{"time.Duration(1025.0) / 2", "512", true},
-		{"(1 << 20) / 4", "262144", false},
+		{"conversion then division", "const c = int(1025.0) / 2", "512", false},
+		{"float conversion", "const c = float64(3) / 2", "3/2", false},
+		{"untyped operand takes the typed side", "const c = int64(7) / 2.0", "3", false},
+		{"untyped float division", "const c = 7.0 / 2", "7/2", false},
+		{"declared type", "const base float64 = 3\nconst c = base / 2", "3/2", false},
+		{"omitted initializer", "const (\n\tbase = 4\n\tc\n)", "4", false},
+		{"iota", "const (\n\ta = 1 << (10 * iota)\n\tb\n\tc\n)", "1048576", false},
+		{"float32 rounding", "const c = float32(16777217)", "16777216", false},
+		{"duration to int64", "import \"time\"\nconst c = int64(time.Second)", "1000000000", false},
+		{"duration conversion", "import \"time\"\nconst c = time.Duration(1025.0) / 2", "512", true},
+		{"duration constant", "import \"time\"\nconst c = 30 * time.Second", "30000000000", true},
+		{"float shift count", "const c = 1 << 10.0", "1024", false},
 	} {
-		x, err := parser.ParseExpr(tc.expr)
-		if err != nil {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := newEvaluator().evalSource("package p\n"+tc.src+"\n", "c")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.v.ExactString() != tc.want || got.duration != tc.duration {
+				t.Errorf("c = %s (duration %v), want %s (duration %v)", got.v.ExactString(), got.duration, tc.want, tc.duration)
+			}
+		})
+	}
+	if _, err := newEvaluator().evalSource("package p\nconst c = int(1.5)\n", "c"); err == nil {
+		t.Error("int(1.5) evaluated; want an error, as Go refuses it")
+	}
+}
+
+// TestGoFilesFollowsBuildConstraints checks that a file for another
+// platform does not supply a constant.
+func TestGoFilesFollowsBuildConstraints(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"limits_linux.go":   "package p\n\nconst limit = 100\n",
+		"limits_windows.go": "package p\n\nconst limit = 200\n",
+		"limits_test.go":    "package p\n\nconst other = 1\n",
+		"tagged.go":         "//go:build sometag\n\npackage p\n\nconst tagged = 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, err := newEvaluator().eval(&constDecl{}, x)
-		if err != nil {
-			t.Errorf("%s: %v", tc.expr, err)
-			continue
-		}
-		if got.v.String() != tc.want || got.duration != tc.duration {
-			t.Errorf("%s = %s (duration %v), want %s (duration %v)", tc.expr, got.v.String(), got.duration, tc.want, tc.duration)
-		}
 	}
-	x, _ := parser.ParseExpr("int(1.5)")
-	if _, err := newEvaluator().eval(&constDecl{}, x); err == nil {
-		t.Error("int(1.5) evaluated; want an error, as Go refuses it")
+	ctx := build.Default
+	ctx.GOOS = "linux"
+	got, err := goFiles(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || filepath.Base(got[0]) != "limits_linux.go" {
+		t.Errorf("goFiles for linux = %v, want only limits_linux.go", got)
+	}
+}
+
+func TestIsDelimiterRow(t *testing.T) {
+	for _, tc := range []struct {
+		cells []string
+		want  bool
+	}{
+		{[]string{"---", ":---:", "---:"}, true},
+		{[]string{"---", "---"}, false},
+		{[]string{"`a`", "`b`", "1"}, false},
+		{[]string{"--", "---", "---"}, false},
+	} {
+		if got := isDelimiterRow(tc.cells, 3); got != tc.want {
+			t.Errorf("isDelimiterRow(%q) = %v, want %v", tc.cells, got, tc.want)
+		}
 	}
 }

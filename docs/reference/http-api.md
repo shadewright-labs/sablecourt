@@ -12,7 +12,7 @@ The route tables are checked by `TestHTTPReferenceListsEveryRoute` in `cmd/sable
 - A `GET` pattern also answers `HEAD`, as Go's router does.
 - The Model Gate is one mount at `/gate/model/`; its rows list the provider paths it forwards, taken from the gate's own route table. Any other path below the mount is refused with 404.
 
-Purposes are one line each. Status codes and error texts are not listed, because no test ties them to this page; the [how it works](../how-it-works/index.md) pages describe the behavior. Errors from the API are JSON of the form `{"error": "..."}`, apart from the plain-text replies of the login, logout and metrics routes and the JSON-RPC errors of `POST /a2a`.
+Purposes are one line each. Status codes and error texts are not listed, because no test ties them to this page; the [how it works](../how-it-works/index.md) pages describe the behavior. Errors from the API are JSON of the form `{"error": "..."}`, apart from the plain-text replies of the login, logout and metrics routes, the JSON-RPC errors of `POST /a2a`, the plain-text replies of the MCP SDK on `/gate/mcp`, and Go's plain-text `405 Method Not Allowed` for a registered path called with another method.
 
 ## Credential classes
 

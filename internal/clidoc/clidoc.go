@@ -119,7 +119,8 @@ func defaultText(f *pflag.Flag) string {
 	if d == "" {
 		return "empty"
 	}
-	return "`" + d + "`"
+	// A pipe ends a table cell even inside inline code, so it is escaped.
+	return "`" + strings.ReplaceAll(d, "|", `\|`) + "`"
 }
 
 func cell(s string) string {

@@ -4,7 +4,7 @@ A manifest is a YAML document that declares one `Workload`, `Policy`, `Budget`, 
 
 Status: built.
 
-The field tables are checked by `TestManifestReferenceMatchesTypesAndLoader` in `internal/config`, which `go test ./...` runs. Field and Type must match the JSON fields of the manifest types in `internal/domain/types.go`. Required is measured with the loader: the test deletes the field from example documents that load and loads them again. `yes` means the loader refuses every document without the field, `no` means it accepts every one, and `conditional` means it depends on other fields, named in the Meaning column. The Meaning column is written by hand, one sentence per field.
+The field tables are checked by `TestManifestReferenceMatchesTypesAndLoader` in `internal/config`, which `go test ./...` runs. Field and Type must match the JSON fields of the manifest types in `internal/domain/types.go`. Required is measured with the loader: the test deletes the field from example documents that load and loads them again. `yes` means the loader refuses every document without the field, `no` means it accepts every one; for a field inside a list entry, such as `spec.rules[].workload`, this holds for documents that have the entry, since an optional list may be left out, and `conditional` means it depends on other fields, named in the Meaning column. The Meaning column is written by hand, one sentence per field.
 
 ## Loading rules
 
