@@ -72,7 +72,9 @@ The pull request that brings this layout removes the jobs `verify` and `security
 
 `release.yml` runs on a pushed `v*` tag. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.
 
-No job or step of `release.yml` has an `if:` or `continue-on-error`, so a job starts when the jobs in its `needs` have succeeded. The `needs` of each job:
+No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.
+A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).
+The `needs` of each job:
 
 | Job | Needs |
 | --- | --- |
@@ -85,7 +87,7 @@ No job or step of `release.yml` has an `if:` or `continue-on-error`, so a job st
 | `verify` | `check`, `images`, `sign-binaries`, `sign-images` |
 | `publish` | `check`, `binaries`, `images`, `scan-images`, `verify` |
 
-What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml` and fails when one differs.
+What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml`. It reads the rows whose first cell is a job name in backticks, and fails when they differ from what it derived or name a job twice.
 
 | Job that failed | Can exist from the other jobs | Can exist in part from the failed job |
 | --- | --- | --- |
@@ -106,14 +108,15 @@ What can exist outside the run when a job other than `publish` fails, run artifa
 
 ### Repository settings
 
-The pipeline relies on these settings, which are kept outside the repository's files:
+`release.yml` does not set these repository settings, and no file in this repository holds their values:
 
-- Creating `v*` tags must be limited to repository admins by a tag ruleset.
-- Immutable releases must be on.
-- Required reviewers on the `release` environment are optional, and none are set by default.
+- A tag ruleset that limits who may create `v*` tags. No step of `release.yml` checks who pushed the tag.
+- Immutable releases. GitHub's documentation says that the assets of a published immutable release are protected from modification and deletion, and that its tag is locked to its commit ([immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)). `publish` attaches the files to a draft before it publishes it.
+- Required reviewers on the `release` environment, if wanted. `publish` names the environment and `release.yml` sets no reviewers. A workflow that names an environment that does not exist creates it with no protection rules ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)).
 
 ### Known limits
 
 - Not pinned by a checksum in this repository: the Go toolchain that `actions/setup-go` installs from `go.mod`, and the runner's `gh`, `jq`, Docker and preinstalled Buildx.
-- The pipeline has not run on a tag yet, so its tests check the workflow text and the scripts, not a run.
-- Open from issue 122: stable `vX.Y.Z` tags are to be created by a release GitHub App, and `publish` writes image tags before it publishes the draft release, so a failure in between can leave tags next to a draft.
+- The tests read the text of `release.yml` and run the release scripts under `hack/` on fixtures and stub commands. No test runs `release.yml`.
+- No step of `release.yml` creates a Git tag: a run starts from a pushed tag.
+- `publish` writes the image tags before it publishes the draft release, and no step removes them, so a failure in between can leave image tags next to a draft release.

@@ -1,11 +1,11 @@
 # Verify a release
 
-You need Bash, GNU `sha256sum`, jq, cosign 3, the GitHub CLI (`gh`) logged in, and for the images Docker with Buildx.
-A pass shows that the file or image is the one this repository's release workflow signed at the tag `v$VERSION`, and that its provenance names the source commit `$SHA`; it does not show who created the tag.
+You need Bash, `cut`, `sort`, a `sha256sum` with `--check` and `--strict` (GNU coreutils has both), jq, cosign 3 and the GitHub CLI (`gh`) logged in to GitHub. For the images you also need Docker with Buildx and a login to `ghcr.io`, which `gh attestation verify` requires for an `oci://` image ([gh manual](https://cli.github.com/manual/gh_attestation_verify)).
+A pass shows that `checksums.txt` and the image index you check carry signatures from a certificate for `release.yml` at the tag `v$VERSION`, that the archives and SBOMs have the SHA-256 values listed in `checksums.txt`, and that the build provenance of these files, of `checksums.txt` and of the index was signed with a certificate whose source repository digest is `$SHA`. It does not show who created the tag.
 
 ## Commands
 
-Put the blocks in this order in one file and run it with `bash`. Take `SHA` and the image digests from the release notes.
+Put the blocks in this order in one file and run it with `bash`. Take `SHA` and the image digests from the release notes, where the release workflow writes the commit it built and both image digests.
 
 ```bash
 set -euo pipefail
@@ -15,7 +15,7 @@ IDENTITY="https://github.com/shadewright-labs/sablecourt/.github/workflows/relea
 ISSUER="https://token.actions.githubusercontent.com"
 ```
 
-A pass sets the certificate identity that the cosign and gh checks below require, and the commit `$SHA` that the gh checks require.
+A pass sets the certificate identity and issuer that the cosign and gh commands below require, and the source repository digest `$SHA` that the gh commands require.
 
 ```bash
 mkdir "sablecourt-$VERSION"
@@ -37,11 +37,14 @@ A pass shows that `checksums.txt` carries a signature from a certificate for `re
 
 ```bash
 sha256sum --check --strict checksums.txt
-LINES=$(wc -l < checksums.txt)
-test "$LINES" -eq 9
+WANT=$(printf '%s\n' "sablecourt_${VERSION}_sbom.spdx.json" \
+  "sablecourt_${VERSION}_"{darwin,linux}_{amd64,arm64}.tar.gz \
+  "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}_linux_{amd64,arm64}.spdx.json | LC_ALL=C sort)
+NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort)
+test "$NAMES" = "$WANT"
 ```
 
-A pass shows that `checksums.txt` lists nine files and that each has the SHA-256 recorded there.
+A pass shows that each file listed in `checksums.txt` is in the folder with the SHA-256 listed for it, and that the list names the four archives and the five SBOMs of `$VERSION`, each once.
 
 ```bash
 for FILE in sablecourt_*.tar.gz sablecourt_*.spdx.json checksums.txt; do
@@ -63,9 +66,9 @@ for FILE in sablecourt_*.tar.gz sablecourt_*.spdx.json checksums.txt; do
 done
 ```
 
-A pass shows that each archive, SBOM and `checksums.txt` has build provenance for `release.yml` at the tag `v$VERSION` and the commit `$SHA`, from GitHub and from `sablecourt_${VERSION}_provenance.intoto.jsonl`.
+A pass shows that each archive and SBOM in the folder and `checksums.txt` has an SLSA build provenance attestation signed with a certificate for `release.yml` at the tag `v$VERSION`, with the source ref `refs/tags/v$VERSION`, the source repository digest `$SHA` and no self-hosted runner, once as fetched from GitHub's API and once from `sablecourt_${VERSION}_provenance.intoto.jsonl`.
 
-For the agent image, set `IMAGE=ghcr.io/shadewright-labs/sablecourt-agent` and its digest in the next block.
+The next three blocks check the daemon image. To check the agent image too, add them to the end of the file a second time, with `IMAGE=ghcr.io/shadewright-labs/sablecourt-agent` and the agent's digest.
 
 ```bash
 IMAGE=ghcr.io/shadewright-labs/sablecourt
@@ -92,7 +95,7 @@ for ARCH in amd64 arm64; do
 done
 ```
 
-A pass shows that the linux/amd64 and linux/arm64 images of the index each carry a signed SPDX attestation equal to the release's SBOM file for that image, and that the file holds one JSON value.
+A pass shows that, for linux/amd64 and for linux/arm64, the index lists one image, that image has SPDX attestations verified with a certificate for `release.yml` at the tag `v$VERSION`, and the predicate of one of them equals the release's SBOM file for that image, which holds one JSON value.
 
 ```bash
 gh attestation verify "oci://$IMAGE@$DIGEST" \
@@ -112,12 +115,12 @@ gh attestation verify "oci://$IMAGE@$DIGEST" \
   --deny-self-hosted-runners > /dev/null
 ```
 
-A pass shows that the image index has build provenance for `release.yml` at the tag `v$VERSION` and the commit `$SHA`, from GitHub and from `sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl`.
+A pass shows that the image index has an SLSA build provenance attestation signed with a certificate for `release.yml` at the tag `v$VERSION`, with the source ref `refs/tags/v$VERSION`, the source repository digest `$SHA` and no self-hosted runner, once as fetched from GitHub's API and once from `sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl`.
 
 ## What this does not prove
 
-- Who created the tag `v$VERSION`: the repository's tag ruleset decides that.
-- Which checks the tagged commit's `release.yml` ran: the certificate names the workflow file and the tag, not the file's content.
+- Who created the tag `v$VERSION`. A tag ruleset limits who may create a tag; it does not show who created this one.
+- Which checks the release workflow ran. The commands check the certificate's identity, issuer, source ref and source repository digest; they do not read `release.yml` at `$SHA`.
 - That the commit `$SHA` is on `main`.
 - That an image tag such as `$VERSION` points at `$DIGEST`: deploy by digest.
 - That the images have no known vulnerabilities.

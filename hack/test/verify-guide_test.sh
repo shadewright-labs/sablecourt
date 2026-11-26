@@ -8,6 +8,9 @@
 #     flags; each flag, file name, URL and image name on the page appears in the verify job or in release.yml;
 #   - the SBOM comparison of the guide and of the verify job, run with jq on fixtures, passes for an equal file and
 #     fails for a file with a second JSON value or another value;
+#   - the checksum check of the guide and of the verify job, run with bash on fixtures, passes for the nine release
+#     files listed once each and fails for nine copies of one line, a repeated, missing or extra file;
+#   - links in the prose go to the GitHub documentation pages listed in DOC_URLS;
 #   - each prose line of both pages is in CLAIMS below, with a check of the workflow, the scripts or the guide's
 #     code that makes it true, so an edited or added line fails until its check is written; no prose line uses
 #     only, always, never, every, any, nothing, cannot or exactly;
@@ -17,7 +20,7 @@ set -euo pipefail
 
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 python3 -I - "${root}" <<'PY'
-import base64, json, os, re, subprocess, sys, tempfile
+import base64, functools, json, os, re, subprocess, sys, tempfile
 
 root = sys.argv[1]
 fails = 0
@@ -117,13 +120,24 @@ SETUP_LINES = {
     "mkdir sablecourt-${version}",
     "cd sablecourt-${version}",
     "gh release download ${tag} --repo ${repository}",
-    "test ${lines} -eq 9",
+    "test ${names} = ${want}",
     "image=ghcr.io/shadewright-labs/sablecourt",
     "digest=sha256:" + "0" * 64,
 }
 GH_FLAGS = ['--repo shadewright-labs/sablecourt', '--cert-identity "$IDENTITY"', '--cert-oidc-issuer "$ISSUER"',
             '--source-ref "refs/tags/v$VERSION"', '--source-digest "$SHA"', "--deny-self-hosted-runners"]
 COSIGN_FLAGS = ['--certificate-identity "$IDENTITY"', '--certificate-oidc-issuer "$ISSUER"']
+# The pages of GitHub's documentation that the prose cites for GitHub's own behaviour, each read for the sentence
+# that cites it: the registry login for oci:// images, jobs skipped after a failed need, pending runs of a
+# concurrency group, deployment protection rules, environments created without protection rules, and what an
+# immutable release locks.
+GH_DOCS = "https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax"
+DOC_URLS = {
+    "https://cli.github.com/manual/gh_attestation_verify",
+    GH_DOCS + "#jobsjob_idneeds", GH_DOCS + "#concurrency", GH_DOCS + "#jobsjob_idenvironment",
+    "https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments",
+    "https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases",
+}
 ABSOLUTE = re.compile(r"\b(only|always|never|every|any|nothing|cannot|exactly)\b", re.I)
 
 
@@ -148,13 +162,6 @@ def cosign_cmds(page):
     return [c for c in guide_cmds(page) if c.startswith("cosign verify")]
 
 
-def block_after(page, line):
-    """The code block right before a prose line of the guide."""
-    at = page.find("```\n\n" + line + "\n")
-    found = blocks(page[:at + 4]) if at >= 0 else []
-    return found[-1] if found else ""
-
-
 def sbom_filter(text, var):
     m = re.search(r"""jq -se --slurpfile want "\$\{?""" + var + r"""\}?" '([^']*)'""", text)
     return m.group(1) if m else ""
@@ -173,10 +180,56 @@ def runs(filt, sbom_text):
         return r.returncode == 0
 
 
+@functools.lru_cache(maxsize=None)
 def sbom_ok(filt):
     return (bool(filt) and runs(filt, '{"a": 1, "b": [1, 2]}\n') and runs(filt, '{"b":[1,2],"a":1}')
             and not runs(filt, '{"a": 1, "b": [1, 2]}\n{"c": 3}\n') and not runs(filt, '{"a": 1, "b": [1, 2]}\n[]\n')
             and not runs(filt, '{"a": 2, "b": [1, 2]}\n') and not runs(filt, ''))
+
+
+RELEASE_FILES = (["sablecourt_0.1.0_sbom.spdx.json"]
+                 + [f"sablecourt_0.1.0_{o}_{a}.tar.gz" for o in ("darwin", "linux") for a in ("amd64", "arm64")]
+                 + [f"sablecourt_0.1.0_image_{i}_linux_{a}.spdx.json"
+                    for i in ("sablecourt", "sablecourt-agent") for a in ("amd64", "arm64")])
+
+
+def sums_pass(script, listed, extra=()):
+    """Runs a checksum check (bash, in a folder with the nine release files of 0.1.0 and the extra ones) on a
+    checksums.txt that lists the given names, each with its real SHA-256."""
+    with tempfile.TemporaryDirectory() as d:
+        for n in RELEASE_FILES + list(extra):
+            with open(os.path.join(d, n), "w") as f:
+                f.write(n + "\n")
+        out = subprocess.run(["sha256sum", "--"] + list(listed), cwd=d, capture_output=True, text=True, check=True)
+        with open(os.path.join(d, "checksums.txt"), "w") as f:
+            f.write(out.stdout)
+        env = {"PATH": os.environ["PATH"], "VERSION": "0.1.0", "DIST": d}
+        r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + script], cwd=d, env=env, capture_output=True)
+        return r.returncode == 0
+
+
+@functools.lru_cache(maxsize=None)
+def sums_ok(script):
+    """Passes for the nine files, each once; fails for nine copies of one line, a repeated file in place of
+    another, a tenth file and a missing file."""
+    one = RELEASE_FILES[0]
+    return (bool(script) and sums_pass(script, RELEASE_FILES)
+            and not sums_pass(script, [one] * 9)
+            and not sums_pass(script, RELEASE_FILES[:-1] + [one])
+            and not sums_pass(script, RELEASE_FILES + ["sablecourt_0.1.0_extra.tar.gz"], ["sablecourt_0.1.0_extra.tar.gz"])
+            and not sums_pass(script, RELEASE_FILES[:-1]))
+
+
+def guide_sums(page):
+    """The guide's block that runs sha256sum --check."""
+    return next((b for b in blocks(page) if "sha256sum --check" in b), "")
+
+
+def verify_sums():
+    """The part of the verify job's archive step from sha256sum --check to the gh loop."""
+    step = wf_step("verify", "Verify the archives")
+    at, end = step.find("(cd \"${DIST}\" && sha256sum --check"), step.find("for file in ")
+    return step[at:end] if 0 <= at < end else ""
 
 
 def notes_name(*parts):
@@ -201,48 +254,90 @@ def cmds_ok(page):
             and not re.search(r"regexp|regex|--signer-|--insecure|--skip|--allow", code))
 
 
+def blk(p, prefix):
+    """The code block right before the first prose line of the guide that starts with prefix."""
+    m = re.search(r"^```\n\n" + re.escape(prefix), p, re.M)
+    found = blocks(p[:m.start() + 4]) if m else []
+    return found[-1] if found else ""
+
+
+def gh_ok(code, n):
+    """code has n gh attestation verify commands, each with the six flags and no other predicate type."""
+    cmds = [c for c in commands(code) if c.startswith("gh attestation verify ")]
+    return len(cmds) == n and all(all(f in c for f in GH_FLAGS) for c in cmds) and "--predicate-type" not in code
+
+
+def actor_unused():
+    """github.actor appears only as the registry login name, and no step reads who pushed the tag."""
+    return (all(l.strip() == "username: ${{ github.actor }}" for l in WF.splitlines() if "actor" in l)
+            and "GITHUB_ACTOR" not in WF)
+
+
+def release_scripts_tested():
+    hack = os.path.join(root, "hack")
+    scripts = [f[:-3] for f in os.listdir(hack) if f.startswith("release-") and f.endswith(".sh")]
+    tests = os.path.join(hack, "test")
+    return (scripts != [] and all(os.path.exists(os.path.join(tests, s + "_test.sh")) for s in scripts)
+            and not any(re.search(r"\bact\b|gh workflow run|gh run rerun", read("hack/test/" + t))
+                        for t in os.listdir(tests) if t.startswith("release-")))
+
+
 # Each prose line of the guide and of the release section of docs/ci.md, and what makes it true. A changed or new
 # line fails until it is added here with its check.
 GUIDE_CLAIMS = {
     "# Verify a release": lambda p: True,
-    "You need Bash, GNU `sha256sum`, jq, cosign 3, the GitHub CLI (`gh`) logged in, and for the images Docker with Buildx.":
-        lambda p: all(t in guide_code(p) for t in ("sha256sum ", "jq ", "cosign ", "gh ", "docker buildx "))
+    "You need Bash, `cut`, `sort`, a `sha256sum` with `--check` and `--strict` (GNU coreutils has both), jq, cosign 3 and the GitHub CLI (`gh`) logged in to GitHub. For the images you also need Docker with Buildx and a login to `ghcr.io`, which `gh attestation verify` requires for an `oci://` image ([gh manual](https://cli.github.com/manual/gh_attestation_verify)).":
+        lambda p: all(t in guide_code(p) for t in ("sha256sum --check --strict ", "cut ", "sort", "jq ", "cosign ",
+                                                    "gh attestation verify ", "gh release download ", "docker buildx ",
+                                                    'gh attestation verify "oci://'))
         and "cosign-release: v3." in WF,
-    "A pass shows that the file or image is the one this repository's release workflow signed at the tag `v$VERSION`, and that its provenance names the source commit `$SHA`; it does not show who created the tag.":
-        lambda p: cmds_ok(p),
+    "A pass shows that `checksums.txt` and the image index you check carry signatures from a certificate for `release.yml` at the tag `v$VERSION`, that the archives and SBOMs have the SHA-256 values listed in `checksums.txt`, and that the build provenance of these files, of `checksums.txt` and of the index was signed with a certificate whose source repository digest is `$SHA`. It does not show who created the tag.":
+        lambda p: cmds_ok(p) and sums_ok(guide_sums(p)) and "cosign verify-blob " in guide_code(p)
+        and 'cosign verify \\\n' in guide_code(p) and "git " not in guide_code(p),
     "## Commands": lambda p: True,
-    "Put the blocks in this order in one file and run it with `bash`. Take `SHA` and the image digests from the release notes.":
+    "Put the blocks in this order in one file and run it with `bash`. Take `SHA` and the image digests from the release notes, where the release workflow writes the commit it built and both image digests.":
         lambda p: notes_name("from ${GITHUB_SHA}", "${DAEMON_IMAGE}@${DAEMON_DIGEST}", "${AGENT_IMAGE}@${AGENT_DIGEST}")
         and blocks(p)[0].startswith("set -euo pipefail\n"),
-    "A pass sets the certificate identity that the cosign and gh checks below require, and the commit `$SHA` that the gh checks require.":
-        lambda p: cmds_ok(p) and 'IDENTITY="https://github.com/shadewright-labs/sablecourt/.github/workflows/release.yml@refs/tags/v$VERSION"'
-        in block_after(p, "A pass sets the certificate identity that the cosign and gh checks below require, and the commit `$SHA` that the gh checks require."),
+    "A pass sets the certificate identity and issuer that the cosign and gh commands below require, and the source repository digest `$SHA` that the gh commands require.":
+        lambda p: cmds_ok(p) and blk(p, "A pass sets ").splitlines()[3:] == [
+            'IDENTITY="https://github.com/shadewright-labs/sablecourt/.github/workflows/release.yml@refs/tags/v$VERSION"',
+            'ISSUER="https://token.actions.githubusercontent.com"'] and blk(p, "A pass sets ").startswith(
+            "set -euo pipefail\nVERSION=0.1.0\nSHA="),
     "A pass puts the release's files in the folder `sablecourt-$VERSION`.":
-        lambda p: 'gh release download "v$VERSION"' in block_after(p, "A pass puts the release's files in the folder `sablecourt-$VERSION`."),
+        lambda p: blk(p, "A pass puts ") == 'mkdir "sablecourt-$VERSION"\ncd "sablecourt-$VERSION"\ngh release download "v$VERSION" --repo shadewright-labs/sablecourt\n',
     "A pass shows that `checksums.txt` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`.":
-        lambda p: "cosign verify-blob " in block_after(p, "A pass shows that `checksums.txt` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`.")
-        and "checksums.txt.sigstore.json" in block_after(p, "A pass shows that `checksums.txt` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`."),
-    "A pass shows that `checksums.txt` lists nine files and that each has the SHA-256 recorded there.":
-        lambda p: block_after(p, "A pass shows that `checksums.txt` lists nine files and that each has the SHA-256 recorded there.")
-        == 'sha256sum --check --strict checksums.txt\nLINES=$(wc -l < checksums.txt)\ntest "$LINES" -eq 9\n',
-    "A pass shows that each archive, SBOM and `checksums.txt` has build provenance for `release.yml` at the tag `v$VERSION` and the commit `$SHA`, from GitHub and from `sablecourt_${VERSION}_provenance.intoto.jsonl`.":
-        lambda p: "for FILE in sablecourt_*.tar.gz sablecourt_*.spdx.json checksums.txt; do" in p
-        and '--bundle "sablecourt_${VERSION}_provenance.intoto.jsonl"' in p,
-    "For the agent image, set `IMAGE=ghcr.io/shadewright-labs/sablecourt-agent` and its digest in the next block.":
-        lambda p: "AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent\n" in WF,
+        lambda p: "cosign verify-blob " in blk(p, "A pass shows that `checksums.txt` carries")
+        and "--bundle checksums.txt.sigstore.json" in blk(p, "A pass shows that `checksums.txt` carries")
+        and all(f in blk(p, "A pass shows that `checksums.txt` carries") for f in COSIGN_FLAGS),
+    "A pass shows that each file listed in `checksums.txt` is in the folder with the SHA-256 listed for it, and that the list names the four archives and the five SBOMs of `$VERSION`, each once.":
+        lambda p: blk(p, "A pass shows that each file listed").startswith("sha256sum --check --strict checksums.txt\n")
+        and sums_ok(blk(p, "A pass shows that each file listed")),
+    "A pass shows that each archive and SBOM in the folder and `checksums.txt` has an SLSA build provenance attestation signed with a certificate for `release.yml` at the tag `v$VERSION`, with the source ref `refs/tags/v$VERSION`, the source repository digest `$SHA` and no self-hosted runner, once as fetched from GitHub's API and once from `sablecourt_${VERSION}_provenance.intoto.jsonl`.":
+        lambda p: blk(p, "A pass shows that each archive").startswith("for FILE in sablecourt_*.tar.gz sablecourt_*.spdx.json checksums.txt; do\n")
+        and gh_ok(blk(p, "A pass shows that each archive"), 2)
+        and blk(p, "A pass shows that each archive").count('--bundle "sablecourt_${VERSION}_provenance.intoto.jsonl"') == 1,
+    "The next three blocks check the daemon image. To check the agent image too, add them to the end of the file a second time, with `IMAGE=ghcr.io/shadewright-labs/sablecourt-agent` and the agent's digest.":
+        lambda p: "AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent\n" in WF and len(blocks(p)) == 8
+        and blocks(p)[5].startswith("IMAGE=ghcr.io/shadewright-labs/sablecourt\nDIGEST=sha256:")
+        and re.search(r"mkdir|gh release download", "".join(blocks(p)[5:])) is None,
     "A pass shows that the image index `$IMAGE@$DIGEST` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`.":
-        lambda p: "cosign verify \\" in block_after(p, "A pass shows that the image index `$IMAGE@$DIGEST` carries a signature from a certificate for `release.yml` at the tag `v$VERSION`."),
-    "A pass shows that the linux/amd64 and linux/arm64 images of the index each carry a signed SPDX attestation equal to the release's SBOM file for that image, and that the file holds one JSON value.":
-        lambda p: "for ARCH in amd64 arm64; do" in p and "cosign verify-attestation --type spdxjson" in p
-        and sbom_ok(sbom_filter(guide_code(p), "SBOM")),
-    "A pass shows that the image index has build provenance for `release.yml` at the tag `v$VERSION` and the commit `$SHA`, from GitHub and from `sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl`.":
-        lambda p: guide_code(p).count('gh attestation verify "oci://$IMAGE@$DIGEST"') == 2
-        and '--bundle "sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl"' in p,
+        lambda p: 'cosign verify \\\n' in blk(p, "A pass shows that the image index `")
+        and all(f in blk(p, "A pass shows that the image index `") for f in COSIGN_FLAGS),
+    "A pass shows that, for linux/amd64 and for linux/arm64, the index lists one image, that image has SPDX attestations verified with a certificate for `release.yml` at the tag `v$VERSION`, and the predicate of one of them equals the release's SBOM file for that image, which holds one JSON value.":
+        lambda p: blk(p, "A pass shows that, for linux").startswith("for ARCH in amd64 arm64; do\n")
+        and "if length == 1 then .[0] else error" in blk(p, "A pass shows that, for linux")
+        and "cosign verify-attestation --type spdxjson" in blk(p, "A pass shows that, for linux")
+        and "| .predicate) | any([.] == $want)" in blk(p, "A pass shows that, for linux")
+        and sbom_ok(sbom_filter(blk(p, "A pass shows that, for linux"), "SBOM")),
+    "A pass shows that the image index has an SLSA build provenance attestation signed with a certificate for `release.yml` at the tag `v$VERSION`, with the source ref `refs/tags/v$VERSION`, the source repository digest `$SHA` and no self-hosted runner, once as fetched from GitHub's API and once from `sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl`.":
+        lambda p: blk(p, "A pass shows that the image index has").count('gh attestation verify "oci://$IMAGE@$DIGEST"') == 2
+        and gh_ok(blk(p, "A pass shows that the image index has"), 2) and "--bundle-from-oci" not in p
+        and blk(p, "A pass shows that the image index has").count('--bundle "sablecourt_${VERSION}_image_${IMAGE##*/}.intoto.jsonl"') == 1,
     "## What this does not prove": lambda p: True,
-    "- Who created the tag `v$VERSION`: the repository's tag ruleset decides that.":
-        lambda p: "git tag" not in WF and "git verify-tag" not in guide_code(p),
-    "- Which checks the tagged commit's `release.yml` ran: the certificate names the workflow file and the tag, not the file's content.":
-        lambda p: True,
+    "- Who created the tag `v$VERSION`. A tag ruleset limits who may create a tag; it does not show who created this one.":
+        lambda p: "git " not in guide_code(p) and actor_unused(),
+    "- Which checks the release workflow ran. The commands check the certificate's identity, issuer, source ref and source repository digest; they do not read `release.yml` at `$SHA`.":
+        lambda p: cmds_ok(p) and re.search(r"\bgit |curl|gh api|release\.yml[^@]", guide_code(p)) is None,
     "- That the commit `$SHA` is on `main`.": lambda p: "main" not in guide_code(p),
     "- That an image tag such as `$VERSION` points at `$DIGEST`: deploy by digest.":
         lambda p: "$IMAGE:" not in guide_code(p),
@@ -253,11 +348,18 @@ CI_CLAIMS = {
     "`release.yml` runs on a pushed `v*` tag. [Verify a release](how-to/verify-a-release.md) lists the commands that check a release.":
         lambda c: re.search(r"^on:\n  push:\n    tags: \[\"v\*\"\]\n\n", WF, re.M) is not None
         and os.path.exists(os.path.join(root, "docs/how-to/verify-a-release.md")),
-    "No job or step of `release.yml` has an `if:` or `continue-on-error`, so a job starts when the jobs in its `needs` have succeeded. The `needs` of each job:":
+    "No job or step of `release.yml` has an `if:` or `continue-on-error`. GitHub skips a job when a job in its `needs` fails or is skipped ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)), so no job of `release.yml` runs after a job it needs has failed.":
         lambda c: not re.search(r"^\s+(?:- )?(?:if|continue-on-error):", WF, re.M),
-    "What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml` and fails when one differs.":
+    "A job whose `needs` have succeeded can still wait. A run stays pending while another run of the concurrency group `release` is in progress ([`concurrency`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)), and `publish` goes to a runner after the deployment protection rules of the `release` environment pass ([`environment`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment)).":
+        lambda c: re.search(r"^concurrency:\n  group: release\n", WF, re.M) is not None
+        and re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None
+        and [j for j in J if re.search(r"^    environment:", J[j], re.M)] == ["publish"],
+    "The `needs` of each job:":
+        lambda c: "the needs table of docs/ci.md is the one of the workflow" in WORKFLOWS_TEST,
+    "What can exist outside the run when a job other than `publish` fails, run artifacts left out. `hack/test/workflows_test.sh` derives both tables from `release.yml`. It reads the rows whose first cell is a job name in backticks, and fails when they differ from what it derived or name a job twice.":
         lambda c: "the failure table of docs/ci.md is the one the needs graph gives" in WORKFLOWS_TEST
-        and "the needs table of docs/ci.md is the one of the workflow" in WORKFLOWS_TEST,
+        and "the needs table of docs/ci.md is the one of the workflow" in WORKFLOWS_TEST
+        and "def unique(pairs):" in WORKFLOWS_TEST and "docs table mutation cases" in WORKFLOWS_TEST,
     "### Scan policy": lambda c: True,
     "- A HIGH or CRITICAL finding fails `scan-images`, with or without a fix, unless `.trivyignore.yaml` in the tagged commit accepts it, and the signing jobs need `scan-images`.":
         lambda c: "--severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml" in scan_cmd()
@@ -266,26 +368,37 @@ CI_CLAIMS = {
     "- Record an accepted finding as an entry in `.trivyignore.yaml`, in a reviewed pull request.":
         lambda c: re.search(r"^vulnerabilities:", TRIVYIGNORE, re.M) is not None,
     "- The vulnerability database is pinned by digest in `TRIVY_DB` in `release.yml`; change the pin in a pull request.":
-        lambda c: re.search(r"^      TRIVY_DB: ghcr\.io/aquasecurity/trivy-db@sha256:[0-9a-f]{64}$", WF, re.M) is not None,
+        lambda c: re.search(r"^      TRIVY_DB: ghcr\.io/aquasecurity/trivy-db@sha256:[0-9a-f]{64}$", WF, re.M) is not None
+        and '--db-repository "${TRIVY_DB}"' in scan_cmd(),
     "- When a tag fails, fix the cause on `main`, cut the next release candidate from the new commit, and do not reuse the tag.":
         lambda c: "git merge-base --is-ancestor" in J.get("check", "") and "hack/release-state.sh" in J.get("check", ""),
     "### Repository settings": lambda c: True,
-    "The pipeline relies on these settings, which are kept outside the repository's files:":
-        lambda c: not os.path.exists(os.path.join(root, ".github/rulesets")),
-    "- Creating `v*` tags must be limited to repository admins by a tag ruleset.": lambda c: True,
-    "- Immutable releases must be on.": lambda c: "gh release upload" not in WF and "--clobber" not in WF,
-    "- Required reviewers on the `release` environment are optional, and none are set by default.":
-        lambda c: re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None,
+    "`release.yml` does not set these repository settings, and no file in this repository holds their values:":
+        lambda c: not any(os.path.exists(os.path.join(root, ".github", f)) for f in ("rulesets", "settings.yml"))
+        and re.search(r"rulesets|environments/|immutable", WF, re.I) is None,
+    "- A tag ruleset that limits who may create `v*` tags. No step of `release.yml` checks who pushed the tag.":
+        lambda c: actor_unused(),
+    "- Immutable releases. GitHub's documentation says that the assets of a published immutable release are protected from modification and deletion, and that its tag is locked to its commit ([immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)). `publish` attaches the files to a draft before it publishes it.":
+        lambda c: "gh release upload" not in WF and "--clobber" not in WF
+        and 'flags=(--verify-tag --draft ' in wf_step("publish", "Create the draft release")
+        and 'gh release create "${TAG}" "${flags[@]}" "${DIST}"/*' in wf_step("publish", "Create the draft release")
+        and WF.find("- name: Create the draft release") < WF.find("--draft=false"),
+    "- Required reviewers on the `release` environment, if wanted. `publish` names the environment and `release.yml` sets no reviewers. A workflow that names an environment that does not exist creates it with no protection rules ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)).":
+        lambda c: re.search(r"^    environment: release$", J.get("publish", ""), re.M) is not None
+        and re.search(r"^\s+(?:reviewers|required_reviewers|wait_timer):", WF, re.M) is None,
     "### Known limits": lambda c: True,
     "- Not pinned by a checksum in this repository: the Go toolchain that `actions/setup-go` installs from `go.mod`, and the runner's `gh`, `jq`, Docker and preinstalled Buildx.":
         lambda c: "go-version-file: go.mod" in J.get("binaries", "")
         and not any("hack/setup-buildx.sh" in J.get(j, "") for j in ("scan-images", "sign-images", "verify"))
         and not re.search(r"install[^\n]*\b(gh|jq)\b", WF),
-    "- The pipeline has not run on a tag yet, so its tests check the workflow text and the scripts, not a run.":
-        lambda c: True,
-    "- Open from issue 122: stable `vX.Y.Z` tags are to be created by a release GitHub App, and `publish` writes image tags before it publishes the draft release, so a failure in between can leave tags next to a draft.":
-        lambda c: "create-github-app-token" not in WF
-        and WF.find("- name: Tag the verified image digests") < WF.find("- name: Publish the release") > 0,
+    "- The tests read the text of `release.yml` and run the release scripts under `hack/` on fixtures and stub commands. No test runs `release.yml`.":
+        lambda c: release_scripts_tested() and 'read(".github/workflows/release.yml")' in WORKFLOWS_TEST,
+    "- No step of `release.yml` creates a Git tag: a run starts from a pushed tag.":
+        lambda c: re.search(r"git tag|git push|/git/refs|--method POST", WF) is None and "--verify-tag" in WF
+        and re.search(r"^on:\n  push:\n    tags:", WF, re.M) is not None,
+    "- `publish` writes the image tags before it publishes the draft release, and no step removes them, so a failure in between can leave image tags next to a draft release.":
+        lambda c: 0 < WF.find("- name: Tag the verified image digests") < WF.find("- name: Publish the release")
+        and re.search(r"imagetools rm|/packages/|--method DELETE \"repos/\$\{GH_REPO\}/(?!releases/)", WF) is None,
 }
 
 
@@ -328,13 +441,17 @@ def page_checks(guide, ci):
         ("guide: each file name on the page is in the verify job", all(
             norm(n) in VERIFY_NORM
             for n in re.findall(r"[\w${}#*/.-]*\.(?:tar\.gz|jsonl|json|txt)\b", guide))),
-        ("guide: each URL on the page is in the verify job", all(
-            norm(u) in VERIFY_NORM for u in re.findall(r"https://[^\s\"`)]+", guide))),
+        ("guide: each URL in the code is in the verify job", all(
+            norm(u) in VERIFY_NORM for u in re.findall(r"https://[^\s\"`)]+", code))),
+        ("guide and ci.md, Releases: each link in the prose is a documentation page the claims name",
+         all(u in DOC_URLS for u in re.findall(r"\]\((https://[^)\s]+)\)", "\n".join(prose_lines(guide) + prose_lines(rel))))),
         ("guide: each image name on the page is one release.yml pushes", set(re.findall(r"ghcr\.io/shadewright-labs/[a-z-]+", guide))
          == {"ghcr.io/shadewright-labs/sablecourt", "ghcr.io/shadewright-labs/sablecourt-agent"}
          and "DAEMON_IMAGE: ghcr.io/shadewright-labs/sablecourt\n" in WF and "AGENT_IMAGE: ghcr.io/shadewright-labs/sablecourt-agent\n" in WF),
         ("guide: the SBOM comparison fails on a second JSON value or another value", sbom_ok(sbom_filter(code, "SBOM"))),
         ("release.yml: the SBOM comparison fails on a second JSON value or another value", sbom_ok(sbom_filter(VERIFY, "sbom"))),
+        ("guide: the checksum check requires the nine release files, each once", sums_ok(guide_sums(guide))),
+        ("release.yml: the checksum check requires the nine release files, each once", sums_ok(verify_sums())),
         ("guide: the intro is two lines", re.match(r"# Verify a release\n\n[^\n]+\n[^\n]+\n\n## ", guide) is not None),
         ("guide: each block is followed by one line that says what a pass shows",
          len(re.findall(r"^```\n\nA pass [^\n]+\n\n(?:[^\n]+\n\n)?(?:```bash|## )", guide, re.M)) == len(blocks(guide))),
@@ -372,15 +489,26 @@ MUTATIONS = [
     sub("/.github/workflows/release.yml@refs/tags/v$VERSION", "/.github/workflows/release.yml@refs/heads/main"),
     sub("    --deny-self-hosted-runners > /dev/null\n", "    > /dev/null\n"),
     sub("any([.] == $want)'", "any(. == $want[0])'"),
-    sub("test \"$LINES\" -eq 9", "test \"$LINES\" -eq 10"),
+    sub('| LC_ALL=C sort)\nNAMES', '| LC_ALL=C sort -u)\nNAMES'),
+    sub('NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort)', 'NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort -u)'),
+    sub('_linux_{amd64,arm64}.spdx.json | LC_ALL=C sort)\nNAMES', '_linux_amd64.spdx.json | LC_ALL=C sort)\nNAMES'),
+    sub("| .predicate) | any", ") | any"),
+    sub("  --source-digest \"$SHA\" \\\n  --deny-self-hosted-runners > /dev/null\ngh attestation verify \"oci",
+        "  --deny-self-hosted-runners > /dev/null\ngh attestation verify \"oci"),
     sub("--certificate-identity \"$IDENTITY\"", "--certificate-identity-regexp \"$IDENTITY\""),
-    sub('LINES=$(wc -l < checksums.txt)\ntest "$LINES" -eq 9', 'test "$(wc -l < checksums.txt)" -eq 9'),
-    sub("from GitHub and from `sablecourt_${VERSION}_provenance.intoto.jsonl`.", "from GitHub."),
+    sub('NAMES=$(cut -c 67- checksums.txt | LC_ALL=C sort)\ntest "$NAMES" = "$WANT"',
+        'test "$(cut -c 67- checksums.txt | LC_ALL=C sort)" = "$WANT"'),
+    sub("once as fetched from GitHub's API and once from `sablecourt_${VERSION}_provenance.intoto.jsonl`.", "from GitHub."),
     sub("- That the images have no known vulnerabilities.\n", "- That the images have no known vulnerabilities.\n- That the release is reproducible.\n"),
     sub("A HIGH or CRITICAL finding", "A CRITICAL finding", "ci"),
     sub("| `verify` | `check`, `images`, `sign-binaries`, `sign-images` |", "| `verify` | `check`, `sign-binaries`, `sign-images` |", "ci"),
-    sub("Immutable releases must be on.", "Immutable releases are always on.", "ci"),
-    sub("by a tag ruleset.", "by a tag ruleset, which this repository enforces.", "ci"),
+    sub("- Immutable releases. ", "- Immutable releases, which `release.yml` turns on. ", "ci"),
+    sub("limits who may create `v*` tags.", "limits who may create `v*` tags and records who did.", "ci"),
+    sub("[`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)",
+        "[`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobs)", "ci"),
+    sub("| `scan-images` | untagged image digests in GHCR | nothing |\n",
+        "| `scan-images` | nothing | nothing |\n| `scan-images` | untagged image digests in GHCR | nothing |\n", "ci"),
+    sub("| `scan-images` | `images` |\n", "| `scan-images` | `check` |\n| `scan-images` | `images` |\n", "ci"),
 ]
 results = []
 for m in MUTATIONS:

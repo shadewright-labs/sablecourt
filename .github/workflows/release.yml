@@ -487,9 +487,13 @@ jobs:
             --certificate-oidc-issuer "${issuer}" \
             "${DIST}/checksums.txt"
           (cd "${DIST}" && sha256sum --check --strict checksums.txt)
-          lines="$(wc -l < "${DIST}/checksums.txt")"
-          if [ "${lines}" -ne 9 ]; then
-            echo "checksums.txt does not list the four archives and the five SBOMs" >&2
+          # The names after the 64 hex digits and two characters of each line, sorted: each of the nine files once.
+          want="$(printf '%s\n' "sablecourt_${VERSION}_sbom.spdx.json" \
+            "sablecourt_${VERSION}_"{darwin,linux}_{amd64,arm64}.tar.gz \
+            "sablecourt_${VERSION}_image_"{sablecourt,sablecourt-agent}_linux_{amd64,arm64}.spdx.json | LC_ALL=C sort)"
+          names="$(cut -c 67- "${DIST}/checksums.txt" | LC_ALL=C sort)"
+          if [ "${names}" != "${want}" ]; then
+            echo "checksums.txt does not list each of the four archives and the five SBOMs once" >&2
             exit 1
           fi
           for file in "${DIST}"/sablecourt_*.tar.gz "${DIST}"/sablecourt_*.spdx.json "${DIST}/checksums.txt"; do
