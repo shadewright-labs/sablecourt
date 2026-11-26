@@ -92,6 +92,21 @@ Limits on this hop:
 
 Stated limit: the hop from the harness to the proxy is plain HTTP inside the per-launch internal network, so the lease crosses it unencrypted. This is accepted because the proxy is the only other member of that network and nothing else can join it during the launch. It stops being acceptable if the network ever gains another member or is shared between launches, and a change like that needs a new amendment that serves the proxy over TLS as well.
 
+## Amendment (2026-11-26): harness tool volume and published images
+
+Status of this amendment: Proposed.
+
+Two lines above change. "The only mounts are..." gains one mount, and "keep them local" no longer holds for every image.
+
+- A harness whose vendor tool may not be redistributed (`claude`, `agy`) gets one more mount: a Sablecourt-labelled tool volume, read-only, that holds the vendor's binary. Its image holds no vendor software.
+- The tool volume is written only by an install container that has no network, no capabilities, a read-only root filesystem and no login volume. `sablectl` downloads the pinned file on the host from the vendor's own download host, follows no redirect, and checks its size and SHA-256 against values pinned in this repository before the install container sees it.
+- Every run checks the tool's version and pinned SHA-256 before the harness starts. A missing tool, another version or a checksum mismatch fails the run closed.
+- Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE. The `claude` and `agy` images hold the base only.
+
+What this does not change: one container and one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
+
+Stated limits: the pinned checksums are taken from the vendor's download at pin time, and the signature of the vendor's manifest is not verified. A compromised harness still cannot replace its own binary, because the tool volume is read-only to it, but it can write to its own home volume.
+
 ## Summary
 
 - Accept the two-milestone scope and retained components to unblock #2.
