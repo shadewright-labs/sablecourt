@@ -35,6 +35,26 @@ func TestEstimateRequestReserveBillableFields(t *testing.T) {
 			body:   `{"messages":[],"functions":[{"name":"f","description":"` + longText + `"}]}`,
 			wantIn: 104, wantOut: 1,
 		},
+		{
+			name:   "responses instructions count as input",
+			body:   `{"instructions":"` + longText + `","input":"hi"}`,
+			wantIn: 100, wantOut: 1,
+		},
+		{
+			name:   "gemini snake case system_instruction counts as input",
+			body:   `{"system_instruction":{"parts":[{"text":"` + longText + `"}]}}`,
+			wantIn: 102, wantOut: 1,
+		},
+		{
+			name:   "response_format schema counts as input",
+			body:   `{"messages":[],"response_format":{"type":"json_schema","json_schema":{"description":"` + longText + `"}}}`,
+			wantIn: 109, wantOut: 1,
+		},
+		{
+			name:   "responses text format schema counts as input",
+			body:   `{"input":"hi","text":{"format":{"type":"json_schema","description":"` + longText + `"}}}`,
+			wantIn: 108, wantOut: 1,
+		},
 		{name: "n scales output", body: `{"max_tokens":3,"n":2}`, wantIn: 1, wantOut: 6},
 		{name: "n of one", body: `{"max_tokens":3,"n":1}`, wantIn: 1, wantOut: 3},
 		{name: "n without limit scales the floor", body: `{"n":4}`, wantIn: 1, wantOut: 4},

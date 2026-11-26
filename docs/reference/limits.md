@@ -49,7 +49,8 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Limit | Constant | Value |
 | --- | --- | --- |
 | Request body read by the Model Gate | `internal/gate/model.maxRequestBodyBytes` | 16 MiB |
-| Upstream response kept to read token usage. A read is kept whole while less than this is held, so up to one read less one byte more is kept (8 MiB + 32 KiB - 1 B at most) | `internal/gate/model.maxCapturedResponseBytes` | 8 MiB |
+| Upstream response parsed for token usage (one extra sentinel byte is retained to detect responses past the limit) | `internal/gate/model.maxCapturedResponseBytes` | 8 MiB |
+| Single SSE line or joined event data parsed for token usage | `internal/gate/model.maxUsageLineBytes` | 4 MiB |
 | Size of one read from the upstream response | `internal/gate/model.upstreamReadChunkBytes` | 32 KiB |
 | Budget reservation lifetime | `internal/store.defaultBudgetReservationTTL` | 15 min |
 | Reservation settlement attempts | `internal/gate/model.settleReservationAttempts` | 3 |

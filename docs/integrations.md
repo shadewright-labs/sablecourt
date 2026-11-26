@@ -70,7 +70,9 @@ In `--mode=citadel`, `internal/runtime/k8s` supports two Kubernetes workload pri
 | `sablecourt_tasks_total{state}` | gauge | Tasks grouped by lifecycle state (`submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`) |
 | `sablecourt_conclaves_total{state}` | gauge | Multi-agent `Conclave` rooms grouped by state (`active`, `input-required`, `closed`) |
 | `sablecourt_approvals_pending` | gauge | Pending human out-of-band approvals |
-| `sablecourt_budget_input_tokens_total` | counter | Aggregate observed input tokens across all providers |
+| `sablecourt_budget_input_tokens_total` | counter | Aggregate observed uncached input tokens across all providers |
+| `sablecourt_budget_cache_write_tokens_total` | counter | Aggregate observed cache write input tokens across all providers |
+| `sablecourt_budget_cache_read_tokens_total` | counter | Aggregate observed cache read input tokens across all providers |
 | `sablecourt_budget_output_tokens_total` | counter | Aggregate observed output tokens across all providers |
 | `sablecourt_budget_cost_microusd_total` | counter | Aggregate observed spend in micro-USD |
 | `sablecourt_conclave_ward_trips_recent` | gauge | Conclave Ward breaker trips in the recent audit window |

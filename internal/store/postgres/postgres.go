@@ -444,10 +444,10 @@ func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.Budg
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
-			task_id, workload_name, provider, model, input_tokens, output_tokens, cost_microusd, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			task_id, workload_name, provider, model, input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_microusd, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, entry.TaskID, entry.WorkloadName, entry.Provider, entry.Model,
-		entry.InputTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt)); err != nil {
+		entry.InputTokens, entry.CacheWriteTokens, entry.CacheReadTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -482,27 +482,27 @@ func lockPostgresBudgetRows(ctx context.Context, tx *sql.Tx, taskID, workloadNam
 func (s *PostgresStore) TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger WHERE task_id = $1
-	`, taskID).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`, taskID).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 
 func (s *PostgresStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger WHERE workload_name = $1 AND created_at >= $2
-	`, workloadName, dayStartUTC.UTC().Format(time.RFC3339Nano)).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`, workloadName, dayStartUTC.UTC().Format(time.RFC3339Nano)).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 
 func (s *PostgresStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger
-	`).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+	`).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	return totals, err
 }
 

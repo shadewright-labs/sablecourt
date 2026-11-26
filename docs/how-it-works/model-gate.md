@@ -15,7 +15,7 @@ Status: built. Inference that a subscription harness runs outside the gate is no
 | `anthropic/v1/messages` | Anthropic |
 | `gemini/v1beta/models/<model>:generateContent` and `:streamGenerateContent` | Gemini |
 
-Any other path returns 404. Keys come from the secret store under `openai_api_key`, `anthropic_api_key`, `gemini_api_key` and `local_model_api_key`. With `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`) every provider route goes to one external gateway and no key is required. The caller's own `Authorization`, `x-api-key` and `x-goog-api-key` headers are dropped and the provider's are injected. Redirects are refused.
+Any other path returns 404. Keys come from the secret store under `openai_api_key`, `anthropic_api_key`, `gemini_api_key` and `local_model_api_key`. With `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`) every provider route goes to one external gateway and no key is required. The caller's own `Authorization`, `x-api-key`, `x-goog-api-key` and `Accept-Encoding` headers are dropped: the gate injects the provider's credential and lets its HTTP transport negotiate gzip and decompress replies (including streams) before reading usage. Redirects are refused.
 
 ## Order of checks
 
@@ -30,15 +30,24 @@ Each refusal returns an error; the audit rows are listed below.
 
 ## Reserve, forward, settle
 
-Before the call the gate estimates the request: input tokens are one quarter of the bytes in the prompt fields (`messages`, `input`, `contents`, `system`, `tools` and similar), and output tokens are the requested maximum (`max_tokens`, `max_completion_tokens`, `max_output_tokens`, or the Gemini equivalent) times the number of choices. With no maximum, output is reserved as one token. Cost uses built-in prices per provider, not per model; the highest of the primary and its fallbacks is reserved.
+Before the call the gate estimates the request: input tokens are one quarter of the bytes in the prompt and schema fields (`messages`, `input`, `contents`, `system`, `systemInstruction`, `system_instruction`, `instructions`, `prompt`, `tools`, `functions`, `response_format`, `text`, `tool_config`, `toolConfig`), and output tokens are the requested maximum (`max_tokens`, `max_completion_tokens`, `max_output_tokens`, or the Gemini equivalent) times the number of choices. With no maximum, output is reserved as one token per choice. Cost uses built-in prices per provider, not per model, pricing input at the highest applicable rate (for Anthropic, the 1-hour cache-write rate, which defaults to twice the input rate; for other providers, the higher of the input rate, cache-write rate, and any explicitly configured 1-hour cache-write rate) without assuming a cache-read discount; the highest of the primary and its fallbacks is reserved. Fractional micro-USD amounts round up (`math.Ceil`), so billable usage never rounds down to zero.
 
 One transaction checks the reservation against the workload's `Budget` and records it:
 
-- per task: `perTask.maxInputTokens`, `maxOutputTokens` and `maxCostUSD`, counting settled usage plus live reservations of that task;
+- per task: `perTask.maxInputTokens` (counting uncached input, cache write and cache read tokens together), `maxOutputTokens` and `maxCostUSD`, counting settled usage plus live reservations of that task;
 - per day: `daily.maxCostUSD`, counting the workload's settled usage since 00:00 UTC plus all its live reservations;
 - a value of zero means no limit for that dimension. A request is refused when usage is already at the limit or when usage plus the reservation would pass it.
 
-A reservation lasts 15 minutes. After a 2xx response the gate settles: it removes the reservation and writes the actual usage to the ledger, priced with the model named in the request. If the response reports no usage, for instance a stream without a usage event, the reserved estimate is charged, so a call is never free. Usage is read from the first 8 MiB of the response. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high for those 15 minutes. No ledger entry is written for that call, so once the reservation expires its usage no longer counts against any budget.
+A reservation lasts 15 minutes. After a 2xx response the gate settles: it removes the reservation and writes the actual usage (uncached input, cache write, cache read and output tokens) to the ledger, priced with the model named in the request.
+
+Two parsers read response usage:
+
+- `github.com/shadewright-labs/armory/modelusage` reads Anthropic Messages (`anthropic/v1/messages`), OpenAI Chat Completions (`openai/v1/chat/completions` and `local/v1/chat/completions`), and OpenAI Responses (`openai/v1/responses` and `local/v1/responses`), for both complete JSON replies and SSE streams.
+- A local parser in `internal/gate/model/usage.go` reads Gemini JSON and SSE replies (`gemini/v1beta/models/<model>:generateContent` and `:streamGenerateContent`). It splits `cachedContentTokenCount` out of `promptTokenCount` as cache reads and bills `thoughtsTokenCount` (thinking tokens) as output alongside `candidatesTokenCount`.
+
+Providers with explicit cache rates in the built-in table use them: Anthropic bills 5-minute cache writes at $3.75/1M, 1-hour cache writes at $6.00/1M (`CacheWrite1hUSD`, configurable per model or provider and defaulting to twice the input rate), and cache reads at $0.30/1M; OpenAI bills cache reads at $1.25/1M. Anthropic 1-hour cache writes (`cache_creation.ephemeral_1h_input_tokens`, capped at `cache_creation_input_tokens`) are priced at the 1-hour rate, with remaining cache writes at the 5-minute rate. Any provider or model without a cache-write or cache-read rate in the table prices those tokens at its input rate, never at zero.
+
+When a stream reaches its final event and trailing bytes follow, the exact final counts are settled. When a stream yields partial usage before breaking or contradicting itself, the gate settles at least the reserved estimate and at least the reported totals with no cache-read discount. When a response reports no usage, omits output counts (for example, count-only embeddings-style replies if such routes are added later; today the gate only serves chat, responses, messages and Gemini `generateContent` routes), is malformed, has out-of-range counts or exceeds the 8 MiB capture limit, the reserved estimate is charged, so a call is never free. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high for those 15 minutes. No ledger entry is written for that call, so once the reservation expires its usage no longer counts against any budget.
 
 Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting.
 
@@ -54,13 +63,15 @@ A task with a parent, such as a workflow step after the first, must carry a ceil
 
 ## What goes into the audit chain
 
-The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a fallback, a settlement failure and each successful call (model, tokens, cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller.
+The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a fallback, a settlement failure and each successful call (model, uncached input, cache write, cache read, output tokens and cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller.
 
 ## Known gaps
 
 What the code does today, where it falls short of the design.
 
 - Workflow steps after the first have a parent task but are created without a budget ceiling, so a Model Gate call from such a step is refused with `invalid_child_budget_ceiling`. This follows from the code and its tests; it has not been run end to end.
+- Anthropic beta compaction usage (`usage.iterations` entries of type `compaction`) is not counted by `armory/modelusage`, so a reply that used compaction is under-counted until `shadewright-labs/armory` issue 26 removes this limit. The gate forwards `anthropic-beta` unchanged rather than stripping headers silently.
+- Pre-call reserve estimation sizes input from prompt and schema bytes in the request body at one token per four bytes and reserves one output token per choice when no output limit is requested. It cannot upper-bound server-side stored context (`previous_response_id`, `conversation`, `cachedContent`) or fields outside the counted list, so a fallback charge to the reserve is not a strict upper bound for requests that rely on stored context or omit output limits.
 
 ## Not built yet
 

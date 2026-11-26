@@ -36,7 +36,7 @@ func TestExceedsBudgetLimit(t *testing.T) {
 }
 
 func TestCheckChildBudgetCeiling(t *testing.T) {
-	used := domain.BudgetTotals{InputTokens: 5, OutputTokens: 5, CostMicroUSD: 500_000}
+	used := domain.BudgetTotals{InputTokens: 2, CacheWriteTokens: 1, CacheReadTokens: 2, OutputTokens: 5, CostMicroUSD: 500_000}
 	reserve := domain.BudgetTotals{InputTokens: 5, OutputTokens: 5, CostMicroUSD: 500_000}
 	for _, tc := range []struct {
 		name, raw, reason string
@@ -123,7 +123,7 @@ func TestReserveBudgetRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.RecordBudgetUsage(ctx, domain.BudgetEntry{
-		TaskID: "task", WorkloadName: "worker", InputTokens: 50, OutputTokens: 40, CostMicroUSD: 300_000, CreatedAt: now,
+		TaskID: "task", WorkloadName: "worker", InputTokens: 20, CacheWriteTokens: 10, CacheReadTokens: 20, OutputTokens: 40, CostMicroUSD: 300_000, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +147,8 @@ func TestReserveBudgetRefusals(t *testing.T) {
 		{name: "unknown task", taskID: "missing", err: store.ErrNotFound},
 		{name: "task of another workload", workload: "other", err: store.ErrNotFound},
 		{name: "negative input", reserve: domain.BudgetTotals{InputTokens: -1}, anyErr: true},
+		{name: "negative cache write", reserve: domain.BudgetTotals{CacheWriteTokens: -1}, anyErr: true},
+		{name: "negative cache read", reserve: domain.BudgetTotals{CacheReadTokens: -1}, anyErr: true},
 		{name: "negative output", reserve: domain.BudgetTotals{OutputTokens: -1}, anyErr: true},
 		{name: "negative cost", reserve: domain.BudgetTotals{CostMicroUSD: -1}, anyErr: true},
 	} {
@@ -212,7 +214,7 @@ func TestSettleBudgetReservationIdempotent(t *testing.T) {
 	if err != nil || res.Exceeded {
 		t.Fatal(res, err)
 	}
-	actual := &domain.BudgetEntry{TaskID: "task", WorkloadName: "worker", Provider: "p", Model: "m", InputTokens: -3, OutputTokens: 4, CostMicroUSD: 9}
+	actual := &domain.BudgetEntry{TaskID: "task", WorkloadName: "worker", Provider: "p", Model: "m", InputTokens: -3, CacheWriteTokens: -2, CacheReadTokens: 11, OutputTokens: 4, CostMicroUSD: 9}
 	if err := st.SettleBudgetReservation(ctx, res.ReservationID, actual); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +223,7 @@ func TestSettleBudgetReservationIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Negative actual usage is clamped to zero, never credited back.
-	if totals != (domain.BudgetTotals{InputTokens: 0, OutputTokens: 4, CostMicroUSD: 9}) {
+	if totals != (domain.BudgetTotals{InputTokens: 0, CacheWriteTokens: 0, CacheReadTokens: 11, OutputTokens: 4, CostMicroUSD: 9}) {
 		t.Fatalf("totals after settle = %+v", totals)
 	}
 	if err := st.SettleBudgetReservation(ctx, res.ReservationID, actual); !errors.Is(err, store.ErrNotFound) {

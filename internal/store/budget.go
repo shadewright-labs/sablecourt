@@ -80,7 +80,7 @@ func CheckChildBudgetCeiling(raw string, used, reserve domain.BudgetTotals) (str
 		reason  string
 		usd     bool
 	}{
-		{value: ceiling.Input, used: used.InputTokens, reserve: reserve.InputTokens, reason: "child_input_tokens"},
+		{value: ceiling.Input, used: used.TotalInputTokens(), reserve: reserve.TotalInputTokens(), reason: "child_input_tokens"},
 		{value: ceiling.Output, used: used.OutputTokens, reserve: reserve.OutputTokens, reason: "child_output_tokens"},
 		{value: ceiling.Cost, used: used.CostMicroUSD, reserve: reserve.CostMicroUSD, reason: "child_cost_usd", usd: true},
 	} {
@@ -120,7 +120,7 @@ func parseChildBudgetLimit(value jsontext.Value, usd bool) (int64, error) {
 // ReserveBudgetTx atomically checks workload and child task budgets (including active reservations)
 // and records a pending reservation row if within all ceilings.
 func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, req BudgetReservationRequest) (BudgetReservationResult, error) {
-	if req.Reserve.InputTokens < 0 || req.Reserve.OutputTokens < 0 || req.Reserve.CostMicroUSD < 0 {
+	if req.Reserve.InputTokens < 0 || req.Reserve.CacheWriteTokens < 0 || req.Reserve.CacheReadTokens < 0 || req.Reserve.OutputTokens < 0 || req.Reserve.CostMicroUSD < 0 {
 		return BudgetReservationResult{}, errors.New("budget reservation amounts must be non-negative")
 	}
 	now := req.Now.UTC()
@@ -167,22 +167,22 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 
 	var taskTotals domain.BudgetTotals
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM (
-			SELECT input_tokens, output_tokens, cost_microusd
+			SELECT input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_microusd
 			FROM budget_ledger
 			WHERE task_id = $1
 			UNION ALL
-			SELECT input_tokens, output_tokens, cost_microusd
+			SELECT input_tokens, 0 AS cache_write_tokens, 0 AS cache_read_tokens, output_tokens, cost_microusd
 			FROM budget_reservations
 			WHERE task_id = $1 AND rtrim(expires_at, 'Z') > rtrim($2, 'Z')
 		) t
-	`, req.TaskID, nowStr).Scan(&taskTotals.InputTokens, &taskTotals.OutputTokens, &taskTotals.CostMicroUSD); err != nil {
+	`, req.TaskID, nowStr).Scan(&taskTotals.InputTokens, &taskTotals.CacheWriteTokens, &taskTotals.CacheReadTokens, &taskTotals.OutputTokens, &taskTotals.CostMicroUSD); err != nil {
 		return BudgetReservationResult{}, err
 	}
 
 	b := req.Budget
-	if b.Spec.PerTask.MaxInputTokens > 0 && ExceedsBudgetLimit(taskTotals.InputTokens, req.Reserve.InputTokens, b.Spec.PerTask.MaxInputTokens) {
+	if b.Spec.PerTask.MaxInputTokens > 0 && ExceedsBudgetLimit(taskTotals.TotalInputTokens(), req.Reserve.TotalInputTokens(), b.Spec.PerTask.MaxInputTokens) {
 		return BudgetReservationResult{Exceeded: true, Reason: "per_task_input_tokens"}, nil
 	}
 	if b.Spec.PerTask.MaxOutputTokens > 0 && ExceedsBudgetLimit(taskTotals.OutputTokens, req.Reserve.OutputTokens, b.Spec.PerTask.MaxOutputTokens) {
@@ -231,7 +231,7 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 		INSERT INTO budget_reservations (
 			id, task_id, workload_name, input_tokens, output_tokens, cost_microusd, expires_at, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, resID, req.TaskID, req.WorkloadName, req.Reserve.InputTokens, req.Reserve.OutputTokens, req.Reserve.CostMicroUSD, expiresStr, nowStr); err != nil {
+	`, resID, req.TaskID, req.WorkloadName, req.Reserve.TotalInputTokens(), req.Reserve.OutputTokens, req.Reserve.CostMicroUSD, expiresStr, nowStr); err != nil {
 		return BudgetReservationResult{}, err
 	}
 
@@ -290,6 +290,8 @@ func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetR
 	}
 
 	in := max(actual.InputTokens, 0)
+	cacheWrite := max(actual.CacheWriteTokens, 0)
+	cacheRead := max(actual.CacheReadTokens, 0)
 	out := max(actual.OutputTokens, 0)
 	cost := max(actual.CostMicroUSD, 0)
 	created := actual.CreatedAt
@@ -298,10 +300,10 @@ func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetR
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
-			task_id, workload_name, provider, model, input_tokens, output_tokens, cost_microusd, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			task_id, workload_name, provider, model, input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_microusd, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, taskID, workloadName, actual.Provider, actual.Model,
-		in, out, cost, created.UTC().Format(time.RFC3339Nano)); err != nil {
+		in, cacheWrite, cacheRead, out, cost, created.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()

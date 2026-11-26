@@ -326,8 +326,15 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			if canFlush {
 				flusher.Flush()
 			}
-			if captured.Len() < maxCapturedResponseBytes {
-				captured.Write(chunk)
+			// Keep up to maxCapturedResponseBytes + 1 bytes so oversized
+			// responses are detected deterministically by modelusage.Limits.
+			if captured.Len() <= maxCapturedResponseBytes {
+				remain := maxCapturedResponseBytes + 1 - captured.Len()
+				if len(chunk) > remain {
+					captured.Write(chunk[:remain])
+				} else {
+					captured.Write(chunk)
+				}
 			}
 		}
 		if readErr != nil {
@@ -338,39 +345,31 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
 		// Keep the reservation if actual usage cannot be recorded.
 		releaseReservation = false
-		usage := parseUsage(activeProvider, captured.Bytes(), upResp.Header.Get("Content-Type"))
-		inTokens := max(usage.InputTokens, 0)
-		outTokens := max(usage.OutputTokens, 0)
-		if inTokens == 0 && outTokens == 0 {
-			// The response carried no usage (for example a stream without a usage
-			// event). Charge the reserved estimate so the call is never free.
-			inTokens = reserve.InputTokens
-			outTokens = reserve.OutputTokens
-		}
-		modelName := usage.Model
+		parsed := parseUsage(activeProvider, upstreamPath, captured.Bytes(), upResp.Header.Get("Content-Type"))
+		settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
+		modelName := settled.Model
 		if modelName == "" {
 			modelName = reqModel
 		}
-		// Price with the admitted request model, the identity the reservation was
-		// sized for, so a reported model name cannot settle above the reserve.
-		costMicro := max(EstimateMicroUSD(activeProvider, reqModel, inTokens, outTokens, g.pricing), 0)
 		entry := domain.BudgetEntry{
-			TaskID:       lease.TaskID,
-			WorkloadName: lease.WorkloadName,
-			Provider:     activeProvider,
-			Model:        modelName,
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			CostMicroUSD: costMicro,
-			CreatedAt:    g.now(),
+			TaskID:           lease.TaskID,
+			WorkloadName:     lease.WorkloadName,
+			Provider:         activeProvider,
+			Model:            modelName,
+			InputTokens:      settled.InputTokens,
+			CacheWriteTokens: settled.CacheWriteTokens,
+			CacheReadTokens:  settled.CacheReadTokens,
+			OutputTokens:     settled.OutputTokens,
+			CostMicroUSD:     costMicro,
+			CreatedAt:        g.now(),
 		}
 		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
 			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
 			return
 		}
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
-			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, inTokens, outTokens, costMicro))
+			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
+				modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
 	}
 }
 
@@ -499,9 +498,9 @@ func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, det
 const (
 	// maxRequestBodyBytes is how much of a request body the gate reads.
 	maxRequestBodyBytes = 16 << 20
-	// maxCapturedResponseBytes is how much of a response the gate keeps to
-	// read usage from. A chunk is kept whole while less than this is held,
-	// so up to upstreamReadChunkBytes-1 more can be kept.
+	// maxCapturedResponseBytes is how much of a response the gate parses for
+	// token usage. One additional sentinel byte is retained so responses past
+	// the limit are reported as oversized.
 	maxCapturedResponseBytes = 8 << 20
 	// upstreamReadChunkBytes is the size of one read from the upstream response.
 	upstreamReadChunkBytes = 32 << 10
@@ -569,7 +568,7 @@ func copySafeRequestHeaders(dst, src http.Header) {
 	for k, vals := range src {
 		lower := strings.ToLower(k)
 		switch lower {
-		case "authorization", "x-api-key", "x-goog-api-key", "host", "content-length", "connection":
+		case "authorization", "x-api-key", "x-goog-api-key", "host", "content-length", "connection", "accept-encoding":
 			continue
 		}
 		for _, v := range vals {
