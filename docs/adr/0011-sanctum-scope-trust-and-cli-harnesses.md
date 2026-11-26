@@ -98,16 +98,16 @@ Status of this amendment: Proposed.
 
 Two lines above change. "The only mounts are..." gains one mount, and "keep them local" no longer holds for every image.
 
-- A harness whose vendor tool may not be redistributed (`claude`, `agy`) gets one more mount: a Sablecourt-labelled tool volume, read-only, that holds the vendor's binary. Its image holds no vendor software.
-- The tool volume is written only by an install container that runs from the harness image as the harness's non-root uid (10001), with no network, no capabilities, a read-only root filesystem and no login volume. A new volume's root takes that uid by copy-up from the image's empty `/opt/harness-tool`. `sablectl` downloads the pinned file on the host from the vendor's own download host, follows no redirect, and checks its size and SHA-256 against values pinned in this repository before the install container sees it.
-- Every run checks the tool's version and pinned SHA-256 before the harness starts, and so does the login probe, which mounts the tool volume read-only next to the login volume. A missing tool, another version or a checksum mismatch fails the run closed.
+- A harness whose vendor tool Sablecourt treats as not redistributable (`claude`, `agy`) gets one more mount: a Sablecourt-labelled tool volume, read-only, that holds the vendor's binary. Its image holds no vendor software.
+- Among the containers Sablecourt creates, only an install container writes the tool volume. It runs from the harness image as the harness's non-root uid (10001), with no network, no capabilities, a read-only root filesystem and no login volume. A new volume's root takes that uid by copy-up from the image's empty `/opt/harness-tool`. `sablectl` downloads the pinned file on the machine that runs it, from the vendor's own download host, follows no redirect, and checks it against values pinned in this repository before the install container sees it: size and SHA-256 of the binary for `claude`; size and SHA-512 of the archive, then size and SHA-256 of the extracted executable, for `agy`.
+- For `claude` and `agy`, every run checks the tool's version and pinned SHA-256 before the harness starts, and so does the login probe, which mounts the tool volume read-only next to the login volume. A missing tool, another version or a checksum mismatch fails the run closed. The `codex` tool is in its image, which the build checks, so it has no such run-time check.
 - Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE; its build checks the release archive against a pinned SHA-256 before extracting it. The `claude` and `agy` images hold the base only.
 
 What this does not change: one container and one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
 
-Stated limits: the pinned checksums are taken from the vendor's download at pin time, and the signature of the vendor's manifest is not verified. A compromised harness still cannot replace its own binary, because the tool volume is read-only to it, but it can write to its own home volume.
+Stated limits: Sablecourt trusts the checksums pinned in this repository, and the signature of the vendor's manifest is not verified. A compromised harness still cannot replace its own binary, because the tool volume is read-only to it, but it can write to its own home volume.
 
-Stated limit: only `linux/arm64` is pinned. `sablectl harness build` always builds for that platform, and every pinned tool is an arm64 binary. On an amd64 host, Docker Desktop builds and runs these images under arm64 emulation, more slowly; an engine without arm64 emulation fails the build. A build for any other target architecture fails in the Codex stage, which has no pin for it.
+Stated limit: only `linux/arm64` is pinned. `sablectl harness build` always requests that platform, and the pins name the arm64 artefact of each tool. Sablecourt does not configure emulation. An uncached build needs a builder that can run arm64 steps, natively or through emulation, and running the images needs the same. A direct build of the `codex` target for another architecture fails in the Codex stage, which has no pin for it; the other targets do not depend on that stage.
 
 ## Summary
 
