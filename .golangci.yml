@@ -1,0 +1,92 @@
+version: "2"
+# Started from Shadewright's configuration. Linters that are off here, and why, are listed under
+# "Not enabled" at the end of this file; turning one on is a change of its own that fixes its findings first.
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck
+    - errorlint
+    - exptostd
+    - gocritic
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - nakedret
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+    - whitespace
+  settings:
+    errcheck:
+      # Writes to a terminal or a response writer. Close, Rollback and Remove are excluded by the rule under
+      # exclusions below; any other unchecked error is still reported.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    errorlint:
+      # fmt.Errorf with %v keeps an error opaque on purpose (the store packages do this), and switching it to
+      # %w changes what errors.Is matches for callers. Comparisons and type assertions on errors are still checked.
+      errorf: false
+    gocritic:
+      disabled-checks:
+        # Style rewrites only; they find no faults.
+        - ifElseChain
+        - elseif
+        - unlambda
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+    staticcheck:
+      checks:
+        - all
+        # The golangci-lint defaults.
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Error strings that start with a capital are product names and messages that tests and operators match.
+        - -ST1005
+        # Quick-fix suggestions (De Morgan, tagged switch, Fprintf) are style, not faults.
+        - -QF*
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+  exclusions:
+    rules:
+      # Close, Rollback and Remove on cleanup paths (mostly deferred): the path already returns its own error,
+      # or there is nothing left to report. A Close whose error matters is checked in the code by hand.
+      - linters:
+          - errcheck
+        text: "^Error return value of `[A-Za-z0-9_.]*\\.(Close|Rollback|Remove|RemoveAll)` is not checked$"
+issues:
+  # The defaults (50 per linter, 3 of the same text) hide repeats; report every finding.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+# Not enabled, with the reason (counts are the findings on the code when this file was added):
+# - gosec: the Security job runs the pinned standalone gosec with its own exclusions and load-error check;
+#   a second copy here, at another version, would need a second set of exclusions kept in step.
+# - lll (1,523), goconst (933), gocyclo (63), modernize (78), prealloc (15): style and size rules the code
+#   base was never written to; they find no faults.
+# - noctx (161, 154 in tests): the listeners, dialers and test requests predate it.
+# - unparam (14, 11 in tests): test helpers with fixed arguments, and three signatures kept for symmetry.
+# - usetesting (7): every finding is a deliberate os.MkdirTemp under /tmp, to keep Unix socket paths
+#   short enough on macOS; t.TempDir would make them too long.
+# - depguard: Shadewright's only rule bans package sort, a project choice Sablecourt has not made.

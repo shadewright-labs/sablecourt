@@ -3,13 +3,29 @@ PLIST_PATH ?= $(HOME)/Library/LaunchAgents/io.shadewright.sablecourtd.plist
 LOG_PATH ?= $(HOME)/Library/Logs/sablecourtd.log
 MANIFESTS ?= $(PWD)/examples/local-demo.yaml
 
-.PHONY: test vet build install demo agent-image service-install service-uninstall docs docs-check
+.PHONY: test vet lint lint-config vulncheck build install demo agent-image service-install service-uninstall docs docs-check
+
+# Pinned tool versions, run with `go run` (checked through the Go checksum database). CI calls the same targets.
+GOLANGCI_LINT_VERSION ?= v2.15.0
+GOVULNCHECK_VERSION ?= v1.9.0
+GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 test:
 	go test -race ./...
 
 vet:
 	go vet ./...
+
+# golangci-lint with .golangci.yml (what the lint job of CI runs).
+lint:
+	$(GOLANGCI_LINT) run ./...
+
+lint-config:
+	$(GOLANGCI_LINT) config verify
+
+# Known vulnerabilities reached from the code, standard library of the current Go release included.
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 # Reference pages under docs/reference are generated from the code or checked
 # against it by tests, which `go test ./...` (and so CI) also runs.
