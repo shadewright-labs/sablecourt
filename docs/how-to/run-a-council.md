@@ -8,7 +8,7 @@ Ask `claude`, `codex` and `agy` one question about a repository and read the ans
 
 - The daemon is running in Sanctum mode and `sablectl` can reach it ([install and start](install-and-start.md)).
 - `claude`, `codex` and `agy` are on the `PATH` of both `sablectl` and the daemon, even though turns run in containers.
-- Docker Engine 28.0 or newer, the three harness images built and each harness logged in ([log in to harnesses](log-in-harnesses.md)).
+- Docker Engine 28.0 or newer, the three harness images built and each harness logged in ([log in to harnesses](log-in-harnesses.md)). The `claude` and `agy` images carry no vendor tool: `sablectl harness login` installs it when the login volume does not exist yet or the tool is missing, of another version or does not match its digest ([harness images and tool install](harness-images.md)).
 - A macOS host where Seatbelt works: the daemon probes it when a council opens and refuses the council on any other platform.
 - A Git checkout owned by the daemon's user, with its own `.git` directory (not a linked worktree), outside the daemon state directory and outside credential directories such as `~/.ssh` and `~/.config`.
 
@@ -34,7 +34,7 @@ Ask `claude`, `codex` and `agy` one question about a repository and read the ans
 
 The output ends with `=== Digest ===`. For a closed council that is the stop reason (`nothing_to_add`, `round_cap`, `start_cap`, `deadline`, `owner_stop` after Ctrl-C, or `owner_close`), then each round and seat. A council paused by a Ward has no digest yet, and the CLI prints `no digest recorded`. `Missing answer` means that seat has no recorded answer for that round. The command exits with an error when no seat answered, when the council was cancelled, or when a Ward paused it. A paused council stays open: resume it with `sablectl conclave decree <id> "<message>"`, or close it with `sablectl conclave close <id>`. Inspect any council later with `sablectl conclave inspect <id>`.
 
-The writer mode (one seat gets a writable worktree) is available through the API field `writer` only.
+The writer mode (one seat gets a writable worktree) is available with `--writer <seat>` (one of `claude`, `codex` or `agy`, not with `--live`), which the CLI sends as the API field `writer`.
 
 ## In depth
 

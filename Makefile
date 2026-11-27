@@ -3,13 +3,68 @@ PLIST_PATH ?= $(HOME)/Library/LaunchAgents/io.shadewright.sablecourtd.plist
 LOG_PATH ?= $(HOME)/Library/Logs/sablecourtd.log
 MANIFESTS ?= $(PWD)/examples/local-demo.yaml
 
-.PHONY: test vet build install demo agent-image service-install service-uninstall
+.PHONY: test vet lint lint-config vulncheck build install demo agent-image service-install service-uninstall docs docs-requirements docs-venv docs-check
+
+# Pinned tool versions, run with `go run` (checked through the Go checksum database). CI calls the same targets.
+GOLANGCI_LINT_VERSION ?= v2.15.0
+GOVULNCHECK_VERSION ?= v1.9.0
+GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 test:
 	go test -race ./...
 
 vet:
 	go vet ./...
+
+# golangci-lint with .golangci.yml (what the lint job of CI runs).
+lint:
+	$(GOLANGCI_LINT) run ./...
+
+lint-config:
+	$(GOLANGCI_LINT) config verify
+
+# Known vulnerabilities reached from the code, standard library of the current Go release included.
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# Reference pages under docs/reference are generated from the code or checked
+# against it by tests, which `go test ./...` (and so CI) also runs.
+DOCS_TESTS = TestCLIReferenceIsCurrent|TestConfigurationStateDirectory|TestConfigurationEnvironmentVariables|TestHTTPReferenceListsEveryRoute|TestManifestReferenceMatchesTypesAndLoader|TestLimitsReferenceMatchesConstants|TestMetricsReferenceListsEveryMetric
+DOCS_PKGS = ./cmd/sablectl ./cmd/sablecourtd ./internal/config ./internal/refdocs ./internal/telemetry
+ZENSICAL ?= .venv/bin/zensical
+ifeq ($(ZENSICAL),.venv/bin/zensical)
+DOCS_VENV_DEP = .venv/docs-requirements.stamp
+endif
+
+# docs regenerates the generated blocks of docs/reference/cli.md. Each command
+# package saves its rendered block to its own file in a scratch directory, and
+# one writer puts them into the page.
+docs:
+	go run ./internal/clidoc/write docs/reference/cli.md ./cmd/sablectl ./cmd/sablecourtd
+
+# docs-requirements regenerates the hash-locked requirements-docs.txt from requirements-docs.in.
+docs-requirements:
+	pipx run --spec 'pip-tools==7.6.2' pip-compile --generate-hashes --strip-extras --allow-unsafe --annotation-style=line \
+		--output-file=requirements-docs.txt requirements-docs.in
+
+# docs-venv creates .venv and installs the hash-locked docs site requirements.
+docs-venv: .venv/docs-requirements.stamp
+
+# The stamp records a finished install of the locked requirements, so a zensical placed in .venv some
+# other way, or an install that stopped half way, does not count.
+.venv/docs-requirements.stamp: requirements-docs.txt
+	python3 -m venv .venv
+	.venv/bin/pip install --require-hashes -r requirements-docs.txt
+	touch $@
+
+# docs-check fails when any reference page is stale, when the Zensical build reports an issue,
+# or when the built site has a broken internal link, broken anchor, missing image, third-party asset
+# or mermaid code fence under docs/.
+# The reference tests never write: the block directory variable is cleared so the render step cannot run.
+docs-check: $(DOCS_VENV_DEP)
+	env -u SABLECOURT_CLI_BLOCK_DIR go test -count=1 -run '$(DOCS_TESTS)' $(DOCS_PKGS)
+	$(ZENSICAL) build --clean --strict
+	python3 -I hack/docs-site-check.py check site hack/docs-pages-pending.txt docs
 
 build:
 	mkdir -p bin
@@ -22,7 +77,7 @@ install: build
 	cp bin/sablectl $(BIN_DIR)/sablectl
 
 agent-image:
-	docker build -t sablecourt-agent:0.1.0 -f cmd/sablecourt-agent/Dockerfile .
+	docker build --target agent -t sablecourt-agent:0.1.0 .
 
 demo:
 	go run ./cmd/sablecourtd --manifests=$(MANIFESTS)

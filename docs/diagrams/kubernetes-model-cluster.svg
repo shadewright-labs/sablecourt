@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 952" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Planned Citadel cluster</title>
+  <desc id="d">Planned layout of Sablecourt in a Kubernetes cluster. Outside the cluster: people with a browser or sablectl, an identity provider, a Git host and model providers. In the control namespace, sablecourtd holds the gates, leases, budgets, approvals and audit chain and stores state in PostgreSQL; people reach it with an OIDC session and it verifies ID tokens with the identity provider; it opens pull requests on the Git host and asks the Kubernetes API to create Jobs. The Kubernetes API starts harness pods in the run namespace, which denies traffic by default; the pods run under a gVisor sandbox runtime class, hold a lease file and a checkout and no provider keys, and make lease calls only to sablecourtd. sablecourtd forwards checked calls to agentgateway in the gateway namespace, which holds the provider keys and adds them before calling the model providers. agentgateway reports token usage to a metrics store in the monitoring namespace with team and workload labels, and Nightloom, outside Sablecourt, reads those cost labels. A direct path from a harness pod to the internet is denied. sablecourtd, PostgreSQL and the Kubernetes API exist in the tree today and are parked; every other box is planned.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="952" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="1072" height="128" rx="14"/>
+  <text class="lanet" x="44" y="54">OUTSIDE THE CLUSTER</text>
+  <rect class="ext" x="48" y="68" width="210" height="64" rx="10"/>
+  <text class="h" x="64" y="94">People</text>
+  <text class="s" x="64" y="115">browser, sablectl</text>
+  <rect class="ext" x="296" y="68" width="210" height="64" rx="10"/>
+  <text class="h" x="312" y="94">Identity provider</text>
+  <text class="s" x="312" y="115">OIDC sign-in</text>
+  <rect class="ext" x="544" y="68" width="210" height="64" rx="10"/>
+  <text class="h" x="560" y="94">Git host</text>
+  <text class="s" x="560" y="115">branches, pull requests</text>
+  <rect class="ext" x="816" y="68" width="230" height="64" rx="10"/>
+  <text class="h" x="832" y="94">Model providers</text>
+  <text class="s" x="832" y="115">Anthropic, OpenAI, Google</text>
+  <rect class="lane" x="24" y="176" width="1072" height="576" rx="14"/>
+  <text class="lanet" x="44" y="206">KUBERNETES CLUSTER</text>
+  <rect class="frame" x="48" y="224" width="312" height="232" rx="12"/>
+  <text class="idt" x="68" y="248">CONTROL NAMESPACE</text>
+  <rect class="key" x="72" y="264" width="248" height="72" rx="12"/>
+  <text class="h" x="88" y="290">sablecourtd</text>
+  <text class="s" x="88" y="311">gates, leases, budgets</text>
+  <text class="s" x="88" y="328">approvals, audit chain</text>
+  <rect class="box" x="72" y="368" width="176" height="64" rx="10"/>
+  <text class="h" x="88" y="394">PostgreSQL</text>
+  <text class="s" x="88" y="415">tasks, leases, audit</text>
+  <rect class="box" x="448" y="368" width="216" height="64" rx="10"/>
+  <text class="h" x="464" y="394">Kubernetes API</text>
+  <text class="s" x="464" y="415">Jobs, TokenReview</text>
+  <rect class="frame" x="776" y="224" width="296" height="232" rx="12"/>
+  <text class="idt" x="796" y="248">GATEWAY NAMESPACE</text>
+  <rect class="plan" x="800" y="264" width="248" height="72" rx="10"/>
+  <text class="h" x="816" y="290">agentgateway</text>
+  <text class="s" x="816" y="311">holds provider keys</text>
+  <text class="s" x="816" y="328">routing, token metrics</text>
+  <rect class="frame" x="48" y="496" width="704" height="232" rx="12"/>
+  <text class="idt" x="68" y="520">RUN NAMESPACE: DEFAULT DENY</text>
+  <rect class="frame" x="72" y="536" width="520" height="172" rx="12"/>
+  <text class="idt" x="92" y="560">SANDBOX RUNTIMECLASS (GVISOR)</text>
+  <rect class="plan" x="96" y="584" width="224" height="72" rx="10"/>
+  <text class="h" x="112" y="610">Harness pod</text>
+  <text class="s" x="112" y="631">lease file, checkout</text>
+  <text class="s" x="112" y="648">no provider keys</text>
+  <rect class="plan" x="352" y="584" width="216" height="72" rx="10"/>
+  <text class="h" x="368" y="610">Harness pod</text>
+  <text class="s" x="368" y="631">one per launch</text>
+  <text class="s" x="368" y="648">same rules</text>
+  <rect class="frame" x="776" y="496" width="296" height="232" rx="12"/>
+  <text class="idt" x="796" y="520">MONITORING NAMESPACE</text>
+  <rect class="plan" x="800" y="584" width="248" height="72" rx="10"/>
+  <text class="h" x="816" y="610">Metrics store</text>
+  <text class="s" x="816" y="631">Prometheus or collector</text>
+  <text class="s" x="816" y="648">team and workload labels</text>
+  <rect class="lane" x="24" y="776" width="1072" height="120" rx="14"/>
+  <text class="lanet" x="44" y="806">OUTSIDE THE CLUSTER</text>
+  <rect class="bad" x="352" y="820" width="216" height="64" rx="10"/>
+  <text class="h" x="368" y="846">Internet</text>
+  <text class="s" x="368" y="867">never reached by pods</text>
+  <rect class="ext" x="800" y="820" width="248" height="64" rx="10"/>
+  <text class="h" x="816" y="846">Nightloom</text>
+  <text class="s" x="816" y="867">cost watch, reads metrics</text>
+  <path class="f" d="M152 132V258" marker-end="url(#a)"/>
+  <text class="lbl" x="160" y="168">OIDC session</text>
+  <path class="r" d="M304 264V138" marker-end="url(#m)"/>
+  <text class="lbl" x="312" y="168">verifies ID tokens</text>
+  <path class="f" d="M320 284H600V138" marker-end="url(#a)"/>
+  <text class="lbl" x="608" y="168">opens PRs</text>
+  <path class="f" d="M320 312H794" marker-end="url(#a)"/>
+  <text class="lbl" x="548" y="304" text-anchor="middle">checked calls</text>
+  <path class="f" d="M932 264V138" marker-end="url(#a)"/>
+  <text class="lbl" x="940" y="168">adds provider key</text>
+  <path class="r" d="M152 336V362" marker-end="url(#m)"/>
+  <text class="lbl" x="160" y="356">state</text>
+  <path class="f" d="M296 336V400H442" marker-end="url(#a)"/>
+  <text class="lbl" x="372" y="392">creates Jobs</text>
+  <path class="f" d="M272 584V342" marker-end="url(#a)"/>
+  <text class="lbl" x="280" y="480">lease calls</text>
+  <path class="r" d="M480 432V578" marker-end="url(#m)"/>
+  <text class="lbl" x="488" y="480">starts pods</text>
+  <path class="deny" d="M460 656V814" marker-end="url(#x)"/>
+  <text class="no" x="468" y="768">denied</text>
+  <path class="r" d="M932 336V578" marker-end="url(#m)"/>
+  <text class="lbl" x="940" y="480">token usage</text>
+  <path class="r" d="M932 656V814" marker-end="url(#m)"/>
+  <text class="lbl" x="940" y="768">cost labels</text>
+  <rect class="box" x="48" y="912" width="28" height="16" rx="4"/>
+  <text class="cap" x="84" y="924">in the tree today, parked</text>
+  <rect class="plan" x="296" y="912" width="28" height="16" rx="4"/>
+  <text class="cap" x="332" y="924">planned</text>
+  <rect class="ext" x="414" y="912" width="28" height="16" rx="4"/>
+  <text class="cap" x="450" y="924">outside Sablecourt</text>
+  <path class="deny" d="M611 920H639"/>
+  <text class="cap" x="647" y="924">denied</text>
+</svg>

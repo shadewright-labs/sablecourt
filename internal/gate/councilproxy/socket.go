@@ -243,7 +243,7 @@ func SweepStaleSockets(sockRoot string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // directory handle (os.Root); closing it finalizes no write
 	dirFile, err := root.Open(".")
 	if err != nil {
 		return err
@@ -423,7 +423,7 @@ func serveProbeListener(ln net.Listener, sentinel, probeToken string, state *pro
 	outcome := make(chan probeOutcome, 1)
 	done := make(chan struct{})
 	serve := func(conn net.Conn) (drained bool) {
-		defer conn.Close()
+		defer conn.Close() //nolint:errcheck // probe connection teardown
 		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 		line, readErr := bufio.NewReader(io.LimitReader(conn, 128)).ReadString('\n')
 		got := strings.TrimSpace(line)
@@ -478,7 +478,7 @@ func drainProbeListener(ctx context.Context, sockPath, sentinel string) error {
 	if err != nil {
 		return fmt.Errorf("council gate socket probe drain: %w", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck // probe connection teardown
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return err
 	}
@@ -570,7 +570,7 @@ func ProbeGateSocketClient(socketPath, token string) error {
 		}
 		return err
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck // probe connection teardown
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return err
 	}

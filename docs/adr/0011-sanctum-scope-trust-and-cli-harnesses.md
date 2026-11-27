@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue #2 sets the build order and trust boundary for the user's workstation. Sanctum currently leaves operator bearer authentication optional. The coding adapter conditionally exports `SABLECOURT_MODEL_GATE_URL`. Its macOS profile broadly permits reads, its Linux wrapper mounts the host root read-only, and an inapplicable sandbox choice can fall through to an unwrapped launch. The adapter starts the harness under the daemon's user identity. These behaviors leave operator state reachable to a same-user process. [Daemon startup](../../cmd/sablecourtd/main.go), [coding adapter](../../internal/runtime/coding/coding.go).
+Issue #2 sets the build order and trust boundary for the user's workstation. Sanctum currently leaves operator bearer authentication optional. The coding adapter conditionally exports `SABLECOURT_MODEL_GATE_URL`. Its macOS profile broadly permits reads, its Linux wrapper mounts the host root read-only, and an inapplicable sandbox choice can fall through to an unwrapped launch. The adapter starts the harness under the daemon's user identity. These behaviors leave operator state reachable to a same-user process. [Daemon startup](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/main.go), [coding adapter](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/coding.go).
 
 ## Decision
 
@@ -53,10 +53,10 @@ On macOS, the outer Seatbelt profile causes the `codex` inner sandbox to fail wi
 
 ### Follow-up
 
-- Extend the Docker runtime for named volumes, checkout and scratch mounts, per-harness commands and proxy allow-lists, closed stdin for headless runs, and an interactive TTY for login. Separate stdout from stderr and collect the final answer before container removal. [internal/runtime/docker/docker.go](../../internal/runtime/docker/docker.go), [runtime gaps from the spike](../harnesses.md#changes-needed-in-internalruntimedocker).
-- Replace the Docker runtime's host-gateway assumption with the selected gate transport. The host-gateway address did not route from the internal network in the spike. Pass only a scoped, short-lived task lease for permitted gate calls and keep `SABLECOURT_TASK_TOKEN` out of logs, artifacts, and persistent state. Omit `SABLECOURT_MODEL_GATE_URL` for subscription runs and keep provider credentials in their own volumes. [internal/runtime/docker/docker.go](../../internal/runtime/docker/docker.go), [cmd/sablecourtd/host.go](../../cmd/sablecourtd/host.go).
-- Map the council driver's `live` and `ref` modes to read-only mounts. In `writer` mode, mount the pinned review checkout read-only for reviewers and the assigned writer worktree read-write for the writer. [internal/conclave/council_driver.go](../../internal/conclave/council_driver.go), [internal/runtime/coding/council.go](../../internal/runtime/coding/council.go).
-- Wire the Docker harness runtime into Sanctum and add the login preflight for each harness volume. Return the matching one-time container login command when preflight fails for a missing login. [cmd/sablecourtd/main.go](../../cmd/sablecourtd/main.go).
+- Extend the Docker runtime for named volumes, checkout and scratch mounts, per-harness commands and proxy allow-lists, closed stdin for headless runs, and an interactive TTY for login. Separate stdout from stderr and collect the final answer before container removal. [internal/runtime/docker/docker.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/docker/docker.go), [runtime gaps from the spike](../harnesses.md#changes-needed-in-internalruntimedocker).
+- Replace the Docker runtime's host-gateway assumption with the selected gate transport. The host-gateway address did not route from the internal network in the spike. Pass only a scoped, short-lived task lease for permitted gate calls and keep `SABLECOURT_TASK_TOKEN` out of logs, artifacts, and persistent state. Omit `SABLECOURT_MODEL_GATE_URL` for subscription runs and keep provider credentials in their own volumes. [internal/runtime/docker/docker.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/docker/docker.go), [cmd/sablecourtd/host.go](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/host.go).
+- Map the council driver's `live` and `ref` modes to read-only mounts. In `writer` mode, mount the pinned review checkout read-only for reviewers and the assigned writer worktree read-write for the writer. [internal/conclave/council_driver.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/conclave/council_driver.go), [internal/runtime/coding/council.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/council.go).
+- Wire the Docker harness runtime into Sanctum and add the login preflight for each harness volume. Return the matching one-time container login command when preflight fails for a missing login. [cmd/sablecourtd/main.go](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/main.go).
 - Build the three harness images from pinned base images and keep them local. [Spike Dockerfiles](../harnesses.md#dockerfiles).
 
 ### Open checks
@@ -71,7 +71,7 @@ On macOS, the outer Seatbelt profile causes the `codex` inner sandbox to fail wi
 
 Status of this amendment: Proposed.
 
-This records how a council harness reaches the daemon gate now that the per-launch proxy is in the tree. If accepted, it closes the first open check above (choose between the pinned gate proxy and the per-workload Unix socket): both are built, and a launch probe picks one. The production launcher in the coding adapter uses the proxy (issue 78) and starts the harness only after the proxy is provisioned and verified ready; this amendment does not change that wiring. [council proxy](../../internal/gate/councilproxy), [daemon host routing](../../cmd/sablecourtd/host.go).
+This records how a council harness reaches the daemon gate now that the per-launch proxy is in the tree. If accepted, it closes the first open check above (choose between the pinned gate proxy and the per-workload Unix socket): both are built, and a launch probe picks one. The production launcher in the coding adapter uses the proxy (issue 78) and starts the harness only after the proxy is provisioned and verified ready; this amendment does not change that wiring. [council proxy](https://github.com/shadewright-labs/sablecourt/blob/main/internal/gate/councilproxy), [daemon host routing](https://github.com/shadewright-labs/sablecourt/blob/main/cmd/sablecourtd/host.go).
 
 Each launch gets its own internal network and its own proxy container. The harness joins only the internal network. The proxy is the only other member of that network and the only container with egress. The network is created with the isolated bridge gateway mode for IPv4 and IPv6, which needs Docker Engine 28.0 or newer. The daemon reads the network back and refuses to publish an endpoint unless the engine applied that mode and assigned no gateway.
 
@@ -91,6 +91,23 @@ Limits on this hop:
 - The daemon's own servers cap connections at 256, give request headers 5 seconds, close idle connections after 60 seconds, and read a whole request within 60 seconds. They set no write deadline, so a streaming response is not cut.
 
 Stated limit: the hop from the harness to the proxy is plain HTTP inside the per-launch internal network, so the lease crosses it unencrypted. This is accepted because the proxy is the only other member of that network and nothing else can join it during the launch. It stops being acceptable if the network ever gains another member or is shared between launches, and a change like that needs a new amendment that serves the proxy over TLS as well.
+
+## Amendment (2026-11-26): harness tool volume and published images
+
+Status of this amendment: Accepted (2026-11-26).
+
+Two lines above change. "The only mounts are..." gains one mount, and "keep them local" no longer holds for every image.
+
+- A harness whose vendor tool Sablecourt treats as not redistributable (`claude`, `agy`) gets one more mount: a Sablecourt-labelled tool volume, read-only, that holds the vendor's binary. Its image holds no vendor software.
+- Among the containers Sablecourt creates, only an install container writes the tool volume. It runs from the harness image as the harness's non-root uid (10001), with no network, no capabilities, a read-only root filesystem and no login volume. A new volume's root takes that uid by copy-up from the image's empty `/opt/harness-tool`. `sablectl` downloads the pinned file on the machine that runs it, from the vendor's own download host, follows no redirect, and checks it against values pinned in this repository before the install container sees it: size and SHA-256 of the binary for `claude`; size and SHA-512 of the archive, then size and SHA-256 of the extracted executable, for `agy`.
+- For `claude` and `agy`, every run checks the tool's version and pinned SHA-256 before the harness starts, and so does the login probe, which mounts the tool volume read-only next to the login volume. If the guard finds the tool missing, reads another version in `VERSION` or computes another SHA-256, it exits with status 125 before the harness starts. The guard and the start of the tool each resolve the path, so an install that finishes between the two can put a different file there. The install container renames a file into place only after it matches the SHA-256 pinned in the `sablectl` that ran the install, so that file is the daemon's pinned binary when both come from the same release, and the binary another release pins otherwise. The `codex` tool is in its image, which the build checks, so it has no such run-time check.
+- Harness images may be published when they hold only software whose licence allows redistribution. The `codex` image holds the unmodified Codex CLI with its LICENSE and NOTICE; its build checks the release archive against a pinned SHA-256 before extracting it. The `claude` and `agy` images hold the base software, an empty `/opt/harness-tool` directory and a licence note, and no vendor tool.
+
+What this does not change: one login volume per harness, no provider login shared between harnesses, and the proxy as the only route out.
+
+Stated limits: Sablecourt trusts the checksums pinned in this repository, and the signature of the vendor's manifest is not verified. A compromised harness still cannot replace its own binary, because the tool volume is read-only to it, but it can write to its own home volume.
+
+Stated limit: only `linux/arm64` is pinned. `sablectl harness build` always requests that platform, and the pins name the arm64 artefact of each tool. `sablectl harness build` configures no emulation. An uncached build needs a builder that can run arm64 steps, natively or through emulation, and running the images needs the same. A direct build of the `codex` target for another architecture fails in the Codex stage, which has no pin for it; the other targets do not depend on that stage.
 
 ## Summary
 

@@ -1,6 +1,8 @@
 package operatortoken
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,5 +306,67 @@ func TestStateDirCreationUnderStickyParent(t *testing.T) {
 	info, err := os.Stat(dir)
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("state directory mode: %v %v", info, err)
+	}
+}
+
+// A failed attempt removes its pending file, and a removal that fails is reported instead of dropped: the
+// pending file holds a credential.
+func TestLoadOrCreatePendingCleanup(t *testing.T) {
+	errWrite := errors.New("injected write failure")
+	errRemove := errors.New("injected remove failure")
+	for _, tc := range []struct {
+		name          string
+		failWrite     bool
+		removeErr     error
+		wantErrs      []error
+		wantPending   bool
+		wantPublished bool
+	}{
+		{name: "success leaves no pending file", wantPublished: true},
+		{name: "failed write removes the pending file", failWrite: true, wantErrs: []error{errWrite}},
+		{name: "failed write and failed removal report both", failWrite: true, removeErr: errRemove, wantErrs: []error{errWrite, errRemove}, wantPending: true},
+		{name: "failed removal after a publish is reported", removeErr: errRemove, wantErrs: []error{errRemove}},
+		{name: "a pending file already gone is not an error", removeErr: os.ErrNotExist, wantPublished: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oldWrite, oldRemove := writePending, removePending
+			t.Cleanup(func() { writePending, removePending = oldWrite, oldRemove })
+			if tc.failWrite {
+				writePending = func(w io.Writer, s string) (int, error) {
+					_, _ = io.WriteString(w, s[:10]) // a partial credential reaches the file
+					return 10, errWrite
+				}
+			}
+			if tc.removeErr != nil {
+				removePending = func(*os.Root, string) error { return tc.removeErr }
+			}
+			token, err := LoadOrCreate(dir)
+			for _, want := range tc.wantErrs {
+				if !errors.Is(err, want) {
+					t.Fatalf("LoadOrCreate error = %v, want %v", err, want)
+				}
+			}
+			if len(tc.wantErrs) == 0 && err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+			if err != nil && token != "" {
+				t.Fatal("a failed LoadOrCreate returned a token")
+			}
+			if err != nil && tc.removeErr != nil && !strings.Contains(err.Error(), "unused credential") {
+				t.Fatalf("removal error does not say what was left behind: %v", err)
+			}
+			_, pendErr := os.Lstat(filepath.Join(dir, Filename+".pending"))
+			if gotPending := pendErr == nil; gotPending != tc.wantPending {
+				t.Fatalf("pending file present = %v, want %v", gotPending, tc.wantPending)
+			}
+			_, pubErr := os.Lstat(filepath.Join(dir, Filename))
+			if gotPublished := pubErr == nil; gotPublished != (tc.wantPublished || (tc.removeErr != nil && !tc.failWrite)) {
+				t.Fatalf("credential file present = %v", gotPublished)
+			}
+		})
 	}
 }

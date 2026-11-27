@@ -312,7 +312,6 @@ func TestOperatorLoginRateLimit(t *testing.T) {
 				t.Errorf("valid login status = %d, cookies = %d", w.Code, len(w.Result().Cookies()))
 			}
 		}
-
 	})
 }
 
@@ -561,7 +560,7 @@ func TestDistributedLoginFailures(t *testing.T) {
 			a := newOperatorAuth(testOperatorToken)
 			a.limiter = newLoginLimiter(3, time.Minute, capacity)
 			req := func(client int, token string) int {
-				r := httptest.NewRequest("POST", "/login", strings.NewReader(url.Values{"token": {token}}.Encode()))
+				r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{"token": {token}}.Encode()))
 				r.RemoteAddr = net.JoinHostPort(net.IPv4(127, 0, 0, byte(client+1)).String(), "80")
 				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 				r.Header.Set("Origin", "http://"+r.Host)
@@ -596,9 +595,9 @@ func TestOperatorCredentialCollisions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mux := http.NewServeMux()
-			mux.HandleFunc("GET "+tc.path, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+			mux.HandleFunc("GET "+tc.path, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 			h := newOperatorAuth(tc.configured).requireOperatorAuth(mux, mux, secret.NewMemoryStore(map[string]string{tc.scope: tc.token}))
-			r := httptest.NewRequest("GET", tc.path, nil)
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			r.Header.Set("Authorization", "Bearer "+tc.token)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -619,7 +618,7 @@ func TestLogoutRevokesSessions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
-			login := httptest.NewRequest("POST", "/login", strings.NewReader("token="+testOperatorToken))
+			login := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token="+testOperatorToken))
 			login.Header.Set("Origin", "http://"+login.Host)
 			login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			w := httptest.NewRecorder()
@@ -628,7 +627,7 @@ func TestLogoutRevokesSessions(t *testing.T) {
 			if w.Code != 303 || len(cookies) != 1 {
 				t.Fatalf("login status %d, cookies %d", w.Code, len(cookies))
 			}
-			r := httptest.NewRequest("POST", "/logout", nil)
+			r := httptest.NewRequest(http.MethodPost, "/logout", nil)
 			origin := tc.origin
 			if origin == "same" {
 				origin = "http://" + r.Host
@@ -646,7 +645,7 @@ func TestLogoutRevokesSessions(t *testing.T) {
 					t.Fatal("missing session deletion")
 				}
 			}
-			r = httptest.NewRequest("GET", "/api/v1/providers", nil)
+			r = httptest.NewRequest(http.MethodGet, "/api/v1/providers", nil)
 			r.AddCookie(cookies[0])
 			w = httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -688,7 +687,7 @@ func TestSecureLoginCookieOnHTTPLoopback(t *testing.T) {
 			}
 			client.Jar = jar
 			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-			r, err := http.NewRequestWithContext(t.Context(), "POST", origin+"/login", strings.NewReader("token="+testOperatorToken))
+			r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, origin+"/login", strings.NewReader("token="+testOperatorToken))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -699,7 +698,7 @@ func TestSecureLoginCookieOnHTTPLoopback(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer login.Body.Close()
-			if login.StatusCode != 303 || !strings.Contains(login.Header.Get("Set-Cookie"), "; Secure") || login.Header.Get("Location") != "/" {
+			if login.StatusCode != http.StatusSeeOther || !strings.Contains(login.Header.Get("Set-Cookie"), "; Secure") || login.Header.Get("Location") != "/" {
 				t.Fatal("login did not redirect to the dashboard with a Secure cookie")
 			}
 			dashboard, err := client.Get(origin + "/")
@@ -707,7 +706,7 @@ func TestSecureLoginCookieOnHTTPLoopback(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer dashboard.Body.Close()
-			if dashboard.StatusCode != 200 {
+			if dashboard.StatusCode != http.StatusOK {
 				t.Errorf("dashboard status %d", dashboard.StatusCode)
 			}
 		})
@@ -722,7 +721,7 @@ func TestIntegrationCollisionCannotIssueSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			secrets := secret.NewMemoryStore(map[string]string{"shadewright_bearer_token": tc.secret})
 			h := newHandler(nil, secrets, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
-			r := httptest.NewRequest("POST", "/login", strings.NewReader("token="+testOperatorToken))
+			r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token="+testOperatorToken))
 			r.Header.Set("Origin", "http://"+r.Host)
 			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			w := httptest.NewRecorder()

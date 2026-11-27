@@ -1,0 +1,87 @@
+name: Repo checks
+
+# Checks that run on every pull request whatever changed, because they are cheap and a change anywhere can break
+# them: the internal links of the tracked Markdown files (a renamed source file can break a docs link), the image
+# references under ghcr.io/shadewright-labs/ (they must name images and tags release.yml publishes), the
+# Dockerfiles' workspace policy (GOWORK=off, as in CI), and the offline tests of the scripts under hack/ that CI
+# relies on. Go is set up for the fuzz target list, which asks the go command.
+# Called by ci.yml (the only trigger); always runs.
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  repo-checks:
+    name: repo checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check internal links
+        run: python3 -I hack/docs-links.py check
+
+      - name: Check image references
+        run: hack/check-image-refs.sh
+
+      - name: Check the workspace policy of the Dockerfiles
+        run: hack/check-dockerfiles.sh
+
+      - name: Test the changed-files detector
+        run: hack/test/ci-changed_test.sh
+
+      - name: Test the ci-ok predicate
+        run: hack/test/ci-ok_test.sh
+
+      - name: Test the fuzz target list
+        run: hack/test/fuzz-targets_test.sh
+
+      - name: Test the link checker
+        run: hack/test/docs-links_test.sh
+
+      - name: Test the built docs site check
+        run: hack/test/docs-site-check_test.sh
+
+      - name: Test the image reference check
+        run: hack/test/check-image-refs_test.sh
+
+      - name: Test the Dockerfile check
+        run: hack/test/dockerfiles_test.sh
+
+      - name: Test the workflows' structure
+        run: hack/test/workflows_test.sh
+
+      - name: Test the release verification guide and the release docs
+        run: hack/test/verify-guide_test.sh
+
+      - name: Test the release archive packer
+        run: hack/test/package-binaries_test.sh
+
+      - name: Test the release asset check
+        run: hack/test/release-assets_test.sh
+
+      - name: Test the release state lookup
+        run: hack/test/release-state_test.sh
+
+      - name: Test the ci-ok gate of a release
+        run: hack/test/release-ci-ok_test.sh
+
+      - name: Test the version image tag guard
+        run: hack/test/release-image-tag_test.sh
+
+      - name: Test the latest rule of a release
+        run: hack/test/release-latest_test.sh
+
+      - name: Test the release notes extractor
+        run: bash hack/test/release-notes_test.sh

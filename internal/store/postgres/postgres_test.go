@@ -36,6 +36,15 @@ func TestEmbeddedPostgresMigrationsPresent(t *testing.T) {
 			t.Fatalf("missing table %q in Postgres migration", tbl)
 		}
 	}
+	cacheMig, err := migrationFS.ReadFile("migrations/0011_budget_cache_tokens.sql")
+	if err != nil {
+		t.Fatalf("read 0011_budget_cache_tokens.sql: %v", err)
+	}
+	for _, col := range []string{"cache_write_tokens", "cache_read_tokens"} {
+		if !strings.Contains(string(cacheMig), col) {
+			t.Fatalf("missing column %q in 0011_budget_cache_tokens.sql", col)
+		}
+	}
 }
 
 func TestLivePostgresIfConfigured(t *testing.T) {

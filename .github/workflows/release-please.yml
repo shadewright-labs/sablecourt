@@ -1,0 +1,49 @@
+name: Release please
+
+# Keeps one release pull request up to date from the Conventional Commits on main (AGENTS.md, "Releases").
+# The pull request carries the edits to CHANGELOG.md, .release-please-manifest.json and the extra files in
+# release-please-config.json; merging it triggers this workflow to create a draft GitHub release and push a
+# plain vX.Y.Z tag (draft and force-tag-creation in release-please-config.json). The App token makes the pull
+# request trigger required checks and makes the tag push trigger release.yml (GITHUB_TOKEN would not).
+# release.yml replaces the draft with its own verified draft carrying the fourteen signed assets and image
+# digests before publishing (docs/ci.md, "Releases"). release-please tracks the last release from
+# .release-please-manifest.json, so hand-cut pre-release tags (vX.Y.Z-rc.N) stay separate.
+#
+# The App's key lives in the `release` environment, which only deployments from main can use.
+# release.yml runs in no environment, so tag runs cannot read the App key.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release please
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint a short-lived App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: sablecourt
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Release please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

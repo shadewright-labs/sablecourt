@@ -101,6 +101,11 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
 		return result, err
 	}
+	if tool := a.CouncilHarnesses[s.Harness].Tool; tool != nil {
+		if err := inspectCouncilToolVolume(ctx, engine, s.Harness, tool.Volume); err != nil {
+			return result, err
+		}
+	}
 	stream, err := engine.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{Stream: true, Stdin: true, Stdout: true, Stderr: true})
 	if err != nil {
 		return result, fmt.Errorf("attach council container: %w", err)
@@ -248,7 +253,7 @@ func (a *Adapter) councilExit(ctx context.Context, engine councilEngineAPI, resu
 	done := make(chan waitOutcome, 1)
 	go func() {
 		select {
-		case <-wait.Error:
+		case <-wait.Error: //nolint:errcheck // any wait error leaves the exit unverified, which is returned below
 			done <- waitOutcome{errored: true}
 		case status, ok := <-wait.Result:
 			done <- waitOutcome{status: status, ok: ok}

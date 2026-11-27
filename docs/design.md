@@ -43,7 +43,7 @@ spec:
   class: long-lived-agent # coding-agent | long-lived-agent | deterministic-controller
   runtime:
     type: docker # docker | worktree-cli
-    image: ghcr.io/shadewright-labs/triage-agent:0.1.0
+    image: registry.example/triage-agent:0.1.0
     readOnlyRootfs: true
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
@@ -132,7 +132,7 @@ Core tables in v0.1:
 - `tasks`: `id`, `parent_task_id`, `idempotency_key` (unique), `workload_name`, `state`, `input_json`, `artifacts_json`, `budget_ceiling_json`, `last_heartbeat_at`, `created_at`, `updated_at`.
 - `task_events`: append-only state transitions and observed runtime facts.
 - `leases`: active short-lived gate tokens (stored as SHA-256 hash, never plaintext), bound to `(task_id, workload_name, expires_at, revoked_at)`.
-- `budget_ledger`: immutable usage rows (`task_id`, `workload_name`, `provider`, `model`, `input_tokens`, `output_tokens`, `cost_microusd`, `created_at`) aggregated inside transactions before granting new requests.
+- `budget_ledger`: immutable usage rows (`task_id`, `workload_name`, `provider`, `model`, `input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`, `cost_microusd`, `created_at`) aggregated inside transactions before granting new requests.
 - `approvals`: `id`, `task_id`, `workload_name`, `capability`, `payload_canonical_json`, `payload_sha256`, `status` (`pending`, `approved`, `denied`, `expired`, `consumed`; an approved row becomes `consumed` at its one use), `decided_by`, `proof_json`, `expires_at`.
 - `checkpoints`: opaque JSON or blob references persisted by long-lived AI agents before suspend and restored on resume.
 - `audit_log`: append-only structured records covering policy evaluations, gate denials, budget trips, approvals, and redaction hits.

@@ -315,7 +315,10 @@ func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scrunti
 	}
 	obs.State = scruntime.StateCompleted
 	if state.Result != nil && state.Result.ExitCode != 0 {
-		obs.State, obs.ExitCode, obs.Message = scruntime.StateFailed, state.Result.ExitCode, state.Result.Message
+		obs.State = scruntime.StateFailed
+		obs.ExitCode = state.Result.ExitCode
+		obs.Message = state.Result.Message
+		obs.LogCloseFailed = state.Result.LogClose || state.Result.ExitCode == wrapperLogCloseExitCode
 	}
 	return obs, nil
 }

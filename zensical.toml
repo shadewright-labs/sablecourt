@@ -1,0 +1,154 @@
+# Docs site for https://shadewrightlabs.com/sablecourt/, built with Zensical.
+# Local preview: python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-docs.txt && .venv/bin/zensical serve
+
+[project]
+site_name = "Sablecourt"
+site_description = "A control plane that runs coding agents and deterministic programs on one machine under limits you set."
+site_url = "https://shadewrightlabs.com/sablecourt/"
+repo_url = "https://github.com/shadewright-labs/sablecourt"
+repo_name = "shadewright-labs/sablecourt"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright 2026 The Sablecourt Authors. Licensed under the Apache License 2.0."
+extra_css = ["stylesheets/brand.css", "stylesheets/hero-bg.css", "stylesheets/labs-switcher.css"]
+extra_javascript = ["javascripts/labs-switcher.js"]
+# docs/reference.md is superseded by docs/reference/ and collides with docs/reference/index.md on
+# site/reference/index.html.
+exclude_docs = """
+/reference.md
+"""
+
+nav = [
+  { "Overview" = [
+    { "Sablecourt" = "index.md" },
+    { "Overview" = "overview.md" },
+  ] },
+  { "How it works" = [
+    { "How it works" = "how-it-works/index.md" },
+    { "Concepts" = "concepts.md" },
+    { "Tasks" = "how-it-works/tasks.md" },
+    { "Workloads and runtimes" = "how-it-works/workloads-and-runtimes.md" },
+    { "Model Gate" = "how-it-works/model-gate.md" },
+    { "Tools and actions" = "how-it-works/tools-and-actions.md" },
+    { "Approvals" = "how-it-works/approvals.md" },
+    { "Conclaves" = "how-it-works/conclaves.md" },
+    { "Council" = "how-it-works/council.md" },
+    { "Harness containers" = "how-it-works/harness-containers.md" },
+    { "Context and learning" = "how-it-works/context-and-learning.md" },
+    { "Integrations" = "how-it-works/integrations.md" },
+  ] },
+  { "How-to guides" = [
+    { "Harness images and tool install" = "how-to/harness-images.md" },
+    { "Log in to harnesses" = "how-to/log-in-harnesses.md" },
+    { "Run a council" = "how-to/run-a-council.md" },
+    { "Review an approval" = "how-to/review-an-approval.md" },
+    { "Watch and steer" = "how-to/watch-and-steer.md" },
+    { "Retry a failed task with a handoff" = "how-to/retry-with-handoff.md" },
+    { "Verify a release" = "how-to/verify-a-release.md" },
+  ] },
+  { "Reference" = [
+    { "Reference" = "reference/index.md" },
+    { "Manifests reference" = "reference/manifests.md" },
+    { "HTTP API reference" = "reference/http-api.md" },
+    { "CLI reference" = "reference/cli.md" },
+    { "Configuration reference" = "reference/configuration.md" },
+    { "Limits reference" = "reference/limits.md" },
+    { "Metrics reference" = "reference/metrics.md" },
+    { "Glossary" = "glossary.md" },
+  ] },
+  { "Design and decisions" = [
+    { "Sablecourt v0.1 design" = "design.md" },
+    { "Sablecourt technical architecture" = "architecture.md" },
+    { "Council harness images and logins" = "council-harnesses.md" },
+    { "Coding CLI headless invocations" = "harnesses.md" },
+    { "Sablecourt integrations and extensions" = "integrations.md" },
+    { "Kubernetes model (Citadel)" = "design/kubernetes-model.md" },
+    { "Architecture decision records" = [
+      { "Architecture decision records" = "adr/README.md" },
+      { "ADR-0001: Local-first control plane with Kubernetes-ready adapters" = "adr/0001-local-first-control-plane-with-k8s-adapters.md" },
+      { "ADR-0002: Three heterogeneous workload adapters in MVP" = "adr/0002-heterogeneous-mvp-workload-adapters.md" },
+      { "ADR-0003: Hybrid workload isolation in MVP" = "adr/0003-hybrid-workload-isolation.md" },
+      { "ADR-0004: In-house Go capability gates for Three Doors in v0.1" = "adr/0004-in-house-capability-gates-three-doors.md" },
+      { "ADR-0005: Dual-path human-in-the-loop approvals" = "adr/0005-dual-path-human-in-the-loop.md" },
+      { "ADR-0006: Hub-and-spoke dispatch over A2A-compatible task envelopes" = "adr/0006-hub-and-spoke-a2a-task-envelope.md" },
+      { "ADR-0007: Strict separation from Nightloom" = "adr/0007-strict-boundary-with-nightloom.md" },
+      { "ADR-0008: Multi-agent Conclaves, Wards, Decrees, Relics, and live Scry/Takeover" = "adr/0008-conclaves-wards-and-live-attach.md" },
+      { "ADR-0009: Sanctum and Citadel modes, audit hash chain, and cryptographic approvals" = "adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md" },
+      { "ADR-0010: Agentic context assembly, scoped learnings, and verification pipeline" = "adr/0010-agentic-context-learnings-and-verification-pipeline.md" },
+      { "ADR-0011: Sanctum scope, trust, and CLI harnesses" = "adr/0011-sanctum-scope-trust-and-cli-harnesses.md" },
+      { "ADR-0012: Learning evidence, scope, and expiry" = "adr/0012-learning-evidence-and-expiry.md" },
+      { "ADR-0013: Bounded council rounds in Conclaves" = "adr/0013-bounded-council-rounds.md" },
+      { "ADR-0014: Identity and authentication" = "adr/0014-identity-and-authentication.md" },
+      { "ADR-NNNN: Short title" = "adr/0000-template.md" },
+    ] },
+  ] },
+  { "Contributing and CI" = [
+    { "CI" = "ci.md" },
+    { "Diagram standard" = "diagrams/README.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+custom_dir = "overrides"
+logo = "assets/brand/sablecourt-glyph.svg"
+favicon = "assets/brand/sablecourt-favicon.svg"
+# false: no Google Fonts request; text and code use the system font stacks set in brand.css.
+font = false
+features = [
+  "content.action.edit",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+# Dark only: one palette, so the theme renders no toggle and ignores the reader's colour preference.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+
+# Zensical defaults set explicitly, with no Mermaid custom fence (diagrams are standalone SVGs).
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}
+
+# Link and anchor checks run in hack/docs-links.py (with hack/docs-pages-pending.txt) and
+# hack/docs-site-check.py (on the built HTML), because docs/ holds planned-page links tracked in
+# hack/docs-pages-pending.txt.
+[project.validation]
+invalid_links = false
+invalid_link_anchors = false

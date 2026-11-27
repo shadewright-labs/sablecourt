@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 344" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Model Gate budget flow</title>
+  <desc id="d">Flow of budget accounting for one Model Gate call. The gate estimates tokens and cost from the request body and reserves them in one store transaction against per-task limits, the daily per-workload cost limit and any child task ceiling for 15 minutes. If a limit is exhausted or a child ceiling is missing or invalid, the gate denies the call with 429 or 403 and stops before forwarding. Within limits, the gate forwards the request to the provider or an external gateway and streams the response back. On a 2xx response it removes the reservation and settles reported usage (or the reserved estimate when none is reported) to the budget ledger and audit chain. On a non-2xx response or upstream error it releases the reservation and charges nothing. A note states that subscription harness inference runs outside the Model Gate and is not counted here.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="344" rx="18" fill="#08060e"/>
+
+  <rect class="box" x="24" y="36" width="192" height="72" rx="10"/>
+  <text class="h" x="40" y="62">Estimate request</text>
+  <text class="s" x="40" y="83">tokens and cost</text>
+  <text class="s" x="40" y="100">from request body</text>
+
+  <rect class="key" x="268" y="36" width="236" height="72" rx="12"/>
+  <text class="h" x="284" y="62">Reserve in store</text>
+  <text class="s" x="284" y="83">per-task, daily per-workload</text>
+  <text class="s" x="284" y="100">child ceiling if delegated (15 min)</text>
+
+  <rect class="box" x="584" y="36" width="208" height="72" rx="10"/>
+  <text class="h" x="600" y="62">Forward call</text>
+  <text class="s" x="600" y="83">to provider or gateway</text>
+  <text class="s" x="600" y="100">stream back to workload</text>
+
+  <rect class="box" x="864" y="36" width="232" height="72" rx="10"/>
+  <text class="h" x="880" y="62">Settle to ledger</text>
+  <text class="s" x="880" y="83">reported usage, or reserve</text>
+  <text class="s" x="880" y="100">if none reported; audited</text>
+
+  <rect class="bad" x="268" y="212" width="236" height="72" rx="10"/>
+  <text class="no" x="284" y="238">Denied (429 / 403)</text>
+  <text class="s" x="284" y="259">429 budget exceeded</text>
+  <text class="s" x="284" y="276">403 invalid child ceiling</text>
+
+  <rect class="box" x="584" y="212" width="208" height="72" rx="10"/>
+  <text class="h" x="600" y="238">Release reserve</text>
+  <text class="s" x="600" y="259">reservation removed</text>
+  <text class="s" x="600" y="276">nothing charged</text>
+
+  <path class="f" d="M216 72H262" marker-end="url(#a)"/>
+  <path class="f" d="M504 72H578" marker-end="url(#a)"/>
+  <text class="lbl" x="541" y="64" text-anchor="middle">within limits</text>
+  <path class="f" d="M792 72H858" marker-end="url(#a)"/>
+  <text class="lbl" x="825" y="64" text-anchor="middle">2xx</text>
+  <path class="deny" d="M386 108V206" marker-end="url(#x)"/>
+  <text class="no" x="398" y="162">exhausted / invalid</text>
+  <path class="f" d="M688 108V206" marker-end="url(#a)"/>
+  <text class="lbl" x="700" y="162">non-2xx / error</text>
+
+  <text class="cap" x="24" y="320">Subscription harness inference runs on its own login outside the Model Gate and is not counted here.</text>
+</svg>

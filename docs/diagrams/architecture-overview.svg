@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1160" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Sablecourt technical architecture</title>
+  <desc id="d">Three callers reach the sablecourtd HTTP server: sablectl CLI, stdio MCP and the internal/ui web UI with an operator token or session cookie (device pairing routes return 503), Shadewright with a scoped escalation token, and Nightloom with a read-only observer token. Inside sablecourtd, the HTTP server enforces authentication, same-origin CSRF checks and a 2 MiB write cap, serves the web UI, AttachHub Scry streams (live Takeover and local STT/TTS voice are parked), and dispatches to the Reconciler and scheduler and the Conclave broker. Both the Reconciler and scheduler and the Conclave broker record state and SHA-256 audit rows to the Store (SQLite WAL migrations 0001-0014; PostgreSQL migrations its own migrations parked). The Reconciler launches workloads with short-lived sc_task_ leases through four execution adapters: Docker or Podman containers call the Model Gate and MCP Gate with their lease; deterministic controllers call the MCP Gate and are refused at the Model Gate; coding-agent runs (Git worktree with macOS Seatbelt, or council harness containers) call the MCP Gate; and the Kubernetes Citadel adapter is parked and drawn dashed. The Model Gate, MCP Gate and Approval Queue all run inside sablecourtd. Actions marked approve by policy pass from the MCP Gate to the Approval Queue, which pins the payload SHA-256 digest and waits for human confirmation through a macOS dialog or a paired device ECDSA P-256 signature.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="1160" rx="18" fill="#08060e"/>
+
+  <rect class="lane" x="24" y="24" width="1232" height="144" rx="14"/>
+  <text class="lanet" x="44" y="52">CALLERS</text>
+  <rect class="box" x="44" y="68" width="320" height="80" rx="10"/>
+  <text class="h" x="60" y="94">sablectl and web UI</text>
+  <text class="s" x="60" y="114">CLI, stdio MCP, internal/ui</text>
+  <text class="s" x="60" y="132">op_ token or session; pairing 503</text>
+  <rect class="ext" x="440" y="68" width="232" height="80" rx="10"/>
+  <text class="h" x="456" y="94">Shadewright</text>
+  <text class="s" x="456" y="114">Escalation API</text>
+  <text class="s" x="456" y="132">scoped bearer token</text>
+  <rect class="ext" x="748" y="68" width="244" height="80" rx="10"/>
+  <text class="h" x="764" y="94">Nightloom</text>
+  <text class="s" x="764" y="114">Observer and Scry API</text>
+  <text class="s" x="764" y="132">read-only observer token</text>
+
+  <rect class="lane" x="24" y="232" width="1232" height="304" rx="14"/>
+  <text class="lanet" x="44" y="260">SABLECOURTD</text>
+  <rect class="key" x="44" y="276" width="1192" height="84" rx="12"/>
+  <text class="h" x="60" y="304">HTTP server</text>
+  <text class="s" x="60" y="324">operator auth, same-origin CSRF, 2 MiB write cap, internal/ui</text>
+  <text class="s" x="60" y="342">AttachHub Scry ring buffer; live Takeover and local STT/TTS voice parked</text>
+
+  <rect class="box" x="44" y="424" width="436" height="88" rx="10"/>
+  <text class="h" x="60" y="452">Reconciler and scheduler</text>
+  <text class="s" x="60" y="474">tasks, workflows, context packets</text>
+  <text class="s" x="60" y="492">mints short-lived sc_task_ leases</text>
+  <rect class="box" x="556" y="424" width="324" height="88" rx="10"/>
+  <text class="h" x="572" y="452">Store and audit chain</text>
+  <text class="s" x="572" y="474">SQLite WAL (0001-0014), SHA-256 chain</text>
+  <text class="s" x="572" y="492">PostgreSQL (its own migrations, parked)</text>
+  <rect class="box" x="956" y="424" width="280" height="88" rx="10"/>
+  <text class="h" x="972" y="452">Conclave broker</text>
+  <text class="s" x="972" y="474">Vassals, Wards, Decrees, Relics</text>
+  <text class="s" x="972" y="492">bounded council rounds</text>
+
+  <rect class="lane" x="24" y="604" width="300" height="492" rx="14"/>
+  <text class="lanet" x="44" y="632">MODEL GATE</text>
+  <text class="idt" x="44" y="652">IN SABLECOURTD</text>
+  <rect class="box" x="44" y="668" width="260" height="184" rx="10"/>
+  <text class="h" x="60" y="698">Model Gate</text>
+  <text class="s" x="60" y="720">sc_task_ lease, budget, fallback</text>
+  <text class="s" x="60" y="738">optional upstream gateway</text>
+
+  <rect class="lane" x="420" y="604" width="440" height="492" rx="14"/>
+  <text class="lanet" x="440" y="632">EXECUTION ADAPTERS</text>
+  <rect class="box" x="440" y="668" width="400" height="72" rx="10"/>
+  <text class="h" x="456" y="694">Docker / Podman</text>
+  <text class="s" x="456" y="716">internal bridge, CapDrop ALL; long-lived agents</text>
+  <rect class="bad" x="440" y="780" width="400" height="72" rx="10"/>
+  <text class="h" x="456" y="806">Deterministic controller</text>
+  <text class="s" x="456" y="828">zero-LLM; wraps Docker or K8s; Model Gate refused</text>
+  <rect class="box" x="440" y="892" width="400" height="72" rx="10"/>
+  <text class="h" x="456" y="918">coding-agent</text>
+  <text class="s" x="456" y="940">Git worktree, macOS Seatbelt; council containers</text>
+  <rect class="plan" x="440" y="1004" width="400" height="72" rx="10"/>
+  <text class="h" x="456" y="1030">Kubernetes Citadel</text>
+  <text class="s" x="456" y="1052">Jobs, Deployments, optional RuntimeClass (parked)</text>
+
+  <rect class="lane" x="956" y="604" width="300" height="492" rx="14"/>
+  <text class="lanet" x="976" y="632">DATA AND APPROVALS</text>
+  <text class="idt" x="976" y="652">IN SABLECOURTD</text>
+  <rect class="box" x="976" y="668" width="260" height="288" rx="10"/>
+  <text class="h" x="992" y="698">MCP Gate</text>
+  <text class="s" x="992" y="720">built-in tools, typed actions</text>
+  <text class="s" x="992" y="738">upstream MCP bridge (parked)</text>
+  <rect class="wait" x="976" y="1004" width="260" height="76" rx="10"/>
+  <text class="h" x="992" y="1028">Approval Queue</text>
+  <text class="s" x="992" y="1048">pinned SHA-256; macOS dialog</text>
+  <text class="s" x="992" y="1066">or P-256 device signature</text>
+
+  <path class="f" d="M240 148V274" marker-end="url(#a)"/>
+  <text class="lbl" x="252" y="204">operator auth</text>
+  <path class="f" d="M556 148V274" marker-end="url(#a)"/>
+  <text class="lbl" x="568" y="204">incidents</text>
+  <path class="r" d="M870 148V274" marker-end="url(#m)"/>
+  <text class="lbl" x="882" y="204">read-only</text>
+
+  <path class="f" d="M262 360V422" marker-end="url(#a)"/>
+  <text class="lbl" x="274" y="396">tasks, schedules</text>
+  <path class="f" d="M1096 360V422" marker-end="url(#a)"/>
+  <text class="lbl" x="1108" y="396">conclaves, decrees</text>
+  <path class="f" d="M480 468H554" marker-end="url(#a)"/>
+  <text class="lbl" x="518" y="460" text-anchor="middle">records</text>
+  <path class="f" d="M956 468H882" marker-end="url(#a)"/>
+  <text class="lbl" x="918" y="460" text-anchor="middle">records</text>
+
+  <path class="f" d="M456 512V602" marker-end="url(#a)"/>
+  <text class="lbl" x="468" y="574">launches with lease</text>
+
+  <path class="f" d="M440 704H306" marker-end="url(#a)"/>
+  <text class="lbl" x="372" y="696" text-anchor="middle">sc_task_ lease</text>
+  <path class="f" d="M840 704H974" marker-end="url(#a)"/>
+  <text class="lbl" x="908" y="696" text-anchor="middle">sc_task_ lease</text>
+  <path class="deny" d="M440 816H306" marker-end="url(#x)"/>
+  <text class="no" x="372" y="808" text-anchor="middle">never</text>
+  <path class="f" d="M840 816H974" marker-end="url(#a)"/>
+  <text class="lbl" x="908" y="808" text-anchor="middle">sc_task_ lease</text>
+  <path class="f" d="M840 928H974" marker-end="url(#a)"/>
+  <text class="lbl" x="908" y="920" text-anchor="middle">sc_task_ lease</text>
+  <path class="f" d="M1106 956V1002" marker-end="url(#a)"/>
+  <text class="lbl" x="1118" y="984">approve</text>
+
+  <rect class="key" x="44" y="1120" width="22" height="14" rx="3"/>
+  <text class="lbl" x="76" y="1132">HTTP entry</text>
+  <rect class="ext" x="200" y="1120" width="22" height="14" rx="3"/>
+  <text class="lbl" x="232" y="1132">outside Sablecourt</text>
+  <rect class="wait" x="408" y="1120" width="22" height="14" rx="3"/>
+  <text class="lbl" x="440" y="1132">waits for a person</text>
+  <rect class="plan" x="616" y="1120" width="22" height="14" rx="3"/>
+  <text class="lbl" x="648" y="1132">parked</text>
+  <path class="deny" d="M756 1127H784" marker-end="url(#x)"/>
+  <text class="lbl" x="794" y="1132">refused</text>
+</svg>

@@ -195,6 +195,8 @@ func conclaveReportBudgetTotals(ctx context.Context, st Store, id string) (domai
 			return domain.BudgetTotals{}, err
 		}
 		sum.InputTokens += totals.InputTokens
+		sum.CacheWriteTokens += totals.CacheWriteTokens
+		sum.CacheReadTokens += totals.CacheReadTokens
 		sum.OutputTokens += totals.OutputTokens
 		sum.CostMicroUSD += totals.CostMicroUSD
 	}
@@ -840,8 +842,8 @@ func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, room lockedConclave, bu
 		args = []any{room.ID}
 	}
 	err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
-		FROM budget_ledger WHERE task_id IN (`+tasks+")", args...).Scan(&totals.InputTokens, &totals.OutputTokens, &totals.CostMicroUSD)
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
+		FROM budget_ledger WHERE task_id IN (`+tasks+")", args...).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)
 	if err != nil {
 		return "", err
 	}
@@ -850,11 +852,12 @@ func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, room lockedConclave, bu
 
 func conclaveBudgetReason(totals domain.BudgetTotals, budget domain.PerTaskBudget) string {
 	cost := float64(totals.CostMicroUSD) / 1_000_000
+	totalInput := totals.TotalInputTokens()
 	switch {
 	case budget.MaxCostUSD > 0 && cost >= budget.MaxCostUSD:
 		return fmt.Sprintf("budget_exceeded($%.4f >= $%.2f)", cost, budget.MaxCostUSD)
-	case budget.MaxInputTokens > 0 && totals.InputTokens >= budget.MaxInputTokens:
-		return fmt.Sprintf("input_tokens_exceeded(%d >= %d)", totals.InputTokens, budget.MaxInputTokens)
+	case budget.MaxInputTokens > 0 && totalInput >= budget.MaxInputTokens:
+		return fmt.Sprintf("input_tokens_exceeded(%d >= %d)", totalInput, budget.MaxInputTokens)
 	case budget.MaxOutputTokens > 0 && totals.OutputTokens >= budget.MaxOutputTokens:
 		return fmt.Sprintf("output_tokens_exceeded(%d >= %d)", totals.OutputTokens, budget.MaxOutputTokens)
 	default:
