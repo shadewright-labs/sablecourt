@@ -389,6 +389,59 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 	return nil
 }
 
+func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+	// One read-committed transaction: lock the row first, then spend it with
+	// an UPDATE compared against the database's clock. The lock comes first
+	// because PostgreSQL evaluates an UPDATE's predicate again after a row
+	// lock wait only when the holder committed a new version of the row; after
+	// a rollback, or a lock taken by SELECT FOR UPDATE or FOR SHARE, it keeps
+	// the predicate as evaluated before the wait. With the lock already held,
+	// the UPDATE cannot wait for the row, and clock_timestamp() (read when the
+	// predicate is evaluated, not at transaction start as now() is) is always
+	// read after any wait, so neither a lock wait nor a pause of the daemon
+	// can carry an earlier time past the expiry. expires_at is RFC 3339 text
+	// and is cast to timestamptz, which compares it as a time (as text,
+	// "...:05Z" would sort after "...:05.5Z") and rounds it to microseconds.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT 1 FROM approvals WHERE id = $1 FOR UPDATE`, id)
+	if err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE approvals SET status = $1
+		WHERE id = $2 AND status = $3 AND task_id = $4 AND capability = $5 AND payload_sha256 = $6
+		  AND expires_at::timestamptz > clock_timestamp()
+	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return tx.Commit()
+	}
+	if err := tx.Rollback(); err != nil {
+		return err
+	}
+	if n != 0 {
+		return fmt.Errorf("consume approval: %d rows updated", n)
+	}
+	a, err := s.GetApproval(ctx, id)
+	if err != nil {
+		return err
+	}
+	return store.ConsumeRefusal(a, taskID, capability, payloadSHA256)
+}
+
 func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)

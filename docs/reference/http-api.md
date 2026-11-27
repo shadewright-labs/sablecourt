@@ -265,7 +265,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/webhook/github.go`, `internal/a2a/h
 
 ## Not built yet
 
-Decided in [ADR-0014](../adr/0014-identity-and-authentication.md), which is Proposed: passkey enrolment, per-session revocation and a single-use `consumed` state for approvals. None of them exists on `main`. `POST /logout` ends all sessions at once by replacing the signing key; a single session cookie cannot be revoked on its own.
+Decided in [ADR-0014](../adr/0014-identity-and-authentication.md), which is Proposed: passkey enrolment and per-session revocation. Neither exists on `main`. `POST /logout` ends all sessions at once by replacing the signing key; a single session cookie cannot be revoked on its own.
 
 Decided in [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): operator acceptance and scoped matching of learnings. `POST /api/v1/learnings` stays disabled until then.
 

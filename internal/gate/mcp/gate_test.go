@@ -489,3 +489,138 @@ func TestActionKeepsSnapshotDuringReload(t *testing.T) {
 		t.Fatalf("next action did not use reloaded policy: %d %s", rec.Code, rec.Body)
 	}
 }
+
+func approveOpenPR(t *testing.T, gate *Gate, queue *approval.Queue, token, payload string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.open_pr", strings.NewReader(`{"payload":`+payload+`}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	gate.ActionHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var pending struct {
+		ApprovalID    string `json:"approval_id"`
+		PayloadSHA256 string `json:"payload_sha256"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Approve(context.Background(), pending.ApprovalID, pending.PayloadSHA256, "operator"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	return pending.ApprovalID
+}
+
+func callWithApproval(gate *Gate, token, approvalID, payload string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.open_pr", strings.NewReader(`{"approvalId":"`+approvalID+`","payload":`+payload+`}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	gate.ActionHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+// An approval authorizes one execution: the second call with the same
+// approvalId is refused and the action does not run again.
+func TestApprovalIsConsumedOnFirstUse(t *testing.T) {
+	ctx := context.Background()
+	gate, st, queue, token := setupMCPGateTest(t)
+	runs := 0
+	gate.RegisterAction("git.open_pr", func(context.Context, domain.Workload, string, json.RawMessage) (any, error) {
+		runs++
+		return map[string]string{"pr_url": "https://github.com/acme/widgets/pull/1"}, nil
+	})
+	payload := `{"head":"sablecourt/task-1","title":"Fix bug"}`
+	id := approveOpenPR(t, gate, queue, token, payload)
+
+	if rec := callWithApproval(gate, token, id, payload); rec.Code != http.StatusOK {
+		t.Fatalf("first use: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := callWithApproval(gate, token, id, payload); rec.Code != http.StatusForbidden {
+		t.Fatalf("second use: want 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if runs != 1 {
+		t.Fatalf("action ran %d times, want 1", runs)
+	}
+	got, err := st.GetApproval(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.ApprovalConsumed {
+		t.Fatalf("status %q, want consumed", got.Status)
+	}
+}
+
+// A consumed approval stays consumed when the side effect fails: the agent
+// needs a fresh approval, and the failure is visible in the audit log.
+func TestApprovalConsumedBeforeFailedSideEffectIsNotReusable(t *testing.T) {
+	ctx := context.Background()
+	gate, st, queue, token := setupMCPGateTest(t)
+	runs := 0
+	gate.RegisterAction("git.open_pr", func(context.Context, domain.Workload, string, json.RawMessage) (any, error) {
+		runs++
+		return nil, errors.New("github unavailable")
+	})
+	payload := `{"head":"sablecourt/task-1","title":"Fix bug"}`
+	id := approveOpenPR(t, gate, queue, token, payload)
+
+	if rec := callWithApproval(gate, token, id, payload); rec.Code != http.StatusBadGateway {
+		t.Fatalf("first use: want 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := callWithApproval(gate, token, id, payload); rec.Code != http.StatusForbidden {
+		t.Fatalf("retry: want 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if runs != 1 {
+		t.Fatalf("action ran %d times, want 1", runs)
+	}
+	records, err := st.ListAudit(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consumed, failed bool
+	for _, r := range records {
+		if r.Category == "approval" && r.Outcome == "consumed" && strings.Contains(r.DetailJSON, id) {
+			consumed = true
+		}
+		if r.Category == "data_action_gate" && r.Outcome == "error" && strings.Contains(r.DetailJSON, id) {
+			failed = true
+		}
+	}
+	if !consumed || !failed {
+		t.Fatalf("audit must show the consumption and the failed use of %s (consumed=%v failed=%v)", id, consumed, failed)
+	}
+}
+
+// An approved row past its expiry no longer authorizes anything.
+func TestExpiredApprovedRowIsRefused(t *testing.T) {
+	ctx := context.Background()
+	gate, st, _, token := setupMCPGateTest(t)
+	runs := 0
+	gate.RegisterAction("git.open_pr", func(context.Context, domain.Workload, string, json.RawMessage) (any, error) {
+		runs++
+		return map[string]string{}, nil
+	})
+	payload := `{"head":"sablecourt/task-1","title":"Fix bug"}`
+	var canonical any
+	_ = json.Unmarshal([]byte(payload), &canonical)
+	canon, digest, err := approval.CanonicalizeAndHash(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	if err := st.CreateApproval(ctx, domain.Approval{
+		ID: "apr_expired", TaskID: "task-1", WorkloadName: "triage-agent", Capability: "action:git.open_pr",
+		PayloadCanonicalJSON: canon, PayloadSHA256: digest, ExpiresAt: past.Add(30 * time.Minute), CreatedAt: past,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DecideApproval(ctx, "apr_expired", digest, domain.ApprovalApproved, "operator", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if rec := callWithApproval(gate, token, "apr_expired", payload); rec.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for expired approval, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if runs != 0 {
+		t.Fatalf("action ran %d times, want 0", runs)
+	}
+}
