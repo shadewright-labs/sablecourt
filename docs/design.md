@@ -10,7 +10,7 @@ Sablecourt v0.1 builds three Go binaries from one module:
 - `sablectl`: command-line client for submitting tasks, inspecting workloads and audit records, reloading Git-tracked manifests, and driving the approval queue.
 - `sablecourt-agent`: a small agent program that runs in a container image (`make agent-image`).
 
-Workload code does not run inside the daemon process: a coding agent is a child process of the daemon, and a container workload runs in the container engine. The store (`internal/store.Store`), the runtime (`internal/runtime.Adapter`), the secret store (`internal/secret.SecretStore`) and the out-of-band approver (`internal/approval.Approver`) are Go interfaces. SQLite and PostgreSQL implement the store, and the Docker, Kubernetes, coding and controller packages implement the runtime.
+Workload code does not run inside the daemon process: a coding agent runs in a harness container (or, only with `--unsafe-host-harnesses`, as a child process of the daemon), and a container workload runs in the container engine. The store (`internal/store.Store`), the runtime (`internal/runtime.Adapter`), the secret store (`internal/secret.SecretStore`) and the out-of-band approver (`internal/approval.Approver`) are Go interfaces. SQLite and PostgreSQL implement the store, and the Docker, Kubernetes, coding and controller packages implement the runtime.
 
 ## Upstream Go library stack
 
@@ -50,7 +50,7 @@ spec:
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
     repoPath: /path/to/repo
-    sandbox: seatbelt # only seatbelt is accepted today; bubblewrap and docker are not implemented for coding runs
+    sandbox: seatbelt # only seatbelt is accepted today, for the unsupported host path; bubblewrap and docker are not implemented for host coding runs
   agentCard:
     description: Triages incoming repository issues and proposes bounded fixes.
     skills:

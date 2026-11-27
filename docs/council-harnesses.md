@@ -1,6 +1,6 @@
 # Council harness images and logins
 
-In Sanctum container mode, each council harness turn (`claude`, `codex`, `agy`) runs in its own container, as ADR-0011 describes. Before a council is created, `sablecourtd` checks each role's image, login volume, tool (for `claude` and `agy`) and credential path, and stops at the first failure. Container mode applies when a Docker runtime is configured; without one, the host path with its own checks is used.
+In Sanctum container mode, each council harness turn (`claude`, `codex`, `agy`) runs in its own container, as ADR-0011 describes. Before a council is created, `sablecourtd` checks each role's image, login volume, tool (for `claude` and `agy`) and credential path, and stops at the first failure. Container mode applies when a Docker runtime is configured; without one, a council is refused unless the daemon runs with `--unsafe-host-harnesses` (see below).
 
 ## Setup, once per harness
 
@@ -41,4 +41,4 @@ The messages are fixed text built from the role name. They do not include Docker
 
 ## Panel workloads
 
-In container mode the three built-in panel workloads record `container` as their sandbox, and the council request path skips the host executable lookup and the Seatbelt check, because the container is the confinement. The daemon still runs the host sandbox availability check when it starts. Without a Docker runtime, a council is refused unless the daemon runs with `--unsafe-host-harnesses`; then the council request path keeps the host executable and Seatbelt checks unchanged. That is host mode, which the [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes unsupported for 0.1.0.
+In container mode the three built-in panel workloads record `container` as their sandbox, and the council request path skips the host executable lookup and the Seatbelt check, because the container is the confinement. The daemon runs the host sandbox availability check at startup only with `--unsafe-host-harnesses`. Without a Docker runtime, a council is refused unless the daemon runs with that flag and the check passes (it fails outside macOS); the council request path then keeps the host executable and Seatbelt checks unchanged. That is host mode, which the [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes unsupported for 0.1.0.
