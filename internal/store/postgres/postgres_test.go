@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -184,17 +187,60 @@ func openFreshPostgres(t *testing.T, dsn string) *PostgresStore {
 			_ = a.Close()
 		}
 	})
-	u, err := url.Parse(dsn)
+	fresh, err := withDatabase(dsn, name)
 	if err != nil {
 		t.Fatalf("SABLECOURT_TEST_POSTGRES_DSN must be a URL for this test: %v", err)
 	}
-	u.Path = "/" + name
-	st, err := Open(u.String())
+	st, err := Open(fresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// withDatabase returns the URL dsn pointing at database name. A dbname or
+// database query parameter overrides the URL path in pgx, so both are
+// dropped and only the path names the database.
+func withDatabase(dsn, name string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", fmt.Errorf("not a postgres URL: scheme %q", u.Scheme)
+	}
+	q := u.Query()
+	q.Del("dbname")
+	q.Del("database")
+	u.RawQuery = q.Encode()
+	u.Path = "/" + name
+	return u.String(), nil
+}
+
+func TestWithDatabaseSelectsTheNewDatabase(t *testing.T) {
+	cases := []string{
+		"postgres://localhost/postgres",
+		"postgres://localhost/postgres?dbname=sablecourt_test",
+		"postgresql://user@localhost:5432/postgres?sslmode=disable&database=sablecourt_test",
+		"postgres://localhost?dbname=sablecourt_test",
+	}
+	for _, dsn := range cases {
+		got, err := withDatabase(dsn, "sc_upgrade_x")
+		if err != nil {
+			t.Fatalf("withDatabase(%q): %v", dsn, err)
+		}
+		cfg, err := pgconn.ParseConfig(got)
+		if err != nil {
+			t.Fatalf("parse %q: %v", got, err)
+		}
+		if cfg.Database != "sc_upgrade_x" {
+			t.Errorf("withDatabase(%q) = %q selects database %q, want sc_upgrade_x", dsn, got, cfg.Database)
+		}
+	}
+	if _, err := withDatabase("host=localhost dbname=x", "y"); err == nil {
+		t.Error("a keyword/value DSN was accepted")
+	}
 }
 
 // An approval the old code left approved after using it cannot be used once
