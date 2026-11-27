@@ -399,7 +399,7 @@ func TestArgumentValidationSendsNoRequest(t *testing.T) {
 		{"memory delete missing key", []string{"memory", "delete", "ns"}, "accepts 2 arg(s)"},
 		{"relic get missing name", []string{"conclave", "relic", "get", "c1"}, "accepts 2 arg(s)"},
 		{"unknown digest flag spelling", []string{"approval", "approve", "a1", "--sha", "x"}, "unknown flag"},
-		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1"}, "invalid daemon API URL"},
+		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1", "--digest", "d"}, "invalid daemon API URL"},
 		{"api url with user info", []string{"--api", "http://user:pass@example.com", "approval", "deny", "a1"}, "invalid daemon API URL"},
 	}
 	for _, tc := range cases {
@@ -423,7 +423,7 @@ func TestRemotePlaintextDaemonRefusesExplicitCredential(t *testing.T) {
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
-	root.SetArgs([]string{"--api", "http://daemon.invalid", "approval", "approve", "a1"})
+	root.SetArgs([]string{"--api", "http://daemon.invalid", "approval", "approve", "a1", "--digest", "d"})
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "operator credentials require HTTPS or a local daemon") {
 		t.Fatalf("error = %v, want HTTPS refusal", err)
@@ -438,7 +438,7 @@ func TestJSONFlagPrintsRawDaemonBody(t *testing.T) {
 		args  []string
 		route string
 	}{
-		{[]string{"approval", "approve", "a1"}, "POST /api/v1/approvals/a1/approve"},
+		{[]string{"approval", "approve", "a1", "--digest", "d"}, "POST /api/v1/approvals/a1/approve"},
 		{[]string{"approval", "deny", "a1"}, "POST /api/v1/approvals/a1/deny"},
 		{[]string{"approval", "list"}, "GET /api/v1/approvals"},
 		{[]string{"device", "revoke", "d1"}, "POST /api/v1/devices/d1/revoke"},
@@ -821,7 +821,7 @@ func TestLocalDaemonWithUnreadableCredentialFailsClosed(t *testing.T) {
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
-	root.SetArgs([]string{"--api", "http://localhost:7432", "approval", "approve", "a1"})
+	root.SetArgs([]string{"--api", "http://localhost:7432", "approval", "approve", "a1", "--digest", "d"})
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "read operator credential") {
 		t.Fatalf("err = %v, want credential read failure", err)

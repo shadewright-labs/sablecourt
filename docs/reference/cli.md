@@ -47,7 +47,7 @@ Approve a pending request (triggers out-of-band confirmation on daemon)
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--digest` | string | empty | Expected SHA-256 digest of the canonical payload |
+| `--digest` | string | empty | Expected SHA-256 digest of the canonical payload (required) |
 
 ### `sablectl approval deny <approval-id>`
 
