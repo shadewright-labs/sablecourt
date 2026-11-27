@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -63,19 +62,37 @@ func (a *Adapter) dockerSocket() string {
 }
 
 // dockerSockets lists every local runtime endpoint a checkout must not
-// expose: the Unix socket DOCKER_HOST names (the one the client really uses)
-// and the discovered socket.
+// expose: the Unix socket the client itself resolved (DaemonHost), the one
+// DOCKER_HOST names, and the discovered socket. Both host strings are read
+// with the Moby client's own ParseHostURL, which takes everything after
+// unix:// as a literal path, so a #, ? or %20 in it is not reinterpreted.
 func (a *Adapter) dockerSockets() []string {
 	var out []string
-	if host := os.Getenv("DOCKER_HOST"); host != "" {
-		if u, err := url.Parse(host); err == nil && u.Scheme == "unix" && u.Path != "" {
-			out = append(out, filepath.Clean(u.Path))
+	add := func(host string) {
+		if path := unixSocketPath(host); path != "" {
+			out = append(out, path)
 		}
 	}
+	if c, ok := a.Client.(interface{ DaemonHost() string }); ok {
+		add(c.DaemonHost())
+	}
+	add(os.Getenv("DOCKER_HOST"))
 	if sock := a.dockerSocket(); sock != "" {
 		out = append(out, sock)
 	}
 	return out
+}
+
+// unixSocketPath returns the cleaned socket path of a unix:// host, or "".
+func unixSocketPath(host string) string {
+	if host == "" {
+		return ""
+	}
+	u, err := client.ParseHostURL(host)
+	if err != nil || u.Scheme != "unix" || u.Host == "" {
+		return ""
+	}
+	return filepath.Clean(u.Host)
 }
 
 // SetAttachHub ties log streams to the daemon lifetime across individual Start calls.

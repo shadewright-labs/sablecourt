@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/moby/moby/api/types/mount"
+
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -114,7 +116,7 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 			}
 			want := []mount.Mount{
 				{Type: mount.TypeBind, Source: src, Target: "/workspace", ReadOnly: !tc.writable, BindOptions: &mount.BindOptions{NonRecursive: true}},
-				{Type: mount.TypeVolume, Source: f.vol.Name, Target: "/home/harness"},
+				{Type: mount.TypeVolume, Source: f.vol.Name, Target: harnessimages.StateDir},
 			}
 			if tc.tool {
 				want = append(want, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
@@ -142,7 +144,7 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 					t.Fatalf("variable %q is not on the harness allowlist", key)
 				}
 			}
-			for _, need := range []string{"HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "SABLECOURT_DATA_GATE_URL=" + gate, "HOME=/home/harness", "TMPDIR=/scratch"} {
+			for _, need := range []string{"HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "SABLECOURT_DATA_GATE_URL=" + gate, "HOME=" + harnessimages.StateDir, "TMPDIR=/scratch"} {
 				if !slices.Contains(c.Env, need) {
 					t.Fatalf("env %v lacks %q", c.Env, need)
 				}
