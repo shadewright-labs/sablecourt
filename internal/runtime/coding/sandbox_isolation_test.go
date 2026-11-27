@@ -56,7 +56,7 @@ func TestSeatbeltRefusesOperatorStateAndSiblingWorktree(t *testing.T) {
 			headCommit := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
 			worktreeRoot := filepath.Join(filepath.Dir(dbPath), "worktrees")
 
-			siblingAdapter := NewAdapter(worktreeRoot)
+			siblingAdapter := newHostModeAdapter(worktreeRoot)
 			siblingAdapter.DryRun = true
 			siblingSpec := scruntime.LaunchSpec{
 				TaskID: "sibling-task",
@@ -130,7 +130,7 @@ printf 'isolation-verified\n'
 `, tokenPath, canonicalTokenPath, stateDir, canonicalStateDir, dbPath, siblingFile, siblingSession, siblingHandle.WorkDir, worktreeRoot, writeCheck)
 			testWrite(t, harnessDir, "claude", script, 0o700)
 
-			adapter := NewAdapter(worktreeRoot)
+			adapter := newHostModeAdapter(worktreeRoot)
 			adapter.HarnessPaths = map[string]string{"claude": harnessPath}
 			spec := scruntime.LaunchSpec{
 				TaskID: "subject-" + tc.name,

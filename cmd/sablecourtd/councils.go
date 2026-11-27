@@ -23,10 +23,10 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
-	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -286,6 +286,14 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 				return
 			}
 		}
+		// Seats run in harness containers; with none and host mode off the
+		// dispatcher cannot launch them, so say why before any host check.
+		if cfg.codingRuntime != nil {
+			if st := cfg.codingRuntime(); st.Mode == "unavailable" {
+				fail(http.StatusServiceUnavailable, "council seats cannot start: "+st.unavailableReason())
+				return
+			}
+		}
 		if cfg.preflightCouncilHarness == nil {
 			for _, role := range councilPanel {
 				bin, err := exec.LookPath(role)
@@ -298,7 +306,7 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		req.spec.Checkout, err = preflightCouncilCheckout(ctx, req.repo, req.ref, req.writer, req.live, cfg.operatorToken, cfg.councilPrivateDirs)
+		req.spec.Checkout, err = preflightCouncilCheckout(ctx, req.repo, req.ref, req.writer, req.live, cfg.operatorToken, cfg.councilMounts)
 		if err != nil {
 			if ctx.Err() != nil {
 				fail(http.StatusServiceUnavailable, "council checkout preflight timed out")
@@ -367,29 +375,6 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 	}
 }
 
-var homeCredentialPaths = [...]string{
-	".ssh",
-	".gnupg",
-	".aws",
-	".kube",
-	".docker",
-	".config",
-	".azure",
-	".gcloud",
-	".gcp",
-	".claude",
-	".codex",
-	".gemini",
-	".agy",
-	".netrc",
-	".npmrc",
-	".pypirc",
-	".git-credentials",
-	filepath.Join(".local", "share", "sablecourt"),
-	filepath.Join("Library", "Keychains"),
-	filepath.Join("Library", "Application Support"),
-}
-
 func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool) {
 	if !info.IsDir() {
 		return 0, 0, false
@@ -401,73 +386,7 @@ func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool
 	return uint64(stat.Dev), stat.Ino, true
 }
 
-func resolveExistingPath(path string) (string, error) {
-	clean := filepath.Clean(path)
-	if !filepath.IsAbs(clean) {
-		return "", errors.New("path must be absolute")
-	}
-	cur := clean
-	var tail []string
-	for {
-		resolved, err := filepath.EvalSymlinks(cur)
-		if err == nil {
-			for i := len(tail) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, tail[i])
-			}
-			return resolved, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return clean, nil
-		}
-		tail = append(tail, filepath.Base(cur))
-		cur = parent
-	}
-}
-
-func pathWithinDir(base, target string) bool {
-	rel, err := filepath.Rel(base, target)
-	return err == nil && (rel == "." || filepath.IsLocal(rel))
-}
-
-func pathOverlaps(a, b string) bool {
-	return pathWithinDir(a, b) || pathWithinDir(b, a)
-}
-
-func forbiddenCouncilPaths(extra []string) ([]string, error) {
-	stateDir, err := operatortoken.StateDir()
-	if err != nil {
-		return nil, errors.New("cannot resolve daemon state directory")
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil || !filepath.IsAbs(homeDir) {
-		return nil, errors.New("cannot resolve daemon home directory")
-	}
-	raw := make([]string, 0, 1+len(extra)+len(homeCredentialPaths))
-	raw = append(raw, stateDir)
-	raw = append(raw, extra...)
-	for _, rel := range homeCredentialPaths {
-		raw = append(raw, filepath.Join(homeDir, rel))
-	}
-	out := make([]string, 0, len(raw))
-	for _, p := range raw {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		resolved, err := resolveExistingPath(p)
-		if err != nil {
-			return nil, errors.New("cannot resolve protected daemon path")
-		}
-		out = append(out, resolved)
-	}
-	return out, nil
-}
-
-func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, live bool, operatorToken string, privateDirs []string) (store.CouncilCheckout, error) {
+func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, live bool, operatorToken string, mounts *mountguard.Guard) (store.CouncilCheckout, error) {
 	checkout := store.CouncilCheckout{}
 	source, err := filepath.EvalSymlinks(repo)
 	if err != nil || !filepath.IsAbs(source) || operatorToken != "" && strings.Contains(source, operatorToken) ||
@@ -483,14 +402,11 @@ func preflightCouncilCheckout(ctx context.Context, repo, ref, writer string, liv
 	if !ok {
 		return checkout, errors.New("council repo must be owned by the daemon user")
 	}
-	forbidden, err := forbiddenCouncilPaths(privateDirs)
-	if err != nil {
-		return checkout, err
-	}
-	for _, p := range forbidden {
-		if pathOverlaps(source, p) {
-			return checkout, errors.New("council repo must not overlap daemon state or credential directories")
-		}
+	// The live checkout is the one bind source an operator names, so it is
+	// checked by file identity: it may not be, contain or share identity with
+	// a daemon path or credential directory, nor lie under one.
+	if err := mounts.CheckLive(source, nil); err != nil {
+		return checkout, errors.New("council repo must not overlap daemon state or credential directories")
 	}
 	gitDir := filepath.Join(source, ".git")
 	gitInfo, err := os.Lstat(gitDir)

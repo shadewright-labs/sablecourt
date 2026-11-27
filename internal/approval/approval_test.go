@@ -127,6 +127,47 @@ func TestConfirmationMessageShowsTargetAndDigest(t *testing.T) {
 	}
 }
 
+// The dialogs of git.push and git.merge_pr show the approved commit SHA in
+// full among the target fields, before any other field; the git.push dialog
+// also shows the push destination there.
+func TestConfirmationMessageShowsApprovedCommit(t *testing.T) {
+	sha := strings.Repeat("ab", 20)
+	cases := []struct {
+		capability string
+		payload    map[string]any
+		targets    []string
+	}{
+		{
+			capability: "action:git.push",
+			payload:    map[string]any{"branch": "sablecourt/task-1", "commit_sha": sha, "destination": "https://github.com/acme/widgets.git", "remote": "origin"},
+			targets:    []string{`branch: "sablecourt/task-1"`, `commit_sha: "` + sha + `"`, `destination: "https://github.com/acme/widgets.git"`},
+		},
+		{
+			capability: "action:git.merge_pr",
+			payload:    map[string]any{"owner": "acme", "repo": "widgets", "pr_number": 7, "commit_sha": sha, "merge_method": "squash"},
+			targets:    []string{`owner: "acme"`, `repo: "widgets"`, `pr_number: "7"`, `commit_sha: "` + sha + `"`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.capability, func(t *testing.T) {
+			canonical, digest, err := CanonicalizeAndHash(tc.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := confirmationMessage(ConfirmationRequest{Capability: tc.capability, PayloadSHA256: digest, Summary: canonical})
+			target := msg[strings.Index(msg, "\nTarget:\n"):strings.Index(msg, "\nDigest")]
+			for _, want := range tc.targets {
+				if !strings.Contains(target, want) {
+					t.Errorf("target section lacks %q:\n%s", want, msg)
+				}
+			}
+			if strings.Contains(target, "(missing)") {
+				t.Errorf("target section has a missing field:\n%s", msg)
+			}
+		})
+	}
+}
+
 // A target value cannot fake another line of the dialog.
 func TestConfirmationMessageQuotesTargetValues(t *testing.T) {
 	payload := map[string]string{"owner": "evil\nrepo: widgets", "repo": "other", "head": "sablecourt/x", "base": "main", "title": "t"}

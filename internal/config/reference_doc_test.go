@@ -261,6 +261,7 @@ var exampleDocs = map[string][]string{
 				"mcpTools":["memory.get"],
 				"mcpServers":[{"name":"up","url":"https://mcp.example.test/mcp","secretName":"up_token","authHeader":"Authorization","authPrefix":"Bearer ","allowedTools":["search"]}],
 				"actions":["git.open_pr"],
+				"repos":["shadewright-labs/sablecourt"],
 				"delegateTo":["sup-runtime"]}}}`,
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workload","metadata":{"name":"subject","zone":"sandbox"},"spec":{
 			"class":"coding-agent",

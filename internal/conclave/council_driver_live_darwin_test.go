@@ -55,6 +55,7 @@ echo "Saw $value in a read-only checkout"
 			state := t.TempDir()
 			t.Setenv("SABLECOURT_STATE_DIR", state)
 			a := coding.NewAdapter(filepath.Join(state, "worktrees"))
+			a.HostModeUnsafe = true // This test drives the opt-in Seatbelt host path.
 			a.HarnessPaths = map[string]string{"claude": harness}
 			rec := controlplane.NewReconciler(controlplane.Options{Store: f.Store, Bundle: f.bundle, Adapters: map[domain.WorkloadClass]rt.Adapter{w.Spec.Class: a}})
 			f.Broker.reconciler = rec

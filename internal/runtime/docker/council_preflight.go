@@ -87,9 +87,9 @@ func (a *Adapter) CheckCouncilHarness(ctx context.Context, harness string) error
 	if !ok || cfg.Image == "" || len(cfg.LoginFiles) == 0 || !councilName.MatchString(cfg.LoginVolume) {
 		return fault(FaultBackend, errors.New("harness is not configured"))
 	}
-	engine, ok := a.Client.(councilEngineAPI)
+	engine, ok := a.engineClient().(councilEngineAPI)
 	if !ok {
-		return fault(FaultBackend, errors.New("Docker cannot verify a login probe"))
+		return fault(FaultBackend, a.lacks("Docker cannot verify a login probe"))
 	}
 	imageID, err := a.councilImageID(ctx, cfg.Image)
 	if err != nil {
@@ -146,18 +146,18 @@ func (a *Adapter) EnsureCouncilLoginVolume(ctx context.Context, harness string) 
 	if !ok || !councilName.MatchString(cfg.LoginVolume) {
 		return fault(FaultBackend, errors.New("harness is not configured"))
 	}
-	engine, ok := a.Client.(councilEngineAPI)
+	engine, ok := a.engineClient().(councilEngineAPI)
 	if !ok {
-		return fault(FaultBackend, errors.New("Docker cannot inspect volumes"))
+		return fault(FaultBackend, a.lacks("Docker cannot inspect volumes"))
 	}
 	vol, err := engine.VolumeInspect(ctx, cfg.LoginVolume, client.VolumeInspectOptions{})
 	if err != nil {
 		if !isMissing(err) {
 			return fault(FaultBackend, err)
 		}
-		creator, ok := a.Client.(volumeCreator)
+		creator, ok := a.engineClient().(volumeCreator)
 		if !ok {
-			return fault(FaultBackend, errors.New("Docker cannot create volumes"))
+			return fault(FaultBackend, a.lacks("Docker cannot create volumes"))
 		}
 		if _, err := creator.VolumeCreate(ctx, client.VolumeCreateOptions{
 			Name: cfg.LoginVolume, Driver: "local", Labels: CouncilLoginVolumeLabels(harness),
@@ -209,7 +209,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 		opts.Config.Cmd = append([]string{"-c", toolProbeScript, "probe", councilToolDir + "/" + cfg.Tool.Binary, cfg.Tool.Version, cfg.Tool.SHA256}, cfg.LoginFiles...)
 		opts.HostConfig.Mounts = append(opts.HostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
-	created, err := a.Client.ContainerCreate(ctx, opts)
+	created, err := a.engineClient().ContainerCreate(ctx, opts)
 	if err != nil {
 		return false, fmt.Errorf("create login probe: %w", err)
 	}
@@ -219,7 +219,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 	defer func() {
 		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 		defer done()
-		_, _ = a.Client.ContainerRemove(cleanup, created.ID, client.ContainerRemoveOptions{Force: true})
+		_, _ = a.engineClient().ContainerRemove(cleanup, created.ID, client.ContainerRemoveOptions{Force: true})
 	}()
 	if len(created.Warnings) > 0 {
 		return false, errors.New("Docker reported a warning applying the login probe configuration")
@@ -238,7 +238,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 			return false, &HarnessError{Harness: harness, Fault: FaultToolInvalid, Err: err}
 		}
 	}
-	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return false, fmt.Errorf("start login probe: %w", err)
 	}
 	result := rt.CouncilResult{ContainerID: created.ID}
