@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -13,25 +14,24 @@ import (
 // and O(n^2) by 64x. Small and large runs alternate and each size takes the
 // fastest of several runs, which damps scheduler and GC noise; the bound of 16
 // leaves 2x above linear and still rejects O(n^1.5). CI runs only with -race,
-// which slows Text by about 20x, so under -race the test uses smaller inputs,
-// fewer runs and every raceCaseStep-th case, with the same ratio and bound.
+// which slows Text by about 20x, so under -race the test uses smaller inputs
+// and fewer runs for every case, with the same ratio and bound.
 func TestRedactorLinearGrowth(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing ratios are not measured under -short")
 	}
-	smallSize, runs, step := 1<<12, 5, 1
+	smallSize, runs := 1<<12, 5
 	if raceEnabled {
-		smallSize, runs, step = 1<<10, 3, raceCaseStep
+		smallSize, runs = 1<<10, 2
 	}
-	const (
-		sizeFactor = 8
-		maxRatio   = 16.0
-	)
-	largeSize := sizeFactor * smallSize
 
 	cases := []struct {
 		name  string
 		build func(int) string
+		// minSmall raises the small size for shapes whose regexp leaves the
+		// bit-state backtracker, which is cheaper per byte, for the slower NFA
+		// near 4 KiB. Both sizes must sit on the same side of that step.
+		minSmall int
 	}{
 		{
 			name: "nested yaml mapping",
@@ -136,7 +136,8 @@ func TestRedactorLinearGrowth(t *testing.T) {
 			},
 		},
 		{
-			name: "pem repeated nested headers with final footer",
+			name:     "pem repeated nested headers with final footer",
+			minSmall: 1 << 12,
 			build: func(n int) string {
 				return joinParts("-----BEGIN ", "RSA PRIVATE KEY-----\n") +
 					strings.Repeat(joinParts("-----BEGIN ", "EC PRIVATE KEY-----\n"), max(1, n/29)) +
@@ -307,70 +308,88 @@ func TestRedactorLinearGrowth(t *testing.T) {
 		},
 	}
 
-	for i, tc := range cases {
-		if i%step != 0 {
-			continue
-		}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			smallInput := tc.build(smallSize)
-			largeInput := tc.build(largeSize)
-
-			smallTime, largeTime := fastestRuns(smallInput, largeInput, runs)
-
-			ratio := float64(largeTime) / float64(smallTime)
-			if ratio > maxRatio {
-				t.Fatalf("time ratio %.2f exceeded linear bound %.1f (small=%v large=%v smallLen=%d largeLen=%d)",
-					ratio, maxRatio, smallTime, largeTime, len(smallInput), len(largeInput))
+			if msg := growthViolation(Text, tc.build, max(smallSize, tc.minSmall), runs); msg != "" {
+				t.Fatal(msg)
 			}
 		})
 	}
 }
 
-// fastestRuns calls Text on small and large in turn, after one warm-up call of
+const (
+	growthSizeFactor = 8
+	growthMaxRatio   = 16.0
+)
+
+// growthViolation builds the input at smallSize and growthSizeFactor times
+// that, times fn on both, and returns a message if the time ratio exceeds
+// growthMaxRatio, or "" if it does not. The real test and the self-test below
+// both go through it.
+func growthViolation(fn func(string) Result, build func(int) string, smallSize, runs int) string {
+	smallInput := build(smallSize)
+	largeInput := build(growthSizeFactor * smallSize)
+	smallTime, largeTime := fastestRuns(fn, smallInput, largeInput, runs)
+	ratio := float64(largeTime) / float64(smallTime)
+	if ratio > growthMaxRatio {
+		return fmt.Sprintf("time ratio %.2f exceeded linear bound %.1f (small=%v large=%v smallLen=%d largeLen=%d)",
+			ratio, growthMaxRatio, smallTime, largeTime, len(smallInput), len(largeInput))
+	}
+	return ""
+}
+
+// fastestRuns calls fn on small and large in turn, after one warm-up call of
 // each, and returns the shortest wall time seen for each.
-// raceCaseStep thins the cases under -race: every raceCaseStep-th one runs.
-const raceCaseStep = 3
-
-// growthText is the function under test; the proof that the test catches
-// quadratic growth replaces it.
-var growthText = Text
-
-func fastestRuns(small, large string, runs int) (time.Duration, time.Duration) {
-	growthText(small)
-	growthText(large)
+func fastestRuns(fn func(string) Result, small, large string, runs int) (time.Duration, time.Duration) {
+	fn(small)
+	fn(large)
 	bestSmall := time.Duration(math.MaxInt64)
 	bestLarge := time.Duration(math.MaxInt64)
 	for range runs {
 		start := time.Now()
-		growthText(small)
+		fn(small)
 		bestSmall = min(bestSmall, time.Since(start))
 		start = time.Now()
-		growthText(large)
+		fn(large)
 		bestLarge = min(bestLarge, time.Since(start))
 	}
 	return max(bestSmall, time.Microsecond), max(bestLarge, time.Microsecond)
 }
 
+// growthSink keeps the quadratic wrapper's work from being optimised away.
+var growthSink int
+
+// TestGrowthBoundRejectsSuperlinear runs the real bound on wrappers of Text:
+// one that adds linear work must pass, one that adds quadratic work must fail.
 func TestGrowthBoundRejectsSuperlinear(t *testing.T) {
-	const (
-		smallN   = 1 << 10
-		largeN   = 8 * smallN
-		maxRatio = 16.0
-	)
-	for _, tc := range []struct {
-		name       string
-		work       func(int) float64
-		wantLinear bool
-	}{
-		{"O(n)", func(n int) float64 { return float64(10 * n) }, true},
-		{"O(n^1.5)", func(n int) float64 { return math.Pow(float64(n), 1.5) }, false},
-		{"O(n^2)", func(n int) float64 { return float64(n) * float64(n) }, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ratio := tc.work(largeN) / tc.work(smallN)
-			if got := ratio <= maxRatio; got != tc.wantLinear {
-				t.Fatalf("ratio %.2f classified linear=%t, want %t", ratio, got, tc.wantLinear)
+	if testing.Short() {
+		t.Skip("timing ratios are not measured under -short")
+	}
+	smallSize, runs := 1<<12, 5
+	if raceEnabled {
+		smallSize, runs = 1<<10, 2
+	}
+	build := func(n int) string {
+		return "secret:\n" + strings.Repeat("  key: value012345\n", max(1, n/19))
+	}
+	linear := func(s string) Result {
+		for i := range len(s) {
+			growthSink += int(s[i])
+		}
+		return Text(s)
+	}
+	quadratic := func(s string) Result {
+		for i := range len(s) {
+			for j := range len(s) {
+				growthSink += int(s[i] ^ s[j])
 			}
-		})
+		}
+		return Text(s)
+	}
+	if msg := growthViolation(linear, build, smallSize, runs); msg != "" {
+		t.Errorf("linear wrapper rejected: %s", msg)
+	}
+	if msg := growthViolation(quadratic, build, smallSize, runs); msg == "" {
+		t.Error("quadratic wrapper passed the growth bound")
 	}
 }
