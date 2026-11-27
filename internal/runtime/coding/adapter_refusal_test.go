@@ -508,6 +508,13 @@ func TestContainerHelpersAndValidation(t *testing.T) {
 			{"missing listen addr", func(a *Adapter, _ *scruntime.LaunchSpec, _ *launchInput) { a.DaemonListen = "" }, "listen address is required"},
 			{"missing task token", func(_ *Adapter, s *scruntime.LaunchSpec, _ *launchInput) { s.TaskToken = "" }, "scoped task lease"},
 			{"missing checkout mode", func(_ *Adapter, _ *scruntime.LaunchSpec, in *launchInput) { in.checkoutMode = "" }, "explicit council checkout mode"},
+			{"council checkout without a council seat", func(_ *Adapter, s *scruntime.LaunchSpec, _ *launchInput) {
+				s.CouncilDeadline = time.Time{}
+			}, "council checkout mode requires a council seat"},
+			{"writer checkout without a council seat", func(_ *Adapter, s *scruntime.LaunchSpec, in *launchInput) {
+				s.CouncilDeadline = time.Time{}
+				in.checkoutMode = checkoutModeWriter
+			}, "council checkout mode requires a council seat"},
 			{"expired deadline", func(_ *Adapter, s *scruntime.LaunchSpec, _ *launchInput) {
 				s.CouncilDeadline = time.Now().Add(-time.Second)
 			}, "deadline reached"},

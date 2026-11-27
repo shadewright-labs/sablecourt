@@ -1184,6 +1184,10 @@ func truncateUTF8(s string, maxBytes int) string {
 }
 
 func launchFailureFacts(err error) string {
+	if errors.Is(err, scruntime.ErrCodingRuntimeUnavailable) {
+		// Fixed text: adapter errors can carry launch input.
+		return `{"reason":"coding_runtime_unavailable","detail":"coding tasks run in harness containers only: no container runtime is configured and host mode is off (see sablectl doctor)"}`
+	}
 	var missing *scruntime.MissingBinaryError
 	if errors.As(err, &missing) && missing.Path != "" {
 		raw, marshalErr := json.Marshal(struct {
@@ -1293,10 +1297,15 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		DataGateURL: r.dataGateURL,
 		TaskToken:   token,
 	}
-	if assigned && assignment.Round > 0 && wl.Spec.Class == domain.ClassCodingAgent && wl.Spec.Coding != nil {
+	// Coding tasks and council seats both run in harness containers when the
+	// adapter has a container runner. Without one the adapter refuses unless
+	// host mode was opted in (ADR-0011 amendment of 2026-11-27).
+	if wl.Spec.Class == domain.ClassCodingAgent && wl.Spec.Coding != nil {
 		if cap, ok := adapter.(councilContainerCapable); ok && cap.SupportsCouncilContainers() {
 			spec.CouncilContainer = true
-			spec.CouncilDeadline = maxLeaseExpiry
+			if assigned && assignment.Round > 0 {
+				spec.CouncilDeadline = maxLeaseExpiry
+			}
 			spec.CreateAttempt = rand.Text()
 			preStart := scruntime.Handle{
 				AdapterName:   "coding:" + wl.Spec.Coding.Harness,

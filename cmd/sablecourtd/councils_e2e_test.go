@@ -178,7 +178,8 @@ func runRealCouncilE2E(t *testing.T, daemonBin, gitDir, mode string) {
 	defer stopDaemon()
 
 	var daemonLog lockedBuffer
-	cmd := exec.CommandContext(daemonCtx, daemonBin, "--db", dbPath, "--listen", addr)
+	// Host mode is opt-in (ADR-0011 amendment of 2026-11-27); this test covers that unsafe path.
+	cmd := exec.CommandContext(daemonCtx, daemonBin, "--db", dbPath, "--listen", addr, "--"+unsafeHostHarnessesFlag)
 	cmd.Dir = t.TempDir()
 	cmd.Stdout = &daemonLog
 	cmd.Stderr = &daemonLog
@@ -573,7 +574,7 @@ func TestReloadBuiltinOnlyAndReservedPanelManifests(t *testing.T) {
 		ctx, stop := context.WithCancel(t.Context())
 		defer stop()
 		var logBuf lockedBuffer
-		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr)
+		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr, "--"+unsafeHostHarnessesFlag)
 		cmd.Dir = t.TempDir()
 		cmd.Stdout = &logBuf
 		cmd.Stderr = &logBuf
@@ -631,7 +632,7 @@ spec:
 		ctx, stop := context.WithCancel(t.Context())
 		defer stop()
 		var logBuf lockedBuffer
-		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr, "--manifests", manifestsDir)
+		cmd := exec.CommandContext(ctx, daemonBin, "--db", dbPath, "--listen", addr, "--manifests", manifestsDir, "--"+unsafeHostHarnessesFlag)
 		cmd.Dir = t.TempDir()
 		cmd.Stdout = &logBuf
 		cmd.Stderr = &logBuf

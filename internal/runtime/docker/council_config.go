@@ -18,6 +18,7 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 // CouncilHarness is trusted daemon configuration for one locally built image,
@@ -82,7 +83,7 @@ func councilArgv(s rt.CouncilLaunch, login bool) ([]string, error) {
 			return append(cmd, "auth", "login"), nil
 		}
 		cmd = append(cmd, "--no-session-persistence", "--output-format", "text")
-		if s.Checkout.Kind == rt.CouncilWriter {
+		if s.Checkout.Kind.Writable() {
 			cmd = append(cmd, "--permission-mode", "acceptEdits")
 		} else {
 			cmd = append(cmd, "--permission-mode", "plan")
@@ -124,54 +125,51 @@ func proxyEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func councilWorkspace(s rt.CouncilCheckout, socket string) (mount.Mount, error) {
+// councilWorkspace builds the checkout bind mount and, for a linked worktree,
+// the bind mount of its per-launch Git metadata directory. Which host
+// directories may be mounted is decided by mountguard alone: a checkout the
+// daemon made must be reached through the worktree root handle with no
+// symlink component, and a live checkout is checked by file identity against
+// the protected paths and runtime sockets.
+func councilWorkspace(s rt.CouncilCheckout, sockets []string, guard *mountguard.Guard) ([]mount.Mount, error) {
 	switch s.Kind {
-	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter:
+	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter, rt.CouncilTask:
 	default:
-		return mount.Mount{}, errors.New("invalid council checkout kind")
+		return nil, errors.New("invalid council checkout kind")
 	}
-	if !filepath.IsAbs(s.Path) || filepath.Clean(s.Path) != s.Path {
-		return mount.Mount{}, errors.New("expected absolute checkout directory")
+	live := s.Kind == rt.CouncilLive
+	if live && s.GitDir != "" {
+		return nil, errors.New("a live checkout carries its own Git metadata")
 	}
-	info, err := os.Lstat(s.Path)
-	if err != nil || !info.IsDir() {
-		return mount.Mount{}, errors.New("checkout must be a directory")
-	}
-	path, err := filepath.EvalSymlinks(s.Path)
+	path, err := guard.MountSource(s.Path, live, sockets)
 	if err != nil {
-		return mount.Mount{}, err
+		return nil, err
 	}
-	home, err := os.UserHomeDir()
+	mounts := []mount.Mount{{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}}
+	if s.GitDir == "" {
+		return mounts, nil
+	}
+	gitDir, err := guard.MountSource(s.GitDir, false, sockets)
 	if err != nil {
-		return mount.Mount{}, err
+		return nil, err
 	}
-	home, err = filepath.EvalSymlinks(home)
-	if err != nil {
-		return mount.Mount{}, err
+	if overlap, err := mountguard.Overlap(path, gitDir); err != nil || overlap {
+		return nil, errors.New("checkout Git metadata overlaps the checkout")
 	}
-	contains := func(target string) bool {
-		return target != "" && (path == target || strings.HasPrefix(target, path+string(filepath.Separator)))
-	}
-	containsSocket := func(sock string) bool {
-		if sock == "" {
-			return false
+	// Only a self-contained metadata directory is mounted. A linked worktree
+	// registration (commondir), an alternates file or a repository with
+	// registered worktrees would reach the shared refs and objects.
+	for _, name := range []string{"commondir", "worktrees", filepath.Join("objects", "info", "alternates")} {
+		if _, err := guard.Root.Lstat(gitDir + string(filepath.Separator) + name); !errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("checkout Git metadata is not self-contained")
 		}
-		if contains(sock) {
-			return true
-		}
-		if resolved, err := filepath.EvalSymlinks(sock); err == nil && contains(resolved) {
-			return true
-		}
-		if parent, err := filepath.EvalSymlinks(filepath.Dir(sock)); err == nil && contains(filepath.Join(parent, filepath.Base(sock))) {
-			return true
-		}
-		return false
 	}
-	if filepath.Dir(path) == path || contains(home) || containsSocket(socket) {
-		return mount.Mount{}, errors.New("unsafe checkout directory")
-	}
-	return mount.Mount{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: s.Kind != rt.CouncilWriter, BindOptions: &mount.BindOptions{NonRecursive: true}}, nil
+	return append(mounts, mount.Mount{Type: mount.TypeBind, Source: gitDir, Target: councilGitDir, ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}), nil
 }
+
+// councilGitDir is where a launch's own Git metadata directory is mounted.
+// GIT_DIR and GIT_WORK_TREE point Git in the container at it and /workspace.
+const councilGitDir = "/workspace-git"
 
 func preparePrompt(s rt.CouncilLaunch) (string, error) {
 	if s.TaskToken == "" || len(s.TaskToken) > 4096 || strings.ContainsAny(s.TaskToken, "\x00\r\n") ||
@@ -185,7 +183,14 @@ func preparePrompt(s rt.CouncilLaunch) (string, error) {
 	return prompt, nil
 }
 
-func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s rt.CouncilLaunch, login bool) (client.ContainerCreateOptions, error) {
+// harnessContainerSpec is the only function that builds a harness container:
+// standalone coding tasks (checkout kind task, or review when read-only),
+// council seats and login sessions all get their create options here, so they
+// share one set of guards. Only explicit mounts (checkout, login volume, the
+// read-only tool volume, tmpfs scratch), an allowlisted environment, the
+// per-launch internal network behind the proxy, a non-root user, a read-only
+// root file system, all capabilities dropped and no-new-privileges.
+func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngineAPI, s rt.CouncilLaunch, login bool) (client.ContainerCreateOptions, error) {
 	var o client.ContainerCreateOptions
 	cfg, ok := a.CouncilHarnesses[s.Harness]
 	if !ok || cfg.Image == "" || !councilName.MatchString(cfg.LoginVolume) || !strings.HasPrefix(cfg.LoginVolume, "sablecourt-") {
@@ -243,13 +248,19 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
-		m, err := councilWorkspace(s.Checkout, a.dockerSocket())
+		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.Mounts)
 		if err != nil {
 			return o, err
 		}
-		mounts = append(mounts, m)
+		mounts = append(mounts, ms...)
+		m := ms[0]
 		wd = m.Target
 		env = append(env, "SABLECOURT_MANAGED=1", "SABLECOURT_TASK_ID="+s.TaskID, "SABLECOURT_WORKLOAD="+s.Workload, "SABLECOURT_DATA_GATE_URL="+gateRaw)
+		if len(ms) > 1 {
+			// The checkout's .git file names a host path; Git here uses the
+			// launch's own metadata, mounted beside the checkout.
+			env = append(env, "GIT_DIR="+councilGitDir, "GIT_WORK_TREE="+m.Target)
+		}
 		if m.ReadOnly {
 			env = append(env, "GIT_OPTIONAL_LOCKS=0")
 		}

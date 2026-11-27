@@ -201,9 +201,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	// Rebuild from the pinned policy and seat, including reservations made
 	// before the dispatcher started writing explicit checkout fields.
 	for key := range payload {
-		if strings.EqualFold(key, "role") || strings.EqualFold(key, "checkoutMode") ||
-			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") ||
-			strings.EqualFold(key, "checkoutSourceId") {
+		if strings.EqualFold(key, "role") || isCheckoutField(key) {
 			delete(payload, key)
 		}
 	}
@@ -262,10 +260,14 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 			return wl, "", errors.New("invalid reserved council packet")
 		}
 	}
-	// Typed consumers may match field names case-insensitively.
+	// Typed consumers may match field names case-insensitively. The checkout
+	// kind comes from the task type: only a council round (rebuilt above from
+	// its reservation) carries checkout fields, so an ordinary task always
+	// runs in its own task worktree whatever its submission says.
 	rebuild := false
 	for key := range payload {
-		if strings.EqualFold(key, "context_packet") || ((assigned || unreservedCouncil) && strings.EqualFold(key, "conclaveId")) {
+		if strings.EqualFold(key, "context_packet") || ((assigned || unreservedCouncil) && strings.EqualFold(key, "conclaveId")) ||
+			(!council && isCheckoutField(key)) {
 			delete(payload, key)
 			rebuild = true
 		}
@@ -321,6 +323,12 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
 	return wl, string(raw), err
+}
+
+// isCheckoutField reports whether key selects a council checkout, in any case.
+func isCheckoutField(key string) bool {
+	return strings.EqualFold(key, "checkoutMode") || strings.EqualFold(key, "checkoutRef") ||
+		strings.EqualFold(key, "checkoutWriter") || strings.EqualFold(key, "checkoutSourceId")
 }
 
 func referencesCouncil(ctx context.Context, st store.Store, payload map[string]json.RawMessage) (bool, error) {

@@ -626,7 +626,7 @@ func (d *Dashboard) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			harness = "claude"
 		}
 		wl.Spec.Runtime = domain.RuntimeConfig{Type: "worktree-cli"}
-		wl.Spec.Coding = &domain.CodingConfig{Harness: harness, RepoPath: ".", Sandbox: "seatbelt"}
+		wl.Spec.Coding = &domain.CodingConfig{Harness: harness, RepoPath: ".", Sandbox: "container"}
 	} else {
 		img := target
 		if img == "" {

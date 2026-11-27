@@ -484,7 +484,7 @@ func TestFailedProvisionNeverStartsHarness(t *testing.T) {
 			a.CouncilRunner = runner
 			a.CouncilProxyImage = "sha256:" + strings.Repeat("a", 64)
 			a.DaemonListen = net.JoinHostPort(net.IPv6loopback.String(), "7432")
-			spec := scruntime.LaunchSpec{TaskID: "failed-provision", Workload: domain.Workload{Metadata: domain.ObjectMeta{Name: "claude"}, Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{Harness: "claude", RepoPath: repo}}}, InputJSON: `{"checkoutMode":"live","role":"claude","conclaveId":"ccl_test","context_packet":"Review."}`, TaskToken: "sc_task_fixture", CouncilContainer: true}
+			spec := scruntime.LaunchSpec{TaskID: "failed-provision", Workload: domain.Workload{Metadata: domain.ObjectMeta{Name: "claude"}, Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{Harness: "claude", RepoPath: repo}}}, InputJSON: `{"checkoutMode":"live","role":"claude","conclaveId":"ccl_test","context_packet":"Review."}`, TaskToken: "sc_task_fixture", CouncilContainer: true, CouncilDeadline: time.Now().Add(time.Minute)}
 			h, err := a.Start(t.Context(), spec)
 			if err == nil || len(runner.launches) != 0 {
 				t.Fatalf("started after failed provision: %v", err)
@@ -553,7 +553,7 @@ func TestMissingProxyEvidenceRefusesLaunch(t *testing.T) {
 			a.CouncilProxy = proxy
 			a.CouncilProxyImage = "sha256:" + strings.Repeat("a", 64)
 			a.DaemonListen = net.JoinHostPort(net.IPv6loopback.String(), "7432")
-			spec := scruntime.LaunchSpec{TaskID: "missing-evidence", TaskToken: "sc_task_fixture", CouncilContainer: true,
+			spec := scruntime.LaunchSpec{TaskID: "missing-evidence", TaskToken: "sc_task_fixture", CouncilContainer: true, CouncilDeadline: time.Now().Add(time.Minute),
 				Workload:  domain.Workload{Metadata: domain.ObjectMeta{Name: "claude"}, Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{RepoPath: repo, Harness: "claude"}}},
 				InputJSON: `{"conclaveId":"ccl_test","role":"claude","context_packet":"Review.","checkoutMode":"live"}`}
 			h, err := a.Start(t.Context(), spec)
