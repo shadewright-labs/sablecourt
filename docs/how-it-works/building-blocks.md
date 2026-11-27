@@ -12,7 +12,7 @@ The starter manifests declare a `coder` workload that runs a harness on the host
 
 Several switches change which part does what. They are listed in "Switches that change this picture" at the end; read that table before applying a sentence from this page to another setup.
 
-[![In the default configuration, manifests declare a workload; callers submit a task for it; a council attempt maps to one task; the runtime adapter chosen by the workload class starts a harness container for coding tasks and council turns or a Docker container for long-lived agents and controllers.](../diagrams/building-blocks-nesting.svg)](../diagrams/building-blocks-nesting.svg "Open full size")
+[![In the default configuration, manifests declare a workload; callers submit a task for it; a council attempt maps to one task; the runtime adapter chosen by the workload class starts a host process under Seatbelt for a standalone coding task (unsupported, moving to containers in issue 181), a harness container for a council turn, or a Docker container for long-lived agents and controllers.](../diagrams/building-blocks-nesting.svg)](../diagrams/building-blocks-nesting.svg "Open full size")
 
 ## Daemon
 
