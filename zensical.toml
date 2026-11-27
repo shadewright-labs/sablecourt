@@ -61,6 +61,7 @@ nav = [
     { "Council harness images and logins" = "council-harnesses.md" },
     { "Coding CLI headless invocations" = "harnesses.md" },
     { "Sablecourt integrations and extensions" = "integrations.md" },
+    { "Kubernetes model (Citadel)" = "design/kubernetes-model.md" },
     { "Architecture decision records" = [
       { "Architecture decision records" = "adr/README.md" },
       { "ADR-0001: Local-first control plane with Kubernetes-ready adapters" = "adr/0001-local-first-control-plane-with-k8s-adapters.md" },
