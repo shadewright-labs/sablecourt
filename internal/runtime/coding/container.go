@@ -219,12 +219,12 @@ func checkPrivateParent(dir string) error {
 // openToHarnessUser adds read permission for every user to each file, and
 // read and search permission to each directory, below dir. It refuses a
 // symlink or any other kind of file, which the daemon never writes there.
-func openToHarnessUser(dir string) error {
+func openToHarnessUser(dir string) (err error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { err = errors.Join(err, root.Close()) }()
 	return fs.WalkDir(root.FS(), ".", func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
