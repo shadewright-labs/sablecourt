@@ -3,7 +3,6 @@ package redact
 import (
 	"regexp"
 	"sort"
-	"strings"
 )
 
 type rule struct {
@@ -74,8 +73,13 @@ type Result struct {
 	Categories []string
 }
 
-// Text redacts sensitive credentials deterministically in linear time.
+// Text redacts registered daemon secrets by exact match first, then applies
+// pattern rules deterministically in linear time.
 func Text(input string) Result {
+	return defaultRegistry.RedactText(input)
+}
+
+func redactPatterns(input string) Result {
 	if input == "" {
 		return Result{}
 	}
@@ -108,11 +112,10 @@ func Text(input string) Result {
 
 // String is a convenience wrapper returning only the redacted string.
 func String(input string) string {
-	return Text(input).Text
+	return defaultRegistry.RedactString(input)
 }
 
-// ContainsSensitive reports whether input matches any redaction rule.
+// ContainsSensitive reports whether input matches any registered secret or redaction rule.
 func ContainsSensitive(input string) bool {
-	res := Text(input)
-	return res.Hits > 0 && strings.Contains(res.Text, "[REDACTED:")
+	return defaultRegistry.ContainsSensitive(input)
 }
