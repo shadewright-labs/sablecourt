@@ -264,3 +264,17 @@ func TestTerminalSessionForwardsBothWays(t *testing.T) {
 		t.Fatalf("container got %q, terminal got %q", w.buf.String(), out.String())
 	}
 }
+
+// TestHarnessInstallArtWaitsForTheMessageLine checks that the animation does
+// not start when the "Downloading" line was cut short or failed.
+func TestHarnessInstallArtWaitsForTheMessageLine(t *testing.T) {
+	for _, keep := range []int{0, 5} {
+		stubFetch(t, false)
+		def, _ := harnessimages.Lookup("claude")
+		errOut := &cutWriter{keep: keep}
+		_ = installHarnessTool(t.Context(), def, &fakeLogin{}, errOut, fakeTerminalArt())
+		if strings.Contains(errOut.offered.String(), "\x1b[?25l") {
+			t.Fatalf("keep=%d: the animation started after an incomplete message line", keep)
+		}
+	}
+}

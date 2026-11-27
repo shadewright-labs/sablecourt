@@ -1,8 +1,8 @@
 package waitart
 
 import (
-	"math/rand/v2"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,14 +64,20 @@ func Lookup(name string) (Scene, bool) {
 	return Scene{}, false
 }
 
-// ForKind returns a scene that fits the kind of wait, chosen at random when
-// several fit, and any scene for a kind with none of its own.
+// sceneTurn counts scene choices so that successive waits rotate through the
+// fitting scenes without any random source.
+var sceneTurn atomic.Uint64
+
+// ForKind returns a scene that fits the kind of wait, rotating through the
+// fitting scenes on successive calls, and any scene for a kind with none of
+// its own.
 func ForKind(k Kind) Scene {
+	turn := sceneTurn.Add(1) - 1
 	names := kindScenes[k]
 	if len(names) == 0 {
-		return scenes[rand.IntN(len(scenes))]
+		return scenes[turn%uint64(len(scenes))]
 	}
-	s, _ := Lookup(names[rand.IntN(len(names))])
+	s, _ := Lookup(names[turn%uint64(len(names))])
 	return s
 }
 

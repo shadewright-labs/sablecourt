@@ -50,7 +50,10 @@ type sprite struct {
 // sp builds a sprite from pairs of text and mask lines.
 func sp(lines ...string) sprite {
 	s := sprite{}
-	for i := 0; i < len(lines); i += 2 {
+	if len(lines)%2 != 0 {
+		panic("waitart: sprite lines must come in text and mask pairs")
+	}
+	for i := 0; i+1 < len(lines); i += 2 {
 		t, m := lines[i], lines[i+1]
 		if len([]rune(t)) != len(m) {
 			panic(fmt.Sprintf("waitart: mask width mismatch: %q (%d) vs %q (%d)", t, len([]rune(t)), m, len(m)))

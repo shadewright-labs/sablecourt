@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -29,6 +30,14 @@ func startWait(cmd *cobra.Command, kind waitart.Kind, status string) *waitart.Pl
 		ctx = context.Background()
 	}
 	return artConfig(cmd).Start(ctx, cmd.ErrOrStderr(), waitart.ForKind(kind), status)
+}
+
+// writeWhole writes a message line and reports whether all of it reached w.
+// The animation starts only after a complete line: a short or failed write
+// leaves a partial line on the screen, and a frame must not land in it.
+func writeWhole(w io.Writer, line string) bool {
+	n, err := io.WriteString(w, line)
+	return err == nil && n == len(line)
 }
 
 // councilStatus is the status line under the council scene, from the round

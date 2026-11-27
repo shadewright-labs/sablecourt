@@ -63,9 +63,11 @@ func installHarnessTool(ctx context.Context, def harnessimages.Definition, runti
 	if def.Tool == nil {
 		return fmt.Errorf("the %s image carries its tool; nothing to install", def.Role)
 	}
-	fmt.Fprintf(errOut, "Downloading %s %s from %s\n", def.Tool.Binary, def.Tool.Version, def.Tool.URL)
-	player := art.Start(ctx, errOut, waitart.ForKind(waitart.Build),
-		fmt.Sprintf("Installing %s %s: download, digest check, copy into the volume", def.Tool.Binary, def.Tool.Version))
+	var player *waitart.Player
+	if writeWhole(errOut, fmt.Sprintf("Downloading %s %s from %s\n", def.Tool.Binary, def.Tool.Version, def.Tool.URL)) {
+		player = art.Start(ctx, errOut, waitart.ForKind(waitart.Build),
+			fmt.Sprintf("Installing %s %s: download, digest check, copy into the volume", def.Tool.Binary, def.Tool.Version))
+	}
 	defer player.Stop()
 	tool, err := fetchTool(ctx, newToolDownloader(), def.Role)
 	if err != nil {

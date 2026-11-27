@@ -105,6 +105,8 @@ type Player struct {
 	drawn     bool // a frame is on the screen
 	held      bool // a partial output line is on the screen; draw nothing
 	stopped   bool
+	disabled  bool // a write failed or the terminal narrowed; draw nothing more
+	terminal  func(io.Writer) (int, bool)
 
 	once sync.Once
 	quit chan struct{}
@@ -127,8 +129,13 @@ func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string)
 		return nil
 	}
 	ct := c.env("COLORTERM")
+	terminal := c.Terminal
+	if terminal == nil {
+		terminal = fileTerminal
+	}
 	p := &Player{
 		w:         w,
+		terminal:  terminal,
 		scene:     sc,
 		status:    status,
 		truecolor: ct == "truecolor" || ct == "24bit",
@@ -166,7 +173,7 @@ func (p *Player) run(ctx context.Context) {
 		p.mu.Lock()
 		if !p.stopped {
 			p.idx++
-			if !p.held {
+			if !p.held && p.fits() {
 				p.clear()
 				p.draw()
 			}
@@ -230,7 +237,9 @@ func (l *lineWriter) Write(b []byte) (int, error) {
 	if p.stopped || len(b) == 0 {
 		return l.out.Write(b)
 	}
-	p.clear()
+	if p.fits() {
+		p.clear()
+	}
 	n, err := l.out.Write(b)
 	// Only the bytes that were written count: after a short or failed write
 	// the line on the screen is whatever reached it.
@@ -243,31 +252,72 @@ func (l *lineWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// fits rechecks the terminal width before a frame is cleared or drawn. When a
+// frame no longer fits, or the writer is no longer a terminal, it turns the
+// art off. The caller holds p.mu.
+func (p *Player) fits() bool {
+	if p.disabled {
+		return false
+	}
+	cols, ok := p.terminal(p.w)
+	if ok && (cols == 0 || cols >= Width) {
+		return true
+	}
+	p.disable()
+	return false
+}
+
+// disable stops all drawing. The frame on the screen may have wrapped or been
+// cut short, so the cursor-up count for clearing it can no longer be trusted:
+// the clear geometry is dropped and nothing is cleared. The cursor is shown
+// again at once. The caller holds p.mu.
+func (p *Player) disable() {
+	if p.disabled {
+		return
+	}
+	p.disabled = true
+	p.drawn = false
+	_, _ = io.WriteString(p.w, showCursor)
+}
+
 // clear removes the frame from the screen: back to the frame's first line,
 // then erase to the end of the screen. The caller holds p.mu.
 func (p *Player) clear() {
-	if !p.drawn {
+	if !p.drawn || p.disabled {
 		return
 	}
-	p.write(fmt.Sprintf("\x1b[%dA\r\x1b[J", Height))
+	if !p.write(fmt.Sprintf("\x1b[%dA\r\x1b[J", Height)) {
+		return
+	}
 	p.drawn = false
 }
 
 // draw writes the current frame from the cursor down and leaves the cursor
 // at the start of the line below it. The caller holds p.mu.
 func (p *Player) draw() {
-	if p.stopped || p.held {
+	if p.stopped || p.held || p.disabled {
 		return
 	}
 	f := p.scene.Frames[p.idx%len(p.scene.Frames)]
 	var b bytes.Buffer
 	b.WriteString("\r")
 	b.WriteString(render(p.scene, f, p.idx, p.status).ansi(p.truecolor))
-	p.write(b.String())
-	p.drawn = true
+	// A frame that did not reach the screen whole is not cleared later: the
+	// seven-row move would erase lines above it.
+	p.drawn = p.write(b.String())
 }
 
-func (p *Player) write(s string) {
-	// A failed write to the terminal only loses the art.
-	_, _ = io.WriteString(p.w, s)
+// write sends s to the terminal and reports whether all of it arrived. After
+// a short or failed write the art is turned off, since the failure only
+// loses the art. The caller holds p.mu.
+func (p *Player) write(s string) bool {
+	if p.disabled {
+		return false
+	}
+	n, err := io.WriteString(p.w, s)
+	if err != nil || n < len(s) {
+		p.disable()
+		return false
+	}
+	return true
 }

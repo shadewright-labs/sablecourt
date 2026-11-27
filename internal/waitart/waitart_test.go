@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -526,5 +527,121 @@ func TestFramesStartAtColumnZero(t *testing.T) {
 	}
 	if offsets != 0 {
 		t.Fatalf("%d frame rows start away from column 0", offsets)
+	}
+}
+
+// scriptedWriter lets the first full calls through whole and then writes only
+// keep bytes of each call and fails.
+type scriptedWriter struct {
+	fakeTerm
+	mu2   sync.Mutex
+	calls int
+	full  int
+	keep  int
+}
+
+func (s *scriptedWriter) Write(b []byte) (int, error) {
+	s.mu2.Lock()
+	s.calls++
+	short := s.calls > s.full
+	s.mu2.Unlock()
+	if !short {
+		return s.fakeTerm.Write(b)
+	}
+	n := min(s.keep, len(b))
+	_, _ = s.fakeTerm.Write(b[:n])
+	return n, errors.New("terminal went away")
+}
+
+func hourScene() Scene {
+	sc, _ := Lookup("bow")
+	sc.Frames = slices.Clone(sc.Frames)
+	for i := range sc.Frames {
+		sc.Frames[i].Delay = time.Hour
+	}
+	return sc
+}
+
+// TestShortFrameWriteDisablesRedraws checks that a frame that did not reach
+// the screen whole turns redraws off and is never cleared with the seven-row
+// move, which would eat the lines above it.
+func TestShortFrameWriteDisablesRedraws(t *testing.T) {
+	// Call 1 is the cursor hide; call 2 is the first frame, cut short.
+	w := &scriptedWriter{full: 1, keep: 10}
+	p := onTerminal(nil).Start(t.Context(), w, hourScene(), "Waiting")
+	_, _ = fmt.Fprint(p.Wrap(w), "line\n")
+	p.Stop()
+	out := w.String()
+	if strings.Contains(out, "\x1b[7A") {
+		t.Fatalf("the incomplete frame was cleared with a seven-row move: %q", out)
+	}
+	if strings.Count(out, "Waiting") != 0 {
+		t.Fatalf("a frame was drawn after the failed write: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[?25h") {
+		t.Fatalf("the cursor was not shown again: %q", out)
+	}
+}
+
+// TestFrameWriteFailureOnRedraw covers a failure after a good first frame.
+func TestFrameWriteFailureOnRedraw(t *testing.T) {
+	// hide, first frame, then a short clear: nothing more is drawn.
+	w := &scriptedWriter{full: 2, keep: 3}
+	p := onTerminal(nil).Start(t.Context(), w, hourScene(), "Waiting")
+	_, _ = fmt.Fprint(p.Wrap(w), "line\n")
+	before := strings.Count(w.String(), "Waiting")
+	_, _ = fmt.Fprint(p.Wrap(w), "again\n")
+	p.Stop()
+	if got := strings.Count(w.String(), "Waiting"); got != before {
+		t.Fatalf("frames drawn after a failed write: %d, want %d", got, before)
+	}
+	if n := strings.Count(w.String(), "\x1b[7A"); n > 1 {
+		t.Fatalf("clear repeated after a failed write: %d", n)
+	}
+}
+
+// TestNarrowedTerminalStopsDrawing checks that the width is read again before
+// each frame: once the terminal is narrower than a frame the player draws
+// nothing and does not clear with geometry that no longer holds.
+func TestNarrowedTerminalStopsDrawing(t *testing.T) {
+	for _, via := range []string{"wrap", "ticker"} {
+		t.Run(via, func(t *testing.T) {
+			var cols atomic.Int64
+			cols.Store(80)
+			cfg := Config{
+				LookupEnv: env(nil),
+				Terminal:  func(io.Writer) (int, bool) { return int(cols.Load()), true },
+			}
+			var term fakeTerm
+			sc := hourScene()
+			if via == "ticker" {
+				sc = fast("bow")
+			}
+			p := cfg.Start(t.Context(), &term, sc, "Waiting")
+			mark := len(term.String())
+			cols.Store(Width - 1)
+			if via == "wrap" {
+				_, _ = fmt.Fprint(p.Wrap(&term), "line\n")
+			} else {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					p.mu.Lock()
+					off := p.disabled
+					p.mu.Unlock()
+					if off {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			p.Stop()
+			after := term.String()[mark:]
+			if strings.Contains(after, "\x1b[7A") || strings.Contains(after, "Waiting") {
+				t.Fatalf("drew or cleared on a narrowed terminal: %q", after)
+			}
+			if !strings.Contains(after, "\x1b[?25h") {
+				t.Fatalf("cursor not shown again: %q", after)
+			}
+		})
 	}
 }

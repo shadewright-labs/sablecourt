@@ -168,3 +168,44 @@ func TestCouncilStatus(t *testing.T) {
 		}
 	}
 }
+
+// cutWriter writes at most keep bytes of each call and then reports an error,
+// like a terminal that went away mid-line.
+type cutWriter struct {
+	sharedTerm
+	keep int
+	// offered is every byte the caller tried to write, cut or not.
+	offered strings.Builder
+}
+
+func (c *cutWriter) Write(b []byte) (int, error) {
+	c.offered.Write(b)
+	n := min(c.keep, len(b))
+	_, _ = c.sharedTerm.Write(b[:n])
+	if n < len(b) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
+// TestCouncilArtWaitsForTheMessageLine checks that the animation starts only
+// after the "convened" line was written whole: on a short or failed write the
+// stderr terminal sees no frame and no cursor change.
+func TestCouncilArtWaitsForTheMessageLine(t *testing.T) {
+	for _, keep := range []int{0, 5} {
+		out := &cutWriter{keep: keep}
+		var errTerm sharedTerm
+		_ = runCouncilSession(context.Background(), newTestClientFactory(councilDaemon(t, 3)), out, councilRunParams{
+			Question:  "q",
+			Repo:      t.TempDir(),
+			Rounds:    2,
+			Harnesses: []string{"claude"},
+			PollEvery: 5 * time.Millisecond,
+			ErrOut:    &errTerm,
+			Art:       fakeTerminalArt(),
+		})
+		if got := errTerm.String(); got != "" {
+			t.Fatalf("keep=%d: the animation started after an incomplete message line: %q", keep, got)
+		}
+	}
+}

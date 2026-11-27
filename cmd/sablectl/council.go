@@ -183,14 +183,18 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 		return errors.New("daemon returned empty conclave ID")
 	}
 
+	lineWritten := true
 	if !params.JSONOut {
-		fmt.Fprintf(out, "%s convened council %s (rounds=%d, with=%s)\n",
-			stJade.Render("✓"), stTitle.Render(sess.ID), params.Rounds, strings.Join(params.Harnesses, ","))
+		lineWritten = writeWhole(out, fmt.Sprintf("%s convened council %s (rounds=%d, with=%s)\n",
+			stJade.Render("✓"), stTitle.Render(sess.ID), params.Rounds, strings.Join(params.Harnesses, ",")))
 	}
 
 	// The animation plays on stderr while the rounds run; council output goes
 	// through it so a frame is cleared before each line and drawn below it.
-	art := params.Art.Start(ctx, params.ErrOut, waitart.ForKind(waitart.Council), councilStatus(params.Rounds, councilDetailResponse{}))
+	var art *waitart.Player
+	if lineWritten {
+		art = params.Art.Start(ctx, params.ErrOut, waitart.ForKind(waitart.Council), councilStatus(params.Rounds, councilDetailResponse{}))
+	}
 	defer art.Stop()
 	out = art.Wrap(out)
 
