@@ -255,6 +255,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load tasks: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	tasks = controlplane.TasksForRead(tasks)
 	audit, err := d.store.ListAudit(ctx, 25)
 	if err != nil {
 		http.Error(w, "load audit: "+err.Error(), http.StatusInternalServerError)
@@ -295,6 +296,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		var lastReply string
 		if msgs, err := d.store.ListTaskMessages(ctx, t.ID); err == nil {
+			msgs = controlplane.TaskMessagesForRead(msgs)
 			for i := len(msgs) - 1; i >= 0; i-- {
 				if msgs[i].Role == "agent" || msgs[i].Role == "system" {
 					lastReply = msgs[i].Content
@@ -366,8 +368,10 @@ func (d *Dashboard) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
+	task = controlplane.TaskForRead(task)
 	events, _ := d.store.ListTaskEvents(ctx, id)
 	messages, _ := d.store.ListTaskMessages(ctx, id)
+	messages = controlplane.TaskMessagesForRead(messages)
 	budget, _ := d.store.TaskBudgetTotals(ctx, id)
 	cancelable := task.State == domain.TaskStateSubmitted || task.State == domain.TaskStateWorking || task.State == domain.TaskStateInputRequired
 

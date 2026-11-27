@@ -415,30 +415,3 @@ func TestRegistryRedactExactLeavesOtherTextAlone(t *testing.T) {
 		t.Fatalf("RedactExact = %q, want %q", got, want)
 	}
 }
-
-func TestRegistryRedactExactJSON(t *testing.T) {
-	reg := NewRegistry()
-	held := synthSecret("json", "_held_", "value_0077")
-	reg.Register(held, held+`"`)
-	esc := "\\" + "u0073" // "s" as a JSON unicode escape
-	m := KnownSecretMarker
-	for _, tc := range []struct {
-		name, in, want string
-	}{
-		{"no held value keeps every byte", `{"b":"` + esc + ` <x>", "a":1.50}`, `{"b":"` + esc + ` <x>", "a":1.50}`},
-		{"string value", `{"p":"x ` + held + `"}`, `{"p":"x ` + m + `"}`},
-		{"held value ending in a quote stays inside its string", `{"p":"` + held + `","q":"ok"}`, `{"p":"` + m + `","q":"ok"}`},
-		{"escaped held value", `{"p":"` + strings.Replace(held, "s", esc, 1) + `"}`, `{"p":"` + m + `"}`},
-		{"nested key and array", `{"o":{"` + held + `":[1,"` + held + `"]},"n":12345678901234567890}`, `{"n":12345678901234567890,"o":{"` + m + `":[1,"` + m + `"]}}`},
-		{"top level string", `"` + held + `"`, `"` + m + `"`},
-		{"not JSON falls back to raw text", `not json ` + held, `not json ` + m},
-		{"trailing data falls back to raw text", `{"p":1} ` + held, `{"p":1} ` + m},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := reg.RedactExactJSON(tc.in)
-			if got != tc.want {
-				t.Fatalf("RedactExactJSON(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}

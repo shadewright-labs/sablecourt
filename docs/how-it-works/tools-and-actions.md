@@ -33,7 +33,15 @@ Each action that fails records a failure for its capability; three in a row open
 
 ## Redaction
 
-`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+`internal/redact` has two layers, and the gate applies both to every tool and action result and to error messages. Court Memory writes redact their value, and the coding adapter redacts task input. Neither layer runs on tool arguments.
+
+Exact match is the layer that can be tested as a guarantee ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md) and its 2026-11-27 amendment, Proposed). It replaces each secret the daemon holds in memory (the operator token, task leases it issued, provider keys, webhook secrets and the other secrets it loads) when the value appears in its literal bytes or in a fixed list of spellings: quoted, JSON-escaped, and base64 or hex for binary values. It decodes nothing else. The launch input and stored task messages are declared JSON records: each is decoded once, and one that shows a held value is refused whole, with none of its payload. Stored task input is checked again when it is read through A2A `tasks/get`, the task API and the dashboard, so a value registered after the task was stored does not come back out.
+
+A credential shorter than 8 bytes is refused where it is loaded, with an error that names the setting and not the value; at start the daemon does not run with one.
+
+Pattern rules are the second layer: regular expressions for some common key shapes, bearer headers and secret-looking `key: value` pairs, run in linear time. They are best effort, and the test rows in `internal/redact` show what they replace.
+
+Exact match does not cover percent encoding, mixed-case hex, nested encodings, Unicode normalisation, number renderings, or a value split across fields or records. It does not run on audit fields, error and log text, the Agent Card, council reads or Takeover input. These limits are tracked in [issue 189](https://github.com/shadewright-labs/sablecourt/issues/189).
 
 ## Audit rows
 

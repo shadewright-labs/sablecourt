@@ -26,7 +26,7 @@ Each refusal returns an error; the audit rows are listed below.
 3. If `providers` is listed it must include the route's provider (403, `provider_not_allowed`). An empty list allows all four.
 4. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
 5. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
-6. The provider key must be available (502 otherwise).
+6. The provider key must be available (502 otherwise). A key shorter than 8 bytes is refused with 502 and an error that names its secret, never the value, and is not sent upstream.
 
 ## Reserve, forward, settle
 
@@ -55,7 +55,7 @@ Three extra billing rules keep the gate fail-closed on provider usage fields:
 
 When a stream reaches its final event and trailing bytes follow, the exact final counts are settled. When a stream yields partial usage before breaking or contradicting itself, the gate settles at least the reserved estimate and at least the reported totals with no cache-read discount. When a response reports no usage, omits output counts (for example, count-only embeddings-style replies if such routes are added later; today the gate only serves chat, responses, messages and Gemini `generateContent` routes), carries a non-terminal Responses status (such as `in_progress`), is malformed, has out-of-range counts (including an OpenAI `total_tokens` below the sum of its parts) or exceeds the 8 MiB capture limit, the reserved estimate is charged, so a call is never free. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high for those 15 minutes. No ledger entry is written for that call, so once the reservation expires its usage no longer counts against any budget.
 
-Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting.
+Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting. Each chunk first passes through the exact matcher of `internal/redact`, on the primary and the fallback path: a secret the daemon holds is replaced, and bytes that could be the start of one are held back until the next chunk or the end of the body, with enough text before them that a replacement made later is still checked against its neighbours. Response headers are matched the same way, and a header whose name shows a held value is dropped. A response that still carries a `Content-Encoding` after the transport is refused with 502, because the matcher cannot read it.
 
 ## Fallback
 

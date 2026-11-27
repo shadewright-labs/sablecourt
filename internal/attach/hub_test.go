@@ -3,8 +3,10 @@ package attach
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
@@ -403,5 +405,65 @@ func TestHubRedactsExactKnownSecretsAcrossChunksAndCRLF(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Third review: Subscribe returned the ring without rechecking it, so a value
+// registered after its output was buffered was replayed, and a slow
+// subscriber lost chunks silently, so the viewer joined chunks the redactor
+// never saw side by side.
+func TestScryReplayRechecksRingAndMarksGaps(t *testing.T) {
+	reg := redact.NewRegistry()
+	hub := NewHubWithRegistry(reg)
+	hub.Register("task", nil)
+	later := "scry_" + "later_" + strings.Repeat("h4", 10)
+	hub.WriteOutput("task", []byte("before "+later+" after\n"))
+	reg.Register(later)
+	history, ch, closed, unsub, err := hub.Subscribe("task")
+	if err != nil || closed {
+		t.Fatalf("subscribe: %v %v", err, closed)
+	}
+	if strings.Contains(history, later) || !strings.Contains(history, "before ") {
+		t.Fatalf("replay = %q", history)
+	}
+
+	// Fill the subscriber's channel, then write more: the missed chunks are
+	// marked before the next chunk it receives.
+	for i := range cap(ch) + 5 {
+		hub.WriteOutput("task", []byte(fmt.Sprintf("line %d\n", i)))
+	}
+	var got []string
+	for range cap(ch) {
+		got = append(got, <-ch)
+	}
+	hub.WriteOutput("task", []byte("resumed\n"))
+	for range 2 {
+		select {
+		case c := <-ch:
+			got = append(got, c)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected the gap marker and the next chunk, got %q", got[len(got)-2:])
+		}
+	}
+	unsub()
+	if got[len(got)-2] != GapMarker || got[len(got)-1] != "resumed\n" {
+		t.Fatalf("missed chunks were not marked: last chunks %q", got[len(got)-3:])
+	}
+}
+
+// Fix round: Scry output ran pattern rules after the exact stream and did not
+// check their output again, so a pattern marker next to other text could
+// rebuild a held value. Every split is tried.
+func TestScryPatternMarkerNeverRebuildsHeldValue(t *testing.T) {
+	reg := redact.NewRegistry()
+	held := "bearer_token]]tail_value"
+	reg.Register(held)
+	doc := "Authorization: Bearer abcdefghij]tail_value\n"
+	for cut := 0; cut <= len(doc); cut++ {
+		r := newStreamRedactor(reg)
+		out := r.write([]byte(doc[:cut]), false) + r.write([]byte(doc[cut:]), true)
+		if strings.Contains(out, held) {
+			t.Fatalf("split at %d emitted %q", cut, out)
+		}
 	}
 }

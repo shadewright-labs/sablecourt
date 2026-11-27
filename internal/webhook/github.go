@@ -45,7 +45,12 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "webhook secret not configured"})
 			return
 		}
-		redact.Register(whSecret)
+		// A secret too short to redact is refused. The caller is not
+		// authenticated yet, so the reply does not say why.
+		if err := redact.RegisterSetting(secretName, whSecret); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webhook secret refused"})
+			return
+		}
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err != nil {

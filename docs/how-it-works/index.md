@@ -22,7 +22,7 @@ Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [cou
 | --- | --- |
 | 1. Model output is never authorization | The policy engine (`internal/policy`) decides each tool, action and delegation request; an `approve` effect needs a person to confirm the pinned digest (`internal/approval`). |
 | 2. Workloads hold no raw secrets | Provider keys stay in the secret store and the Model Gate; a workload gets a lease and a stripped environment. The subscription logins of ADR-0011 are the one exception. |
-| 3. External input is untrusted | `internal/redact` runs at the MCP Gate, in Conclave messages and Relics, in Court Memory writes, in Scry output and in council context. |
+| 3. External input is untrusted | `internal/redact` runs at the MCP Gate, in Conclave messages and Relics, in Court Memory writes, in Scry output and replay, in council context, on Model Gate responses and on stored task input when it is read. Exact match of daemon-held secrets covers literal bytes and a fixed list of spellings; pattern rules are best effort ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)). |
 | 4. Separate identities, fail closed | Policy defaults to deny, a manifest with another default is rejected, an exhausted budget stops a call, a missing sandbox stops a launch. |
 | 5. Evidence over inference | The reconciler decides from observed runtime state and stored heartbeats, and fails a task whose workload or adapter is missing. |
 | 6. Idempotent reconciliation | Idempotency keys on tasks, reserved council turns, and recovery of running tasks at startup. |

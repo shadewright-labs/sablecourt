@@ -846,36 +846,35 @@ func TestLaunchInputRedactsRegisteredSecrets(t *testing.T) {
 // uEsc starts a JSON unicode escape (backslash, u).
 const uEsc = "\\" + "u"
 
-// Exact match on the serialized launch input must neither change its JSON
-// structure nor miss a held value written with JSON escapes.
-func TestLaunchInputRedactsDecodedJSONValues(t *testing.T) {
+// The launch input is a declared JSON record. It is decoded once, and when it
+// shows a held value (in its raw bytes, or in any decoded string or name,
+// duplicates included) it is refused whole with none of its payload. Input
+// that shows none reaches the workload byte for byte.
+func TestLaunchInputRefusedWholeOnHeldValue(t *testing.T) {
 	for i, tc := range []struct {
-		name     string
-		held     func(base string) string
-		input    func(base string) string
-		wantKeys []string
+		name  string
+		held  func(base string) string
+		input func(base string) string
 	}{
 		{"held value ends in a quote",
 			func(b string) string { return b + `"` },
-			func(b string) string { return `{"prompt":"` + b + `","extra":"ok"}` },
-			[]string{"prompt", "extra"}},
+			func(b string) string { return `{"prompt":"` + b + `","extra":"ok"}` }},
 		{"held value ends in a backslash",
 			func(b string) string { return b + `\` },
-			func(b string) string { return `{"prompt":"` + b + `\"ok"}` },
-			[]string{"prompt"}},
-		{"held value spans fields",
+			func(b string) string { return `{"prompt":"` + b + `\"ok"}` }},
+		{"held value spans fields in the raw bytes",
 			func(b string) string { return b + `","extra":"2` },
-			func(b string) string { return `{"prompt":"` + b + `","extra":"2"}` },
-			[]string{"prompt", "extra"}},
+			func(b string) string { return `{"prompt":"` + b + `","extra":"2"}` }},
 		{"held value written with unicode escapes",
 			func(b string) string { return b },
 			// "l" written as a JSON unicode escape.
-			func(b string) string { return `{"prompt":"` + uEsc + `006c` + b[1:] + `","n":12345678901234567890}` },
-			[]string{"prompt", "n"}},
+			func(b string) string { return `{"prompt":"` + uEsc + `006c` + b[1:] + `","n":12345678901234567890}` }},
 		{"held value in a key",
 			func(b string) string { return b },
-			func(b string) string { return `{"` + b + `":"v","extra":"ok"}` },
-			[]string{redact.KnownSecretMarker, "extra"}},
+			func(b string) string { return `{"` + b + `":"v","extra":"ok"}` }},
+		{"held value in a shadowed nested duplicate key",
+			func(b string) string { return b },
+			func(b string) string { return `{"prompt":"p","meta":{"k":"` + uEsc + `006c` + b[1:] + `","k":"ok"}}` }},
 	} {
 		// The default registry is process wide, so each case holds its own value.
 		base := fmt.Sprintf("launch_json_%d_", i) + strings.Repeat("q7", 12)
@@ -889,30 +888,22 @@ func TestLaunchInputRedactsDecodedJSONValues(t *testing.T) {
 			if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
 				t.Fatal(err)
 			}
-			var got map[string]any
-			dec := json.NewDecoder(strings.NewReader(a.lastSpec.InputJSON))
-			dec.UseNumber()
-			if err := dec.Decode(&got); err != nil {
-				t.Fatalf("launch input is no longer JSON: %v: %s", err, a.lastSpec.InputJSON)
-			}
-			if len(got) != len(tc.wantKeys) {
-				t.Fatalf("launch input keys changed: %s", a.lastSpec.InputJSON)
-			}
-			for _, k := range tc.wantKeys {
-				if _, ok := got[k]; !ok {
-					t.Fatalf("launch input lost key %q: %s", k, a.lastSpec.InputJSON)
-				}
-			}
-			for k, v := range got {
-				if s, ok := v.(string); (ok && strings.Contains(s, held)) || strings.Contains(k, held) {
-					t.Fatalf("launch input carries a held value after decoding: %s", a.lastSpec.InputJSON)
-				}
-			}
-			if n, ok := got["n"]; ok && n.(json.Number).String() != "12345678901234567890" {
-				t.Fatalf("launch input changed a number: %s", a.lastSpec.InputJSON)
+			if a.lastSpec.InputJSON != redact.DefaultRegistry().RefusedJSON() {
+				t.Fatalf("launch input = %s, want it refused as a whole", a.lastSpec.InputJSON)
 			}
 		})
 	}
+	t.Run("no held value keeps every byte", func(t *testing.T) {
+		r, _, _, task := regressionFixture(t)
+		task.InputJSON = `{"prompt":"` + uEsc + `006c <x>","n":12345678901234567890,"p":"a","p":"b"}`
+		a := &fakeAdapter{}
+		if err := launchForTest(context.Background(), r, task, r.bundle.Workloads["worker"], a); err != nil {
+			t.Fatal(err)
+		}
+		if a.lastSpec.InputJSON != task.InputJSON {
+			t.Fatalf("launch input = %s, want %s", a.lastSpec.InputJSON, task.InputJSON)
+		}
+	})
 }
 
 // Input that holds no registered value reaches the workload byte for byte.

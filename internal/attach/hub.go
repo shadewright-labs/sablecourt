@@ -11,6 +11,11 @@ import (
 
 const defaultRingSize = 64 * 1024
 
+// GapMarker is sent to a Scry subscriber before the next chunk it receives
+// after it missed chunks (its channel was full), so the viewer does not join
+// two chunks the redactor never saw side by side.
+const GapMarker = "\n[scry: output dropped]\n"
+
 var (
 	ErrSessionNotFound     = errors.New("live attach session not found")
 	ErrTakeoverHeld        = errors.New("takeover already held by another operator")
@@ -25,8 +30,16 @@ type session struct {
 	stdin         io.WriteCloser
 	takeoverOwner string
 	closed        bool
-	subs          map[int]chan string
+	subs          map[int]*subscriber
 	nextSubID     int
+	registry      *redact.Registry
+}
+
+// subscriber is one Scry observer. dropped is set when a chunk could not be
+// delivered, and cleared once the gap marker is sent.
+type subscriber struct {
+	ch      chan string
+	dropped bool
 }
 
 // Hub multiplexes live redacted output (Scry) and exclusive stdin control (Takeover)
@@ -69,10 +82,11 @@ func (h *Hub) Register(taskID string, stdin io.WriteCloser) {
 	}
 	reg := h.secretRegistry()
 	h.sessions[taskID] = &session{
-		maxRing: defaultRingSize,
-		output:  newStreamRedactor(reg),
-		stdin:   stdin,
-		subs:    make(map[int]chan string),
+		maxRing:  defaultRingSize,
+		output:   newStreamRedactor(reg),
+		stdin:    stdin,
+		subs:     make(map[int]*subscriber),
+		registry: reg,
 	}
 }
 
@@ -104,13 +118,30 @@ func (s *session) emitLocked(clean string) {
 	if len(s.ring) > s.maxRing {
 		s.ring = append([]byte(nil), s.ring[len(s.ring)-s.maxRing:]...)
 	}
-	for _, ch := range s.subs {
+	for _, sub := range s.subs {
+		if sub.dropped {
+			select {
+			case sub.ch <- s.gapMarker():
+				sub.dropped = false
+			default:
+				continue
+			}
+		}
 		select {
-		case ch <- clean:
+		case sub.ch <- clean:
 		default:
-			// Drop chunk for slow consumer rather than blocking the agent process.
+			// Drop chunk for slow consumer rather than blocking the agent
+			// process, and mark the gap before the next chunk it gets.
+			sub.dropped = true
 		}
 	}
+}
+
+func (s *session) gapMarker() string {
+	if s.registry == nil {
+		return GapMarker
+	}
+	return s.registry.RedactExact(GapMarker)
 }
 
 // Subscribe attaches a read-only Scry observer. Returns buffered history, a live chunk channel,
@@ -124,7 +155,12 @@ func (h *Hub) Subscribe(taskID string) (string, <-chan string, bool, func(), err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The ring was filtered when it was written. A value registered since
+	// then is caught here, so replay matches the registry as it is now.
 	history := string(s.ring)
+	if s.registry != nil {
+		history = s.registry.RedactExact(history)
+	}
 	if s.closed {
 		ch := make(chan string)
 		close(ch)
@@ -133,13 +169,13 @@ func (h *Hub) Subscribe(taskID string) (string, <-chan string, bool, func(), err
 	id := s.nextSubID
 	s.nextSubID++
 	ch := make(chan string, 64)
-	s.subs[id] = ch
+	s.subs[id] = &subscriber{ch: ch}
 	unsub := func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if c, exists := s.subs[id]; exists {
+		if sub, exists := s.subs[id]; exists {
 			delete(s.subs, id)
-			close(c)
+			close(sub.ch)
 		}
 	}
 	return history, ch, false, unsub, nil
@@ -263,8 +299,8 @@ func (s *session) closeLocked() {
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 	}
-	for id, ch := range s.subs {
+	for id, sub := range s.subs {
 		delete(s.subs, id)
-		close(ch)
+		close(sub.ch)
 	}
 }

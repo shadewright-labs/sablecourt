@@ -54,7 +54,9 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	if err != nil {
 		return "", fmt.Errorf("load github_token: %w", err)
 	}
-	redact.Register(token)
+	if err := redact.RegisterSetting("github_token", token); err != nil {
+		return "", err
+	}
 	apiBase := gh.APIURL
 	if apiBase == "" {
 		apiBase = "https://api.github.com"

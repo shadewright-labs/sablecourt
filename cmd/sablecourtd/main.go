@@ -176,6 +176,29 @@ type daemonConfig struct {
 	logger               *slog.Logger
 }
 
+// wireK8sRuntime installs the Kubernetes runtime adapter when --runtime=k8s.
+// A missing or unreadable configuration leaves the other adapters in place. A
+// credential in it too short to redact stops the start, like every other
+// credential the daemon loads.
+func wireK8sRuntime(ctx context.Context, cfg daemonConfig, adapters map[domain.WorkloadClass]scruntime.Adapter, hub *attach.Hub, logger *slog.Logger) error {
+	if cfg.runtimeBackend != "k8s" {
+		return nil
+	}
+	k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass)
+	if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+		return err
+	}
+	if err != nil {
+		logger.Warn("kubernetes runtime unavailable", "error", err)
+		return nil
+	}
+	k8sAdapter.SetAttachHub(ctx, hub)
+	adapters[domain.ClassLongLivedAgent] = k8sAdapter
+	adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
+	logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
+	return nil
+}
+
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
 	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
 	adapter.BranchRetention = retention
@@ -300,7 +323,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if pgDSN == "" {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
-	registerDSN(pgDSN)
+	if err := registerDSN(pgDSN); err != nil {
+		return err
+	}
 	var st store.Store
 	if cfg.openStore != nil {
 		st, err = cfg.openStore()
@@ -417,7 +442,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		stores = append(stores, fileSecretStore)
 	}
 	secretStore := secret.NewObservingStore(&secret.ChainStore{Stores: stores}, registerDaemonSecret)
-	preloadDaemonSecrets(ctx, secretStore, fileSecretStore, bundle)
+	if err := preloadDaemonSecrets(ctx, secretStore, fileSecretStore, bundle); err != nil {
+		return err
+	}
 
 	modelGate := model.New(model.Options{
 		Store:      gateLeaseStore{st},
@@ -460,7 +487,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		if b == nil {
 			return
 		}
-		preloadBundleSecrets(ctx, secretStore, b)
+		if err := preloadBundleSecrets(ctx, secretStore, b); err != nil {
+			logger.Error("refusing reloaded MCP server credentials", "error", err)
+		}
 		for _, w := range b.Workloads {
 			if len(w.Spec.Grants.MCPServers) > 0 {
 				dataActionGate.RegisterUpstreamTools(w.Spec.Grants.MCPServers, mcpBridge)
@@ -475,15 +504,8 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
-	if cfg.runtimeBackend == "k8s" {
-		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
-			k8sAdapter.SetAttachHub(ctx, attachHub)
-			adapters[domain.ClassLongLivedAgent] = k8sAdapter
-			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
-			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
-		} else {
-			logger.Warn("kubernetes runtime unavailable", "error", err)
-		}
+	if err := wireK8sRuntime(ctx, cfg, adapters, attachHub, logger); err != nil {
+		return err
 	}
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
@@ -908,7 +930,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		events, _ := st.ListTaskEvents(r.Context(), id)
 		budget, _ := st.TaskBudgetTotals(r.Context(), id)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"task":   task,
+			"task":   controlplane.TaskForRead(task),
 			"events": events,
 			"budget": budget,
 		})
@@ -942,7 +964,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 			CreatedAt:    time.Now().UTC(),
 		})
-		writeJSON(w, http.StatusCreated, retried)
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(retried))
 	})
 	if conclaveBroker != nil {
 		integrations.NewShadewright(integrations.ShadewrightOptions{
@@ -1361,7 +1383,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(w, http.StatusOK, controlplane.TasksForRead(items))
 	})
 	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -1378,7 +1400,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusCreated, task)
+		// An idempotent replay returns the stored task.
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(task))
 	})
 	mux.HandleFunc("GET /api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListAudit(r.Context(), 50)
@@ -1529,11 +1552,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		// A message stored before its text became a daemon-held secret is
-		// still redacted on the way out.
-		for i := range msgs {
-			msgs[i].Content = redact.DefaultRegistry().RedactExact(msgs[i].Content)
-		}
-		writeJSON(w, http.StatusOK, msgs)
+		// still refused on the way out. The first message is the task input,
+		// a declared JSON record, so it follows the same rule as the launch
+		// input and the other task read paths.
+		writeJSON(w, http.StatusOK, controlplane.TaskMessagesForRead(msgs))
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
 		lease, ok := authenticateGateLease(w, r, st)

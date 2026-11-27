@@ -137,8 +137,9 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 				}
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
 					!strings.HasPrefix(token, "op_") && !strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
-					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil {
-						redact.Register(want)
+					// A token too short to redact is refused like a missing one.
+					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil &&
+						redact.RegisterSetting("observer_bearer_token", want) == nil {
 						if tokenDigestEqual(token, strings.TrimSpace(want)) {
 							scoped.ServeHTTP(w, r)
 							return

@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
@@ -59,7 +63,9 @@ func TestDaemonSecretPreloadAndRegistration(t *testing.T) {
 	}
 
 	obs := secret.NewObservingStore(fs, registerDaemonSecret)
-	preloadDaemonSecrets(ctx, obs, fs, bundle)
+	if err := preloadDaemonSecrets(ctx, obs, fs, bundle); err != nil {
+		t.Fatalf("preloadDaemonSecrets: %v", err)
+	}
 
 	for _, mustRedact := range []string{apiKey, mcpKey, customFileKey, envWebhook} {
 		if got := redact.String("x=" + mustRedact); strings.Contains(got, mustRedact) {
@@ -84,8 +90,12 @@ func TestDaemonSecretPreloadAndRegistration(t *testing.T) {
 func TestRegisterDSNAndOperatorSigningKeyRotation(t *testing.T) {
 	pwURL := synthDaemonSecret("pgurl", "_pass_", "44332211")
 	pwKV := synthDaemonSecret("pgkv", "_pass_", "33221100")
-	registerDSN("postgres://user:" + pwURL + "@127.0.0.1:5432/sablecourt")
-	registerDSN("host=127.0.0.1 user=svc password=" + pwKV + " dbname=sablecourt")
+	if err := registerDSN("postgres://user:" + pwURL + "@127.0.0.1:5432/sablecourt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerDSN("host=127.0.0.1 user=svc password=" + pwKV + " dbname=sablecourt"); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, pw := range []string{pwURL, pwKV} {
 		if got := redact.String("err " + pw); strings.Contains(got, pw) {
@@ -110,5 +120,78 @@ func TestRegisterDSNAndOperatorSigningKeyRotation(t *testing.T) {
 	}
 	if got := redact.String("k=" + rotatedKeyHex); strings.Contains(got, rotatedKeyHex) {
 		t.Fatal("rotated operator signing key hex was not redacted")
+	}
+}
+
+// A credential shorter than redact.MinSecretLength cannot be held by the exact
+// matcher, so the daemon refuses to start with it. The error names the
+// setting and never the value.
+func TestShortCredentialsRefusedAtLoad(t *testing.T) {
+	ctx := context.Background()
+	short := "s7" + "x9q" // five bytes, synthetic
+	for _, tc := range []struct {
+		name, setting string
+		load          func() error
+	}{
+		{"provider key in the file store", "openai_api_key", func() error {
+			fs := secret.NewFileStore(filepath.Join(t.TempDir(), "secrets.json"))
+			if err := fs.Set(ctx, "openai_api_key", short); err != nil {
+				t.Fatal(err)
+			}
+			return preloadDaemonSecrets(ctx, secret.NewObservingStore(fs, registerDaemonSecret), fs, nil)
+		}},
+		{"webhook secret in the file store", "github_webhook_secret", func() error {
+			fs := secret.NewFileStore(filepath.Join(t.TempDir(), "secrets.json"))
+			if err := fs.Set(ctx, "github_webhook_secret", short); err != nil {
+				t.Fatal(err)
+			}
+			return preloadDaemonSecrets(ctx, secret.NewObservingStore(fs, registerDaemonSecret), fs, nil)
+		}},
+		{"other secret in the file store", "extra_file_key", func() error {
+			fs := secret.NewFileStore(filepath.Join(t.TempDir(), "secrets.json"))
+			if err := fs.Set(ctx, "extra_file_key", short); err != nil {
+				t.Fatal(err)
+			}
+			return preloadDaemonSecrets(ctx, secret.NewObservingStore(fs, registerDaemonSecret), fs, nil)
+		}},
+		{"MCP server secret named by the bundle", "short_mcp_auth", func() error {
+			mem := secret.NewMemoryStore(map[string]string{"short_mcp_auth": short})
+			bundle := &config.Bundle{Workloads: map[string]domain.Workload{"w": {Spec: domain.WorkloadSpec{Grants: domain.GrantSet{
+				MCPServers: []domain.UpstreamMCPServer{{Name: "srv", URL: "https://mcp.example.invalid", SecretName: "short_mcp_auth"}},
+			}}}}}
+			return preloadDaemonSecrets(ctx, mem, nil, bundle)
+		}},
+		{"kubernetes bearer token from the kubeconfig", "kubernetes bearer token", func() error {
+			path := filepath.Join(t.TempDir(), "kubeconfig")
+			kc := "apiVersion: v1\nkind: Config\ncurrent-context: x\n" +
+				"clusters: [{name: c, cluster: {server: \"https://k8s.example.invalid\"}}]\n" +
+				"users: [{name: u, user: {token: \"" + short + "\"}}]\n" +
+				"contexts: [{name: x, context: {cluster: c, user: u}}]\n"
+			if err := os.WriteFile(path, []byte(kc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := daemonConfig{runtimeBackend: "k8s", kubeconfigPath: path, k8sNamespace: "default"}
+			return wireK8sRuntime(ctx, cfg, map[domain.WorkloadClass]scruntime.Adapter{}, attach.NewHub(), slog.New(slog.DiscardHandler))
+		}},
+		{"notify webhook from the environment", "SABLECOURT_NOTIFY_WEBHOOK_URL", func() error {
+			t.Setenv("SABLECOURT_NOTIFY_WEBHOOK_URL", short)
+			return preloadDaemonSecrets(ctx, nil, nil, nil)
+		}},
+		{"postgres URL password", "postgres DSN password", func() error {
+			return registerDSN("postgres://user:" + short + "@127.0.0.1:5432/sablecourt")
+		}},
+		{"postgres keyword password", "postgres DSN password", func() error {
+			return registerDSN("host=127.0.0.1 user=svc password=" + short + " dbname=sablecourt")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.load()
+			if err == nil {
+				t.Fatal("short credential accepted at load")
+			}
+			if !strings.Contains(err.Error(), tc.setting) || strings.Contains(err.Error(), short) {
+				t.Fatalf("error %q must name %q and not the value", err, tc.setting)
+			}
+		})
 	}
 }

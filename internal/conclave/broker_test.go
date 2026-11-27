@@ -549,3 +549,58 @@ func TestReadRelicForTaskRedactsStoredMetadata(t *testing.T) {
 		t.Fatalf("read rewrote the stored relic: %q", stored.ContentType)
 	}
 }
+
+// A message stored before its recipient role became a daemon-held value is
+// redacted when a workload reads it, without rewriting the stored row.
+func TestReadMessagesForTaskRedactsStoredToRole(t *testing.T) {
+	ctx := context.Background()
+	st := brokerTestStore(t)
+	bundle := &config.Bundle{Conclaves: map[string]domain.Conclave{"room": {Spec: domain.ConclaveSpec{
+		Vassals: []domain.ConclaveVassal{{Role: "reader", Workload: "worker", CanMessage: []string{"all"}}},
+	}}}}
+	b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
+	room, err := b.Open(ctx, "room", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	input := `{"conclaveId":"` + room.ID + `","role":"reader","activation":"always-on"}`
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "reader-task", IdempotencyKey: "conclave-" + room.ID + "-init-reader", WorkloadName: "worker", State: domain.TaskStateWorking, InputJSON: input, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	later := "torole_later_" + strings.Repeat("m5", 12)
+	if _, err := st.AppendConclaveMessage(ctx, domain.ConclaveMessage{ConclaveID: room.ID, FromRole: "operator", ToRole: "role-" + later, Kind: "question", Body: "hello", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	redact.Register(later)
+	msgs, err := b.ReadMessagesForTask(ctx, room.ID, "worker", "reader-task", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range msgs {
+		if strings.HasPrefix(m.ToRole, "role-") {
+			found = true
+		}
+		if strings.Contains(m.ToRole, later) {
+			t.Fatalf("message read by a workload kept a held recipient role: %q", m.ToRole)
+		}
+	}
+	if !found {
+		t.Fatalf("stored message not returned: %+v", msgs)
+	}
+	stored, err := st.ListConclaveMessages(ctx, room.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := false
+	for _, m := range stored {
+		kept = kept || m.ToRole == "role-"+later
+	}
+	if !kept {
+		t.Fatal("read rewrote the stored message")
+	}
+}

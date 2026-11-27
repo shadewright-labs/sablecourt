@@ -147,8 +147,8 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 		"notify_webhook_url":       notifyWebhookURL,
 		"custom_special_secret":    specialSecret,
 	})
-	secStore := secret.NewObservingStore(rawMem, func(_ string, v string) {
-		redact.Register(v)
+	secStore := secret.NewObservingStore(rawMem, func(name string, v string) error {
+		return redact.RegisterSetting(name, v)
 	})
 
 	// 1. Register provider key via providers.Registry (initial and rotated).

@@ -102,7 +102,9 @@ func (b *UpstreamBridge) CallTool(ctx context.Context, srv domain.UpstreamMCPSer
 		if err != nil || strings.TrimSpace(val) == "" {
 			return "", fmt.Errorf("upstream MCP secret %q unavailable", srv.SecretName)
 		}
-		redact.Register(val)
+		if err := redact.RegisterSetting(srv.SecretName, val); err != nil {
+			return "", err
+		}
 		hdr := strings.TrimSpace(srv.AuthHeader)
 		if hdr == "" {
 			hdr = "Authorization"

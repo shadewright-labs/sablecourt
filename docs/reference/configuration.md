@@ -33,7 +33,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 ## Secrets
 
-Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values.
+Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values. Each value must be at least 8 bytes after trimming whitespace, so exact-match redaction can hold it: the daemon refuses to start with a shorter one, and the error names the secret but not its value. The same rule applies to `SABLECOURT_NOTIFY_WEBHOOK_URL` and to a PostgreSQL DSN password.
 
 | Name | Used by | Required for |
 | --- | --- | --- |

@@ -48,7 +48,13 @@ func BrokerHandler(opts Options) http.Handler {
 			writeRPCError(w, nil, -32001, "A2A bearer token not configured")
 			return
 		}
-		redact.Register(expectedToken)
+		// A token too short to redact is refused; the caller is not
+		// authenticated yet, so the reply does not say why.
+		if err := redact.RegisterSetting(secName, expectedToken); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRPCError(w, nil, -32001, "A2A bearer token refused")
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		gotToken := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(gotToken), []byte(strings.TrimSpace(expectedToken))) != 1 {
@@ -110,6 +116,8 @@ func BrokerHandler(opts Options) http.Handler {
 				return
 			}
 			msgs, _ := opts.Store.ListTaskMessages(r.Context(), p.ID)
+			task = controlplane.TaskForRead(task)
+			msgs = controlplane.TaskMessagesForRead(msgs)
 			writeRPCResult(w, req.ID, map[string]any{
 				"id":        task.ID,
 				"workload":  task.WorkloadName,

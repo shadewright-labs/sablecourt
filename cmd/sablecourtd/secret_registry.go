@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -35,24 +36,36 @@ func isNonSecretConfigKey(name string) bool {
 	}
 }
 
-func registerDaemonSecret(name, value string) {
+// registerDaemonSecret registers a value read from the secret store under
+// name, or refuses it when it is too short to redact (the error names the
+// setting, never the value).
+func registerDaemonSecret(name, value string) error {
 	if isNonSecretConfigKey(name) {
-		return
+		return nil
 	}
-	redact.Register(value)
+	return redact.RegisterSetting(name, value)
 }
 
-func preloadDaemonSecrets(ctx context.Context, st secret.SecretStore, fileStore *secret.FileStore, bundle *config.Bundle) {
-	if envWebhook := strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL")); envWebhook != "" {
-		redact.Register(envWebhook)
+// preloadDaemonSecrets registers every credential the daemon can load before
+// it serves anything. A credential shorter than redact.MinSecretLength stops
+// the start with an error naming its setting.
+func preloadDaemonSecrets(ctx context.Context, st secret.SecretStore, fileStore *secret.FileStore, bundle *config.Bundle) error {
+	var errs []error
+	if err := redact.RegisterSetting("SABLECOURT_NOTIFY_WEBHOOK_URL", os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL")); err != nil {
+		errs = append(errs, err)
 	}
 	if st == nil {
-		return
+		return errors.Join(errs...)
+	}
+	keep := func(err error) {
+		var short *redact.ShortSecretError
+		if errors.As(err, &short) {
+			errs = append(errs, err)
+		}
 	}
 	for _, name := range knownDaemonSecretNames {
-		if val, err := st.Get(ctx, name); err == nil {
-			registerDaemonSecret(name, val)
-		}
+		_, err := st.Get(ctx, name)
+		keep(err)
 	}
 	if fileStore != nil {
 		if keys, err := fileStore.Keys(ctx); err == nil {
@@ -60,41 +73,56 @@ func preloadDaemonSecrets(ctx context.Context, st secret.SecretStore, fileStore 
 				if isNonSecretConfigKey(name) {
 					continue
 				}
-				if val, err := st.Get(ctx, name); err == nil {
-					registerDaemonSecret(name, val)
-				}
+				_, err := st.Get(ctx, name)
+				keep(err)
 			}
 		}
 	}
-	preloadBundleSecrets(ctx, st, bundle)
+	keep(preloadBundleSecrets(ctx, st, bundle))
+	return errors.Join(errs...)
 }
 
-func preloadBundleSecrets(ctx context.Context, st secret.SecretStore, bundle *config.Bundle) {
+// preloadBundleSecrets registers the MCP server secrets a bundle names. The
+// store passed in registers what it reads (an ObservingStore); a plain store
+// is registered here.
+func preloadBundleSecrets(ctx context.Context, st secret.SecretStore, bundle *config.Bundle) error {
 	if st == nil || bundle == nil {
-		return
+		return nil
 	}
+	var errs []error
 	for _, w := range bundle.Workloads {
 		for _, srv := range w.Spec.Grants.MCPServers {
 			name := strings.TrimSpace(srv.SecretName)
 			if name == "" {
 				continue
 			}
-			if val, err := st.Get(ctx, name); err == nil {
-				registerDaemonSecret(name, val)
+			val, err := st.Get(ctx, name)
+			if err == nil {
+				err = registerDaemonSecret(name, val)
+			}
+			var short *redact.ShortSecretError
+			if errors.As(err, &short) {
+				errs = append(errs, err)
 			}
 		}
 	}
+	return errors.Join(errs...)
 }
 
-func registerDSN(dsn string) {
+// registerDSN registers the password of a PostgreSQL DSN and the DSN itself,
+// or refuses a password too short to redact.
+func registerDSN(dsn string) error {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
-		return
+		return nil
 	}
 	if u, err := url.Parse(dsn); err == nil && u.User != nil {
 		if pw, ok := u.User.Password(); ok && pw != "" {
-			redact.Register(pw, dsn)
-			return
+			if err := redact.RegisterSetting("postgres DSN password", pw); err != nil {
+				return err
+			}
+			redact.Register(dsn)
+			return nil
 		}
 	}
 	for field := range strings.FieldsSeq(dsn) {
@@ -103,8 +131,13 @@ func registerDSN(dsn string) {
 			continue
 		}
 		v = strings.Trim(v, `"'`)
-		if v != "" {
-			redact.Register(v, dsn)
+		if v == "" {
+			continue
 		}
+		if err := redact.RegisterSetting("postgres DSN password", v); err != nil {
+			return err
+		}
+		redact.Register(dsn)
 	}
+	return nil
 }

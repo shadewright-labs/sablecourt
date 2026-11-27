@@ -66,8 +66,13 @@ func NewFromConfig(kubeconfigPath, namespace, runtimeClassName string) (*Adapter
 	if err != nil {
 		return nil, fmt.Errorf("load kubernetes config: %w", err)
 	}
-	redact.Register(cfg.BearerToken, cfg.Password)
-	redact.RegisterBytes(cfg.KeyData)
+	if err := errors.Join(
+		redact.RegisterSetting("kubernetes bearer token", cfg.BearerToken),
+		redact.RegisterSetting("kubernetes password", cfg.Password),
+		redact.RegisterSettingBytes("kubernetes client key", cfg.KeyData),
+	); err != nil {
+		return nil, err
+	}
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create kubernetes clientset: %w", err)

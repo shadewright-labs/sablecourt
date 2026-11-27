@@ -92,7 +92,10 @@ func RejectShadewrightTokenOnOtherRoutes(next http.Handler, secrets secret.Secre
 		}
 		want := strings.TrimSpace(rawWant)
 		if err == nil && want != "" {
-			redact.Register(rawWant)
+			if redact.RegisterSetting(secName, rawWant) != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "integration token refused"})
+				return
+			}
 			for _, v := range authValues {
 				got, ok := extractBearerLoose(v)
 				if ok && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
@@ -586,7 +589,12 @@ func (h *ShadewrightHandler) authenticate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "shadewright_bearer_token not configured"})
 		return false
 	}
-	redact.Register(rawWant)
+	// A token too short to redact is refused; the caller is not authenticated
+	// yet, so the reply does not say why.
+	if redact.RegisterSetting(h.secretName, rawWant) != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "integration token refused"})
+		return false
+	}
 	authValues := r.Header.Values("Authorization")
 	if len(authValues) != 1 || !strings.HasPrefix(authValues[0], "Bearer ") {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)

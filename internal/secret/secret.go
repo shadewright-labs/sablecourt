@@ -282,14 +282,16 @@ func (m *MemoryStore) Delete(_ context.Context, name string) error {
 }
 
 // ObservingStore wraps a SecretStore and invokes OnValue whenever a secret is
-// successfully read or written, so callers can register held secret values
-// before they can appear in any output.
+// successfully read or about to be written, so callers can register held
+// secret values before they can appear in any output. When OnValue refuses a
+// value (a credential too short to redact), Get returns that error instead of
+// the value and Set stores nothing.
 type ObservingStore struct {
 	Inner   SecretStore
-	OnValue func(name, value string)
+	OnValue func(name, value string) error
 }
 
-func NewObservingStore(inner SecretStore, onValue func(name, value string)) *ObservingStore {
+func NewObservingStore(inner SecretStore, onValue func(name, value string) error) *ObservingStore {
 	return &ObservingStore{Inner: inner, OnValue: onValue}
 }
 
@@ -299,7 +301,9 @@ func (o *ObservingStore) Get(ctx context.Context, name string) (string, error) {
 	}
 	val, err := o.Inner.Get(ctx, name)
 	if err == nil && o.OnValue != nil {
-		o.OnValue(name, val)
+		if err := o.OnValue(name, val); err != nil {
+			return "", err
+		}
 	}
 	return val, err
 }
@@ -309,7 +313,9 @@ func (o *ObservingStore) Set(ctx context.Context, name, value string) error {
 		return errors.New("no primary secret store configured")
 	}
 	if o.OnValue != nil {
-		o.OnValue(name, value)
+		if err := o.OnValue(name, value); err != nil {
+			return err
+		}
 	}
 	return o.Inner.Set(ctx, name, value)
 }

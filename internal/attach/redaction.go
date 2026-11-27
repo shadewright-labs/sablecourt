@@ -18,7 +18,10 @@ const (
 )
 
 type streamRedactor struct {
-	known     *redact.Stream
+	known *redact.Stream
+	// checked scans the output of the pattern rules again, so a pattern
+	// marker next to other text cannot rebuild a held value.
+	checked   *redact.Stream
 	text      textRedactor
 	inPEM     bool
 	pemFooter []byte
@@ -30,8 +33,9 @@ func newStreamRedactor(reg *redact.Registry) streamRedactor {
 		reg = redact.DefaultRegistry()
 	}
 	return streamRedactor{
-		known: reg.NewStream(),
-		text:  textRedactor{registry: reg},
+		known:   reg.NewStream(),
+		checked: reg.NewStream(),
+		text:    textRedactor{registry: reg},
 	}
 }
 
@@ -40,6 +44,9 @@ func newStreamRedactor(reg *redact.Registry) streamRedactor {
 func (r *streamRedactor) write(raw []byte, eof bool) string {
 	if r.known == nil {
 		r.known = redact.NewStream()
+	}
+	if r.checked == nil {
+		r.checked = redact.NewStream()
 	}
 	raw = r.known.Write(raw, eof)
 	var out strings.Builder
@@ -99,7 +106,7 @@ func (r *streamRedactor) write(raw []byte, eof bool) string {
 		}
 		r.text.finish(&out)
 	}
-	return out.String()
+	return string(r.checked.Write([]byte(out.String()), eof))
 }
 
 // pemHeader finds a complete private key header or an ambiguous suffix.

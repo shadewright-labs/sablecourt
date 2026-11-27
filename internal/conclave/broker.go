@@ -504,7 +504,7 @@ func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body st
 	if name == "" {
 		return domain.ConclaveRelic{}, errors.New("relic name is required")
 	}
-	if redact.DefaultRegistry().RedactExact(name) != name {
+	if redact.DefaultRegistry().ContainsHeld(name) {
 		return domain.ConclaveRelic{}, errors.New("relic name holds a secret the daemon keeps")
 	}
 	if contentType == "" {
