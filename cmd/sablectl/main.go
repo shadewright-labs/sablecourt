@@ -26,6 +26,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 )
 
 // version is what `sablectl version` prints. A build can set it with -ldflags -X main.version=...
@@ -65,6 +66,7 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", "", "Optional sablecourtd Unix domain socket path")
 	rootCmd.PersistentFlags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file instead of OS Keychain")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output raw JSON instead of styled tables")
+	rootCmd.PersistentFlags().Bool(noArtFlag, false, "Draw no wait animation on stderr (also off with SABLECOURT_NO_ART=1, NO_COLOR, TERM=dumb or when stderr is not a terminal)")
 
 	httpClient := func(timeout time.Duration) (*http.Client, string) {
 		return newDaemonClientWithTransport(timeout, apiURL, socketPath, defaultTransport)
@@ -479,9 +481,11 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(65 * time.Second)
-			body, err := fetchPOST(cli, base+"/api/v1/approvals/"+url.PathEscape(args[0])+"/approve", map[string]string{
+			art := startWait(cmd, waitart.Person, "Waiting for out-of-band confirmation: "+args[0])
+			body, err := fetchPOSTContext(cmd.Context(), cli, base+"/api/v1/approvals/"+url.PathEscape(args[0])+"/approve", map[string]string{
 				"expectedSha256": approveDigest,
 			})
+			art.Stop()
 			if err != nil {
 				return err
 			}
@@ -690,7 +694,9 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Open %s and enter code: %s\nWaiting for authorization...\n",
 				stJade.Render(dc.VerificationURI), stTitle.Render(dc.UserCode))
-			tok, err := flow.PollToken(context.Background(), dc.DeviceCode, time.Duration(dc.Interval)*time.Second)
+			art := startWait(cmd, waitart.Person, "Waiting for GitHub authorization: enter the code in the browser")
+			tok, err := flow.PollToken(cmd.Context(), dc.DeviceCode, time.Duration(dc.Interval)*time.Second)
+			art.Stop()
 			if err != nil {
 				return err
 			}

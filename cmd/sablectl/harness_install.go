@@ -8,6 +8,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 	"github.com/spf13/cobra"
 )
 
@@ -51,18 +52,23 @@ func installHarnessCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return installHarnessTool(cmd.Context(), def, runtime, cmd.ErrOrStderr())
+			return installHarnessTool(cmd.Context(), def, runtime, cmd.ErrOrStderr(), artConfig(cmd))
 		},
 	}
 }
 
 // installHarnessTool downloads and checks the pinned tool on this machine,
 // then streams it into the tool volume through the install container.
-func installHarnessTool(ctx context.Context, def harnessimages.Definition, runtime loginRuntime, errOut io.Writer) error {
+func installHarnessTool(ctx context.Context, def harnessimages.Definition, runtime loginRuntime, errOut io.Writer, art waitart.Config) error {
 	if def.Tool == nil {
 		return fmt.Errorf("the %s image carries its tool; nothing to install", def.Role)
 	}
-	fmt.Fprintf(errOut, "Downloading %s %s from %s\n", def.Tool.Binary, def.Tool.Version, def.Tool.URL)
+	var player *waitart.Player
+	if writeWhole(errOut, fmt.Sprintf("Downloading %s %s from %s\n", def.Tool.Binary, def.Tool.Version, def.Tool.URL)) {
+		player = art.Start(ctx, errOut, waitart.ForKind(waitart.Build),
+			fmt.Sprintf("Installing %s %s: download, digest check, copy into the volume", def.Tool.Binary, def.Tool.Version))
+	}
+	defer player.Stop()
 	tool, err := fetchTool(ctx, newToolDownloader(), def.Role)
 	if err != nil {
 		return fmt.Errorf("install %s: %w", def.Role, err)
@@ -83,6 +89,7 @@ func installHarnessTool(ctx context.Context, def harnessimages.Definition, runti
 		}
 		return fmt.Errorf("install %s into volume %s: %w", def.Role, def.Tool.Volume, err)
 	}
+	player.Stop()
 	fmt.Fprintf(errOut, "Installed %s %s (SHA-256 checked) into volume %s\n", def.Tool.Binary, def.Tool.Version, def.Tool.Volume)
 	return nil
 }

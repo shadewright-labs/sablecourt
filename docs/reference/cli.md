@@ -10,6 +10,20 @@ The `sablectl` and `sablecourtd` sections are generated from the command trees i
 
 There is no token flag, because a token on the command line shows in the process table. `sablectl` takes the operator token from the `SABLECOURT_OPERATOR_TOKEN` environment variable. With it unset, a client talking to a local daemon (a loopback host or `--socket`) reads `operator.token` from the [state directory](configuration.md#state-directory).
 
+## Wait animation
+
+While `sablectl` waits on a long event, it draws a short animated scene (7 lines by 64 columns) with a status line on standard error, so the wait shows what it waits for. The scene is cleared before each line of output and drawn again below it, and it is removed when the wait ends or on Ctrl-C, which also shows the cursor again.
+
+| Wait | Scene |
+| --- | --- |
+| `sablectl council`, while the rounds run (the status shows the round and how many seats answered) | `duel` or `blade` |
+| `sablectl harness build`, and the tool install of `harness install` and `harness login` | `forge` |
+| `sablectl approval approve`, while the daemon waits for the out-of-band confirmation, and `sablectl auth github`, while it waits for the browser authorization | `watch` |
+
+`sablectl task scry` and `sablectl conclave watch` print live output and draw no animation, nor does the interactive session of `harness login`.
+
+Nothing is drawn when standard error is not a terminal or is narrower than 64 columns, with the global `--no-art` flag, or when the environment sets `SABLECOURT_NO_ART` (any value but `0`), `NO_COLOR` (any value but empty) or `TERM=dumb`. `COLORTERM=truecolor` or `24bit` selects 24-bit colour; otherwise the 256-colour palette is used.
+
 ## sablectl
 
 <!-- BEGIN GENERATED sablectl: do not edit, run `make docs` -->
@@ -24,6 +38,7 @@ Groups the commands below; it does nothing on its own.
 | --- | --- | --- | --- |
 | `--api` | string | `http://127.0.0.1:7432` | sablecourtd HTTP API base URL |
 | `--json` | bool | `false` | Output raw JSON instead of styled tables |
+| `--no-art` | bool | `false` | Draw no wait animation on stderr (also off with SABLECOURT_NO_ART=1, NO_COLOR, TERM=dumb or when stderr is not a terminal) |
 | `--secret-file` | string | empty | Optional 0600 JSON secret file instead of OS Keychain |
 | `--socket` | string | empty | Optional sablecourtd Unix domain socket path |
 
