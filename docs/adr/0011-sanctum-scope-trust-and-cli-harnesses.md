@@ -111,9 +111,9 @@ Stated limit: only `linux/arm64` is pinned. `sablectl harness build` always requ
 
 ## Amendment (2026-11-27): container-only harnesses for 0.1.0
 
-Status of this amendment: Proposed.
+Status of this amendment: Accepted (2026-11-27).
 
-If accepted, this amendment supersedes the "Host fallback" section of the 2026-11-25 amendment, the third item of its "Open checks" (host-mode `codex`), and the last sentence of the Summary below ("Keep host mode as the weaker fallback for machines without a container runtime"). That text stays as written; where it disagrees with this amendment, this amendment wins.
+This amendment supersedes the "Host fallback" section of the 2026-11-25 amendment, the third item of its "Open checks" (host-mode `codex`), and the last sentence of the Summary below ("Keep host mode as the weaker fallback for machines without a container runtime"). It also supersedes the matching part of [ADR-0003](0003-hybrid-workload-isolation.md): line 15, which runs local coding CLI agents under macOS Seatbelt or Linux Bubblewrap with container execution as an option, and line 26, which accepts OS-sandboxed coding CLI sessions as a documented trade-off. That text stays as written; where it disagrees with this amendment, this amendment wins.
 
 For 0.1.0, coding tasks and council seats run in harness containers only ([issue 181](https://github.com/shadewright-labs/sablecourt/issues/181)). A standalone coding task uses the same container, the same per-harness login volume and the same per-launch proxy as a council seat. This is the decision [issue 132](https://github.com/shadewright-labs/sablecourt/issues/132) asked for.
 
@@ -125,7 +125,7 @@ Why host mode goes:
 
 - No harness finds a login in host mode ([issue 63](https://github.com/shadewright-labs/sablecourt/issues/63), issue 132). The host launch sets `HOME` to the task's private scratch directory and sets neither `CLAUDE_CONFIG_DIR` nor `CODEX_HOME` ([internal/runtime/coding/launch.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/launch.go), lines 270 and 316 to 336), so none of the separate state directories described above is ever used.
 - One harness cannot run under the outer Seatbelt profile. `codex` fails in its own inner sandbox when nested, as the 2026-11-25 amendment records. Another harness, `claude`, keeps its subscription credential in the user's login Keychain, so its profile would have to allow Keychain lookups that any same-user process can also make ([Separate state directories](../harnesses.md#separate-state-directories)).
-- The generated Seatbelt profile allows outbound network connections with no filter ([internal/runtime/coding/sandbox.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/sandbox.go), line 157). In Seatbelt that rule also covers connections to local Unix sockets, so the profile does not separate the harness from local services running as the same user.
+- The generated Seatbelt profile does not restrict local connections well enough to keep invariant 2.
 
 What this does not change: the container restrictions, one login volume per harness, the subscription login as the only invariant 2 exception, the proxy as the only route out, and the council run, round and wall-time ceilings.
 
