@@ -416,7 +416,7 @@ func parseOrigin(raw string) (owner, repo string, err error) {
 
 // parseGitHubRemote reads owner and repository from a github.com remote URL in
 // HTTPS, SSH URL or scp-like form, or from GitHub's SSH over port 443
-// (ssh://git@ssh.github.com:443/OWNER/REPO.git).
+// (the ssh scheme with user git, host ssh.github.com and port 443).
 func parseGitHubRemote(remote string) (owner, repo string, ok bool) {
 	var path string
 	switch {
