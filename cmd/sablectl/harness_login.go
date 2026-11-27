@@ -14,6 +14,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -59,12 +60,14 @@ func loginHarnessCmd() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			in := cmd.InOrStdin()
-			return runHarnessLogin(cmd.Context(), args[0], in, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runHarnessLogin(cmd.Context(), args[0], in, cmd.OutOrStdout(), cmd.ErrOrStderr(), artConfig(cmd))
 		},
 	}
 }
 
-func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut io.Writer) error {
+// art covers only the tool install: the login itself is an interactive
+// terminal session and draws no animation.
+func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut io.Writer, art waitart.Config) error {
 	def, err := harnessimages.Lookup(role)
 	if err != nil {
 		return err
@@ -101,7 +104,7 @@ func runHarnessLogin(ctx context.Context, role string, in io.Reader, out, errOut
 		fmt.Fprintf(errOut, "A login for %s already exists; continuing will replace it if you finish the flow.\n", role)
 	}
 	if install {
-		if err := installHarnessTool(ctx, def, runtime, errOut); err != nil {
+		if err := installHarnessTool(ctx, def, runtime, errOut, art); err != nil {
 			return err
 		}
 	}

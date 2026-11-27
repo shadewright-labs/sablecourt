@@ -6,7 +6,7 @@ Action
 :   One entry of the closed catalog of typed changes the MCP Gate can run: `git.create_branch`, `git.open_pr` and `sandbox.propose_promotion`. There is no free-form command. See [tools and actions](how-it-works/tools-and-actions.md).
 
 Approval
-:   A pending request to run an action whose policy effect is `approve`. Its payload is pinned by a SHA-256 digest and its status is `pending`, `approved`, `denied` or `expired`. See [approvals](how-it-works/approvals.md).
+:   A pending request to run an action whose policy effect is `approve`. Its payload is pinned by a SHA-256 digest and its status is `pending`, `approved`, `denied`, `expired` or `consumed` (used once, never usable again). See [approvals](how-it-works/approvals.md).
 
 Approval Queue
 :   The part of the daemon that holds approvals and asks a person to confirm them. On macOS the confirmation is a native dialog. The third of the capability gates.
@@ -21,7 +21,7 @@ Budget
 :   A `Budget` manifest: per-task token and cost limits and a daily cost limit. Enforced by the Model Gate.
 
 Citadel
-:   The Kubernetes operating mode (`--mode=citadel`, alias `enterprise`). Built and parked by ADR-0011. See the [overview](overview.md#parked-parts).
+:   The Kubernetes operating mode (`--mode=citadel`, alias `enterprise`): the Kubernetes runtime, listen address `0.0.0.0:7432` by default, and no host coding adapter or councils. See the [overview](overview.md#parked-parts).
 
 Class
 :   What kind of workload it is: `coding-agent`, `long-lived-agent` or `deterministic-controller`.
@@ -30,7 +30,7 @@ Conclave
 :   A room where several workloads, the Vassals, exchange messages and files on one topic under limits. Manifest kind `Conclave`; states `active`, `input-required`, `completed`, `cancelled`. See [Conclaves](how-it-works/conclaves.md).
 
 Council
-:   A Conclave of `claude`, `codex` and `agy` (or a subset chosen with `--with`) that answers one question in bounded rounds. Started with `sablectl council`.
+:   A Conclave of `claude`, `codex` and `agy` (`--with` must name all three) that answers one question in bounded rounds. Started with `sablectl council`.
 
 Court Memory
 :   The key-value memory shown on `/memory` and read through `memory.*` MCP tools. Not a place for secrets.
@@ -54,7 +54,7 @@ Harness
 :   A coding CLI that Sablecourt launches: `claude`, `codex` or `agy`. In a council each runs in its own container when the Docker council runtime is configured.
 
 Idempotency key
-:   A key stored with a task. Submitting a second task with a key that already exists returns the existing task for the same workload instead of creating another.
+:   A key stored with a task. Submitting a second task with a key that already exists returns the existing task when the workload and the parent task are the same, instead of creating another; otherwise the submission is refused.
 
 Lease
 :   The scoped, short-lived credential of a task: `sc_task_` plus 64 hex characters, stored only as a hash. See [identity and access](how-it-works/identity-and-access.md).
@@ -99,13 +99,13 @@ Round
 :   One pass in which each council role takes a turn. The default is two rounds.
 
 Sanctum
-:   The default operating mode: one user, one machine, loopback only.
+:   The default operating mode: one user, one machine, listening on `127.0.0.1:7432` unless `--listen` says otherwise.
 
 Sandbox zone
 :   The zone (`zone: sandbox`) of a workload that holds no mutating action or delegation grant. The other zone is `runtime`.
 
 Scry
-:   Read-only, redacted live view of a task's output (`sablectl task scry`). Takeover, exclusive input to a task, is parked.
+:   Read-only, redacted live view of a task's output (`sablectl task scry`). Takeover is exclusive input to a task, through `POST /api/v1/tasks/{id}/takeover`.
 
 Session marker
 :   The environment variable `SABLECOURT_MANAGED=1` and, in coding worktrees, the file `.sablecourt-session.json` that mark a session as managed by Sablecourt.
@@ -126,7 +126,7 @@ Ward
 :   A limit on a Conclave (`maxRuns`, `maxMessages`, `maxPingPong`, the budget). Tripping one pauses the room in `input-required`.
 
 Workflow
-:   A `Workflow` manifest: ordered steps, each naming a workload, optionally a role (`author`, `verifier`, `fast`) and a model tier.
+:   A `Workflow` manifest: ordered, named steps, each naming a declared workload, optionally a role (free text; `verifier` has special handling) and a model tier.
 
 Workload
 :   A `Workload` manifest: something Sablecourt may launch, with a class, zone, runtime and grants.

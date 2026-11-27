@@ -1,8 +1,8 @@
 # Tools and actions
 
-The MCP Gate (also called the Data and Action Gate) serves the tools a workload is granted and runs a small closed set of typed actions, after the policy engine has said yes. It is the only way a workload reads Court Memory or changes anything outside its own checkout.
+The MCP Gate (also called the Data and Action Gate) serves the tools a workload is granted and runs a small closed set of typed actions, after the policy engine has said yes. A workload reads Court Memory on demand through its tools and asks for a change outside its own checkout through its actions; the daemon also puts a context packet into the task input.
 
-Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). Several faults are known and tracked in issue #9 (see [Known gaps](#known-gaps)).
+Status: built. Several faults are known and tracked in issue #9 (see [Known gaps](#known-gaps)).
 
 ## Two routes
 
@@ -13,7 +13,13 @@ Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/
 
 The lease must be active, and its workload must be declared in the loaded manifests. The action body is limited to 2 MiB, unknown fields are refused. The action path is `/gate/actions/<name>`.
 
-Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`, `memory.get`, `memory.search` and `memory.delete`. Memory writes are redacted, namespaces `learning:*` and `system:*` are closed to the tools, and `search` is a substring match (SQL `LIKE`) on keys and values. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
+Built-in tools: `sablecourt.list_workloads`, four memory tools (`memory.put`, `memory.get`, `memory.search` and `memory.delete`) and four Conclave tools (`conclave.post`, `conclave.read`, `conclave.relic_put` and `conclave.relic_get`). `memory.put` redacts the value it stores. `memory.put` and `memory.delete` refuse the namespaces `learning:*`, `proposed:learning:*` and `system:*`; `memory.get` and `memory.search` refuse `learning:*` and `system:*` (a search without a namespace leaves their entries out). `memory.search` is a substring match (SQL `LIKE`) on keys and values and returns 50 entries by default. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`, and owner and repository must be the GitHub repository pinned at start, see below) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
+
+Each action payload is decoded once, strictly, into the action's typed input: a duplicate key, a key that differs from a field only in case, an unknown field, a `null` value, text that is not UTF-8, a `\u` escape of an unpaired surrogate (which the decoder would turn into U+FFFD) or any data after the object is refused with 400 before an approval exists (a `git.open_pr` target other than the pinned repository is refused with 403 at the same point). The approval digest, the dialog and the executor all use that one decoded value. Branch and base names are checked as Git ref names and used as given, nothing trimmed, and `git.create_branch` needs an explicit `base`. The gate accepts a narrower set than Git: at most 200 bytes, each `/`-separated part starts with an ASCII letter or digit and holds only letters, digits, `.`, `_` and `-`, no part ends in `.` or `.lock`, and no `..` or `HEAD`. A base such as `release/_candidate`, which Git accepts, is refused with 400. A body over 2 MiB is refused: with 400 when it comes through the daemon, whose body limit applies first, and with 413 from the action handler alone.
+
+## Which repository `git.open_pr` may target
+
+When the daemon starts it reads the `origin` remote of its repo root once and pins that GitHub `owner/repo`. `git.open_pr` refuses any other target with 403 when the payload is checked, before an approval is requested or spent, refuses every call when the origin read when the action runs (after an approval is spent) differs from the pin, and refuses every call when nothing could be pinned (no origin, or an origin that is not on github.com; GitHub's SSH over port 443, user `git` at host `ssh.github.com` port 443, is accepted). While a repository is pinned, each audit row the gate writes for an action call names it as `allowed_repo`, except the row for an unknown action name and the `pending` row the approval queue writes. A reload (`POST /api/v1/reload`, a manifest saved in the web UI, or a manifests git sync) never changes the pin: it reads the origin again only to compare it. A changed or unreadable origin logs a warning on each reload and writes one `denied` audit row with reason `repo_origin_changed` or `repo_origin_unreadable` each time the observed origin changes. A row that cannot be written stays owed, and later reloads write it in order, even after the origin has changed again; at most 16 owed rows are kept and the oldest is dropped past that. These rows are in category `data_action_gate` and name no task. To point `git.open_pr` at another repository, change the origin and restart the daemon.
 
 ## How a call is decided
 
@@ -29,11 +35,11 @@ A rule names a workload and a capability, each exact, `*`, or a prefix ending in
 
 ## Circuit breaker
 
-Each action that fails records a failure for its capability; three in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see [Known gaps](#known-gaps)).
+Each failed run of an action records a failure for its capability, a target refused when the action runs included. When the policy effect is `allow`, a payload or target refused at the check counts too. Three failures in a row open the breaker for 2 minutes, and a success resets it. An open breaker makes the engine deny `action:` calls with `circuit_breaker_open`. In the current wiring the gate records failures on a breaker object that the policy engine does not check, so the breaker never opens (see [Known gaps](#known-gaps)).
 
 ## Redaction
 
-`internal/redact` is a best-effort pattern filter. It is defence in depth, not a boundary ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)): a secret shape it does not match passes through. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies. Request bodies sent through the Model Gate are forwarded as sent, so repository content a harness reads can reach the model provider. Exact-match redaction of secrets the daemon holds is decided and not built ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)).
+`internal/redact` is a best-effort pattern filter. It is defence in depth, not a boundary ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)): a secret shape it does not match passes through. It replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. The gate hands tool arguments to the handler unchanged, so redaction of an argument is up to the handler: the memory tools redact the values they store or put in an audit row, and the Conclave tools redact message and Relic bodies. It does not run on Model Gate request or response bodies, so repository content a harness reads can reach the model provider. Exact-match redaction of secrets the daemon holds is decided and not built ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)).
 
 ### Known redaction gaps
 
@@ -64,21 +70,20 @@ The tests in `internal/redact` hold a corpus of synthetic secrets and ordinary t
 
 ## Audit rows
 
-The gate appends a row, category `data_action_gate`, for each denial, error and allowed call, for an unknown action and for an approval mismatch; the memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. A tool call that returns `approval_required` writes nothing in the gate itself.
+Once the lease and the request envelope are accepted, the gate appends a row, category `data_action_gate`, for a policy denial, a handler error or refusal, an allowed call, an unknown action and an approval mismatch. Requests that fail the lease check or the envelope check (401, 403, 400, 413, 503) write no gate row, and neither does a failure to queue an approval. The memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. Gate rows are best effort: the gate ignores an error from the append, so a failed write loses the row and the call carries on. The exception is the `consumed` row of an approved action, which must be written before the action runs. A tool call that returns `approval_required` writes nothing in the gate itself.
 
 ## Known gaps
 
 What the code does today, where it falls short of the design.
 
 - Tool calls whose effect is `approve` cannot complete: each call creates a new pending approval and there is no way to present an approved one. Only actions can be approved and re-run.
-- An approved action can be repeated for the life of the lease: the approval is not marked used and its expiry is not checked at use. Making it single-use is decided in [ADR-0014](../adr/0014-identity-and-authentication.md), Proposed.
 - The circuit breaker never opens, because the gate and the policy engine hold separate breaker objects.
-- `git.open_pr` does not validate `owner`, `repo` or `base`. There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
+- There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
 - The sandbox-zone rule covers `action:` and `delegate:` only; a mutating MCP tool such as `memory.put` is open to a sandbox workload when policy allows it.
 
-## Not built yet
+## Upstream MCP servers
 
-- Parked by ADR-0011: upstream MCP servers (`grants.mcpServers`) are bridged with an injected secret and a 4 MiB response cap, but are not part of the current scope.
+Upstream MCP servers (`grants.mcpServers`) are built, but ADR-0011 puts them outside the current scope. At start-up and on reload the daemon registers, for each server with a name and a URL, each non-blank tool of `allowedTools` as `<name>.<tool>`. Registration is daemon-wide: a workload sees a tool only when its own `mcpTools` grant holds the full name, and the policy engine decides each call. The bridge adds the server's secret on the way out and reads at most 4 MiB of a response.
 
 ## In depth
 

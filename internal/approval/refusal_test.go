@@ -95,7 +95,7 @@ func TestApproveRefusals(t *testing.T) {
 		st := setupApprovalStore(t)
 		q := NewQueue(st, nil)
 		apr := requestOne(t, q)
-		if _, err := q.Approve(ctx, apr.ID, "", "op"); err == nil || !strings.Contains(err.Error(), "no out-of-band approver") {
+		if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op"); err == nil || !strings.Contains(err.Error(), "no out-of-band approver") {
 			t.Fatalf("Approve = %v", err)
 		}
 		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalPending {
@@ -105,7 +105,7 @@ func TestApproveRefusals(t *testing.T) {
 
 	t.Run("unknown approval", func(t *testing.T) {
 		q := NewQueue(setupApprovalStore(t), &countingApprover{})
-		if _, err := q.Approve(ctx, "apr_missing", "", "op"); !errors.Is(err, store.ErrNotFound) {
+		if _, err := q.Approve(ctx, "apr_missing", strings.Repeat("0", 64), "op"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("Approve = %v, want ErrNotFound", err)
 		}
 	})
@@ -115,10 +115,10 @@ func TestApproveRefusals(t *testing.T) {
 		ap := &countingApprover{}
 		q := NewQueue(st, ap)
 		apr := requestOne(t, q)
-		if _, err := q.Approve(ctx, apr.ID, "", "op"); err != nil {
+		if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op"); err != nil {
 			t.Fatalf("first Approve: %v", err)
 		}
-		if _, err := q.Approve(ctx, apr.ID, "", "op"); !errors.Is(err, store.ErrConflict) {
+		if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op"); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("second Approve = %v, want ErrConflict", err)
 		}
 		if ap.calls != 1 {
@@ -160,7 +160,7 @@ func TestApproveRefusals(t *testing.T) {
 		st := setupApprovalStore(t)
 		q := NewQueue(st, &countingApprover{err: errors.New("cancel")})
 		apr := requestOne(t, q)
-		if _, err := q.Approve(ctx, apr.ID, "", "op"); !errors.Is(err, ErrNotConfirmed) {
+		if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op"); !errors.Is(err, ErrNotConfirmed) {
 			t.Fatalf("Approve = %v, want ErrNotConfirmed", err)
 		}
 		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalPending {
@@ -172,7 +172,7 @@ func TestApproveRefusals(t *testing.T) {
 		st := setupApprovalStore(t)
 		q := NewQueue(st, &countingApprover{})
 		apr := requestOne(t, q)
-		got, err := q.Approve(ctx, apr.ID, "", "op")
+		got, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op")
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
@@ -194,7 +194,7 @@ func TestDenyRefusals(t *testing.T) {
 		t.Fatalf("Deny unknown = %v", err)
 	}
 	apr := requestOne(t, q)
-	if _, err := q.Approve(ctx, apr.ID, "", "op"); err != nil {
+	if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "op"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 	if _, err := q.Deny(ctx, apr.ID, "op", "late"); !errors.Is(err, store.ErrConflict) {
@@ -318,7 +318,7 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 
 	t.Run("unknown device", func(t *testing.T) {
 		_, q, priv, _, apr := setup(t)
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", "dev-nope", signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, store.ErrNotFound) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, "dev-nope", signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -328,7 +328,7 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 		if err := st.RevokeDevice(ctx, dev.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrDeviceRevoked) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrDeviceRevoked) {
 			t.Fatalf("got %v", err)
 		}
 		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalPending {
@@ -338,7 +338,7 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 
 	t.Run("unknown approval", func(t *testing.T) {
 		_, q, priv, dev, _ := setup(t)
-		if _, err := q.ApproveWithSignature(ctx, "apr_x", "", dev.ID, signApproval(t, priv, "apr_x", "")); !errors.Is(err, store.ErrNotFound) {
+		if _, err := q.ApproveWithSignature(ctx, "apr_x", strings.Repeat("0", 64), dev.ID, signApproval(t, priv, "apr_x", strings.Repeat("0", 64))); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -346,7 +346,7 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		st, q, priv, dev, apr := setup(t)
 		q.now = func() time.Time { return apr.ExpiresAt.Add(time.Second) }
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrApprovalExpired) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, signApproval(t, priv, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrApprovalExpired) {
 			t.Fatalf("got %v", err)
 		}
 		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalExpired {
@@ -363,7 +363,7 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 
 	t.Run("signature over another approval", func(t *testing.T) {
 		st, q, priv, dev, apr := setup(t)
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, signApproval(t, priv, "apr_other", apr.PayloadSHA256)); !errors.Is(err, ErrInvalidSignature) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, signApproval(t, priv, "apr_other", apr.PayloadSHA256)); !errors.Is(err, ErrInvalidSignature) {
 			t.Fatalf("got %v", err)
 		}
 		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalPending {
@@ -374,29 +374,35 @@ func TestApproveWithSignatureRefusals(t *testing.T) {
 	t.Run("signature from another key", func(t *testing.T) {
 		_, q, _, dev, apr := setup(t)
 		other, _ := p256PEM(t)
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, signApproval(t, other, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrInvalidSignature) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, signApproval(t, other, apr.ID, apr.PayloadSHA256)); !errors.Is(err, ErrInvalidSignature) {
 			t.Fatalf("got %v", err)
 		}
 	})
 
 	t.Run("signature not base64", func(t *testing.T) {
 		_, q, _, dev, apr := setup(t)
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, "!!!"); !errors.Is(err, ErrInvalidSignature) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, "!!!"); !errors.Is(err, ErrInvalidSignature) {
 			t.Fatalf("got %v", err)
 		}
 	})
 
-	t.Run("empty expected digest approves once, then conflicts", func(t *testing.T) {
+	t.Run("empty expected digest is refused; the digest approves once, then conflicts", func(t *testing.T) {
 		st, q, priv, dev, apr := setup(t)
 		sig := signApproval(t, priv, apr.ID, apr.PayloadSHA256)
-		got, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, sig)
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, sig); !errors.Is(err, ErrDigestRequired) {
+			t.Fatalf("empty expected digest = %v, want ErrDigestRequired", err)
+		}
+		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalPending {
+			t.Fatalf("status after the refused call = %s, want pending", s)
+		}
+		got, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, sig)
 		if err != nil {
 			t.Fatalf("ApproveWithSignature: %v", err)
 		}
 		if got.Status != domain.ApprovalApproved || got.DecidedBy != "device:"+dev.ID {
 			t.Fatalf("approval = %+v", got)
 		}
-		if _, err := q.ApproveWithSignature(ctx, apr.ID, "", dev.ID, sig); !errors.Is(err, store.ErrConflict) {
+		if _, err := q.ApproveWithSignature(ctx, apr.ID, apr.PayloadSHA256, dev.ID, sig); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("replay = %v, want ErrConflict", err)
 		}
 		recs, _ := st.ListAudit(ctx, 1)

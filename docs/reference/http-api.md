@@ -12,7 +12,7 @@ The route tables are checked by `TestHTTPReferenceListsEveryRoute` in `cmd/sable
 - A `GET` pattern also answers `HEAD`, as Go's router does.
 - The Model Gate is one mount at `/gate/model/`; its rows list the provider paths it forwards, taken from the gate's own route table. Any other path below the mount is refused with 404.
 
-Purposes are one line each. Status codes and error texts are not listed, because no test ties them to this page; the [how it works](../how-it-works/index.md) pages describe the behavior. Errors from the API are JSON of the form `{"error": "..."}`, apart from the plain-text replies of the login, logout and metrics routes, the JSON-RPC errors of `POST /a2a`, the plain-text replies of the MCP SDK on `/gate/mcp`, and Go's plain-text `405 Method Not Allowed` for a registered path called with another method.
+Purposes are one line each. Status codes and error texts are not listed, because no test ties them to this page; the [how it works](../how-it-works/index.md) pages describe the behavior. Errors from the `/api/v1/` and `/gate/` routes are JSON of the form `{"error": "..."}`, apart from the plain-text `500 streaming unsupported` of the four server-sent stream routes, the plain-text replies of the login, logout and metrics routes, the JSON-RPC errors of `POST /a2a`, the plain-text replies of the MCP SDK on `/gate/mcp`, and Go's plain-text `405 Method Not Allowed` for a registered path called with another method. The dashboard pages and form posts reply in HTML or plain text, and a browser `GET` without credentials gets an HTML `401` that links to `/login`.
 
 ## Credential classes
 
@@ -34,8 +34,8 @@ Source: `cmd/sablecourtd/operator_auth.go`, `cmd/sablecourtd/host.go`. Each rule
 | --- | --- |
 | Host check | The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` with the listen port, or an entry from `--allow-host`. `/gate/` paths are also accepted on the `--gate-host` authority. |
 | Path form | A path that is not in canonical form (dot segments, doubled slashes) is refused. |
-| Cross-origin | A write (any method but `GET`, `HEAD` and `OPTIONS`) that carries `Origin` or `Sec-Fetch-Site` must be same-origin. `/gate/`, `POST /api/v1/hooks/github` and `POST /a2a` skip this check. |
-| Body size | Every write has a body cap; the values are on the [limits](limits.md#http-server) page. |
+| Cross-origin | A write (any method but `GET`, `HEAD` and `OPTIONS`) that carries `Origin` or `Sec-Fetch-Site` must be same-origin. `/gate/`, `POST /api/v1/hooks/github` and `POST /a2a` skip this check. A write that authenticates with the session cookie must also be same-origin, whether or not it carries those headers. |
+| Body size | A write outside `/gate/model/` and `POST /api/v1/voice/transcribe` is cut off at 2 MiB. The voice route has its own cap, and the Model Gate reads at most 16 MiB of a request body. The values are on the [limits](limits.md#http-server) page. |
 
 ## Public routes
 
@@ -46,7 +46,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/ui/ui.go`.
 | `GET /healthz` | Liveness. Returns `{"status":"ok"}`. |
 | `GET /login` | HTML sign-in form. |
 | `POST /login` | Exchange the operator token, sent as the form field `token`, for a session cookie. |
-| `GET /.well-known/agent-card.json` | Agent card that lists every workload outside the `sandbox` zone. Parked. |
+| `GET /.well-known/agent-card.json` | Agent card with one skill for each loaded workload outside the `sandbox` zone. |
 | `GET /favicon.ico` | Dashboard icon. |
 | `GET /apple-touch-icon.png` | Dashboard icon. |
 | `GET /assets/` | Dashboard static files. |
@@ -55,7 +55,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/ui/ui.go`.
 
 ### Tasks
 
-Source: `cmd/sablecourtd/main.go`. The takeover, stdin and detach routes are parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md).
+Source: `cmd/sablecourtd/main.go`.
 
 | Route | Purpose |
 | --- | --- |
@@ -64,14 +64,14 @@ Source: `cmd/sablecourtd/main.go`. The takeover, stdin and detach routes are par
 | `POST /api/v1/tasks` | Submit a task. Body `{"workload", "idempotencyKey", "inputJson"}`. |
 | `GET /api/v1/tasks/{id}` | The task, its state events and its budget totals as `{"task","events","budget"}`. |
 | `POST /api/v1/tasks/{id}/cancel` | Cancel a task. |
-| `POST /api/v1/tasks/{id}/retry` | Submit a new task from the input of an old one. With `?handoff=true` (or `1`) it attaches a failure handoff. |
+| `POST /api/v1/tasks/{id}/retry` | Submit a new task from the input of a task in a terminal state. A council task is refused. With `?handoff=true` (or `1`) it attaches a failure handoff. |
 | `POST /api/v1/tasks/{id}/suspend` | Checkpoint a working task. |
 | `POST /api/v1/tasks/{id}/resume` | Resume a suspended task. |
 | `GET /api/v1/tasks/{id}/scry` | Server-sent stream of redacted task output (Scry). Observer credential accepted. |
-| `POST /api/v1/tasks/{id}/takeover` | Take exclusive stdin control of a live task. |
-| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding the takeover. |
-| `POST /api/v1/tasks/{id}/detach` | Release the takeover. |
-| `GET /api/v1/stream` | Server-sent `state` events with a fingerprint of tasks, approvals and audit rows, for the dashboard. |
+| `POST /api/v1/tasks/{id}/takeover` | Take exclusive stdin control of a live task session that has a writable stdin; refused while another operator holds it. Body `{"operator"}`. |
+| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding the takeover. Body `{"operator","data"}`. |
+| `POST /api/v1/tasks/{id}/detach` | Release the takeover. Body `{"operator"}`. |
+| `GET /api/v1/stream` | Server-sent `state` events with a fingerprint of tasks, pending approvals and the newest audit row, sent at once and every 3 seconds, for the dashboard. |
 | `GET /api/v1/budget` | Token and micro-USD totals over all tasks. |
 
 ### Approvals and devices
@@ -81,7 +81,7 @@ Source: `cmd/sablecourtd/main.go`. Device pairing is disabled: both pairing rout
 | Route | Purpose |
 | --- | --- |
 | `GET /api/v1/approvals` | List approvals, newest first. `?status=` filters by state. |
-| `POST /api/v1/approvals/{id}/approve` | Approve after the out-of-band confirmation. Body `{"expectedSha256","decidedBy"}`. |
+| `POST /api/v1/approvals/{id}/approve` | Approve after the out-of-band confirmation. Body `{"expectedSha256","decidedBy"}`; `expectedSha256` is required and must equal the approval's payload digest: an empty or missing digest is refused with 409 (`expected payload digest is required`) before the approval is read, and the confirmation dialog on the daemon host shows the stored value and is checked against the same digest. A body with `deviceId` and `signature` takes the device-signature path. |
 | `POST /api/v1/approvals/{id}/deny` | Deny. Body `{"decidedBy","reason"}`. |
 | `POST /api/v1/devices/pair/start` | Disabled. |
 | `POST /api/v1/devices/pair/complete` | Disabled. |
@@ -94,23 +94,23 @@ Source: `cmd/sablecourtd/main.go`.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/v1/audit` | The newest audit rows, newest first. |
+| `GET /api/v1/audit` | The newest 50 audit rows, newest first. |
 | `GET /api/v1/audit/verify` | Walk the audit hash chain and report whether it is valid. |
-| `GET /api/v1/audit/export` | The newest audit rows as `application/x-ndjson`, oldest first. |
-| `GET /api/v1/memory` | List Court Memory entries. Query `namespace` and `q` (substring match). |
-| `POST /api/v1/memory` | Set an entry. Body `{"namespace","key","value"}`. |
-| `DELETE /api/v1/memory/{namespace}/{key}` | Delete an entry. |
+| `GET /api/v1/audit/export` | The newest 10000 audit rows as `application/x-ndjson`, oldest first. |
+| `GET /api/v1/memory` | List up to 100 Court Memory entries, never those in a `learning:` namespace. Query `namespace` and `q` (substring match). |
+| `POST /api/v1/memory` | Set an entry; the value is redacted, and a `learning:` namespace is refused with 403. Body `{"namespace","key","value"}`. |
+| `DELETE /api/v1/memory/{namespace}/{key}` | Delete an entry; a `learning:` namespace is refused with 403. |
 | `GET /api/v1/schedules` | List declared Schedules. |
 | `POST /api/v1/schedules/{name}/run` | Run a Schedule now. |
 | `POST /api/v1/reload` | Reload the manifests. |
-| `POST /api/v1/promote/{name}` | For a `sandbox` workload, create the branch `sablecourt/promote-<name>` in the daemon's working directory. |
+| `POST /api/v1/promote/{name}` | For a `sandbox` workload, run `git branch` to create the branch `sablecourt/promote-<name>` in the daemon's working directory. It does not change the zone; a workload already in the `runtime` zone gets 409. |
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |
 | `GET /api/v1/providers/tiers` | The `fast`, `coding` and `critic` model routes. |
 | `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model"}`. |
-| `GET /api/v1/learnings` | Learnings from Court Memory that match `?repo=` and `?path=`. |
+| `GET /api/v1/learnings` | Up to 100 learnings from Court Memory that match `?repo=` and `?path=` (a comma-separated list). |
 | `POST /api/v1/learnings` | Disabled: refuses every call ([ADR-0012](../adr/0012-learning-evidence-and-expiry.md)). |
-| `POST /api/v1/notify/test` | Send a test chat alert. Parked. |
+| `POST /api/v1/notify/test` | Send a test alert, with a redacted title and text, to the configured chat webhook (secret `notify_webhook_url`, or `SABLECOURT_NOTIFY_WEBHOOK_URL`). With no webhook configured nothing is sent and the reply is still 200 `{"status":"sent"}`; a failed send is 502. |
 
 ### Metrics and sign-out
 
@@ -123,14 +123,14 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablecourtd/operator_auth.go`, `internal
 
 ### Voice
 
-Source: `cmd/sablecourtd/main.go`, `internal/voice/voice.go`. All voice routes are parked.
+Source: `cmd/sablecourtd/main.go`, `internal/voice/voice.go`. The audio goes to the speech-to-text endpoint (default a local address, set with `SABLECOURT_STT_URL` or the secret `voice_stt_url`) and the text of `speak` goes to the text-to-speech endpoint (`SABLECOURT_TTS_URL` or `voice_tts_url`; none by default). Either can point off the machine.
 
 | Route | Purpose |
 | --- | --- |
 | `GET /api/v1/voice/status` | The resolved speech settings. |
 | `POST /api/v1/voice/transcribe` | Speech to text: raw audio or `multipart/form-data` with a `file` part. Returns the redacted transcript. |
-| `POST /api/v1/voice/speak` | Text to speech. Body `{"text","voice"}`. |
-| `POST /api/v1/conclaves/{id}/voice-decree` | Audio Decree to a Conclave, transcribed by the voice backend. |
+| `POST /api/v1/voice/speak` | Text to speech: the text is redacted, cut to 4,000 bytes (after redaction, so a multi-byte character can be split) and sent to the configured text-to-speech endpoint, and the audio comes back. Body `{"text","voice"}`. |
+| `POST /api/v1/conclaves/{id}/voice-decree` | Audio Decree to a Conclave: the audio is transcribed as for `transcribe` and the redacted text is posted as a Decree to the role in `to` (query or form field, `all` if absent). |
 
 ### Councils and conclaves
 
@@ -156,8 +156,8 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablecourtd/councils.go`, `cmd/sablecour
 | `decree` | string | none | If present, must equal `question` after trimming. |
 | `title` | string | `Council` | At most 512 bytes. |
 | `repo` | string | none | Required absolute path, at most 4096 bytes, of a primary Git checkout owned by the daemon user, outside the state and credential directories. |
-| `ref` | string | none | Branch, tag, `HEAD` or full commit ID, at most 256 bytes. Excludes `live`. |
-| `live` | bool | `true` when neither `ref` nor `writer` is set | Read-only view of the working tree. Excludes `ref` and `writer`. |
+| `ref` | string | none | Branch, tag, `HEAD` or full commit ID, at most 256 bytes, not starting with `-`. Cannot be combined with `live: true`. |
+| `live` | bool | `true` when neither `ref` nor `writer` is set | Read-only view of the working tree. `true` cannot be combined with `ref` or `writer`; `false` needs a `ref` or `writer`. |
 | `writer` | string | none | `claude`, `codex` or `agy`. With no `ref`, the ref is `HEAD`. `sablectl council --writer <seat>` sets it. |
 | `rounds` | integer | `2` | At least 1. |
 | `starts` | integer | `6` | From 1 to 6. |
@@ -192,7 +192,7 @@ Source: `internal/ui/ui.go`. The web dashboard uses the operator credential and 
 | `POST /ui/approvals/{id}/deny` | Form post: deny. |
 | `POST /ui/conclaves` | Form post: open a Conclave. |
 | `POST /ui/conclaves/{id}/relics` | Form post: upload a Relic. |
-| `POST /ui/conclaves/{id}/learning` | Form post: save a learning from a Conclave. |
+| `POST /ui/conclaves/{id}/learning` | Form post: save a proposed learning (`status: "proposed"`, pending review) from a Conclave message under `proposed:learning:<scope>`. |
 | `POST /ui/conclaves/{id}/decree` | Form post: send a Decree. |
 | `POST /ui/conclaves/{id}/close` | Form post: close a Conclave. |
 | `POST /ui/memory/set` | Form post: set a Court Memory entry. |
@@ -228,7 +228,7 @@ Source: `internal/integrations/shadewright.go`. Both take a JSON object and reco
 
 ## Task-lease routes
 
-Source: `cmd/sablecourtd/main.go`, `internal/gate/model/gate.go`, `internal/gate/mcp/gate.go`. The lease must be active: known by its token hash, not expired and not revoked. For `/gate/mcp`, `/gate/actions/`, `/gate/task/` and `/gate/conclave/` the task must also be `working` or `input-required`.
+Source: `cmd/sablecourtd/main.go`, `internal/gate/model/gate.go`, `internal/gate/mcp/gate.go`. The lease must be active: known by its token hash, not expired and not revoked. The task must also be `working` or `input-required`; for the routes under `/gate/` the daemon refuses a lease of any other task with 401.
 
 | Route | Purpose |
 | --- | --- |
@@ -236,13 +236,13 @@ Source: `cmd/sablecourtd/main.go`, `internal/gate/model/gate.go`, `internal/gate
 | `ANY /gate/model/openai/v1/responses` | Model Gate to OpenAI. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
 | `ANY /gate/model/local/v1/chat/completions` | Model Gate to a local OpenAI-compatible endpoint. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
 | `ANY /gate/model/local/v1/responses` | Model Gate to a local OpenAI-compatible endpoint. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
-| `ANY /gate/model/anthropic/v1/messages` | Model Gate to Anthropic. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
-| `ANY /gate/model/gemini/v1beta/models/{model}:generateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
-| `ANY /gate/model/gemini/v1beta/models/{model}:streamGenerateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged, also to a fallback provider. |
+| `ANY /gate/model/anthropic/v1/messages` | Model Gate to Anthropic. Methods: any. The method is forwarded unchanged. There is no fallback provider. |
+| `ANY /gate/model/gemini/v1beta/models/{model}:generateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged. There is no fallback provider. |
+| `ANY /gate/model/gemini/v1beta/models/{model}:streamGenerateContent` | Model Gate to Gemini, any model name. Methods: any. The method is forwarded unchanged. There is no fallback provider. |
 | `ANY /gate/mcp` | MCP over streamable HTTP, stateless. Methods: `POST`. Lists only the tools granted to the workload and registered in the gate. |
 | `ANY /gate/actions/` | Typed action from the closed catalog, named by the path below the mount (for example `/gate/actions/git.open_pr`). Methods: `POST`. Body `{"approvalId","payload"}`. |
 | `GET /gate/task/messages` | Messages of the lease's task. |
-| `POST /gate/task/messages` | Add a message to the lease's task. Body `{"role","content"}`. |
+| `POST /gate/task/messages` | Add a redacted message to the lease's task, always stored with the role `agent` (a `role` of `system` is refused with 403). Body `{"role","content"}`; `content` is required. |
 | `POST /gate/conclave/{id}/messages` | Post a proposal as the lease's seat. |
 | `GET /gate/conclave/{id}/messages` | Read messages visible to the seat. Query `since`. |
 | `POST /gate/conclave/{id}/relics` | Store a Relic as the seat. |
@@ -265,7 +265,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/webhook/github.go`, `internal/a2a/h
 
 ## Not built yet
 
-Decided in [ADR-0014](../adr/0014-identity-and-authentication.md), which is Proposed: passkey enrolment, per-session revocation and a single-use `consumed` state for approvals. None of them exists on `main`. `POST /logout` ends all sessions at once by replacing the signing key; a single session cookie cannot be revoked on its own.
+Decided in [ADR-0014](../adr/0014-identity-and-authentication.md), which is Proposed: passkey enrolment and per-session revocation. Neither exists on `main`. `POST /logout` ends all sessions at once by replacing the signing key; a single session cookie cannot be revoked on its own.
 
 Decided in [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): operator acceptance and scoped matching of learnings. `POST /api/v1/learnings` stays disabled until then.
 

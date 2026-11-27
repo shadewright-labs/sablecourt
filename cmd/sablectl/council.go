@@ -23,6 +23,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 )
 
 const (
@@ -134,6 +135,8 @@ func buildCouncilCmd(httpClient func(time.Duration) (*http.Client, string), json
 				Writer:     strings.TrimSpace(writer.value),
 				JSONOut:    *jsonOut,
 				PollEvery:  defaultCouncilPollEvery,
+				ErrOut:     cmd.ErrOrStderr(),
+				Art:        artConfig(cmd),
 			})
 		},
 	}
@@ -159,6 +162,9 @@ type councilRunParams struct {
 	Writer     string
 	JSONOut    bool
 	PollEvery  time.Duration
+	// ErrOut is where the wait animation is drawn, when Art allows it.
+	ErrOut io.Writer
+	Art    waitart.Config
 }
 
 func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*http.Client, string), out io.Writer, params councilRunParams) error {
@@ -177,10 +183,20 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 		return errors.New("daemon returned empty conclave ID")
 	}
 
+	lineWritten := true
 	if !params.JSONOut {
-		fmt.Fprintf(out, "%s convened council %s (rounds=%d, with=%s)\n",
-			stJade.Render("✓"), stTitle.Render(sess.ID), params.Rounds, strings.Join(params.Harnesses, ","))
+		lineWritten = writeWhole(out, fmt.Sprintf("%s convened council %s (rounds=%d, with=%s)\n",
+			stJade.Render("✓"), stTitle.Render(sess.ID), params.Rounds, strings.Join(params.Harnesses, ",")))
 	}
+
+	// The animation plays on stderr while the rounds run; council output goes
+	// through it so a frame is cleared before each line and drawn below it.
+	var art *waitart.Player
+	if lineWritten {
+		art = params.Art.Start(ctx, params.ErrOut, waitart.ForKind(waitart.Council), councilStatus(params.Rounds, councilDetailResponse{}))
+	}
+	defer art.Stop()
+	out = art.Wrap(out)
 
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
@@ -207,6 +223,7 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 			return false, err
 		}
 		latest = detail
+		art.SetStatus(councilStatus(params.Rounds, detail))
 		for _, m := range detail.Messages {
 			if m.ID <= lastSeenID {
 				continue
@@ -284,6 +301,7 @@ func runCouncilSession(ctx context.Context, httpClient func(time.Duration) (*htt
 		}
 	}
 	cancelStream()
+	art.Stop()
 
 	// Final fetch with a bounded fresh context to capture any trailing digest Relic.
 	finalCtx, cancelFinal := context.WithTimeout(context.Background(), 5*time.Second)

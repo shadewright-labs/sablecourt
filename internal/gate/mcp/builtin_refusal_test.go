@@ -38,12 +38,27 @@ func builtinGate(t *testing.T, repoRoot string, opener PROpener) *Gate {
 func runAction(t *testing.T, g *Gate, name, payload string) (any, error) {
 	t.Helper()
 	g.mu.RLock()
-	fn := g.actions[name]
+	def, ok := g.actions[name]
 	g.mu.RUnlock()
-	if fn == nil {
+	if !ok {
 		t.Fatalf("action %q not registered", name)
 	}
-	return fn(context.Background(), domain.Workload{}, "task-1", json.RawMessage(payload))
+	// The gate decodes the payload once into the typed value and runs that
+	// value, so a test runs both steps the same way.
+	value, err := def.decode(json.RawMessage(payload))
+	if err != nil {
+		return nil, err
+	}
+	return def.run(context.Background(), domain.Workload{}, "task-1", value)
+}
+
+// initGitHubRepo is initGitRepo with a GitHub origin, the only repository
+// git.open_pr may target.
+func initGitHubRepo(t *testing.T, origin string) string {
+	t.Helper()
+	repo := initGitRepo(t)
+	gitOut(t, repo, "remote", "add", "origin", origin)
+	return repo
 }
 
 func TestBuiltinCreateBranchRefusals(t *testing.T) {
@@ -57,17 +72,19 @@ func TestBuiltinCreateBranchRefusals(t *testing.T) {
 		payload string
 		wantErr string
 	}{
-		{"unknown field", gate, `{"branch":"sablecourt/a","force":true}`, "invalid action payload"},
-		{"empty branch", gate, `{"branch":"  "}`, "protected or empty"},
-		{"master", gate, `{"branch":"master"}`, "protected or empty"},
-		{"outside prefix", gate, `{"branch":"feature/x"}`, "must start with sablecourt/"},
-		{"dot dot", gate, `{"branch":"sablecourt/../main"}`, "illegal characters"},
-		{"space", gate, `{"branch":"sablecourt/a b"}`, "illegal characters"},
-		{"glob", gate, `{"branch":"sablecourt/a*"}`, "illegal characters"},
-		{"no repo root", noRoot, `{"branch":"sablecourt/a"}`, "repo root not configured"},
-		{"base as option", gate, `{"branch":"sablecourt/a","base":"--orphan"}`, "invalid base ref"},
-		{"base range", gate, `{"branch":"sablecourt/a","base":"main..HEAD"}`, "invalid base ref"},
-		{"base with space", gate, `{"branch":"sablecourt/a","base":"ma in"}`, "invalid base ref"},
+		{"unknown field", gate, `{"branch":"sablecourt/a","base":"main","force":true}`, "invalid action payload"},
+		{"blank branch", gate, `{"branch":"  ","base":"main"}`, "invalid ref name"},
+		{"master", gate, `{"branch":"master","base":"main"}`, "must start with sablecourt/"},
+		{"outside prefix", gate, `{"branch":"feature/x","base":"main"}`, "must start with sablecourt/"},
+		{"dot dot", gate, `{"branch":"sablecourt/../main","base":"main"}`, "invalid ref name"},
+		{"space", gate, `{"branch":"sablecourt/a b","base":"main"}`, "invalid ref name"},
+		{"glob", gate, `{"branch":"sablecourt/a*","base":"main"}`, "invalid ref name"},
+		{"no repo root", noRoot, `{"branch":"sablecourt/a","base":"main"}`, "repo root not configured"},
+		{"missing base", gate, `{"branch":"sablecourt/a"}`, "invalid base"},
+		{"base as option", gate, `{"branch":"sablecourt/a","base":"--orphan"}`, "invalid base"},
+		{"base range", gate, `{"branch":"sablecourt/a","base":"main..HEAD"}`, "invalid base"},
+		{"base with space", gate, `{"branch":"sablecourt/a","base":"ma in"}`, "invalid base"},
+		{"base HEAD", gate, `{"branch":"sablecourt/a","base":"HEAD"}`, "invalid base"},
 		{"base that does not exist", gate, `{"branch":"sablecourt/a","base":"no-such-ref"}`, "git branch failed"},
 	}
 	for _, tc := range cases {
@@ -79,17 +96,19 @@ func TestBuiltinCreateBranchRefusals(t *testing.T) {
 		})
 	}
 
-	out, err := runAction(t, gate, "git.create_branch", `{"branch":"sablecourt/from-head","base":"HEAD"}`)
+	base := strings.TrimSpace(gitOut(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
+	out, err := runAction(t, gate, "git.create_branch", `{"branch":"sablecourt/from-base","base":"`+base+`"}`)
 	if err != nil {
-		t.Fatalf("create_branch with base HEAD: %v", err)
+		t.Fatalf("create_branch with base %s: %v", base, err)
 	}
-	if m, _ := out.(map[string]string); m["status"] != "created" || m["branch"] != "sablecourt/from-head" {
+	if m, _ := out.(map[string]string); m["status"] != "created" || m["branch"] != "sablecourt/from-base" {
 		t.Fatalf("result = %#v", out)
 	}
 }
 
 func TestBuiltinOpenPRRefusals(t *testing.T) {
 	ok := &stubPROpener{}
+	repo := initGitHubRepo(t, "https://github.com/o/r.git")
 	cases := []struct {
 		name    string
 		opener  PROpener
@@ -97,16 +116,17 @@ func TestBuiltinOpenPRRefusals(t *testing.T) {
 		wantErr string
 	}{
 		{"head outside prefix", ok, `{"owner":"o","repo":"r","head":"main","base":"main","title":"t"}`, "invalid head branch"},
-		{"missing owner", ok, `{"repo":"r","head":"sablecourt/x","base":"main","title":"t"}`, "owner, repo, base, and title are required"},
-		{"blank title", ok, `{"owner":"o","repo":"r","head":"sablecourt/x","base":"main","title":" "}`, "required"},
-		{"missing base", ok, `{"owner":"o","repo":"r","head":"sablecourt/x","title":"t"}`, "required"},
+		{"missing owner", ok, `{"repo":"r","head":"sablecourt/x","base":"main","title":"t"}`, "invalid owner"},
+		{"blank title", ok, `{"owner":"o","repo":"r","head":"sablecourt/x","base":"main","title":" "}`, "title is required"},
+		{"missing base", ok, `{"owner":"o","repo":"r","head":"sablecourt/x","title":"t"}`, "invalid base"},
+		{"other repository", ok, `{"owner":"o","repo":"other","head":"sablecourt/x","base":"main","title":"t"}`, "not the configured repository"},
 		{"unknown field", ok, `{"owner":"o","repo":"r","head":"sablecourt/x","base":"main","title":"t","draft":true}`, "invalid action payload"},
 		{"no opener", nil, `{"owner":"o","repo":"r","head":"sablecourt/x","base":"main","title":"t"}`, "PR opener not configured"},
 		{"opener fails", failingPROpener{errors.New("github down")}, `{"owner":"o","repo":"r","head":"sablecourt/x","base":"main","title":"t"}`, "github down"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gate := builtinGate(t, "", tc.opener)
+			gate := builtinGate(t, repo, tc.opener)
 			if _, err := runAction(t, gate, "git.open_pr", tc.payload); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("open_pr = %v, want %q", err, tc.wantErr)
 			}
@@ -124,7 +144,7 @@ func TestBuiltinProposePromotionRefusals(t *testing.T) {
 		payload string
 		wantErr string
 	}{
-		{"bad branch", `{"workload":"exp-sandbox","branch":"main","reason":"r"}`, "protected"},
+		{"bad branch", `{"workload":"exp-sandbox","branch":"main","reason":"r"}`, "must start with sablecourt/"},
 		{"unknown workload", `{"workload":"nobody","branch":"sablecourt/p","reason":"r"}`, `workload "nobody" not found`},
 		{"already runtime", `{"workload":"triage-agent","branch":"sablecourt/p","reason":"r"}`, "already in zone"},
 		{"unknown field", `{"workload":"exp-sandbox","branch":"sablecourt/p","zone":"runtime"}`, "invalid action payload"},

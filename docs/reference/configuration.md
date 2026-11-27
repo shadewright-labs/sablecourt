@@ -72,7 +72,7 @@ Source: `internal/gate/model/gate.go`. With `--model-gateway-url` set, every pro
 
 ## Environment variables
 
-Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`, `internal/harnessimages`, `internal/runtime/coding`.
+Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`, `internal/harnessimages`, `internal/runtime/coding`, `internal/waitart`.
 
 The tables in this section and the Environment variable column of the voice table are checked by `TestConfigurationEnvironmentVariables` in `internal/refdocs`: it finds every `os.Getenv`, `os.LookupEnv` and `os.Environ` call in `cmd/sablecourtd`, `cmd/sablectl` and `internal`, and fails when a name the code reads is missing here or a name here is not read. The "Read by" and "Passed by" columns are not checked. No flag takes its default from the environment through a binding library; each fallback is one of these calls.
 
@@ -84,6 +84,10 @@ The tables in this section and the Environment variable column of the voice tabl
 | `SABLECOURT_POSTGRES_DSN` | `sablecourtd` | Same as `--postgres-dsn`. [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks PostgreSQL. |
 | `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | The operator token. Without it, `sablectl` reads `operator.token` from the state directory when the daemon is local. Sent only over HTTPS or to a local daemon. There is no matching flag. |
 | `SABLECOURT_GITHUB_CLIENT_ID` | `sablectl` | Same as `auth github --client-id` (parked). |
+| `SABLECOURT_NO_ART` | `sablectl` | Any value but empty or `0` turns off the [wait animation](cli.md#wait-animation), as `--no-art` does. |
+| `NO_COLOR` | `sablectl` | Any value but empty turns off the wait animation. |
+| `TERM` | `sablectl` | `dumb` turns off the wait animation. |
+| `COLORTERM` | `sablectl` | `truecolor` or `24bit` draws the wait animation in 24-bit colour; any other value uses the 256-colour palette. |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
 | `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. |
 | `SABLECOURT_NOTIFY_WEBHOOK_URL` | `sablecourtd` | Chat alert webhook, used when the `notify_webhook_url` secret is not set (parked). |
