@@ -114,8 +114,8 @@ func TestBodyPastTheLimitIsRefused(t *testing.T) {
 	env := `{"payload":` + validOpenPR + `}`
 	padded := env + strings.Repeat(" ", maxActionBody-len(env))
 	for _, tail := range []string{"null", "{}", " "} {
-		if rec := tg.post("ops-agent", "git.open_pr", padded+tail); rec.Code == http.StatusOK {
-			t.Fatalf("envelope padded to the limit plus %q accepted", tail)
+		if rec := tg.post("ops-agent", "git.open_pr", padded+tail); rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("envelope padded to the limit plus %q: want 413, got %d: %s", tail, rec.Code, rec.Body.String())
 		}
 	}
 	if n := len(tg.pr.calls()); n != 0 {
