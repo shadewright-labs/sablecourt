@@ -131,9 +131,9 @@ What this does not change: the container restrictions, one login volume per harn
 
 Stated limit: a machine without a container runtime cannot run coding tasks or councils in 0.1.0.
 
-## Amendment (2026-11-27, Proposed): bind mounts by handle and file identity
+## Amendment (2026-11-27, Accepted): bind mounts by handle and file identity
 
-Status of this amendment: Proposed. It records the decision of 2026-11-27 on [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181), taken after three review passes each found new path spellings where the mount check and the daemon's own file opens disagreed. It narrows what may be mounted and changes no accepted text above.
+Status of this amendment: Accepted (2026-11-27). It records the decision of 2026-11-27 on [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181), taken after three review passes each found new path spellings where the mount check and the daemon's own file opens disagreed. It narrows what may be mounted and changes no accepted text above.
 
 Bind mounts. The daemon opens its worktree root once at startup and mounts a checkout it made (a task worktree, a council ref, review or writer checkout, or a launch's own Git metadata) only when every component below that root is a plain directory checked through the handle, passing Docker the root's canonical path plus those components. The one checkout an operator names, the live repository, is compared by device and inode with the database and its directory, the secret file, the state directory, the worktree root, the home credential paths and the runtime sockets, each walked up to the file system root with `..`, and is refused if it is, contains or lies under one of them. The daemon refuses to start when the database, the secret file or the state directory lies under the worktree root or when `--db` contains `?`, checks after opening that SQLite opened the file it created, builds no Docker adapter on a remote Docker engine (`tcp://`, `ssh://`) or on a client that does not report its host, so the daemon, `sablectl harness login` and `sablectl harness install` refuse to start and make no network, volume or container call there, and derives a crashed launch's task directory from the root and the task ID instead of the journal.
 
