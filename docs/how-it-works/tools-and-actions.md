@@ -33,7 +33,34 @@ Each action that fails records a failure for its capability; three in a row open
 
 ## Redaction
 
-`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+`internal/redact` is a best-effort pattern filter. It is defence in depth, not a boundary ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)): a secret shape it does not match passes through. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies. Request bodies sent through the Model Gate are forwarded as sent, so repository content a harness reads can reach the model provider. Exact-match redaction of secrets the daemon holds is decided and not built ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)).
+
+### Known redaction gaps
+
+The tests in `internal/redact` hold a corpus of synthetic secrets and ordinary text. Each row is either asserted (hidden, or kept unchanged) or listed in the gap table of `known_gaps_test.go`, which pins today's result: the secret stays visible, or, in the over-redaction class, ordinary text is hidden. When a rule starts covering a gap row, `TestKnownGaps` fails and tells you to move the row to the corpus. The table below is generated from the gap table, and `TestKnownGapsDoc` fails when the two differ.
+
+<!-- redact-gaps:start -->
+
+| Class | Rows | Examples |
+| --- | --- | --- |
+| token key names | 3 | `auth_token: <value>`, `https://x.invalid/?token=<value>&next=/home` |
+| URL userinfo | 17 | `postgres://app:<password>@example.com:5432/x`, `redis://:<password>@cache.internal:6379/0`, `postgres://app:p@<rest of password>@example.com/x` |
+| Basic auth | 7 | `Authorization: Basic <base64>`, `Proxy-Authorization: Basic <base64>`, `map[Authorization:[Basic <base64>]]` |
+| truncated PEM | 10 | `a BEGIN RSA PRIVATE KEY header and body with no END line`, `a BEGIN PRIVATE KEY block closed by an END line of another label`, `BEGIN PRIVATE KEY header with the body glued to it, no END line` |
+| JWT | 11 | `session=<header>.<payload>.<signature>`, `tok=<header>.<payload>`, `enc=<five dot-separated segments>` |
+| cookies | 11 | `Cookie: session=<value>`, `Set-Cookie: sid=<value>; Path=/; HttpOnly`, `curl -H 'Cookie: a=b' https://x.invalid` |
+| nested YAML | 34 | `secret:\n  value: <value>`, `database:\n  password:\n    value: <value>`, `{"text":"secret:\n  value: <value>\n"}` |
+| Slack keys | 1 | `slack=xoxb-<digits>-<digits>-<letters>` |
+| Stripe keys | 1 | `stripe=sk_live_<24 characters>` |
+| other: key names | 16 | `SECRET_KEY: <value>`, `pwd=<value>`, `credentials: <value>` |
+| other: Authorization forms | 10 | `{"Authorization":["Bearer <value>"]}`, `Authorization: Token <value>`, `Authorization: Digest username="u", response="<value>"` |
+| other: value shapes | 21 | `{"password": 12345678901}`, `{'password': '<value>'}`, `password=ab,<rest of value>` |
+| other: command-line flags | 4 | `mycli --password <value> --host db.internal`, `curl -u admin:<value> https://api.invalid/v1`, `curl --proxy-user u:<value> https://example.test/` |
+| other: split tokens | 17 | `a GitHub token with an invalid UTF-8 byte inside`, `a GitHub token with a zero-width space inside`, `AKIA<16 characters>_ID` |
+| other: opaque strings | 1 | `deploy <40 hex characters>` |
+| over-redaction | 6 | `interface Cfg { token: string; apiKey: string }`, `secret:\n  secretName: db-creds\n  defaultMode: 0400`, `password: changed` |
+
+<!-- redact-gaps:end -->
 
 ## Audit rows
 

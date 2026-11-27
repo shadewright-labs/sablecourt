@@ -1,0 +1,2 @@
+go test fuzz v1
+string("seCret:|\n \x80\n\x00 00")
