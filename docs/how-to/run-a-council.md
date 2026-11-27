@@ -27,7 +27,7 @@ Ask `claude`, `codex` and `agy` one question about a repository and read the ans
    ```
 
 3. Adjust the council. `--repo <dir>` picks another repository, `--rounds <n>` sets the round ceiling (default 2, at least 1), `--sequential` runs the seats one after another in each round, and `--with claude,codex,agy` sets the order (all three are always required). Starts and wall time have no flag; the API takes `starts` (1 to 6) and `durationSeconds`.
-4. Read the output. The CLI prints `--- Round N ---`, then each answer as `@role (review, #id)`. A line starting with `!` is a `system` message such as a Ward. Add the global `--json` flag for one JSON document instead.
+4. Read the output. The CLI prints `--- Round N ---`, then each answer as `@role (review, #id)`. A line starting with `!` is a `system` message such as a Ward. Add the global `--json` flag for one JSON document instead. While the rounds run, a terminal also shows a short animation on standard error with the round and how many seats answered; `--no-art` or `SABLECOURT_NO_ART=1` turns it off (see [wait animation](../reference/cli.md#wait-animation)).
 5. Stop early with Ctrl-C. The CLI cancels the council and its turns, and the daemon still writes the digest.
 
 ## Check it worked
