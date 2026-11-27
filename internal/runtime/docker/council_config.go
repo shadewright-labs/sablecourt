@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -312,7 +313,7 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 		return o, err
 	}
 	if !command {
-		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: "/home/harness"})
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: harnessimages.StateDir})
 	}
 	if cfg.Tool != nil && !command {
 		// Read-only, and NoCopy so the engine never fills it from the image.

@@ -33,7 +33,7 @@ grep -Eq '^CapEff:[[:space:]]*0+$' /proc/self/status || exit 33
 grep -Eq '^NoNewPrivs:[[:space:]]*1$' /proc/self/status || exit 34
 awk '$5 == "/" && $6 ~ /^ro(,|$)/ {f=1} END{exit !f}' /proc/self/mountinfo || exit 35
 awk '$5 == "/workspace" && $6 ~ /^ro(,|$)/ {f=1} END{exit !f}' /proc/self/mountinfo || exit 36
-if awk '$5 == "/home/harness" {f=1} END{exit !f}' /proc/self/mountinfo; then exit 37; fi
+if awk -v h="$2" '$5 == h {f=1} END{exit !f}' /proc/self/mountinfo; then exit 37; fi
 [[ $HOME == /scratch ]] || exit 38
 [[ -z ${SABLECOURT_TASK_TOKEN+x} && -z ${SABLECOURT_TASK_TOKEN_FILE+x} && -z ${SABLECOURT_MODEL_GATE_URL+x} ]] || exit 39
 if touch /workspace/write-attempt 2>/dev/null; then exit 40; fi
@@ -167,7 +167,7 @@ func TestCommandStepDocker(t *testing.T) {
 				InputJSON:        `{"command":"check"}`,
 				TaskToken:        "sc_task_" + rand.Text(),
 				CouncilContainer: true,
-				Command: &scruntime.CommandSpec{Name: "check", Argv: []string{"/bin/bash", "--noprofile", "--norc", "-c", commandProbe, "check", tc.exit},
+				Command: &scruntime.CommandSpec{Name: "check", Argv: []string{"/bin/bash", "--noprofile", "--norc", "-c", commandProbe, "check", tc.exit, harnessimages.StateDir},
 					Timeout: 30 * time.Second, MaxOutputBytes: domain.DefaultCommandOutputBytes},
 			}
 			h, err := adapter.StartAtCommit(t.Context(), spec, commit, true)
