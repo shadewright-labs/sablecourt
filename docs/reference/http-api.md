@@ -261,7 +261,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/webhook/github.go`, `internal/a2a/h
 | Route | Purpose |
 | --- | --- |
 | `POST /api/v1/hooks/github` | GitHub webhook, signed with HMAC SHA-256 in `X-Hub-Signature-256` using the `github_webhook_secret` secret. An `issues` event with action `opened` submits a task to the workload `triage-agent`. |
-| `POST /a2a` | JSON-RPC 2.0 methods `tasks/send` and `tasks/get`, with a bearer token checked against the `a2a_bearer_token` secret. |
+| `POST /a2a` | JSON-RPC 2.0 methods `tasks/send` and `tasks/get`, with a bearer token checked against the `a2a_bearer_token` secret. A request that presents the value of `observer_bearer_token` gets 403 only when that value equals `a2a_bearer_token`; otherwise it gets 401 like any wrong token. If the observer secret cannot be read, the route answers 503. |
 
 ## Not built yet
 

@@ -919,7 +919,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		withHandoff := r.URL.Query().Get("handoff") == "true" || r.URL.Query().Get("handoff") == "1"
-		retried, err := reconciler.RetryTaskWithHandoff(r.Context(), id, withHandoff, "api_retry")
+		var created bool
+		retried, err := reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "api_retry")
 		if err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, store.ErrNotFound) {
@@ -928,15 +929,17 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
-			Category:     "task",
-			TaskID:       retried.ID,
-			WorkloadName: retried.WorkloadName,
-			Action:       "task.retry",
-			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
-			CreatedAt:    time.Now().UTC(),
-		})
+		if created {
+			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+				Category:     "task",
+				TaskID:       retried.ID,
+				WorkloadName: retried.WorkloadName,
+				Action:       "task.retry",
+				Outcome:      "submitted",
+				DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
+				CreatedAt:    time.Now().UTC(),
+			})
+		}
 		writeJSON(w, http.StatusCreated, retried)
 	})
 	if conclaveBroker != nil {
