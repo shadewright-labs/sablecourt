@@ -38,9 +38,9 @@ On task failure or verifier rejection, Sablecourt builds a standardized `failure
 - All pre-checks remain read-only, time-bounded, and redacted through `internal/redact`, preserving Sablecourt's secret-isolation invariant.
 - Automatic remediation stays opt-in and retry-capped, avoiding runaway loops or unexpected model spend.
 
-## Amendment, 2026-11-27 (Proposed)
+## Amendment, 2026-11-27 (Accepted 2026-11-27)
 
-Status of this amendment: Proposed.
+Status of this amendment: Accepted (2026-11-27).
 
 Title: coding court roles, operator role cards and author/verifier family separation.
 
@@ -112,17 +112,18 @@ The refusal is the point of the rule. A verifier from the same family tends to s
 
 In 0.1.0 the orchestrator is the daemon's fixed workflow together with the operator. The workflow sets the order of steps, the retry caps and the handoffs, and the operator applies manifests and approves. No model decides which step runs next. A model orchestrator seat that only proposes the next step, with the operator or deterministic policy deciding, comes after 0.1.0 and needs its own ADR ([issue 209](https://github.com/shadewright-labs/sablecourt/issues/209)). This keeps invariant 1 simple for the first release: no model output picks what runs.
 
-### Open questions for the user
+### Decisions on the open questions
 
-- Should a single-provider machine get a named override of the family refusal, recorded on each step it lets through, or does such a machine simply run without verifier steps?
-- Which family should the default `critic` route use (for example `cli:codex` with a GPT model), given that verifier workloads must then run that harness?
-- Is the `security` role mandatory for every change on an invariant path, or does each workflow opt in?
-- This question touches invariant 1. In the post-0.1.0 orchestrator ADR, may deterministic policy authorize a step the orchestrator seat proposes, against a pinned plan, without the operator confirming it, or must every proposal wait for the operator? A model's proposal alone never authorizes a step either way.
-- May a repository ever propose roles, for example as a card the operator reviews and accepts, or do cards stay out of repositories for good?
+- A single-family machine gets no override of the family refusal. It runs workflows without verifier steps, and the refusal is visible.
+- The `security` role is mandatory for every change on an invariant path: redaction, approvals, the gate, harness isolation, the audit chain and policy.
+- Role cards stay out of repositories for now. Only operator manifests supply them. A path where a repository proposes a card and the operator reviews and accepts it needs its own decision.
+- Whether an orchestrator seat may dispatch a step without the operator confirming a plan is left to the orchestrator seat's own ADR ([issue 209](https://github.com/shadewright-labs/sablecourt/issues/209)). A model's proposal alone never authorizes a step.
+
+Still open: which family the default `critic` route uses (for example `cli:codex` with a GPT model), given that verifier workloads must then run that harness. It is operator configuration and does not change the rule.
 
 ### Consequences of this amendment
 
-- A machine that resolves every tier to one model family cannot run a workflow with a model verifier step until the operator adds a second family or the first open question is settled. A new model whose name matches no prefix rule needs a family on its tier route before it can author or verify.
+- A machine that resolves every tier to one model family cannot run a workflow with a model verifier step until the operator adds a second family. A new model whose name matches no prefix rule needs a family on its tier route before it can author or verify.
 - Every task launch writes one dispatch fact, and each verifier dispatch reads the run's chain. A step in the chain with no recorded model blocks every verifier after it.
 - The operator writes and keeps the cards inside the manifests. A card change is a manifest change, and the bundle digest on each dispatch fact shows which version ran.
 - A card read from a file, a card in a repository, an agent editing a card, and any card field that grants access or picks a tier are all out. So is a model that dispatches steps on its own in 0.1.0.
