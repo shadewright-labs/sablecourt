@@ -210,7 +210,7 @@ func fixtureRun(t *testing.T) (*Adapter, *councilEngine, rt.CouncilLaunch) {
 	t.Helper()
 	isolateHome(t)
 	f := newCouncilEngine()
-	a := NewAdapter(f, "")
+	a := testAdapter(f, "")
 	a.discoverSocket = func() string { return "" }
 	root := withWorktreeRoot(t, a)
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8080/gate/data"}}

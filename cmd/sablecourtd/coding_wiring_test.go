@@ -151,7 +151,10 @@ type fakeWiringEngine struct {
 func TestWireCouncilContainers(t *testing.T) {
 	state := t.TempDir()
 	hub := attach.NewHub()
-	da := docker.NewAdapter(fakeWiringEngine{}, "")
+	da, err := docker.NewAdapter(fakeWiringEngine{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
 
 	// Even when host sandbox is unavailable, Sanctum registers coding adapter for container councils.

@@ -144,30 +144,30 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 		if err := nilAdapter.Ping(ctx); err == nil {
 			t.Fatal("nil adapter Ping succeeded")
 		}
-		if err := NewAdapter(nil, "").Ping(ctx); err == nil {
+		if err := testAdapter(nil, "").Ping(ctx); err == nil {
 			t.Fatal("nil client Ping succeeded")
 		}
-		if err := NewAdapter(&fakeEngine{}, "").Ping(ctx); err != nil {
+		if err := testAdapter(&fakeEngine{}, "").Ping(ctx); err != nil {
 			t.Fatalf("non-pinger client Ping = %v, want nil", err)
 		}
 		pe := &pingEngine{}
-		if err := NewAdapter(pe, "").Ping(ctx); err != nil || !pe.pinged {
+		if err := testAdapter(pe, "").Ping(ctx); err != nil || !pe.pinged {
 			t.Fatalf("pingEngine Ping = %v, pinged=%t", err, pe.pinged)
 		}
 		pe.pingErr = errors.New("daemon unreachable")
-		if err := NewAdapter(pe, "").Ping(ctx); !errors.Is(err, pe.pingErr) {
+		if err := testAdapter(pe, "").Ping(ctx); !errors.Is(err, pe.pingErr) {
 			t.Fatalf("pingEngine error = %v, want %v", err, pe.pingErr)
 		}
 	})
 
 	t.Run("EnsureInternalNetwork EnsureImage ResolveLocalImage", func(t *testing.T) {
 		eng := &fullAttachEngine{}
-		a := NewAdapter(eng, "")
+		a := testAdapter(eng, "")
 		if err := a.EnsureInternalNetwork(ctx); err != nil || !eng.networkExists {
 			t.Fatalf("EnsureInternalNetwork = %v, exists=%t", err, eng.networkExists)
 		}
 		badNet := &fullAttachEngine{createNetErr: errors.New("create denied")}
-		if err := NewAdapter(badNet, "").EnsureInternalNetwork(ctx); err == nil || !strings.Contains(err.Error(), "create denied") {
+		if err := testAdapter(badNet, "").EnsureInternalNetwork(ctx); err == nil || !strings.Contains(err.Error(), "create denied") {
 			t.Fatalf("failed network create = %v", err)
 		}
 		if err := a.EnsureImage(ctx, "fixture:1"); err != nil {
@@ -178,14 +178,14 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 			t.Fatalf("ResolveLocalImage = %q, %v", id, err)
 		}
 		badImg := &inspectEngine{imageErr: errors.New("no image")}
-		if _, err := NewAdapter(badImg, "").ResolveLocalImage(ctx, "absent"); err == nil {
+		if _, err := testAdapter(badImg, "").ResolveLocalImage(ctx, "absent"); err == nil {
 			t.Fatal("ResolveLocalImage accepted inspect failure")
 		}
 	})
 
 	t.Run("Start env, refusal and attach streaming", func(t *testing.T) {
 		eng := &fullAttachEngine{}
-		a := NewAdapter(eng, "")
+		a := testAdapter(eng, "")
 		if _, err := a.Start(ctx, scruntime.LaunchSpec{TaskID: "t0"}); err == nil || !strings.Contains(err.Error(), "runtime.image") {
 			t.Fatalf("missing image Start = %v", err)
 		}
@@ -247,7 +247,7 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 
 		// Engine with attach only (no logStreamer) still registers stdin in hub.
 		stdinEng := &stdinOnlyEngine{conn: &trackingConn{}}
-		a2 := NewAdapter(stdinEng, "")
+		a2 := testAdapter(stdinEng, "")
 		a2.AttachHub = attach.NewHub()
 		if _, err := a2.Start(ctx, spec); err != nil {
 			t.Fatalf("Start stdin-only: %v", err)
@@ -276,7 +276,7 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				eng := &fullAttachEngine{fakeEngine: fakeEngine{inspectState: tc.state}, inspectErr: tc.err}
-				obs, err := NewAdapter(eng, "").Observe(ctx, scruntime.Handle{ExternalID: "c1"})
+				obs, err := testAdapter(eng, "").Observe(ctx, scruntime.Handle{ExternalID: "c1"})
 				if tc.err != nil {
 					if err == nil {
 						t.Fatal("expected inspect error")
@@ -292,7 +292,7 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 
 	t.Run("Suspend Resume Stop", func(t *testing.T) {
 		eng := &fullAttachEngine{}
-		a := NewAdapter(eng, "")
+		a := testAdapter(eng, "")
 		h := scruntime.Handle{ExternalID: "ctr-9", WorkDir: "/work"}
 		cp, err := a.Suspend(ctx, h)
 		if err != nil || cp.ID != "cp-ctr-9" || cp.Path != "/work" || cp.CreatedAt.IsZero() {
@@ -331,7 +331,7 @@ func TestRecoveryInvalidHandleAndFailedExit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := NewAdapter(&recoveryEngine{id: "c1", state: tc.state}, "")
+			a := testAdapter(&recoveryEngine{id: "c1", state: tc.state}, "")
 			alive, err := a.HandleAlive(ctx, tc.handle)
 			if alive != tc.wantAlive || (err != nil) != tc.wantError {
 				t.Fatalf("HandleAlive = %t, %v", alive, err)
@@ -384,7 +384,7 @@ func TestHarnessErrorAndPreflightRefusals(t *testing.T) {
 	}
 
 	// Engine missing councilEngineAPI refuses CheckCouncilHarness and EnsureCouncilLoginVolume.
-	plain := NewAdapter(&fakeEngine{}, "")
+	plain := testAdapter(&fakeEngine{}, "")
 	plain.CouncilHarnesses = map[string]CouncilHarness{
 		"claude": {Image: "img", LoginVolume: "sablecourt-claude", LoginFiles: []string{"/data/harness/c"}},
 	}
@@ -401,7 +401,7 @@ func TestHarnessErrorAndPreflightRefusals(t *testing.T) {
 
 	// Engine with councilEngineAPI but without volumeCreator refuses creation.
 	noCreate := &missingVolumeEngine{councilEngine: newCouncilEngine()}
-	aNoCreate := NewAdapter(noCreate, "")
+	aNoCreate := testAdapter(noCreate, "")
 	aNoCreate.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "img", LoginVolume: "sablecourt-claude"}}
 	if err := aNoCreate.EnsureCouncilLoginVolume(context.Background(), "claude"); !errors.As(err, &he) || he.Fault != FaultBackend {
 		t.Fatalf("EnsureCouncilLoginVolume without volumeCreator = %v", err)
@@ -442,7 +442,7 @@ func TestInspectAndCleanupCouncilRefusals(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				eng := &inspectOnlyCouncilEngine{resp: tc.resp, err: tc.err}
-				got, err := NewAdapter(eng, "").InspectCouncil(ctx, tc.id)
+				got, err := testAdapter(eng, "").InspectCouncil(ctx, tc.id)
 				if tc.wantErr != "" {
 					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 						t.Fatalf("InspectCouncil = %+v, %v; want %q", got, err, tc.wantErr)
@@ -457,16 +457,16 @@ func TestInspectAndCleanupCouncilRefusals(t *testing.T) {
 	})
 
 	t.Run("CleanupCouncil refusals", func(t *testing.T) {
-		a := NewAdapter(&inspectOnlyCouncilEngine{}, "")
+		a := testAdapter(&inspectOnlyCouncilEngine{}, "")
 		if err := a.CleanupCouncil(ctx, scruntime.CouncilResult{}); err == nil || !strings.Contains(err.Error(), "missing council create identity") {
 			t.Fatalf("missing identity cleanup = %v", err)
 		}
 		engIncomplete := &inspectOnlyCouncilEngine{resp: container.InspectResponse{ID: "c1"}}
-		if err := NewAdapter(engIncomplete, "").CleanupCouncil(ctx, scruntime.CouncilResult{ContainerName: "n", CreateAttempt: "a"}); err == nil || !strings.Contains(err.Error(), "incomplete council create evidence") {
+		if err := testAdapter(engIncomplete, "").CleanupCouncil(ctx, scruntime.CouncilResult{ContainerName: "n", CreateAttempt: "a"}); err == nil || !strings.Contains(err.Error(), "incomplete council create evidence") {
 			t.Fatalf("incomplete cleanup = %v", err)
 		}
 		engGone := &inspectOnlyCouncilEngine{removeErr: missing{errors.New("gone")}}
-		if err := NewAdapter(engGone, "").CleanupCouncil(ctx, scruntime.CouncilResult{ContainerID: "c1"}); err != nil {
+		if err := testAdapter(engGone, "").CleanupCouncil(ctx, scruntime.CouncilResult{ContainerID: "c1"}); err != nil {
 			t.Fatalf("remove not found = %v, want nil", err)
 		}
 	})
@@ -554,7 +554,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 	})
 
 	t.Run("proxy adapter capability and name refusals", func(t *testing.T) {
-		plain := NewAdapter(&fakeEngine{}, "")
+		plain := testAdapter(&fakeEngine{}, "")
 		if err := plain.ProbeGateSocket(ctx, councilproxy.GateSocketProbe{Name: "p"}); err == nil {
 			t.Fatal("ProbeGateSocket succeeded without councilEngineAPI")
 		}
@@ -585,7 +585,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 	})
 
 	t.Run("ProvisionCouncilProxy error returns nil session", func(t *testing.T) {
-		plain := NewAdapter(&fakeEngine{}, "")
+		plain := testAdapter(&fakeEngine{}, "")
 		sess, err := plain.ProvisionCouncilProxy(ctx, "sha256:"+strings.Repeat("a", 64), councilproxy.Config{})
 		if err == nil || sess != nil {
 			t.Fatalf("ProvisionCouncilProxy = %v, %v; want nil session and error", sess, err)
@@ -597,7 +597,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 		p.volumes["sablecourt-harness-claude"] = volume.Volume{Name: "sablecourt-harness-claude", Driver: "local", Labels: CouncilLoginVolumeLabels("claude")}
 		// Trigger non-ready wait error in councilExit via error channel.
 		we := &waitErrorEngine{councilEngine: newCouncilEngine(), sendErr: true}
-		aWe := NewAdapter(we, "")
+		aWe := testAdapter(we, "")
 		aWe.CouncilHarnesses = a.CouncilHarnesses
 		res := scruntime.CouncilResult{ContainerID: "cid"}
 		if err := aWe.councilExit(ctx, we, &res); err == nil || !strings.Contains(err.Error(), "could not verify council exit") {
@@ -613,7 +613,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 	t.Run("StartProxy refuses stopped container and nil reader", func(t *testing.T) {
 		eng := &nilReaderProxyEngine{readinessEngine: &readinessEngine{fakeProxyEngine: newFakeProxyEngine()}}
 		eng.containers["proxy"] = container.InspectResponse{ID: "cid", Config: &container.Config{}, State: &container.State{Running: true}}
-		a := NewAdapter(eng, "")
+		a := testAdapter(eng, "")
 		if err := a.StartProxy(ctx, "proxy"); err == nil || !strings.Contains(err.Error(), "missing council proxy authentication challenge") {
 			t.Fatalf("nil reader StartProxy = %v", err)
 		}
@@ -630,7 +630,7 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 
 	t.Run("CreateProxy warnings and empty ID", func(t *testing.T) {
 		eng := &warnProxyEngine{fakeProxyEngine: newFakeProxyEngine(), emptyID: true}
-		a := NewAdapter(eng, "")
+		a := testAdapter(eng, "")
 		info, err := a.CreateInternalNetwork(ctx, councilproxy.InternalNetworkSpec{Name: "pnet"})
 		if err != nil {
 			t.Fatal(err)

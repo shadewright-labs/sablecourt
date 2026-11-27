@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -128,5 +130,29 @@ func mustMkdirAll(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestDaemonRefusesRemoteEngine checks that the daemon does not start with the
+// Docker backend on a remote engine: it builds no Docker adapter there, so no
+// network, volume or container call can reach that engine.
+func TestDaemonRefusesRemoteEngine(t *testing.T) {
+	for _, host := range []string{"tcp://engine.invalid:2376", "ssh://engine.invalid"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("SABLECOURT_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+			t.Setenv("SABLECOURT_MODE", "")
+			t.Setenv("DOCKER_HOST", host)
+			dbDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			err = runDaemon(ctx, daemonConfig{dbPath: filepath.Join(dbDir, "sablecourt.db"), listenAddr: "127.0.0.1:0"})
+			if err == nil || !strings.Contains(err.Error(), "remote engine") {
+				t.Fatalf("runDaemon = %v, want the remote engine refusal", err)
+			}
+		})
 	}
 }

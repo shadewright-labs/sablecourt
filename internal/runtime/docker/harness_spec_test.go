@@ -123,7 +123,7 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 			f := newCouncilEngine()
 			f.vol.Labels = CouncilLoginVolumeLabels(tc.harness)
 			f.net.Name = netNm
-			a := NewAdapter(f, "")
+			a := testAdapter(f, "")
 			a.discoverSocket = func() string { return filepath.Join(home, ".docker", "run", "docker.sock") }
 			cfg := CouncilHarness{Image: "fixture", LoginVolume: f.vol.Name}
 			if tc.tool {
@@ -279,7 +279,7 @@ func TestHarnessContainerSpecAllowsTaskWorktreeUnderStateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newCouncilEngine()
-	a := NewAdapter(f, "")
+	a := testAdapter(f, "")
 	a.discoverSocket = func() string { return "" }
 	openRootAt(t, a, root, filepath.Join(state, "sablecourt.db"), state)
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}

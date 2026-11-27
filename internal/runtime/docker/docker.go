@@ -55,37 +55,34 @@ type Adapter struct {
 	discoverSocket func() string
 }
 
-// errRemoteEngine is the refusal of an engine not reached over a local Unix socket.
-var errRemoteEngine = errors.New("Sablecourt creates containers only on a local Docker engine; a remote engine (tcp:// or ssh://) is refused")
+// errRemoteEngine is the refusal of an engine not reached over a local Unix
+// socket or Windows named pipe.
+var errRemoteEngine = errors.New("Sablecourt runs only on a local Docker engine (a unix:// socket or a Windows named pipe); a remote engine such as tcp:// or ssh:// is refused")
 
-// createContainer is the only place the adapter asks the engine to create a
-// container (a test holds every other function to it). It refuses a remote
-// engine first, so no harness, login probe, socket probe, proxy, tool install
-// or workload container is created on one, whichever entry point asks.
-func (a *Adapter) createContainer(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
-	if err := a.remoteEngine(); err != nil {
-		return client.ContainerCreateResult{}, err
+// checkLocalEngine refuses a Docker host that is not a local Unix socket or
+// Windows named pipe. The mount rule compares host file identities, which say
+// nothing about the files of a remote engine (tcp://, ssh://), so no Docker
+// adapter exists on one. An empty host is the client's local default.
+func checkLocalEngine(host string) error {
+	if host == "" {
+		return nil
 	}
-	return a.Client.ContainerCreate(ctx, o)
+	u, err := client.ParseHostURL(host)
+	if err != nil || (u.Scheme != "unix" && u.Scheme != "npipe") || u.Host == "" {
+		return errRemoteEngine
+	}
+	return nil
 }
 
-// remoteEngine refuses an engine that is not reached over a local Unix
-// socket. The mount rule compares host file identities, which say nothing
-// about the files of a remote engine (tcp://, ssh://). harnessContainerSpec
-// also calls it, to refuse a harness launch before resolving any mount.
-func (a *Adapter) remoteEngine() error {
-	hosts := []string{os.Getenv("DOCKER_HOST")}
-	if c, ok := a.Client.(interface{ DaemonHost() string }); ok {
-		hosts = append(hosts, c.DaemonHost())
+// localEngine checks DOCKER_HOST and the host the client itself dials. The
+// constructors call it, so an adapter, and with it every engine call, exists
+// only on a local engine.
+func localEngine(cli EngineClient) error {
+	if err := checkLocalEngine(os.Getenv("DOCKER_HOST")); err != nil {
+		return err
 	}
-	for _, host := range hosts {
-		if host == "" {
-			continue
-		}
-		u, err := client.ParseHostURL(host)
-		if err != nil || u.Scheme != "unix" {
-			return errRemoteEngine
-		}
+	if c, ok := cli.(interface{ DaemonHost() string }); ok {
+		return checkLocalEngine(c.DaemonHost())
 	}
 	return nil
 }
@@ -140,7 +137,14 @@ func (a *Adapter) SetAttachHub(ctx context.Context, hub *attach.Hub) {
 
 var _ scruntime.Adapter = (*Adapter)(nil)
 
+// NewFromEnv builds the adapter on the engine DOCKER_HOST names, or on a
+// discovered local socket. It is the only place a Docker engine client is
+// created (a test holds the module to that), and it refuses a remote engine
+// before creating one.
 func NewFromEnv() (*Adapter, error) {
+	if err := checkLocalEngine(os.Getenv("DOCKER_HOST")); err != nil {
+		return nil, err
+	}
 	opts := []client.Opt{client.FromEnv}
 	if os.Getenv("DOCKER_HOST") == "" {
 		if sock := discoverDockerSocket(); sock != "" {
@@ -151,10 +155,7 @@ func NewFromEnv() (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create moby client: %w", err)
 	}
-	return &Adapter{
-		Client:      cli,
-		NetworkName: DefaultNetworkName,
-	}, nil
+	return NewAdapter(cli, DefaultNetworkName)
 }
 
 func discoverDockerSocket() string {
@@ -182,14 +183,19 @@ func discoverDockerSocket() string {
 	return ""
 }
 
-func NewAdapter(cli EngineClient, networkName string) *Adapter {
+// NewAdapter wraps an engine client. It refuses a remote engine: a remote
+// DOCKER_HOST, or a client whose DaemonHost is not a local socket or pipe.
+func NewAdapter(cli EngineClient, networkName string) (*Adapter, error) {
+	if err := localEngine(cli); err != nil {
+		return nil, err
+	}
 	if networkName == "" {
 		networkName = DefaultNetworkName
 	}
 	return &Adapter{
 		Client:      cli,
 		NetworkName: networkName,
-	}
+	}, nil
 }
 
 // CouncilRuntimeConfigured distinguishes a missing local runtime from a Docker
@@ -333,7 +339,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		},
 	}
 
-	created, err := a.createContainer(ctx, client.ContainerCreateOptions{
+	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-" + spec.TaskID,
 		Config: &container.Config{
 			Image:     image.ID,

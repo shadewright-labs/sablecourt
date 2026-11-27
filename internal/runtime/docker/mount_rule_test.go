@@ -35,7 +35,7 @@ func newMountRuleFixture(t *testing.T, kind rt.CouncilCheckoutKind) *mountRuleFi
 	t.Helper()
 	home, state := isolateHome(t)
 	f := newCouncilEngine()
-	a := NewAdapter(f, "")
+	a := testAdapter(f, "")
 	a.discoverSocket = func() string { return "" }
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}
 	m := &mountRuleFixture{a: a, f: f, home: home, state: state}
@@ -318,35 +318,6 @@ func TestMountRuleLiveCheckout(t *testing.T) {
 			}
 			if got := o.HostConfig.Mounts[0]; got.Source != m.live || !got.ReadOnly {
 				t.Fatalf("bind = %+v, want the repository read-only", got)
-			}
-		})
-	}
-}
-
-// TestMountRuleRefusesRemoteEngine covers the remote engine row: host file
-// identity says nothing about a remote engine's files, so no harness launches.
-func TestMountRuleRefusesRemoteEngine(t *testing.T) {
-	for _, tc := range []struct {
-		name, env, client string
-		accept            bool
-	}{
-		{name: "local socket", env: "unix:///run/docker.sock", accept: true},
-		{name: "tcp DOCKER_HOST", env: "tcp://engine.invalid:2376"},
-		{name: "ssh DOCKER_HOST", env: "ssh://engine.invalid"},
-		{name: "client resolved a tcp host", client: "tcp://engine.invalid:2375"},
-		{name: "unparsable DOCKER_HOST", env: "://"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newMountRuleFixture(t, rt.CouncilTask)
-			t.Setenv("DOCKER_HOST", tc.env)
-			engine := hostedEngine{councilEngine: m.f, host: tc.client}
-			m.a.Client = engine
-			_, err := m.a.harnessContainerSpec(t.Context(), engine, m.s, false)
-			if tc.accept && err != nil {
-				t.Fatalf("local engine refused: %v", err)
-			}
-			if !tc.accept && (err == nil || !strings.Contains(err.Error(), "remote engine")) {
-				t.Fatalf("remote engine: %v", err)
 			}
 		})
 	}

@@ -63,7 +63,7 @@ func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSoc
 			probeErr = fmt.Errorf("remove socket probe: %w", err)
 		}
 	}()
-	created, err := a.createContainer(ctx, client.ContainerCreateOptions{
+	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: spec.Name,
 		Config: &container.Config{Image: spec.ImageID, User: spec.User, Cmd: spec.Args, Env: slices.Clone(councilBaseEnv),
 			Labels:      map[string]string{councilproxy.ResourceLabel: spec.Name},
@@ -80,9 +80,6 @@ func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSoc
 	}
 	if err == nil {
 		_, err = a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{})
-	}
-	if errors.Is(err, errRemoteEngine) {
-		return err
 	}
 	if err != nil {
 		if councilproxy.IsUnshareableSocketBindError(spec.HostSocketPath, 125, err.Error()) {
@@ -185,7 +182,7 @@ func (a *Adapter) CreateProxy(ctx context.Context, spec councilproxy.ProxyContai
 			netID: {Aliases: []string{spec.Name}},
 		},
 	}
-	created, err := a.createContainer(ctx, client.ContainerCreateOptions{
+	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: spec.Name,
 		Config: &container.Config{
 			Image: imageID,

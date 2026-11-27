@@ -51,7 +51,7 @@ func TestHarnessContainerSpecRefusesSocketsTheClientDials(t *testing.T) {
 			if tc.clientURL != nil {
 				engine.host = tc.clientURL(sock)
 			}
-			a := NewAdapter(engine, "")
+			a := testAdapter(engine, "")
 			a.discoverSocket = func() string { return "" }
 			a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}
 			s := rt.CouncilLaunch{TaskID: "task-sock", Workload: "guard", Harness: "claude", Checkout: rt.CouncilCheckout{Path: checkout, Kind: rt.CouncilLive},

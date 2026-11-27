@@ -204,9 +204,6 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 	if err := a.validateCouncilTool(s.Harness, cfg); err != nil {
 		return o, err
 	}
-	if err := a.remoteEngine(); err != nil {
-		return o, err
-	}
 	if !councilName.MatchString(s.TaskID) || !councilName.MatchString(s.Workload) {
 		return o, errors.New("invalid council task or workload name")
 	}

@@ -69,7 +69,7 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		result.CreateAttempt = rand.Text()
 	}
 	o.Config.Labels[attemptLabel] = result.CreateAttempt
-	created, err := a.createContainer(ctx, o)
+	created, err := a.Client.ContainerCreate(ctx, o)
 	result.ContainerID = created.ID
 	defer func() {
 		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
