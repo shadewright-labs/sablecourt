@@ -17,7 +17,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | `internal/store` | `Store` interface implemented by `internal/store/sqlite` (WAL, `LIKE` memory search) and `internal/store/postgres` (`pgx/v5`, `ILIKE` memory search) |
 | `internal/secret` | `SecretStore` interface backed by macOS Keychain, encrypted local file, or Kubernetes `0400` volume mount |
 | `internal/policy` | Deterministic `allow` / `approve` / `deny` evaluator (fail-closed default `deny`) and failure `CircuitBreaker` |
-| `internal/redact` | Linear-time RE2 secret redactor scrubbing API keys, bearer tokens, and private keys before storage or broadcast |
+| `internal/redact` | Best-effort, linear-time text redactor used at storage, output and export boundaries (see [tools and actions](how-it-works/tools-and-actions.md#redaction)) |
 | `internal/gate/model` | HTTP/SSE proxy for OpenAI, Anthropic, Gemini, local endpoints, and upstream `agentgateway`; enforces `sc_task_` leases, budgets, SSRF protection, and `openai <-> local` fallback |
 | `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.open_pr`), and proxied upstream MCP servers |
 | `internal/approval` | Pinned SHA-256 approval queue, macOS native `osascript` out-of-band prompt, and ECDSA P-256 device signature verification |

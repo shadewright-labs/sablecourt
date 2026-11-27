@@ -90,7 +90,7 @@ Reconciler
 :   The loop in the daemon that observes tasks, launches `submitted` ones and records the outcome. See [tasks](how-it-works/tasks.md).
 
 Redaction
-:   Removal of secret-shaped text at a boundary, done by `internal/redact` in linear time. The Model Gate does not redact request or response bodies.
+:   Best-effort scrubbing of secret-shaped text by `internal/redact` on selected text paths, not a guarantee. See [tools and actions](how-it-works/tools-and-actions.md#redaction) for the covered paths, examples and known gaps.
 
 Relic
 :   A named, redacted file shared in a Conclave, put with `sablectl conclave relic put`.

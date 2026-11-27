@@ -57,6 +57,10 @@ When a stream reaches its final event and trailing bytes follow, the exact final
 
 Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting.
 
+## Redaction
+
+Request bodies sent to a model through the Model Gate are forwarded as sent and are not redacted (`internal/gate/model/gate.go`). For containerized council turns, the council proxy opens an HTTPS `CONNECT` tunnel to the provider and cannot see tunnel content either. Repository content a harness reads therefore reaches the model provider. An exact-match guarantee for daemon-held secrets is tracked in [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180); see [tools and actions](tools-and-actions.md#redaction) for what `internal/redact` covers on other paths.
+
 ## Fallback
 
 A request routed to `openai` or `local` may be retried once on the other of the two, if the workload's grant lists it and it is configured, when the first call fails at transport level or answers 429, 502, 503 or 504. The response then carries the header `X-Sablecourt-Fallback-Provider` and an audit row `model.fallback`. Anthropic and Gemini requests are not retried elsewhere because their wire formats differ.

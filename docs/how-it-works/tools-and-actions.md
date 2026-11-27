@@ -13,7 +13,7 @@ Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/
 
 The lease must be active, and its workload must be declared in the loaded manifests. The action body is limited to 2 MiB, unknown fields are refused. The action path is `/gate/actions/<name>`.
 
-Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`, `memory.get`, `memory.search` and `memory.delete`. Memory writes are redacted, namespaces `learning:*` and `system:*` are closed to the tools, and `search` is a substring match (SQL `LIKE`) on keys and values. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
+Built-in tools: `sablecourt.list_workloads` and four memory tools, `memory.put`, `memory.get`, `memory.search` and `memory.delete`. `memory.put` redacts the value it stores (not the key), namespaces `learning:*` and `system:*` are closed to the tools, and `search` is a substring match (SQL `LIKE`) on keys and values. Built-in actions: `git.create_branch` (local branch, name must start with `sablecourt/`), `git.open_pr` (opens a GitHub pull request with the gate's token; head must start with `sablecourt/`) and `sandbox.propose_promotion` (checks that the workload is in the sandbox zone and returns the next step; it changes nothing).
 
 ## How a call is decided
 
@@ -33,7 +33,57 @@ Each action that fails records a failure for its capability; three in a row open
 
 ## Redaction
 
-`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+`internal/redact` is a best-effort filter, not a guarantee. It provides defence in depth on the text paths it covers: MCP tool and action results, session output, council prompt, messages and artifacts, notifications and the Shadewright export.
+
+Request bodies sent to a model through the Model Gate are forwarded as sent and are not redacted (`internal/gate/model/gate.go`), and the council proxy is an HTTPS `CONNECT` tunnel that cannot see content. Repository content a harness reads therefore reaches the model provider. An exact-match guarantee for daemon-held secrets is tracked in [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180).
+
+The table below is generated from test cases in `internal/redact/examples_doc_test.go`, with secret values shortened for display:
+
+<!-- redact-examples:start -->
+
+| Case | Input | Output |
+| --- | --- | --- |
+| PEM private key block | `-----BEGIN RSA ...-----\n...\n-----END ...` | `[REDACTED:private_key]` |
+| Prefixed token | `key sk-ant-...` | `key [REDACTED:anthropic_key]` |
+| URL userinfo password | `https://alice:...@example.com/p` | `https://[REDACTED:url_credential]@example.com/p` |
+| Authorization header | `Authorization: Bearer ...` | `Authorization: Bearer [REDACTED:bearer_token]` |
+| Cookie header | `Cookie: sid=...` | `Cookie: [REDACTED:cookie]` |
+| JWT | `jwt eyJ... .eyJ... .sig...` | `jwt [REDACTED:jwt]` |
+| Key=value secret | `db_password=...` | `db_password=[REDACTED:secret]` |
+| Non-secret kept | `region: europe-west4` | `region: europe-west4` |
+| Status prose kept | `Authorization: skipping verification` | `Authorization: skipping verification` |
+| Known gap: key synonym leaks | `SECRET_KEY_BASE=<value>` | `SECRET_KEY_BASE=<value>` |
+| Known gap: value starting with ( leaks | `password=(<value>)` | `password=(<value>)` |
+| Known gap: logfmt auth header leaks | `authorization=Bearer <value>` | `authorization=Bearer <value>` |
+| Known gap: scheme-less Authorization leaks | `Authorization: <value>` | `Authorization: <value>` |
+| Known gap: short unquoted value leaks | `password=abc12` | `password=abc12` |
+| Known gap: unquoted passphrase keeps later words | `passphrase: correct horse battery staple` | `passphrase: [REDACTED:secret] horse battery staple` |
+| Known gap: CRLF-split GitHub token leaks tail | `ghp_...\r\n<tail>` | `[REDACTED:github_token]\r\n<tail>` |
+| Known gap: env var reference over-redacted | `password: ${DB_PASSWORD}` | `password: [REDACTED:secret]` |
+| Known gap: -tokens suffix over-redacted | `max-tokens=123456` | `max-tokens=[REDACTED:secret]` |
+
+<!-- redact-examples:end -->
+
+### Known redaction gaps
+
+These fourteen gaps are known and accepted today:
+
+1. Key synonyms are not redacted: `SECRET_KEY_BASE=...`, `ENCRYPTION_KEY=...` and `master_key: ...` keep their value.
+2. A no-break space (U+00A0) between key and value is not a separator, so `password:` followed by a no-break space and a value keeps the value.
+3. A value that starts with `(`, `&` or `<` is not redacted: `password=(value)`, `password=&value` and `password=<value` keep it.
+4. Double-escaped JSON, a JSON document embedded in a JSON string so that its quotes are escaped twice, keeps its secret fields.
+5. A `Cookie` header folded onto a continuation line (`Cookie:` then a line break) keeps its value.
+6. Logfmt pairs with `=` instead of `:` are not header matches: `authorization=Bearer ...` and `cookie="sid=..."` keep their value.
+7. An `Authorization` header with no scheme word (`Authorization: value`) keeps its value.
+8. `curl --proxy-user user:value` and the cookie flags `-b` and `--cookie` keep their value.
+9. An unquoted value is redacted only up to its first whitespace, and only when it is six or more characters, so later words of a passphrase and short values stay.
+10. When a secret value contains a token that is redacted first, the text after the marker stays: `password=<value>-<aws key>xyz` ends in `[REDACTED:aws_access_key]xyz`.
+11. Variable references and secret names are over-redacted: `password: ${DB_PASSWORD}`, `token=$API_TOKEN`, `Authorization: Bearer $API_TOKEN` and `existingSecret: postgres-secret` lose their text.
+12. A GitHub token split by a line break can leak: with 20 characters after the prefix before a CRLF, the tail after the break stays; with only the prefix before the break, the characters after it stay.
+13. A quoted value that is cut short or spans lines can leak: an unterminated `password="abc12` keeps `abc12`, and a multiline double-quoted value stops at a continuation line that holds `:` or `=` (`password="abc`, a new line, `def:ghi"` keeps `ghi`).
+14. A key name that ends in `-tokens` is treated like `tokens`, so `max-tokens=123456` loses its value.
+
+The test `TestKnownGaps` in `internal/redact` pins each of these as today's behaviour.
 
 ## Audit rows
 
@@ -48,6 +98,7 @@ What the code does today, where it falls short of the design.
 - The circuit breaker never opens, because the gate and the policy engine hold separate breaker objects.
 - `git.open_pr` does not validate `owner`, `repo` or `base`. There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
 - The sandbox-zone rule covers `action:` and `delegate:` only; a mutating MCP tool such as `memory.put` is open to a sandbox workload when policy allows it.
+- Line-at-a-time output callers such as `internal/runtime/coding/output.go` call stateless `redact.String` rather than `LineRedactor`, so secrets split across lines in session output can pass through.
 
 ## Not built yet
 
