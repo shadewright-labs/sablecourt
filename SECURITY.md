@@ -12,6 +12,10 @@ Sablecourt is designed as a policy-governed control plane that isolates untruste
 - Browser state-changing requests enforce same-origin CSRF checks (`Sec-Fetch-Site` and `Origin`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and bounded request body limits.
 - In `--mode=citadel`, `sablecourtd` enforces fail-closed bearer authentication (`--operator-auth-required=true`), disables host-level process execution, and requires cryptographic ECDSA P-256 device signatures for approvals.
 
+## Known redaction gaps
+
+Pattern redaction is best effort and not a boundary (AGENTS.md invariant 3, [ADR-0015](docs/adr/0015-redaction-is-defence-in-depth.md)). Inputs that `internal/redact` is known to miss, such as some URL userinfo, JWT, truncated PEM and cookie shapes, are pinned by the corpus tests and listed by class in the generated table in the Redaction section of [Tools and actions](docs/how-it-works/tools-and-actions.md). A secret in one of those shapes can reach model context, logs and Conclave messages.
+
 ## Verifying a release
 
 [Verify a release](docs/how-to/verify-a-release.md) lists the commands that check the signatures and provenance of a release.

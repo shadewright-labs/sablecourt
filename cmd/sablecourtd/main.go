@@ -133,7 +133,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().StringVar(&modelGatewayURL, "model-gateway-url", "", "Optional upstream AI gateway URL (e.g. agentgateway or Agent Router)")
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
-	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
+	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to a YAML manifest file or a directory of YAML manifests")
 	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
 	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")
@@ -508,37 +508,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
+	policies := newPolicyLoader(st, manifestsPath)
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
-		var b *config.Bundle
-		var pol *policy.Engine
-		if manifestsPath == "" {
-			pol = policy.NewEngine(nil, nil)
-		} else {
-			loaded, err := config.LoadPath(manifestsPath)
-			if err != nil {
-				return nil, nil, fmt.Errorf("load manifests: %w", err)
-			}
-			for _, w := range loaded.Workloads {
-				cardBytes, err := json.Marshal(w.Spec.AgentCard)
-				if err != nil {
-					return nil, nil, err
-				}
-				if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
-					Name:           w.Metadata.Name,
-					Zone:           w.Metadata.Zone,
-					Class:          w.Spec.Class,
-					ManifestDigest: loaded.ManifestDigest,
-					AgentCardJSON:  string(cardBytes),
-				}); err != nil {
-					return nil, nil, err
-				}
-			}
-			var policies []domain.Policy
-			for _, p := range loaded.Policies {
-				policies = append(policies, p)
-			}
-			breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-			b, pol = loaded, policy.NewEngine(policies, breaker)
+		b, pol, err := policies.Load(ctx)
+		if err != nil {
+			return nil, nil, err
 		}
 		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
 			var err error
@@ -577,7 +551,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		logger.Info("model gate routing through external AI gateway", "url", cfg.modelGatewayURL)
 	}
 
-	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	breaker := policies.Breaker()
 	notifier := notify.New(notify.Options{Secrets: secretStore})
 	var oobApprover approval.Approver
 	if !isCitadel {
@@ -601,7 +575,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		Breaker:   breaker,
 		Approvals: approvalQueue,
 	})
-	mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	// The repository git.open_pr may target is read from the repo root's origin
+	// once, here. A reload only compares the origin with it (reloadGitOps);
+	// changing the repository needs a restart.
+	repoBinding := mcpgate.RegisterBuiltinGitOps(dataActionGate, repoRoot, &mcpgate.GitHubPROpener{Secrets: secretStore})
+	if pinned, err := repoBinding.Pinned(); err != nil {
+		logger.Warn("git.open_pr has no target repository; every call is refused until a restart", "error", err)
+	} else {
+		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
+	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
 	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
 	registerUpstreamMCP := func(b *config.Bundle) {
@@ -669,7 +651,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	conclaveBroker.RegisterMCPTools(dataActionGate)
 
 	scheduler := controlplane.NewScheduler(reconciler)
-	reloadFn := func() error {
+	// One reload at a time: the reload route, the dashboard and the manifests
+	// git sync can call it together, and the gate and the reconciler must end
+	// with the same bundle and policy.
+	reloadFn := serialized(func() error {
 		b, pol, err := loadAndSync()
 		if err != nil {
 			return err
@@ -678,7 +663,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		bundle = b
 		bundleMu.Unlock()
 		modelGate.SetBundle(b)
-		dataActionGate.Reload(b, pol)
+		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
 		registerUpstreamMCP(b)
 		reconciler.Reload(b, pol)
 		_ = scheduler.Reload(ctx, b)
@@ -686,7 +671,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 		}
 		return nil
-	}
+	})
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -1608,7 +1593,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DeviceID       string `json:"deviceId"`
 			Signature      string `json:"signature"`
 		}
-		// An empty body approves without a pin; a malformed one must not drop the pin silently.
+		// An empty body leaves the pin empty and the queue refuses it (ErrDigestRequired, once an approver is configured); a malformed one is a 400 so a pin is not dropped silently.
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid approval body"})
 			return
@@ -2113,4 +2098,76 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 		return nil, "", "", err
 	}
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
+}
+
+// policyLoader reads the manifests, records the declared workloads and builds
+// the policy engine for each load.
+type policyLoader struct {
+	st            store.Store
+	manifestsPath string
+	gateBreaker   *policy.CircuitBreaker
+}
+
+func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
+	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+}
+
+// Breaker returns the circuit breaker the action gate records outcomes on.
+func (l *policyLoader) Breaker() *policy.CircuitBreaker {
+	return l.gateBreaker
+}
+
+func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine, error) {
+	if l.manifestsPath == "" {
+		return nil, policy.NewEngine(nil, nil), nil
+	}
+	loaded, err := config.LoadPath(l.manifestsPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load manifests: %w", err)
+	}
+	for _, w := range loaded.Workloads {
+		cardBytes, err := json.Marshal(w.Spec.AgentCard)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := l.st.UpsertWorkload(ctx, domain.WorkloadRecord{
+			Name:           w.Metadata.Name,
+			Zone:           w.Metadata.Zone,
+			Class:          w.Spec.Class,
+			ManifestDigest: loaded.ManifestDigest,
+			AgentCardJSON:  string(cardBytes),
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+	var policies []domain.Policy
+	for _, p := range loaded.Policies {
+		policies = append(policies, p)
+	}
+	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
+	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// serialized returns fn guarded by one mutex, so calls never overlap and
+// each runs to the end before the next starts.
+func serialized(fn func() error) func() error {
+	var mu sync.Mutex
+	return func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		return fn()
+	}
+}
+
+// reloadGitOps applies a reloaded bundle and policy to the action gate and
+// checks the repo root's origin against the repository pinned at start. Every
+// reload trigger (POST /api/v1/reload, the dashboard and the manifests git
+// sync) runs it through the daemon's one reload function. It never re-pins: a
+// changed or unreadable origin keeps git.open_pr refused, is logged here, and
+// Recheck writes it to the audit log once per change of the observed origin.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
+	gate.Reload(b, pol)
+	if err := binding.Recheck(ctx); err != nil {
+		logger.Warn("git.open_pr refused after reload", "error", err)
+	}
 }

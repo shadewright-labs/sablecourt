@@ -14,6 +14,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 )
 
 type fakeSession struct {
@@ -122,7 +123,7 @@ func TestHarnessLogin(t *testing.T) {
 			t.Cleanup(func() { newLoginRuntime = old })
 			stubFetch(t, tc.name == "tool download fails")
 			var out, errOut bytes.Buffer
-			err := runHarnessLogin(t.Context(), tc.role, strings.NewReader("code123\n"), &out, &errOut)
+			err := runHarnessLogin(t.Context(), tc.role, strings.NewReader("code123\n"), &out, &errOut, waitart.Config{})
 			if got.Image != def.Image || got.Volume != def.Volume {
 				t.Fatalf("runtime configured for %+v", got)
 			}
@@ -193,7 +194,7 @@ func TestHarnessInstall(t *testing.T) {
 			stubFetch(t, tc.fail)
 			def, _ := harnessimages.Lookup(tc.role)
 			var errOut bytes.Buffer
-			err := installHarnessTool(t.Context(), def, tc.fake, &errOut)
+			err := installHarnessTool(t.Context(), def, tc.fake, &errOut, waitart.Config{})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v", err)
@@ -280,5 +281,19 @@ func TestLoginRuntimeRefusesRemoteEngine(t *testing.T) {
 				t.Fatalf("newLoginRuntime() = %v, %v, want the remote engine refusal", r, err)
 			}
 		})
+	}
+}
+
+// TestHarnessInstallArtWaitsForTheMessageLine checks that the animation does
+// not start when the "Downloading" line was cut short or failed.
+func TestHarnessInstallArtWaitsForTheMessageLine(t *testing.T) {
+	for _, keep := range []int{0, 5} {
+		stubFetch(t, false)
+		def, _ := harnessimages.Lookup("claude")
+		errOut := &cutWriter{keep: keep}
+		_ = installHarnessTool(t.Context(), def, &fakeLogin{}, errOut, fakeTerminalArt())
+		if strings.Contains(errOut.offered.String(), "\x1b[?25l") {
+			t.Fatalf("keep=%d: the animation started after an incomplete message line", keep)
+		}
 	}
 }

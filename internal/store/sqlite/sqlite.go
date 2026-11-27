@@ -484,6 +484,41 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+	// One statement in the driver's autocommit transaction, compared against
+	// SQLite's own clock. julianday('now') is read while the statement runs,
+	// after it has taken the database write lock, so a wait for that lock (up
+	// to busy_timeout) or a pause of the daemon before the statement cannot
+	// carry an earlier time past the expiry. What remains: 'now' is fixed for
+	// the one statement, and julianday rounds both sides to the millisecond.
+	// The rounding is monotonic, so a time at or after the expiry never
+	// compares as earlier; a use less than a millisecond before the expiry may
+	// be refused.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE approvals SET status = ?
+		WHERE id = ? AND status = ? AND task_id = ? AND capability = ? AND payload_sha256 = ?
+		  AND julianday(expires_at) > julianday('now')
+	`, string(domain.ApprovalConsumed), id, string(domain.ApprovalApproved), taskID, capability, payloadSHA256)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return nil
+	}
+	if n != 0 {
+		return fmt.Errorf("consume approval: %d rows updated", n)
+	}
+	a, err := s.GetApproval(ctx, id)
+	if err != nil {
+		return err
+	}
+	return store.ConsumeRefusal(a, taskID, capability, payloadSHA256)
+}
+
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
