@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
@@ -169,20 +172,71 @@ func harnessGitDirPath(taskBase string) string { return taskBase + ".git" }
 // checkout files, and removes the directory when the task finishes. A live
 // checkout is a primary worktree whose .git is mounted with it, so it needs
 // none.
+//
+// The container user (10001) is not the daemon user on native Linux Docker,
+// so the directory is made readable by every user (directories 0755, files
+// 0644) once its parent is checked to be a directory the daemon user owns
+// that grants nothing to group or others: the container runtime reaches the
+// bind source as root, and no other host user can reach it through that
+// parent. It is not made writable; see the uid 10001 limit on the harness
+// containers page.
 func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *worktreeState) (string, error) {
 	if state.Mode == checkoutModeLive {
 		return "", nil
+	}
+	gitDir := harnessGitDirPath(taskBase)
+	if err := checkPrivateParent(filepath.Dir(gitDir)); err != nil {
+		return "", err
 	}
 	checkout := state.checkoutGit(dir)
 	head, err := checkout.commitID(ctx, "HEAD")
 	if err != nil {
 		return "", err
 	}
-	gitDir := harnessGitDirPath(taskBase)
 	if err := createLiveGitDir(ctx, checkout, gitDir, head); err != nil {
 		return "", fmt.Errorf("create harness Git metadata: %w", err)
 	}
+	if err := openToHarnessUser(gitDir); err != nil {
+		return "", errors.Join(fmt.Errorf("open harness Git metadata to the container user: %w", err), os.RemoveAll(gitDir))
+	}
 	return gitDir, nil
+}
+
+// checkPrivateParent refuses a directory that is a symlink, is owned by
+// another user or grants any permission to group or others.
+func checkPrivateParent(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok || int64(st.Uid) != int64(os.Geteuid()) || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("harness Git metadata parent %s must be a directory owned by the daemon user with mode 0700", filepath.Base(dir))
+	}
+	return nil
+}
+
+// openToHarnessUser adds read permission for every user to each file, and
+// read and search permission to each directory, below dir. It refuses a
+// symlink or any other kind of file, which the daemon never writes there.
+func openToHarnessUser(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.IsDir():
+			return os.Chmod(path, info.Mode().Perm()|0o055)
+		case info.Mode().IsRegular():
+			return os.Chmod(path, info.Mode().Perm()|0o044)
+		default:
+			return fmt.Errorf("unexpected file type %v in harness Git metadata", info.Mode().Type())
+		}
+	})
 }
 
 func (a *Adapter) resolveProxyImageID(ctx context.Context) (string, error) {

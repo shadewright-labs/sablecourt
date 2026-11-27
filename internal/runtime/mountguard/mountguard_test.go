@@ -244,6 +244,63 @@ func TestCheckLiveWithoutGuard(t *testing.T) {
 	}
 }
 
+// TestCheckLiveRule pins the live checkout rule that ADR-0011 and the
+// harness containers page state: a live repository is refused when it is or
+// contains a protected path (the database and its directory, the secret file,
+// the state directory, the worktree root, the home directory, a home
+// credential path or a socket), and when it lies under the state directory,
+// the worktree root or a home credential path. Lying under the database's
+// directory or the home directory alone is allowed.
+func TestCheckLiveRule(t *testing.T) {
+	base := resolvedTemp(t)
+	home := mkdir(t, filepath.Join(base, "home"))
+	state := mkdir(t, filepath.Join(base, "state"))
+	t.Setenv("HOME", home)
+	t.Setenv("SABLECOURT_STATE_DIR", state)
+	dbDir := mkdir(t, filepath.Join(base, "data"))
+	db := filepath.Join(dbDir, "sablecourt.db")
+	secretDir := mkdir(t, filepath.Join(base, "secrets"))
+	secret := filepath.Join(secretDir, "secrets.json")
+	sockDir := mkdir(t, filepath.Join(base, "run"))
+	sock := filepath.Join(sockDir, "docker.sock")
+	for _, f := range []string{db, secret, sock} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := openRoot(t, filepath.Join(dbDir, "worktrees"))
+	g := &Guard{Root: root, Protected: []string{db, dbDir, secret}}
+	for _, tc := range []struct {
+		name string
+		dir  string
+		ok   bool
+	}{
+		{name: "contains the database directory", dir: base},
+		{name: "is the database directory", dir: dbDir},
+		{name: "contains the secret file", dir: secretDir},
+		{name: "contains a socket", dir: sockDir},
+		{name: "is the state directory", dir: state},
+		{name: "under the state directory", dir: mkdir(t, filepath.Join(state, "repo"))},
+		{name: "is the worktree root", dir: root.Path()},
+		{name: "under the worktree root", dir: mkdir(t, filepath.Join(root.Path(), "repo"))},
+		{name: "is the home directory", dir: home},
+		{name: "under a credential path", dir: mkdir(t, filepath.Join(home, ".config", "repo"))},
+		{name: "under the database directory", dir: mkdir(t, filepath.Join(dbDir, "repo")), ok: true},
+		{name: "under the secret file directory", dir: mkdir(t, filepath.Join(secretDir, "repo")), ok: true},
+		{name: "under the home directory", dir: mkdir(t, filepath.Join(home, "src", "repo")), ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := g.CheckLive(tc.dir, []string{sock})
+			if tc.ok && err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if !tc.ok && !errors.Is(err, ErrUnsafe) {
+				t.Fatalf("accepted: %v", err)
+			}
+		})
+	}
+}
+
 // TestOverlap checks the identity overlap test used for a launch's Git
 // metadata directory.
 func TestOverlap(t *testing.T) {

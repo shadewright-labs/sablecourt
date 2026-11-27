@@ -2008,6 +2008,9 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 		if err := copyRegularFile(srcIndex, filepath.Join(liveGitDir, "index")); err != nil {
 			return err
 		}
+		if err := copySharedIndex(ctx, owner, liveGitDir); err != nil {
+			return err
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -2038,6 +2041,30 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 		return err
 	}
 	return nil
+}
+
+// copySharedIndex copies the shared index file a split index names
+// (core.splitIndex), which Git keeps beside the index as
+// sharedindex.<object ID>. Without it Git cannot read the copied index. An
+// index that is not split prints no path (or an all-zero object ID) and
+// needs nothing.
+func copySharedIndex(ctx context.Context, owner gitRepo, liveGitDir string) error {
+	out, err := owner.run(ctx, "rev-parse", "--shared-index-path")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	name := filepath.Base(strings.TrimSpace(out))
+	id, ok := strings.CutPrefix(name, "sharedindex.")
+	if !ok || !isCommitID(id) {
+		return errors.New("primary repository names an invalid shared index")
+	}
+	if strings.Trim(id, "0") == "" {
+		return nil
+	}
+	return copyRegularFile(filepath.Join(owner.gitDir, name), filepath.Join(liveGitDir, name))
 }
 
 func copyRegularFile(src, dst string) error {

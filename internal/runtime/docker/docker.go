@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -59,22 +60,49 @@ type Adapter struct {
 }
 
 // errRemoteEngine is the refusal of an engine not reached over a local Unix
-// socket or Windows named pipe.
-var errRemoteEngine = errors.New("Sablecourt runs only on a local Docker engine (a unix:// socket or a Windows named pipe); a remote engine such as tcp:// or ssh:// is refused")
+// socket or a Windows named pipe on this machine.
+var errRemoteEngine = errors.New("Sablecourt runs only on a local Docker engine (a unix:// socket or a named pipe on this machine, npipe:////./pipe/<name>); a remote engine such as tcp://, ssh:// or a pipe on another machine is refused")
 
 // checkLocalEngine refuses a Docker host that is not a local Unix socket or
-// Windows named pipe. The mount rule compares host file identities, which say
-// nothing about the files of a remote engine (tcp://, ssh://), so no Docker
-// adapter exists on one. An empty host is the client's local default.
+// a named pipe on the local machine. The mount rule compares host file
+// identities, which say nothing about the files of a remote engine (tcp://,
+// ssh://, or a pipe on another machine such as npipe:////server/pipe/name),
+// so no Docker adapter exists on one. An empty host is the client's local
+// default.
 func checkLocalEngine(host string) error {
 	if host == "" {
 		return nil
 	}
 	u, err := client.ParseHostURL(host)
-	if err != nil || (u.Scheme != "unix" && u.Scheme != "npipe") || u.Host == "" {
+	if err != nil || u.Host == "" {
 		return errRemoteEngine
 	}
-	return nil
+	switch u.Scheme {
+	case "unix":
+		return nil
+	case "npipe":
+		if localPipe(u.Host) {
+			return nil
+		}
+	}
+	return errRemoteEngine
+}
+
+// localPipe reports whether a named pipe address names a pipe on the local
+// machine: //./pipe/<name> (or the same with backslashes), where the name is
+// one path element without . or .. segments, which Windows would collapse
+// into another path such as a UNC path to a remote machine.
+func localPipe(addr string) bool {
+	name, ok := strings.CutPrefix(strings.ReplaceAll(addr, "\\", "/"), "//./pipe/")
+	if !ok || name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // errNoDaemonHost refuses an engine client that does not say which host it
