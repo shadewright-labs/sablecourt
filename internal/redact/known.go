@@ -499,6 +499,9 @@ type acMatcher struct {
 	// marker replaces a match: KnownSecretMarker, or empty when a pattern
 	// overlaps it (see markerFor).
 	marker string
+	// cutAfter marks the bytes after which a Stream may cut: bytes no
+	// pattern holds, other than CR, LF, backslash, r and n (see Stream).
+	cutAfter [256]bool
 }
 
 func buildACMatcher(patterns map[string]struct{}) *acMatcher {
@@ -509,9 +512,13 @@ func buildACMatcher(patterns map[string]struct{}) *acMatcher {
 		nodes:  make([]acNode, 1, len(patterns)*16),
 		marker: markerFor(patterns),
 	}
+	var inPattern [256]bool
 	for p := range patterns {
 		if len(p) > m.maxPatLen {
 			m.maxPatLen = len(p)
+		}
+		for i := range len(p) {
+			inPattern[p[i]] = true
 		}
 		var u int32
 		for i := range len(p) {
@@ -526,6 +533,13 @@ func buildACMatcher(patterns map[string]struct{}) *acMatcher {
 		}
 		if int32(len(p)) > m.nodes[u].maxMatchLen {
 			m.nodes[u].maxMatchLen = int32(len(p))
+		}
+	}
+	for b := range m.cutAfter {
+		switch byte(b) {
+		case '\r', '\n', '\\', 'r', 'n':
+		default:
+			m.cutAfter[b] = !inPattern[b]
 		}
 	}
 
@@ -625,17 +639,12 @@ func appendMergedSpan(spans []byteSpan, start, end int) []byteSpan {
 	return append(spans, byteSpan{start: start, end: end})
 }
 
-// scan feeds s through the automaton and returns the merged match spans with
-// the final state, the count of fed bytes and the ring of their source offsets.
+// scan feeds s through the automaton and returns the merged match spans.
 // With skipBreaks it skips CR, LF and their escaped forms, so a value wrapped
 // across lines still matches; without it every byte is fed (the raw-byte view).
 // Both views are needed: skipping "\n" also eats the first byte of a value that
 // starts with n or r after a backslash.
-//
-// With rounds set, a byte whose round is at least below ends any match in
-// progress and starts none, so only matches made of earlier rounds are found
-// (see Stream.lowest).
-func scan[T string | []byte](m *acMatcher, s T, skipBreaks bool, rounds []uint8, below uint8) ([]byteSpan, int32, int, []int) {
+func scan[T string | []byte](m *acMatcher, s T, skipBreaks bool) []byteSpan {
 	ringSize := m.maxPatLen
 	ring := make([]int, ringSize)
 	var (
@@ -643,17 +652,7 @@ func scan[T string | []byte](m *acMatcher, s T, skipBreaks bool, rounds []uint8,
 		st    int32
 		k     int
 	)
-	barrier := func(idx int) bool {
-		if rounds != nil && rounds[idx] >= below {
-			st = 0
-			return true
-		}
-		return false
-	}
 	feed := func(idx int, b byte) {
-		if barrier(idx) {
-			return
-		}
 		ring[k%ringSize] = idx
 		k++
 		st = m.step(st, b)
@@ -666,15 +665,12 @@ func scan[T string | []byte](m *acMatcher, s T, skipBreaks bool, rounds []uint8,
 		b := s[i]
 		if skipBreaks {
 			if b == '\r' || b == '\n' {
-				barrier(i)
 				i++
 				continue
 			}
 			if b == '\\' && i+1 < len(s) {
 				next := s[i+1]
 				if next == 'r' || next == 'n' {
-					barrier(i)
-					barrier(i + 1)
 					i += 2
 					continue
 				}
@@ -689,14 +685,12 @@ func scan[T string | []byte](m *acMatcher, s T, skipBreaks bool, rounds []uint8,
 		feed(i, b)
 		i++
 	}
-	return spans, st, k, ring
+	return spans
 }
 
 // matchSpans returns the merged match spans of both views of s.
 func matchSpans[T string | []byte](m *acMatcher, s T) []byteSpan {
-	skipped, _, _, _ := scan(m, s, true, nil, 0)
-	raw, _, _, _ := scan(m, s, false, nil, 0)
-	return mergeSpans(skipped, raw)
+	return mergeSpans(scan(m, s, true), scan(m, s, false))
 }
 
 // mergeSpans merges two sorted span lists into one sorted list without overlaps.
@@ -731,74 +725,72 @@ func (m *acMatcher) hit(s string) bool {
 // not settled after maxRewrites rounds, the whole of s is replaced by the
 // marker, which holds no registered value (see markerFor).
 func (m *acMatcher) redactString(s string) (string, int) {
-	out, hits := s, 0
+	out, hits, settled := m.redactRounds(s)
+	if !settled {
+		return m.marker, hits
+	}
+	return out, hits
+}
+
+// redactRounds runs the rounds of redactString and reports whether they
+// settled, in which case out is the rewritten text.
+func (m *acMatcher) redactRounds(s string) (out string, hits int, settled bool) {
+	out = s
 	for range maxRewrites {
 		spans := matchSpans(m, out)
 		if len(spans) == 0 {
-			return out, hits
+			return out, hits, true
 		}
 		hits += len(spans)
 		out = string(replaceByteSpans([]byte(out), spans, m.marker))
 	}
-	return m.marker, hits
+	return out, hits, false
 }
 
 // Stream redacts exact registered secrets across arbitrary write boundaries,
 // including secrets split by CR or LF characters.
 //
-// A replacement is written into the pending buffer and scanned again with
-// the bytes around it, so what the stream emits is exactly the text it
-// checked: a marker next to other text cannot form a held value unseen.
-// How much text stays pending, and why no later round can change emitted
-// text, is argued at holdBack.
+// It keeps the raw input it has not emitted yet and emits only what the batch
+// redactor (redactString) returns for a prefix of it that ends at a safe cut,
+// so the joined output equals the batch output of the whole input.
+//
+// A cut right after a byte b is safe when b occurs in no pattern of the
+// matcher and is not CR, LF, a backslash, r or n (acMatcher.cutAfter). The
+// argument, from scan and redactString, which are all the batch redactor
+// does:
+//
+//   - Both views feed b as a byte of its own. The raw-byte view feeds every
+//     byte. The view that skips line breaks skips only CR, LF and a backslash
+//     followed by r or n, and pairs a backslash with the backslash after it:
+//     b is none of those bytes, so it is neither skipped nor the first or
+//     second byte of a pair. A backslash just before b looks ahead only at b,
+//     which is in the prefix, so the prefix is read the same with or without
+//     the rest.
+//   - No pattern holds b, so feeding it puts the automaton back at the root
+//     and no match covers it. Each view of prefix+rest finds the matches of
+//     the prefix alone and, shifted, the matches of the rest alone, and no
+//     match crosses b.
+//   - replaceByteSpans rewrites the two sides apart and leaves b at the end
+//     of the rewritten prefix, so the same holds in every later round,
+//     whatever the marker holds. Hence redactString(prefix+rest) is
+//     redactString(prefix)+redactString(rest) when both settle within
+//     maxRewrites rounds; when either does not, batch gives the marker alone
+//     and the stream closes with the marker.
+//   - Every emitted piece but the last ends with such a byte, so no held value
+//     spans two emitted pieces either.
+//
+// The stream emits up to the last safe cut in its buffer. If none appears and
+// the buffer grows past maxStreamPending, it emits the marker and closes. At
+// eof it runs the batch redactor on the rest. The cost is that output comes
+// in larger pieces (a clean line waits for a byte no pattern holds) and that a
+// stream with no safe cut before the cap stops. The matcher is loaded on each
+// write, so a value registered later does not change text already emitted.
 type Stream struct {
 	reg *Registry
 	buf []byte
-	// round holds, for each byte of buf, the rewrite round that last changed
-	// it or the way it is read (0 for input bytes); see rewrite.
-	round []uint8
-	// closed is set when rewriting did not settle within maxRewrites. The
-	// stream then fails closed and emits nothing more.
+	// closed is set when the batch redactor did not settle on a prefix or no
+	// safe cut appeared before the cap. The stream then emits nothing more.
 	closed bool
-}
-
-// maxRound is the last rewrite round whose result can still be emitted.
-// redactString scans at most maxRewrites times, so text whose matches stop
-// after maxRewrites-1 replacement rounds is the last it returns rewritten; one
-// more round and it fails closed to the marker. The stream fails closed at the
-// same round.
-const maxRound = maxRewrites - 1
-
-// The stream keeps the batch redactor's rounds. Round 1 replaces matches in
-// the input; round r+1 replaces matches in the text round r left. Each byte of
-// the pending buffer carries the last round that changed it or the way it is
-// read (0 for an input byte), and a match belongs to one round more than the
-// highest round inside it.
-//
-// A match in round r+1 that was not a match in round r contains a byte round
-// r changed: a marker byte, or a byte whose reading changed. Those are the
-// byte just before a replacement (a backslash there can stop or start pairing
-// with what follows, and with the marker off the two sides of a removed match
-// join there) and the run of backslashes right after it. Text left of the
-// leftmost change is unchanged and read the same way. A match is at most
-// maxPatLen fed bytes, so round r+1 starts at most maxPatLen fed bytes before
-// the leftmost replacement of round r, and the byte before a replacement is
-// the leftmost byte a round can change.
-//
-// At a cut, a match not seen yet starts at or after settle (liveCut and the
-// spans across settle set it), so it and the rounds after it change no byte
-// before settle - (r-1)*maxPatLen - 1 in round r. The marker's length drops
-// out: a marker byte lies right of the replacement start that put it there,
-// so it never moves the leftmost change. Counting skip-view bytes covers the
-// raw-byte view too, because that view feeds every byte the skip view does.
-
-// holdBack is how many fed bytes the stream keeps pending before settle, or
-// before the first match it has not replaced yet when that is earlier. A
-// chain of rounds started there has at most maxRound rounds, so it reaches
-// (maxRound-1)*maxPatLen fed bytes back plus the byte before its last
-// replacement: no later round can change an emitted byte.
-func (m *acMatcher) holdBack() int {
-	return (maxRound-1)*m.maxPatLen + 1
 }
 
 // String keeps fmt from printing the buffered start of a possible match.
@@ -822,241 +814,49 @@ func (s *Stream) Write(raw []byte, eof bool) []byte {
 		if len(s.buf) == 0 {
 			return raw
 		}
-		out := make([]byte, 0, len(s.buf)+len(raw))
-		out = append(out, s.buf...)
-		out = append(out, raw...)
-		s.buf, s.round = nil, nil
+		s.buf = append(s.buf, raw...)
+		out := s.buf
+		s.buf = nil
 		return out
-	}
-	if len(raw) == 0 && len(s.buf) == 0 {
-		return nil
 	}
 	s.buf = append(s.buf, raw...)
-	s.round = append(s.round, make([]uint8, len(raw))...)
-
-	// Each pass replaces matches of the lowest round present, so the rounds
-	// strictly rise and maxRound+1 passes always reach one that replaces none.
-	for range maxRound + 1 {
-		settle, spans := s.cut(m, eof)
-		low, lowSpans, ok := s.lowest(m, spans, eof)
-		if !ok {
-			break
-		}
-		if ready := s.ready(m, lowSpans, low, settle, eof); len(ready) > 0 {
-			// Rewrite and scan again: the marker is now part of the text.
-			s.rewrite(m, ready, uint8(low))
-			continue
-		}
-		limit := settle
-		if len(spans) > 0 {
-			limit = min(limit, spans[0].start)
-		}
-		emit := limit
-		if limit < len(s.buf) {
-			emit = keepBefore(s.buf[:limit], m.holdBack())
-		}
-		pendingCap := max(maxStreamPending, 4*m.maxPatLen)
-		out := bytes.Clone(s.buf[:emit])
-		if !eof && len(s.buf)-settle > pendingCap {
-			// Fail closed on adversarial CR/LF flooding after an active
-			// prefix. The marker stays pending with the text kept before
-			// it, so it is scanned with what precedes and follows it. It
-			// counts as a first-round replacement at settle, which the
-			// text kept before it covers (see holdBack).
-			next := append(bytes.Clone(s.buf[emit:settle]), m.marker...)
-			rounds := append(bytes.Clone(s.round[emit:settle]), bytes.Repeat([]byte{1}, len(m.marker))...)
-			if k := settle - emit - 1; k >= 0 {
-				rounds[k] = max(rounds[k], 1)
-			}
-			s.buf, s.round = next, rounds
-			return out
-		}
-		rem := copy(s.buf, s.buf[emit:])
-		copy(s.round, s.round[emit:])
-		s.buf, s.round = s.buf[:rem], s.round[:rem]
-		return out
+	cut := len(s.buf)
+	if !eof {
+		cut = m.lastSafeCut(s.buf)
 	}
+	var out []byte
+	if cut > 0 {
+		text, _, settled := m.redactRounds(string(s.buf[:cut]))
+		if !settled {
+			return s.close(m)
+		}
+		out = []byte(text)
+		rem := copy(s.buf, s.buf[cut:])
+		s.buf = s.buf[:rem]
+	}
+	if len(s.buf) > maxStreamPending {
+		return append(out, s.close(m)...)
+	}
+	return out
+}
+
+// close ends the stream: it drops the pending input and returns the marker,
+// the last bytes the stream emits.
+func (s *Stream) close(m *acMatcher) []byte {
 	s.closed = true
-	s.buf, s.round = nil, nil
-	return nil
+	s.buf = nil
+	return []byte(m.marker)
 }
 
-// lowest returns the lowest round r of the pending matches and the merged
-// matches of that round, found with every byte of round r or later as a
-// barrier: they are the matches the batch redactor finds in round r, since
-// those bytes are the only ones that differ from its text after round r-1. It
-// reports false when that round is past maxRound, where the batch redactor
-// fails closed.
-func (s *Stream) lowest(m *acMatcher, spans []byteSpan, eof bool) (int, []byteSpan, bool) {
-	if len(spans) == 0 {
-		return 0, nil, true
-	}
-	var top uint8
-	for _, v := range s.round {
-		top = max(top, v)
-	}
-	skipView := s.skipView(eof)
-	for r := 1; r <= int(top)+1; r++ {
-		if r > maxRound {
-			return 0, nil, false
-		}
-		if r == int(top)+1 {
-			// No byte is a barrier: these are all the pending matches.
-			return r, spans, true
-		}
-		skipped, _, _, _ := scan(m, skipView, true, s.round, uint8(r))
-		raw, _, _, _ := scan(m, s.buf, false, s.round, uint8(r))
-		if found := mergeSpans(skipped, raw); len(found) > 0 {
-			return r, found, true
+// lastSafeCut returns the offset just after the last byte of b at which a cut
+// is safe (see Stream), or 0 when b has none.
+func (m *acMatcher) lastSafeCut(b []byte) int {
+	for i := len(b) - 1; i >= 0; i-- {
+		if m.cutAfter[b[i]] {
+			return i + 1
 		}
 	}
-	return 0, nil, false
-}
-
-// ready returns the matches of round r that no later input can change, so
-// the batch redactor replaces them in round r with the same extent. An
-// earlier round still to come changes no byte before
-// settle - (r-2)*maxPatLen - 1, and a match of round r still to come starts no
-// earlier than settle - (r-1)*maxPatLen, so a match of round r that ends there
-// is final. At eof nothing is still to come.
-func (s *Stream) ready(m *acMatcher, spans []byteSpan, r, settle int, eof bool) []byteSpan {
-	limit := settle
-	if !eof && r > 1 {
-		limit = keepBefore(s.buf[:settle], (r-1)*m.maxPatLen)
-	}
-	var ready []byteSpan
-	for _, sp := range spans {
-		if eof || sp.end <= limit {
-			ready = append(ready, sp)
-		}
-	}
-	return ready
-}
-
-// rewrite replaces the ready spans of round r with the marker and records r
-// for each changed byte: the marker bytes, the byte before them and the run of
-// backslashes after them, whose reading the replacement can change.
-func (s *Stream) rewrite(m *acMatcher, ready []byteSpan, r uint8) {
-	next := make([]byte, 0, len(s.buf))
-	rounds := make([]uint8, 0, len(s.round))
-	type change struct {
-		at, end int
-		round   uint8
-	}
-	changes := make([]change, 0, len(ready))
-	pos := 0
-	for _, sp := range ready {
-		next = append(next, s.buf[pos:sp.start]...)
-		rounds = append(rounds, s.round[pos:sp.start]...)
-		at := len(next)
-		next = append(next, m.marker...)
-		rounds = append(rounds, bytes.Repeat([]byte{r}, len(m.marker))...)
-		changes = append(changes, change{at: at, end: len(next), round: r})
-		pos = sp.end
-	}
-	next = append(next, s.buf[pos:]...)
-	rounds = append(rounds, s.round[pos:]...)
-	for _, c := range changes {
-		if c.at > 0 {
-			rounds[c.at-1] = max(rounds[c.at-1], c.round)
-		}
-		for i := c.end; i < len(next); i++ {
-			rounds[i] = max(rounds[i], c.round)
-			if next[i] != '\\' {
-				break
-			}
-		}
-	}
-	s.buf, s.round = next, rounds
-}
-
-// cut scans the pending buffer in both views and returns settle (the offset
-// where a match that may still complete starts) and the merged match spans.
-func (s *Stream) cut(m *acMatcher, eof bool) (settle int, spans []byteSpan) {
-	skipView := s.skipView(eof)
-	skipped, stS, kS, ringS := scan(m, skipView, true, nil, 0)
-	rawSpans, stR, kR, ringR := scan(m, s.buf, false, nil, 0)
-	spans = mergeSpans(skipped, rawSpans)
-	settle = len(s.buf)
-	if eof {
-		return settle, spans
-	}
-	settle = min(m.liveCut(stS, kS, ringS, len(skipView)), m.liveCut(stR, kR, ringR, len(s.buf)))
-	if len(skipView) < len(s.buf) && settle > len(skipView) {
-		settle = len(skipView)
-	}
-	for _, sp := range spans {
-		if sp.end > settle && sp.start < settle {
-			settle = sp.start
-		}
-	}
-	return settle, spans
-}
-
-// skipView is the pending buffer as the view that skips line breaks reads it.
-// A trailing unpaired backslash may start an escaped line break that the next
-// write completes, so before eof that view stops short of it; read as a plain
-// byte it would end a partial match that is still live and wrongly settle the
-// text before it.
-func (s *Stream) skipView(eof bool) []byte {
-	if !eof && trailingOddBackslash(s.buf) {
-		return s.buf[:len(s.buf)-1]
-	}
-	return s.buf
-}
-
-// keepBefore returns the offset in b of the n-th last byte the view that skips
-// line breaks feeds to the automaton, or 0 when it feeds fewer. That view
-// feeds no more bytes than the raw one, so the offset also keeps n raw bytes.
-// An escaped backslash counts as two fed bytes but is never split, so the
-// pending text is read from its first byte as it was read in the whole text.
-func keepBefore(b []byte, n int) int {
-	fed := make([]int, 0, len(b))
-	for i := 0; i < len(b); {
-		c := b[i]
-		if c == '\r' || c == '\n' {
-			i++
-			continue
-		}
-		if c == '\\' && i+1 < len(b) {
-			switch b[i+1] {
-			case 'r', 'n':
-				i += 2
-				continue
-			case '\\':
-				fed = append(fed, i, i)
-				i += 2
-				continue
-			}
-		}
-		fed = append(fed, i)
-		i++
-	}
-	if len(fed) <= n {
-		return 0
-	}
-	return fed[len(fed)-n]
-}
-
-// liveCut returns the source offset where a match that may still complete
-// starts, or n when none is in progress.
-func (m *acMatcher) liveCut(st int32, k int, ring []int, n int) int {
-	live := st
-	for live != 0 && len(m.nodes[live].edges) == 0 {
-		live = m.nodes[live].fail
-	}
-	if live == 0 {
-		return n
-	}
-	return ring[(k-int(m.nodes[live].depth))%m.maxPatLen]
-}
-
-func trailingOddBackslash(b []byte) bool {
-	n := 0
-	for i := len(b) - 1; i >= 0 && b[i] == '\\'; i-- {
-		n++
-	}
-	return n%2 == 1
+	return 0
 }
 
 func replaceByteSpans(src []byte, spans []byteSpan, marker string) []byte {

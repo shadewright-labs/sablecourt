@@ -38,7 +38,7 @@ The states are `active`, `input-required`, `completed` and `cancelled`. `sablect
 
 A Relic is a named file (`sablectl conclave relic put <id> <name>`, or the gate for a Vassal). Its body is redacted and its SHA-256 is stored with it. Relics cannot be added to a paused or closed room.
 
-Scry is a read-only, redacted view of a task's output (`sablectl task scry <task-id>`), kept in a 64 KiB ring buffer. When a viewer subscribes, the buffered history is checked again against the secrets the daemon holds at that moment. A viewer that falls behind loses chunks; the next chunk it gets is preceded by the line `[scry: output dropped]`. Host-run coding tasks and long-lived container workloads stream to it. A council turn in a container does not: its answer appears when the turn exits. Takeover (exclusive input) is in the code and parked.
+Scry is a read-only, redacted view of a task's output (`sablectl task scry <task-id>`), kept in a 64 KiB ring buffer. Output reaches the ring after the stream matcher of `internal/redact`, which holds text back until a byte that no registered value contains (a space in most output), so a line can appear in larger pieces than the task wrote; 64 KiB with no such byte end the stream with the marker. When a viewer subscribes, the buffered history is checked again against the secrets the daemon holds at that moment. A viewer that falls behind loses chunks; the next chunk it gets is preceded by the line `[scry: output dropped]`. Host-run coding tasks and long-lived container workloads stream to it. A council turn in a container does not: its answer appears when the turn exits. Takeover (exclusive input) is in the code and parked.
 
 ## Not built yet
 

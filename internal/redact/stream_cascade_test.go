@@ -30,50 +30,55 @@ func cascadeCases() []cascadeCase {
 	const base = "base_held_value_0456"
 	var cases []cascadeCase
 	for depth := 1; depth <= maxRewrites; depth++ {
-		for _, xlen := range []int{3, 17} {
-			for _, br := range []string{"", "\n", "\\n"} {
-				for _, alphabet := range []string{"abcdefghij", `\a\b\c\d\e`} {
-					piece := func(i int, n int) string {
-						c := alphabet[(2*i)%len(alphabet) : (2*i)%len(alphabet)+2]
-						return strings.Repeat(c, n)[:n]
-					}
-					// Marker on: x_i followed by the start of the marker is held.
-					reg := NewRegistry()
-					reg.Register(base)
-					var b strings.Builder
-					b.WriteString("pre text that is emitted early, ")
-					for i := depth; i >= 1; i-- {
-						x := piece(i, xlen)
-						reg.Register(x + KnownSecretMarker[:6])
-						b.WriteString(insertBreak(x, br))
-					}
-					b.WriteString(insertBreak(base, br))
-					b.WriteString(" post")
-					if reg.Marker() == KnownSecretMarker {
-						cases = append(cases, cascadeCase{
-							name: fmt.Sprintf("marker/depth=%d/x=%d/br=%q/%s", depth, xlen, br, alphabet[:2]),
-							reg:  reg,
-							doc:  b.String(),
-						})
-					}
+		// ov is how many bytes of a held value lie past the piece before the
+		// replacement: one byte with xlen 20 reaches back 7*20 fed bytes in
+		// round 8 (third check of the stream, finding 1).
+		for _, ov := range []int{6, 1} {
+			for _, xlen := range []int{3, 17, 20} {
+				for _, br := range []string{"", "\n", "\\n"} {
+					for _, alphabet := range []string{"abcdefghij", `\a\b\c\d\e`} {
+						piece := func(i int, n int) string {
+							c := alphabet[(2*i)%len(alphabet) : (2*i)%len(alphabet)+2]
+							return strings.Repeat(c, n)[:n]
+						}
+						// Marker on: x_i followed by the start of the marker is held.
+						reg := NewRegistry()
+						reg.Register(base)
+						var b strings.Builder
+						b.WriteString("pre text that is emitted early, ")
+						for i := depth; i >= 1; i-- {
+							x := piece(i, xlen)
+							reg.Register(x + KnownSecretMarker[:ov])
+							b.WriteString(insertBreak(x, br))
+						}
+						b.WriteString(insertBreak(base, br))
+						b.WriteString(" post")
+						if reg.Marker() == KnownSecretMarker {
+							cases = append(cases, cascadeCase{
+								name: fmt.Sprintf("marker/depth=%d/ov=%d/x=%d/br=%q/%s", depth, ov, xlen, br, alphabet[:2]),
+								reg:  reg,
+								doc:  b.String(),
+							})
+						}
 
-					// Marker off: removing a match joins y_i and z_i into a held value.
-					reg = NewRegistry()
-					reg.Register("REDACTED:known", base)
-					var left, right []string
-					for i := 1; i <= depth; i++ {
-						y, z := piece(i, xlen), piece(i+depth, 5)
-						reg.Register(y + z)
-						left = append([]string{insertBreak(y, br)}, left...)
-						right = append(right, insertBreak(z, br))
-					}
-					if reg.Marker() == "" {
-						cases = append(cases, cascadeCase{
-							name: fmt.Sprintf("empty/depth=%d/x=%d/br=%q/%s", depth, xlen, br, alphabet[:2]),
-							reg:  reg,
-							doc: "pre text that is emitted early, " + strings.Join(left, "") +
-								insertBreak(base, br) + strings.Join(right, "") + " post",
-						})
+						// Marker off: removing a match joins y_i and z_i into a held value.
+						reg = NewRegistry()
+						reg.Register("REDACTED:known", base)
+						var left, right []string
+						for i := 1; i <= depth; i++ {
+							y, z := piece(i, xlen), piece(i+depth, min(ov, 5))
+							reg.Register(y + z)
+							left = append([]string{insertBreak(y, br)}, left...)
+							right = append(right, insertBreak(z, br))
+						}
+						if reg.Marker() == "" {
+							cases = append(cases, cascadeCase{
+								name: fmt.Sprintf("empty/depth=%d/ov=%d/x=%d/br=%q/%s", depth, ov, xlen, br, alphabet[:2]),
+								reg:  reg,
+								doc: "pre text that is emitted early, " + strings.Join(left, "") +
+									insertBreak(base, br) + strings.Join(right, "") + " post",
+							})
+						}
 					}
 				}
 			}
@@ -96,18 +101,6 @@ func batchSettles(m *acMatcher, s string) bool {
 	return false
 }
 
-func streamChunks(reg *Registry, doc string, cuts []int) string {
-	s := reg.NewStream()
-	var out []byte
-	prev := 0
-	for _, c := range cuts {
-		out = append(out, s.Write([]byte(doc[prev:c]), false)...)
-		prev = c
-	}
-	out = append(out, s.Write([]byte(doc[prev:]), true)...)
-	return string(out)
-}
-
 // Fix round 2, finding 1: rewriting runs up to maxRewrites rounds, each of
 // which can reach back a pattern length before the last replacement, but the
 // stream kept only one pattern length before a pending match. A cascade then
@@ -128,13 +121,7 @@ func TestStreamMatchesBatchOnRewriteCascades(t *testing.T) {
 			}
 			check := func(cuts []int) {
 				t.Helper()
-				got := streamChunks(tc.reg, tc.doc, cuts)
-				if tc.reg.ContainsHeld(got) {
-					t.Fatalf("stream cut at %v emitted %q, which shows a held value", cuts, got)
-				}
-				if settles && got != want {
-					t.Fatalf("stream cut at %v emitted %q, batch gave %q", cuts, got, want)
-				}
+				checkStreamProperty(t, tc.reg, tc.doc, cuts)
 			}
 			n := len(tc.doc)
 			for i := 0; i <= n; i++ {
@@ -165,7 +152,7 @@ func TestStreamMatchesBatchOnRewriteCascades(t *testing.T) {
 }
 
 // Finding 3 of the second check: rewriting that does not settle was never
-// tested. Past maxRound rounds the batch redactor returns the marker alone,
+// tested. Past maxRewrites-1 replacement rounds the batch redactor returns the marker alone,
 // and the stream closes: it emits nothing more, even for clean text.
 func TestRewritesPastMaxRoundFailClosed(t *testing.T) {
 	t.Parallel()
@@ -192,6 +179,6 @@ func TestRewritesPastMaxRoundFailClosed(t *testing.T) {
 		}
 	}
 	if seen == 0 {
-		t.Fatal("no generated case runs past maxRound")
+		t.Fatal("no generated case runs past maxRewrites rounds")
 	}
 }

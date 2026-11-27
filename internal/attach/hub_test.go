@@ -446,7 +446,9 @@ func TestScryReplayRechecksRingAndMarksGaps(t *testing.T) {
 		}
 	}
 	unsub()
-	if got[len(got)-2] != GapMarker || got[len(got)-1] != "resumed\n" {
+	// The exact stream holds a trailing line break until a byte it can cut
+	// after arrives, so the chunk may carry the line break of the line before.
+	if got[len(got)-2] != GapMarker || strings.Trim(got[len(got)-1], "\n") != "resumed" {
 		t.Fatalf("missed chunks were not marked: last chunks %q", got[len(got)-3:])
 	}
 }
