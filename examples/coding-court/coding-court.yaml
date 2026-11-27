@@ -7,15 +7,18 @@
 # the agent reads as its instructions. It names no model, no tier and no
 # verdict format, and it grants nothing: access comes from the workload's
 # grants and the daemon's own checks, with or without a card. The verdict
-# line a verifier ends with is the one the control plane accepts.
+# line a verifier ends with is the one the control plane parses (the final
+# line must be exactly VERDICT: PASS or VERDICT: CHANGES_REQUESTED).
 #
-# The tier belongs to the workflow step. The developers use the claude harness,
-# the reviewer the codex harness and the security reviewer the agy harness, so
-# a verifier never runs the author's model family. Verifier steps name provider
-# and model because the compiled default critic route is not their harness.
+# The tier belongs to the workflow step. The examples put the developers on
+# the claude harness, the reviewer on codex and the security reviewer on agy,
+# and the verifier steps name a provider and model of another family. That is
+# the intended routing, not a check: confirm the resolved family of every
+# step before the verifier, fix rounds included. Enforcement is issue 206.
 #
-# The coding blocks set sandbox: container. The coding runs in a harness
-# container, the only mode the daemon uses unless host mode is forced.
+# The coding blocks set sandbox: container, the value sablectl init writes.
+# The loader does not check the field, and a task that runs in a harness
+# container ignores it (docs/reference/manifests.md).
 apiVersion: sablecourt.io/v1alpha1
 kind: Workload
 metadata:
@@ -140,7 +143,7 @@ spec:
     repoPath: .
     sandbox: container
   agentCard:
-    description: Read-only security verifier, stated as failed controls.
+    description: Security verifier told to work read-only, stated as failed controls.
     skills:
       - security-review
   roleCard: |
@@ -176,7 +179,7 @@ metadata:
   name: go-change
   zone: runtime
 spec:
-  description: A Go change by an author, then a read-only review.
+  description: A Go change by an author, then a review.
   steps:
     - name: author
       workload: developer-go
@@ -225,7 +228,7 @@ metadata:
   name: docs-change
   zone: runtime
 spec:
-  description: A documentation change by an author, then a read-only review.
+  description: A documentation change by an author, then a review.
   steps:
     - name: author
       workload: developer-docs

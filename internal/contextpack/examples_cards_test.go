@@ -20,7 +20,8 @@ import (
 //     about 400 bytes each;
 //   - the packet header, intent and a failure handoff are reserved as 2 KiB.
 //
-// What is left for the card is 32 - 16 - 8 - 2 = 6 KiB. Author cards must also
+// What is left for the card is 32 - 16 - 8 - 2 = 6 KiB. This is a byte budget
+// with stated reserves: the test does not assemble a packet. Author cards must also
 // stay near the 1 KiB the ADR-0010 amendment asks for, so the limit is 1.25 KiB.
 const (
 	learningsReserve = 8 << 10
@@ -84,11 +85,9 @@ func TestExampleCodingCourtCardsFitContextPacket(t *testing.T) {
 					t.Errorf("%s: card has a long dash", name)
 				}
 			}
-			if set.prefix == "" {
-				for _, name := range set.authors {
-					if n := len(cards[name]); n > authorCardLimit {
-						t.Errorf("%s: generic author card is %d bytes, limit %d", name, n, authorCardLimit)
-					}
+			for _, name := range set.authors {
+				if n := len(cards[name]); n > authorCardLimit {
+					t.Errorf("%s: author card is %d bytes, limit %d", name, n, authorCardLimit)
 				}
 			}
 			for _, need := range []string{"numbered list", "recommended answer", "main alternative", "Decree", "round two"} {

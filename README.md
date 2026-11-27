@@ -94,7 +94,7 @@ Published docs site: [shadewrightlabs.com/sablecourt](https://shadewrightlabs.co
 - [Concepts](docs/concepts.md) and the [glossary](docs/glossary.md): workloads, leases, gates, Conclaves and the court vocabulary.
 - [How it works](docs/how-it-works/index.md): the path of a request and where each invariant is enforced.
 - [Run a council](docs/how-to/run-a-council.md), [log in to harnesses](docs/how-to/log-in-harnesses.md) and [harness images and tool install](docs/how-to/harness-images.md): what each harness image contains and how the proprietary tools are installed at login.
-- [Coding court example](examples/coding-court/README.md): four role cards, an architect prompt and three workflows for an author, reviewer and security sequence.
+- [Coding court example](examples/coding-court/README.md): two card sets (generic Go and this repository), each with three workflows for an author and a reviewer, and one workflow in each set adds a security review.
 - [Review an approval](docs/how-to/review-an-approval.md): read the pinned payload, then approve or deny.
 - [Watch and steer](docs/how-to/watch-and-steer.md) and [retry with a handoff](docs/how-to/retry-with-handoff.md).
 - [Reference](docs/reference/index.md): manifests, HTTP API, CLI, configuration, limits and metrics, with the tested parts checked against the code.
