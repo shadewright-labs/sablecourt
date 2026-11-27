@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
-	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -61,7 +60,9 @@ func (d Destination) LearningsAllowed(wl domain.Workload) bool {
 	if !d.DockerAgents || d.ModelGateway {
 		return false
 	}
-	if wl.Spec.Class == domain.ClassCodingAgent || wl.Spec.Coding != nil {
+	// DockerAgents only places long-lived agents, so every other class,
+	// including an empty or unknown one, has an unknown destination.
+	if wl.Spec.Class != domain.ClassLongLivedAgent || wl.Spec.Coding != nil {
 		return false
 	}
 	grant := wl.Spec.Grants.ModelGate
@@ -113,7 +114,11 @@ func learningSection(learnings []domain.Learning) []packetContext {
 		if len(lines) == MaxPacketLearnings {
 			break
 		}
-		line := redact.String("- [" + l.ID + "] " + strings.TrimSpace(l.Statement) + "\n")
+		// RedactLearningText adds URL userinfo and unclosed private key
+		// blocks to the shared rules, so a row that skipped write-time
+		// redaction is still cleaned here. The newline stays outside, because
+		// an unclosed key block consumes the rest of the text.
+		line := store.RedactLearningText("- ["+l.ID+"] "+strings.TrimSpace(l.Statement)) + "\n"
 		if total+len(line) > MaxLearningSectionBytes {
 			break
 		}

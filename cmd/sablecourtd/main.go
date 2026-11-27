@@ -328,6 +328,14 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
+// packetLearningDestination fixes the facts that decide whether a context
+// packet may carry learnings (ADR-0012): long-lived agents run in the Docker
+// adapter, and no model gateway receives the requests.
+func packetLearningDestination(adapters map[domain.WorkloadClass]scruntime.Adapter, modelGatewayURL string) contextpack.Destination {
+	_, dockerAgents := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	return contextpack.Destination{DockerAgents: dockerAgents, ModelGateway: modelGatewayURL != ""}
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -614,8 +622,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Warn("kubernetes runtime unavailable", "error", err)
 		}
 	}
-	_, dockerAgents := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
-	packetDest := contextpack.Destination{DockerAgents: dockerAgents, ModelGateway: cfg.modelGatewayURL != ""}
+	packetDest := packetLearningDestination(adapters, cfg.modelGatewayURL)
 	logger.Info("context packet learning destination fixed at startup",
 		"dockerAgents", packetDest.DockerAgents, "modelGateway", packetDest.ModelGateway)
 

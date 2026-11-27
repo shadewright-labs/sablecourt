@@ -562,6 +562,18 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 	if rec.Code != http.StatusGone || apiError(t, rec) != "legacy learning publication is disabled" {
 		t.Fatalf("learnings %d %s", rec.Code, rec.Body.String())
 	}
+	seedAPILearning(t, env.st, "Accepted advice for local agents")
+	if err := env.st.PutMemory(context.Background(), domain.MemoryEntry{Namespace: "learning:global", Key: "legacy", Value: "Legacy advice from Court Memory", Author: "operator", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings", "")
+	var listed []domain.Learning
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); rec.Code != http.StatusOK || err != nil {
+		t.Fatalf("list learnings %d %s %v", rec.Code, rec.Body.String(), err)
+	}
+	if len(listed) != 1 || listed[0].Statement != "Accepted advice for local agents" || strings.Contains(rec.Body.String(), "Legacy advice") {
+		t.Fatalf("listed learnings %s", rec.Body.String())
+	}
 	rec = apiCall(env.h, http.MethodGet, "/api/v1/providers", "")
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("providers without registry %d %s", rec.Code, rec.Body.String())
@@ -569,6 +581,33 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 	rec = apiCall(env.h, http.MethodPost, "/api/v1/providers/openai/sync", "")
 	if rec.Code != http.StatusServiceUnavailable || apiError(t, rec) != "provider registry unavailable" {
 		t.Fatalf("sync without registry %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// seedAPILearning proposes and accepts a global learning backed by a task artifact.
+func seedAPILearning(t *testing.T, st store.Store, statement string) {
+	t.Helper()
+	ctx := context.Background()
+	ls, err := store.Learnings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "learning-evidence", AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "learning-evidence", IdempotencyKey: "learning-evidence", WorkloadName: "learning-evidence", State: domain.TaskStateCompleted, ArtifactsJSON: `[{"name":"record","text":"recorded observation"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Minute)
+	l, err := ls.ProposeLearning(ctx, domain.Learning{
+		ID: "advice", Statement: statement, Scope: domain.LearningScope{Global: true}, SourceKind: domain.LearningSourceTask,
+		SourceID: "learning-evidence", EvidenceRef: "artifact:record", Author: "operator-1", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l.ID, l.VersionDigest, now); err != nil {
+		t.Fatal(err)
 	}
 }
 

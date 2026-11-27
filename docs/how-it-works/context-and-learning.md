@@ -33,7 +33,7 @@ The pre-check runs only when the workload has a `coding.repoPath` that names an 
 | `go vet ./...` | the repository has a `go.mod` and `go` is on the path | only when it reports issues |
 | `sg scan` | the repository has an `sgconfig.yml` and `sg` is on the path | only when it reports issues |
 
-The paths from `git status` also decide which path-scoped learnings match. The daemon runs these commands itself in the repository directory, not inside the harness sandbox.
+The paths from `git status` are what path-scoped learnings match against, but no packet that may carry learnings has them today: the pre-check needs a `coding.repoPath`, the destination check refuses learnings to a workload with a `coding` block, and the control plane drops `repo_path` from the task input of an ordinary task. The daemon runs these commands itself in the repository directory, not inside the harness sandbox.
 
 ## Learnings in the packet
 
@@ -45,7 +45,7 @@ The matcher reads only the learning record of [ADR-0012](../adr/0012-learning-ev
 
 - The daemon runs long-lived agents in the Docker adapter, whose internal network has no egress. Kubernetes, or no runtime for long-lived agents, makes the destination unknown.
 - No model gateway URL is set (`--model-gateway-url` or `SABLECOURT_MODEL_GATEWAY_URL`). A gateway receives requests for every provider, `local` included.
-- The workload is not a `coding-agent` and has no `coding` block. A CLI harness prompt goes to a remote model.
+- The workload is a `long-lived-agent` and has no `coding` block. A CLI harness prompt goes to a remote model, and the Docker adapter places no other class, so an empty or unknown class counts as unknown.
 - `grants.modelGate` is allowed and lists exactly one provider, `local`. An empty list allows every provider, and a list with any other provider can route a request to a remote one, including through fallback.
 
 The daemon fixes the first two facts once at startup and logs them in the line "context packet learning destination fixed at startup". Every other packet gets no learnings, and the store is not read for it. Council turns use their own packet, which never carries learnings. The `local` provider is assumed to stay on this machine: its default upstream is loopback, and a local upstream configured elsewhere would break that assumption.
@@ -55,7 +55,7 @@ The daemon fixes the first two facts once at startup and logs them in the line "
 For a local destination the assembler asks the store for records that are `accepted`, not expired and not contradicted, with every scope selector matching:
 
 - A global record matches every task.
-- A path-scoped record matches when one of its globs fits a path from `git status` of the pre-check. A `**` segment matches zero or more path components.
+- A path-scoped record matches when one of its globs fits a path from `git status` of the pre-check. A `**` segment matches zero or more path components. A packet that passes the destination check has no pre-check paths today, so a path-scoped record never matches yet.
 - A record with a repository remote URL never matches yet: the assembler derives no remote URL from the checkout, and a missing selector fails the match.
 - A record with incident selectors never matches an ordinary task, for the same reason.
 
@@ -85,7 +85,7 @@ Every line is dashed because the store enforces the transitions but no route, pa
 
 - Proposing, accepting, confirming and retiring through a route, page or command. ADR-0014 would give acceptance to the `approver` role; it is Proposed.
 - Proposing candidates when a run ends.
-- Matching repository-scoped and incident-scoped records in the packet: the assembler has no repository remote URL or incident selectors to match against.
+- Matching repository-scoped, path-scoped and incident-scoped records in the packet: the assembler has no repository remote URL or incident selectors, and a packet that passes the destination check has no pre-check paths.
 - Counting each learning once per confirmed packet delivery, keyed by packet ID.
 - PostgreSQL has no learning table.
 

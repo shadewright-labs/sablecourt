@@ -10,6 +10,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
 const (
@@ -94,6 +95,9 @@ func TestLearningDestination(t *testing.T) {
 		{"provider name with spaces", docker, agentWorkload(domain.ClassLongLivedAgent, nil, domain.ModelGateGrant{Allowed: true, Providers: []string{" local"}}), false},
 		{"grant not allowed", docker, agentWorkload(domain.ClassLongLivedAgent, nil, domain.ModelGateGrant{Providers: []string{"local"}}), false},
 		{"no model gate grant", docker, agentWorkload(domain.ClassLongLivedAgent, nil, domain.ModelGateGrant{}), false},
+		{"empty workload class", docker, agentWorkload("", nil, local), false},
+		{"unknown workload class", docker, agentWorkload("remote-agent", nil, local), false},
+		{"deterministic controller class", docker, agentWorkload(domain.ClassDeterministicController, nil, local), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -221,16 +225,51 @@ func TestLearningSectionCap(t *testing.T) {
 	}
 }
 
+// rawLearningStore returns stored learnings with a statement that never
+// passed the store's write-time redaction, so a packet test proves that
+// Assemble redacts on its own.
+type rawLearningStore struct {
+	*sqlite.SQLiteStore
+	statement string
+}
+
+func (r rawLearningStore) ListLearnings(ctx context.Context, filter store.LearningFilter) ([]domain.Learning, error) {
+	out, err := r.SQLiteStore.ListLearnings(ctx, filter)
+	for i := range out {
+		out[i].Statement = r.statement
+	}
+	return out, err
+}
+
 // TestPacketLearningsRedacted checks that a statement reaching a local
-// packet passes the redactor.
+// packet passes the learning redactor in Assemble, not only at write time.
 func TestPacketLearningsRedacted(t *testing.T) {
-	st := newTestStore(t)
 	// Built from parts so the source holds no key-shaped literal.
-	secret := "ghp_" + strings.Repeat("A1b2C3d4", 5)
-	seedAcceptedLearning(t, st, "advice", "Rotate "+secret+" weekly", domain.LearningScope{Global: true}, time.Now().UTC())
-	wl := agentWorkload(domain.ClassLongLivedAgent, nil, domain.ModelGateGrant{Allowed: true, Providers: []string{"local"}})
-	pkt := Assemble(context.Background(), st, domain.Task{InputJSON: `{"prompt":"work"}`}, wl, Destination{DockerAgents: true})
-	if pkt.LearningCount != 1 || strings.Contains(pkt.Markdown, secret) {
-		t.Fatalf("count %d, packet:\n%s", pkt.LearningCount, pkt.Markdown)
+	token := "ghp_" + strings.Repeat("A1b2C3d4", 5)
+	pemBody := "MIIEfixture" + "body"
+	for _, tc := range []struct {
+		name, statement, secret string
+	}{
+		{"token", "Rotate " + token + " weekly", token},
+		{"url userinfo", "Clone https://alice:secretpass" + "@" + "git.invalid/org/repo", "secretpass"},
+		{"unclosed private key", "Drop -----BEGIN " + "PRIVATE KEY-----\n" + pemBody, pemBody},
+		{"closed private key", "Use -----BEGIN RSA " + "PRIVATE KEY-----\n" + pemBody + "\n-----END RSA " + "PRIVATE KEY----- then", pemBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := newTestStore(t)
+			seedAcceptedLearning(t, st, "advice", "Placeholder advice", domain.LearningScope{Global: true}, time.Now().UTC())
+			raw := rawLearningStore{SQLiteStore: st.(*sqlite.SQLiteStore), statement: tc.statement}
+			wl := agentWorkload(domain.ClassLongLivedAgent, nil, domain.ModelGateGrant{Allowed: true, Providers: []string{"local"}})
+			pkt := Assemble(context.Background(), raw, domain.Task{InputJSON: `{"prompt":"work"}`}, wl, Destination{DockerAgents: true})
+			if pkt.LearningCount != 1 || strings.Contains(pkt.Markdown, tc.secret) {
+				t.Fatalf("count %d, packet:\n%s", pkt.LearningCount, pkt.Markdown)
+			}
+			for _, l := range learningSection([]domain.Learning{{ID: "l1", Statement: tc.statement}}) {
+				if strings.Contains(l.text, tc.secret) || !strings.HasSuffix(l.text, "\n") {
+					t.Fatalf("learning line %q", l.text)
+				}
+			}
+		})
 	}
 }

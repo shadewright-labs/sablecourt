@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
@@ -207,5 +208,30 @@ func TestWireCouncilContainers(t *testing.T) {
 	wireCouncilContainers(citadelAdapters, true, da, hub, filepath.Join(state, "sablecourt.db"), time.Hour, net.JoinHostPort(net.IPv6loopback.String(), "7432"))
 	if citadelAdapters[domain.ClassCodingAgent] != nil {
 		t.Fatal("citadel unexpectedly registered council coding adapter")
+	}
+}
+
+// TestPacketLearningDestinationWiring checks the startup facts behind the
+// ADR-0012 destination check: only the Docker adapter for long-lived agents
+// and no model gateway make a destination local.
+func TestPacketLearningDestinationWiring(t *testing.T) {
+	dockerAgents := map[domain.WorkloadClass]scruntime.Adapter{domain.ClassLongLivedAgent: &docker.Adapter{}}
+	for _, tc := range []struct {
+		name     string
+		adapters map[domain.WorkloadClass]scruntime.Adapter
+		gateway  string
+		want     contextpack.Destination
+	}{
+		{"docker, no gateway", dockerAgents, "", contextpack.Destination{DockerAgents: true}},
+		{"docker with gateway", dockerAgents, "http://gateway.example.test", contextpack.Destination{DockerAgents: true, ModelGateway: true}},
+		{"no long-lived runtime", map[domain.WorkloadClass]scruntime.Adapter{}, "", contextpack.Destination{}},
+		{"other long-lived runtime", map[domain.WorkloadClass]scruntime.Adapter{domain.ClassLongLivedAgent: &councilTestAdapter{}}, "", contextpack.Destination{}},
+		{"docker under another class only", map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: &docker.Adapter{}}, "", contextpack.Destination{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := packetLearningDestination(tc.adapters, tc.gateway); got != tc.want {
+				t.Fatalf("destination %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
