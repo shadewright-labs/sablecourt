@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,16 +10,19 @@ import (
 )
 
 type LaunchSpec struct {
-	TaskID           string
-	Workload         domain.Workload
-	WorkDir          string
-	InputJSON        string
-	ModelGateURL     string
-	DataGateURL      string
-	TaskToken        string
-	ModelGateToken   string
+	TaskID         string
+	Workload       domain.Workload
+	WorkDir        string
+	InputJSON      string
+	ModelGateURL   string
+	DataGateURL    string
+	TaskToken      string
+	ModelGateToken string
+	// CouncilContainer asks the coding adapter for a harness container. The
+	// reconciler sets it for every coding task (standalone or council seat)
+	// when the adapter has a container runner; the name predates standalone use.
 	CouncilContainer bool
-	CouncilDeadline  time.Time
+	CouncilDeadline  time.Time // Set only for council seats.
 	CreateAttempt    string
 }
 
@@ -83,6 +87,11 @@ type Adapter interface {
 	CollectArtifacts(ctx context.Context, handle Handle) ([]Artifact, error)
 }
 
+// ErrCodingRuntimeUnavailable means no coding task can start: no container
+// runtime is configured and host mode is off. Refusals wrap it so the
+// reconciler can record why a task failed.
+var ErrCodingRuntimeUnavailable = errors.New("coding runtime unavailable")
+
 // MissingBinaryError reports that a workload executable could not be found at Path.
 type MissingBinaryError struct {
 	Path string
@@ -111,7 +120,15 @@ const (
 	CouncilRef    CouncilCheckoutKind = "ref"
 	CouncilReview CouncilCheckoutKind = "review"
 	CouncilWriter CouncilCheckoutKind = "assigned-writer"
+	// CouncilTask is a standalone coding task's own writable worktree. It runs
+	// in the same harness container, with the same guards, as a council seat.
+	CouncilTask CouncilCheckoutKind = "task"
 )
+
+// Writable reports whether the harness may write to the checkout.
+func (k CouncilCheckoutKind) Writable() bool {
+	return k == CouncilWriter || k == CouncilTask
+}
 
 type CouncilLimits struct {
 	NanoCPUs    int64

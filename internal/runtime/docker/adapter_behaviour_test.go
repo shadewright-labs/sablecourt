@@ -526,29 +526,29 @@ func TestCouncilConfigAndProxyRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("councilOptions shared volume, invalid names and replaced network", func(t *testing.T) {
+	t.Run("harnessContainerSpec shared volume, invalid names and replaced network", func(t *testing.T) {
 		a, eng, s := fixtureRun(t)
 		a.CouncilHarnesses["codex"] = CouncilHarness{Image: "other", LoginVolume: a.CouncilHarnesses["claude"].LoginVolume}
-		if _, err := a.councilOptions(ctx, eng, s, false); err == nil || !strings.Contains(err.Error(), "separate login volumes") {
+		if _, err := a.harnessContainerSpec(ctx, eng, s, false); err == nil || !strings.Contains(err.Error(), "separate login volumes") {
 			t.Fatalf("shared login volume = %v", err)
 		}
 		delete(a.CouncilHarnesses, "codex")
 
 		badTask := s
 		badTask.TaskID = "../bad"
-		if _, err := a.councilOptions(ctx, eng, badTask, false); err == nil || !strings.Contains(err.Error(), "invalid council task or workload name") {
+		if _, err := a.harnessContainerSpec(ctx, eng, badTask, false); err == nil || !strings.Contains(err.Error(), "invalid council task or workload name") {
 			t.Fatalf("bad task ID = %v", err)
 		}
 
 		badNet := s
 		badNet.Network = "bad net"
-		if _, err := a.councilOptions(ctx, eng, badNet, false); err == nil || !strings.Contains(err.Error(), "invalid council network name") {
+		if _, err := a.harnessContainerSpec(ctx, eng, badNet, false); err == nil || !strings.Contains(err.Error(), "invalid council network name") {
 			t.Fatalf("bad network name = %v", err)
 		}
 
 		replacedNet := s
 		replacedNet.NetworkID = "wrong-net-id"
-		if _, err := a.councilOptions(ctx, eng, replacedNet, false); err == nil || !strings.Contains(err.Error(), "network was replaced") {
+		if _, err := a.harnessContainerSpec(ctx, eng, replacedNet, false); err == nil || !strings.Contains(err.Error(), "network was replaced") {
 			t.Fatalf("replaced network = %v", err)
 		}
 	})

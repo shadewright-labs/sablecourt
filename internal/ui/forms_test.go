@@ -621,7 +621,7 @@ func TestStudioCreateAgentForm(t *testing.T) {
 		{name: "coding agent unknown harness falls back to claude", budget: true,
 			form: url.Values{"name": {"coder-x"}, "description": {"writes code"}, "class": {string(domain.ClassCodingAgent)}, "runtime_target": {"rm -rf"}, "providers": {"anthropic, ,openai"}},
 			check: func(t *testing.T, wl domain.Workload) {
-				if wl.Spec.Coding == nil || wl.Spec.Coding.Harness != "claude" || wl.Spec.Coding.Sandbox != "seatbelt" || wl.Spec.Runtime.Type != "worktree-cli" {
+				if wl.Spec.Coding == nil || wl.Spec.Coding.Harness != "claude" || wl.Spec.Coding.Sandbox != "container" || wl.Spec.Runtime.Type != "worktree-cli" {
 					t.Fatalf("coding spec %+v runtime %+v", wl.Spec.Coding, wl.Spec.Runtime)
 				}
 				g := wl.Spec.Grants.ModelGate

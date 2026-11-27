@@ -209,7 +209,7 @@ func TestCouncilNativeDocker(t *testing.T) {
 	t.Run("detached wall limit", func(t *testing.T) {
 		// Leave bootstrap waiting for input and disconnect. PID 1 must enforce the deadline.
 		s := rt.CouncilLaunch{TaskID: name, Workload: "review", Harness: "claude", Checkout: rt.CouncilCheckout{Kind: rt.CouncilReview, Path: t.TempDir()}, Limits: rt.CouncilLimits{WallTime: time.Second, MemoryBytes: 64 << 20, NanoCPUs: 500000000, PIDs: 32}}
-		o, err := a.councilOptions(t.Context(), cli, s, false)
+		o, err := a.harnessContainerSpec(t.Context(), cli, s, false)
 		if err != nil {
 			t.Fatal(err)
 		}

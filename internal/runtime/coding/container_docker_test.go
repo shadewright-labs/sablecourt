@@ -70,6 +70,12 @@ case "$prompt" in
     if touch /workspace/write-attempt 2>/dev/null; then exit 44; fi
     printf 'reviewer verdict\n'
     ;;
+  *MODE_TASK*)
+    grep -q "committed-v2" /workspace/committed.txt
+    if workspace_ro; then exit 49; fi
+    printf 'standalone change\n' > /workspace/standalone.txt
+    printf 'standalone done\n'
+    ;;
   *MODE_WRITER*)
     grep -q "committed-v1" /workspace/committed.txt
     printf 'implemented in container\n' > /workspace/feature.txt
@@ -230,11 +236,14 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 		token := "sc_task_" + rand.Text()
 		spec := scruntime.LaunchSpec{
 			TaskID:           taskID,
-			Workload:         domain.Workload{Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox}, Spec: domain.WorkloadSpec{Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: role, RepoPath: repo, Sandbox: "seatbelt"}}},
+			Workload:         domain.Workload{Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox}, Spec: domain.WorkloadSpec{Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: role, RepoPath: repo, Sandbox: "container"}}},
 			InputJSON:        string(raw),
 			TaskToken:        token,
 			CouncilContainer: true,
-			CouncilDeadline:  time.Now().Add(30 * time.Second),
+		}
+		if payload["checkoutMode"] != "" {
+			// Council seats carry the council deadline; a standalone task uses the wall-time limit.
+			spec.CouncilDeadline = time.Now().Add(30 * time.Second)
 		}
 		h, err := adapter.Start(t.Context(), spec)
 		// A failed start can still return a handle that owns resources.
@@ -323,6 +332,25 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 		}
 		if err := adapter.CleanupCouncil(t.Context(), "ccl_docker_ref"); err != nil {
 			t.Fatalf("CleanupCouncil(ref): %v", err)
+		}
+	})
+
+	// A standalone coding task (issues 181 and 132) runs in the same harness
+	// container, behind the same per-launch proxy, as the council seats above.
+	t.Run("standalone task", func(t *testing.T) {
+		arts := runTurn(t, "task_docker_task_"+strings.ToLower(rand.Text()[:6]), "claude", map[string]string{
+			"prompt": "MODE_TASK edit",
+		})
+		if got := artifactByName(arts, "final-message"); got != "standalone done" {
+			t.Fatalf("final-message = %q, want %q", got, "standalone done")
+		}
+		diff := artifactByName(arts, "git-diff")
+		if !strings.Contains(diff, "standalone.txt") || !strings.Contains(diff, "standalone change") {
+			t.Fatalf("standalone git-diff missing container edit: %q", diff)
+		}
+		commit := artifactByName(arts, "git-commit")
+		if got := testGit(t, repo, "show", commit+":standalone.txt"); strings.TrimSpace(got) != "standalone change" {
+			t.Fatalf("host git show standalone.txt = %q", got)
 		}
 	})
 

@@ -16,6 +16,7 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
+	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -82,7 +83,7 @@ func councilArgv(s rt.CouncilLaunch, login bool) ([]string, error) {
 			return append(cmd, "auth", "login"), nil
 		}
 		cmd = append(cmd, "--no-session-persistence", "--output-format", "text")
-		if s.Checkout.Kind == rt.CouncilWriter {
+		if s.Checkout.Kind.Writable() {
 			cmd = append(cmd, "--permission-mode", "acceptEdits")
 		} else {
 			cmd = append(cmd, "--permission-mode", "plan")
@@ -124,9 +125,14 @@ func proxyEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func councilWorkspace(s rt.CouncilCheckout, socket string) (mount.Mount, error) {
+// councilWorkspace builds the checkout bind mount. It refuses a checkout that
+// is or contains the home directory, a container runtime socket (discovered
+// or named by DOCKER_HOST), the daemon state directory or another protected
+// daemon path. A checkout inside a protected directory (a task worktree under
+// the worktree root) is allowed: it cannot reach its parent.
+func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) (mount.Mount, error) {
 	switch s.Kind {
-	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter:
+	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter, rt.CouncilTask:
 	default:
 		return mount.Mount{}, errors.New("invalid council checkout kind")
 	}
@@ -162,15 +168,44 @@ func councilWorkspace(s rt.CouncilCheckout, socket string) (mount.Mount, error) 
 		if resolved, err := filepath.EvalSymlinks(sock); err == nil && contains(resolved) {
 			return true
 		}
-		if parent, err := filepath.EvalSymlinks(filepath.Dir(sock)); err == nil && contains(filepath.Join(parent, filepath.Base(sock))) {
-			return true
-		}
-		return false
+		return contains(resolveExistingPrefix(sock))
 	}
-	if filepath.Dir(path) == path || contains(home) || containsSocket(socket) {
+	if filepath.Dir(path) == path || contains(home) {
 		return mount.Mount{}, errors.New("unsafe checkout directory")
 	}
-	return mount.Mount{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: s.Kind != rt.CouncilWriter, BindOptions: &mount.BindOptions{NonRecursive: true}}, nil
+	for _, sock := range sockets {
+		if containsSocket(sock) {
+			return mount.Mount{}, errors.New("unsafe checkout directory")
+		}
+	}
+	stateDir, err := operatortoken.StateDir()
+	if err != nil {
+		return mount.Mount{}, errors.New("cannot resolve daemon state directory")
+	}
+	// containsSocket also resolves the target and its parent, which suits any
+	// protected path that may not exist yet.
+	for _, p := range append([]string{stateDir}, protected...) {
+		if p != "" && (!filepath.IsAbs(p) || containsSocket(filepath.Clean(p))) {
+			return mount.Mount{}, errors.New("unsafe checkout directory")
+		}
+	}
+	return mount.Mount{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}, nil
+}
+
+// resolveExistingPrefix resolves symlinks in the longest existing prefix of p
+// and appends the rest, so a path that does not exist yet still compares
+// against the resolved checkout.
+func resolveExistingPrefix(p string) string {
+	rest := ""
+	for dir := filepath.Clean(p); ; dir = filepath.Dir(dir) {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		if filepath.Dir(dir) == dir {
+			return filepath.Clean(p)
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 func preparePrompt(s rt.CouncilLaunch) (string, error) {
@@ -185,7 +220,14 @@ func preparePrompt(s rt.CouncilLaunch) (string, error) {
 	return prompt, nil
 }
 
-func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s rt.CouncilLaunch, login bool) (client.ContainerCreateOptions, error) {
+// harnessContainerSpec is the only function that builds a harness container:
+// standalone coding tasks (checkout kind task, or review when read-only),
+// council seats and login sessions all get their create options here, so they
+// share one set of guards. Only explicit mounts (checkout, login volume, the
+// read-only tool volume, tmpfs scratch), an allowlisted environment, the
+// per-launch internal network behind the proxy, a non-root user, a read-only
+// root file system, all capabilities dropped and no-new-privileges.
+func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngineAPI, s rt.CouncilLaunch, login bool) (client.ContainerCreateOptions, error) {
 	var o client.ContainerCreateOptions
 	cfg, ok := a.CouncilHarnesses[s.Harness]
 	if !ok || cfg.Image == "" || !councilName.MatchString(cfg.LoginVolume) || !strings.HasPrefix(cfg.LoginVolume, "sablecourt-") {
@@ -243,7 +285,7 @@ func (a *Adapter) councilOptions(ctx context.Context, engine councilEngineAPI, s
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
-		m, err := councilWorkspace(s.Checkout, a.dockerSocket())
+		m, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.ProtectedPaths)
 		if err != nil {
 			return o, err
 		}

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 576" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">From manifest to process, default configuration</title>
-  <desc id="d">The default configuration: a Mac with a Docker engine running and the daemon in sanctum mode with the docker runtime. Manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule, Conclave) declare a workload with a class, zone, runtime and grants. A task is one run of that workload, launched with a lease; a retry creates a new task. Tasks are submitted by sablectl, the web UI, webhooks and A2A callers, workflow steps, schedules, Conclaves, retries and delegating tasks. A council attempt, numbered by round, role and attempt, maps to one task. The runtime adapter that the workload class picks starts the task with its lease, as one of three things: a host process (coding adapter under macOS Seatbelt, a harness CLI; unsupported for 0.1.0, replaced by harness containers in issue 181) for a coding-agent workload, a council container (coding adapter through Docker, a harness CLI with its own login) for a council turn, or a container (the Docker adapter by default; a Kubernetes Job or Deployment under other switches) for a long-lived agent or a deterministic controller. Other switches change this picture; the building blocks page lists them.</desc>
+  <desc id="d">The default configuration: a Mac with a Docker engine running and the daemon in sanctum mode with the docker runtime. Manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule, Conclave) declare a workload with a class, zone, runtime and grants. A task is one run of that workload, launched with a lease; a retry creates a new task. Tasks are submitted by sablectl, the web UI, webhooks and A2A callers, workflow steps, schedules, Conclaves, retries and delegating tasks. A council attempt, numbered by round, role and attempt, maps to one task. The runtime adapter that the workload class picks starts the task with its lease, as one of two things: a harness container (coding adapter through Docker, a harness CLI with its own login) for a coding task or a council turn, built the same way for both, or a container (the Docker adapter by default; a Kubernetes Job or Deployment under other switches) for a long-lived agent or a deterministic controller. Host mode is off: a note at the left says that host processes run only when forced with an unsafe flag, outside invariants 2 and 3. Other switches change this picture; the building blocks page lists them.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -75,20 +75,19 @@
   <text class="h" x="396" y="394">Runtime adapter</text>
   <text class="s" x="396" y="415">picked by workload class</text>
 
-  <path class="f" d="M380 400H204V474" marker-end="url(#a)"/>
-  <text class="lbl" x="292" y="392" text-anchor="middle">coding-agent</text>
-  <path class="f" d="M560 432V474" marker-end="url(#a)"/>
-  <text class="lbl" x="572" y="458">council turn</text>
+  <path class="f" d="M460 432V474" marker-end="url(#a)"/>
+  <text class="lbl" x="472" y="458">coding task</text>
+  <path class="f" d="M660 432V474" marker-end="url(#a)"/>
+  <text class="lbl" x="672" y="458">council turn</text>
   <path class="f" d="M740 400H916V474" marker-end="url(#a)"/>
   <text class="lbl" x="828" y="392" text-anchor="middle">agent, controller</text>
 
-  <rect class="box" x="44" y="480" width="320" height="72" rx="10"/>
-  <text class="h" x="60" y="506">Host process, unsupported</text>
-  <text class="s" x="60" y="527">coding adapter, Seatbelt</text>
-  <text class="s" x="60" y="544">harness CLI, macOS only</text>
+  <text class="cap" x="44" y="506">Host process: off by default.</text>
+  <text class="cap" x="44" y="527">Only with an unsafe opt-in flag,</text>
+  <text class="cap" x="44" y="544">outside invariants 2 and 3.</text>
 
   <rect class="box" x="400" y="480" width="320" height="72" rx="10"/>
-  <text class="h" x="416" y="506">Council container</text>
+  <text class="h" x="416" y="506">Harness container</text>
   <text class="s" x="416" y="527">coding adapter through Docker</text>
   <text class="s" x="416" y="544">harness CLI, own login</text>
 

@@ -1145,6 +1145,7 @@ func TestCodingMissingBinaryRecordsLaunchFailedPath(t *testing.T) {
 			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude", RepoPath: repoDir, Sandbox: "seatbelt"}
 			r.bundle.Workloads["worker"] = wl
 			adapter := coding.NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+			adapter.HostModeUnsafe = true // This regression covers the opt-in host launcher.
 			if tc.harness != "" {
 				adapter.HarnessPaths = map[string]string{"claude": tc.harness}
 			}

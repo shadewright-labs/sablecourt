@@ -286,6 +286,14 @@ func councilOpen(st store.Store, cfg handlerConfig) http.HandlerFunc {
 				return
 			}
 		}
+		// Seats run in harness containers; with none and host mode off the
+		// dispatcher cannot launch them, so say why before any host check.
+		if cfg.codingRuntime != nil {
+			if st := cfg.codingRuntime(); st.Mode == "unavailable" {
+				fail(http.StatusServiceUnavailable, "council seats cannot start: "+st.unavailableReason())
+				return
+			}
+		}
 		if cfg.preflightCouncilHarness == nil {
 			for _, role := range councilPanel {
 				bin, err := exec.LookPath(role)

@@ -55,7 +55,7 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 			return result, err
 		}
 	}
-	o, err := a.councilOptions(ctx, engine, s, login)
+	o, err := a.harnessContainerSpec(ctx, engine, s, login)
 	if err != nil {
 		return result, err
 	}

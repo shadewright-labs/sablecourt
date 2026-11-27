@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,8 +47,12 @@ type Adapter struct {
 	Client           EngineClient
 	NetworkName      string
 	AttachHub        *attach.Hub
-	attachCtx        context.Context
-	discoverSocket   func() string
+	// ProtectedPaths are daemon files and directories (database, worktree
+	// root, secret file) that no harness checkout may equal or contain. The
+	// daemon state directory is always protected, whether or not it is listed.
+	ProtectedPaths []string
+	attachCtx      context.Context
+	discoverSocket func() string
 }
 
 func (a *Adapter) dockerSocket() string {
@@ -55,6 +60,22 @@ func (a *Adapter) dockerSocket() string {
 		return a.discoverSocket()
 	}
 	return discoverDockerSocket()
+}
+
+// dockerSockets lists every local runtime endpoint a checkout must not
+// expose: the Unix socket DOCKER_HOST names (the one the client really uses)
+// and the discovered socket.
+func (a *Adapter) dockerSockets() []string {
+	var out []string
+	if host := os.Getenv("DOCKER_HOST"); host != "" {
+		if u, err := url.Parse(host); err == nil && u.Scheme == "unix" && u.Path != "" {
+			out = append(out, filepath.Clean(u.Path))
+		}
+	}
+	if sock := a.dockerSocket(); sock != "" {
+		out = append(out, sock)
+	}
+	return out
 }
 
 // SetAttachHub ties log streams to the daemon lifetime across individual Start calls.

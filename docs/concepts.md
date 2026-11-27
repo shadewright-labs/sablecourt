@@ -102,7 +102,7 @@ Each audit row written now stores the hash of the previous row, anchored at the 
 
 Status: Sanctum built. Citadel built, parked.
 
-`--mode` is `sanctum` (the default: one user, loopback `127.0.0.1:7432`, SQLite) or `citadel` (Kubernetes runtime, listen address `0.0.0.0:7432`, PostgreSQL when `SABLECOURT_POSTGRES_DSN` is set, SQLite otherwise). `local` and `enterprise` are aliases. In Citadel mode the host coding adapter and councils are off. The host coding adapter is itself unsupported for 0.1.0 (see [workloads and runtimes](how-it-works/workloads-and-runtimes.md#coding-adapter-host-sandbox)). ADR-0011 limits current work to Sanctum; see the [overview](overview.md#parked-parts).
+`--mode` is `sanctum` (the default: one user, loopback `127.0.0.1:7432`, SQLite) or `citadel` (Kubernetes runtime, listen address `0.0.0.0:7432`, PostgreSQL when `SABLECOURT_POSTGRES_DSN` is set, SQLite otherwise). `local` and `enterprise` are aliases. In Citadel mode the host coding adapter and councils are off. Outside Citadel, coding tasks run in harness containers; host mode is off unless forced with `--unsafe-host-harnesses` and unsupported for 0.1.0 (see [workloads and runtimes](how-it-works/workloads-and-runtimes.md#host-mode-unsafe-off-by-default)). ADR-0011 limits current work to Sanctum; see the [overview](overview.md#parked-parts).
 
 ## Not built yet
 

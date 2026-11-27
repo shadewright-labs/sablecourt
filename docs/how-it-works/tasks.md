@@ -30,7 +30,7 @@ A task carries an idempotency key. If none is given the task ID is used. Submitt
 
 [![States of a task: submitted to working, working to input-required and back, to suspended and back, and to completed, failed or cancelled.](../diagrams/task-states.svg)](../diagrams/task-states.svg "Open full size")
 
-The store does not check which transitions are allowed. Each change is a compare-and-swap on the current state (`UPDATE ... WHERE state = from`), so two callers cannot both move the same task, and each change adds a row to `task_events` with a reason. `sablectl task inspect` shows those events. Failure reasons include `launch_failed`, `lost_on_restart`, `observe_error`, `runtime_unknown` and `author_checkout_unavailable`.
+The store does not check which transitions are allowed. Each change is a compare-and-swap on the current state (`UPDATE ... WHERE state = from`), so two callers cannot both move the same task, and each change adds a row to `task_events` with a reason. `sablectl task inspect` shows those events. Failure reasons include `launch_failed`, `lost_on_restart`, `observe_error`, `runtime_unknown` and `author_checkout_unavailable`. A coding task refused because no container runtime is configured and host mode is off fails with `launch_failed` and the fact `"reason":"coding_runtime_unavailable"`.
 
 ## What one pass of the reconciler does
 

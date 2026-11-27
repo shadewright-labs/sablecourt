@@ -83,9 +83,18 @@ func (a *Adapter) validateCouncilContainerLaunch(spec scruntime.LaunchSpec, inpu
 		return errors.New("council container requires a scoped task lease")
 	}
 	switch input.checkoutMode {
-	case checkoutModeLive, checkoutModeRef, checkoutModeWriter:
+	case "", checkoutModeLive, checkoutModeRef, checkoutModeWriter:
 	default:
+		return errors.New("harness container requires a known checkout mode")
+	}
+	// The reconciler sets CouncilDeadline only for a council round, so the
+	// deadline, not the input, says whether this launch is a seat. A seat needs
+	// a council checkout; any other task gets only its own worktree.
+	if input.checkoutMode == "" && !spec.CouncilDeadline.IsZero() {
 		return errors.New("council container requires an explicit council checkout mode")
+	}
+	if input.checkoutMode != "" && spec.CouncilDeadline.IsZero() {
+		return errors.New("council checkout mode requires a council seat")
 	}
 	if _, err := a.councilLimits(spec.CouncilDeadline); err != nil {
 		return err
@@ -125,6 +134,12 @@ func (a *Adapter) councilLimits(deadline time.Time) (scruntime.CouncilLimits, er
 
 func councilCheckoutKind(mode string, readOnly bool) (scruntime.CouncilCheckoutKind, error) {
 	switch mode {
+	case "":
+		// A standalone task: its own worktree, or a pinned read-only checkout for a verifier.
+		if readOnly {
+			return scruntime.CouncilReview, nil
+		}
+		return scruntime.CouncilTask, nil
 	case checkoutModeLive:
 		return scruntime.CouncilLive, nil
 	case checkoutModeRef:

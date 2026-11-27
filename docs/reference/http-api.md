@@ -104,6 +104,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `POST /api/v1/schedules/{name}/run` | Run a Schedule now. |
 | `POST /api/v1/reload` | Reload the manifests. |
 | `POST /api/v1/promote/{name}` | For a `sandbox` workload, create the branch `sablecourt/promote-<name>` in the daemon's working directory. |
+| `GET /api/v1/runtime/coding` | How coding tasks and council seats run: `{"mode","hostModeOptIn"}`, where `mode` is `container`, `host-unsafe` (host mode forced on with `--unsafe-host-harnesses`, outside invariants 2 and 3) or `unavailable`. `sablectl doctor` prints it. |
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |
 | `GET /api/v1/providers/tiers` | The `fast`, `coding` and `critic` model routes. |

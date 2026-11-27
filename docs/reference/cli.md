@@ -606,6 +606,7 @@ Sablecourt local-first and enterprise Kubernetes control plane daemon
 | `--runtime` | string | `docker` | Container runtime backend: docker or k8s |
 | `--secret-file` | string | empty | Optional 0600 JSON secret file fallback path |
 | `--socket` | string | empty | Optional Unix domain socket path for local CLI access (0600) |
+| `--unsafe-host-harnesses` | bool | `false` | UNSAFE: run coding harnesses on the host when no container runtime is configured; such runs are outside invariants 2 and 3 |
 
 ### `sablecourtd completion`
 
