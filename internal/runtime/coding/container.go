@@ -220,19 +220,24 @@ func checkPrivateParent(dir string) error {
 // read and search permission to each directory, below dir. It refuses a
 // symlink or any other kind of file, which the daemon never writes there.
 func openToHarnessUser(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return fs.WalkDir(root.FS(), ".", func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
+		info, err := root.Lstat(path)
 		if err != nil {
 			return err
 		}
 		switch {
 		case info.IsDir():
-			return os.Chmod(path, info.Mode().Perm()|0o055)
+			return root.Chmod(path, info.Mode().Perm()|0o055)
 		case info.Mode().IsRegular():
-			return os.Chmod(path, info.Mode().Perm()|0o044)
+			return root.Chmod(path, info.Mode().Perm()|0o044)
 		default:
 			return fmt.Errorf("unexpected file type %v in harness Git metadata", info.Mode().Type())
 		}
