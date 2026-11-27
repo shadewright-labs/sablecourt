@@ -134,3 +134,71 @@ func TestBrokerHandlerSendIsIdempotentAndJoinsParts(t *testing.T) {
 		t.Fatalf("prompt = %q", in["prompt"])
 	}
 }
+
+func TestBrokerHandlerRefusesObserverSecret(t *testing.T) {
+	const shared = "shared-secret-for-both-roles"
+	for _, tc := range []struct {
+		name     string
+		secrets  map[string]string
+		token    string
+		wantCode int
+	}{
+		{"observer secret equal to a2a secret", map[string]string{"a2a_bearer_token": shared, "observer_bearer_token": shared}, shared, http.StatusForbidden},
+		{"observer secret padded with space", map[string]string{"a2a_bearer_token": shared, "observer_bearer_token": shared + "\n"}, shared, http.StatusForbidden},
+		{"observer secret differs", map[string]string{"a2a_bearer_token": shared, "observer_bearer_token": "other-observer"}, "other-observer", http.StatusUnauthorized},
+		{"a2a secret alone works", map[string]string{"a2a_bearer_token": shared}, shared, http.StatusOK},
+	} {
+		for _, method := range []string{"tasks/send", "tasks/get"} {
+			t.Run(tc.name+" "+method, func(t *testing.T) {
+				st, rec := newBroker(t)
+				h := BrokerHandler(Options{Store: st, Reconciler: rec, Secrets: secret.NewMemoryStore(tc.secrets)})
+				body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"id":"x","workload":"llm-agent"}}`
+				req := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+				rr := httptest.NewRecorder()
+				h.ServeHTTP(rr, req)
+				if rr.Code != tc.wantCode {
+					t.Fatalf("status = %d, want %d: %s", rr.Code, tc.wantCode, rr.Body.String())
+				}
+				if tc.wantCode != http.StatusOK {
+					if tasks, _ := st.ListTasks(context.Background()); len(tasks) != 0 {
+						t.Fatalf("refused request created tasks: %+v", tasks)
+					}
+				}
+			})
+		}
+	}
+}
+
+type observerErrStore struct {
+	secret.SecretStore
+	err error
+}
+
+func (s observerErrStore) Get(ctx context.Context, name string) (string, error) {
+	if name == "observer_bearer_token" {
+		return "", s.err
+	}
+	return s.SecretStore.Get(ctx, name)
+}
+
+func TestBrokerHandlerFailsClosedOnObserverLookupError(t *testing.T) {
+	const shared = "shared-secret-for-both-roles"
+	st, rec := newBroker(t)
+	secrets := observerErrStore{SecretStore: secret.NewMemoryStore(map[string]string{"a2a_bearer_token": shared}), err: secret.ErrInsecureFileMode}
+	h := BrokerHandler(Options{Store: st, Reconciler: rec, Secrets: secrets})
+	body := `{"jsonrpc":"2.0","id":1,"method":"tasks/send","params":{"id":"x","workload":"llm-agent"}}`
+	req := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+shared)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), shared) {
+		t.Fatal("response leaks the token")
+	}
+	if tasks, _ := st.ListTasks(context.Background()); len(tasks) != 0 {
+		t.Fatalf("refused request created tasks: %+v", tasks)
+	}
+}

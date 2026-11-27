@@ -454,6 +454,7 @@ var specialAddresses = []netip.Prefix{
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{100, 64}), 10),
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 0, 0}), 24),
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 0, 2}), 24),
+	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 88, 99}), 24),
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 18}), 15),
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 51, 100}), 24),
 	netip.PrefixFrom(netip.AddrFrom4([4]byte{203, 0, 113}), 24),
@@ -461,13 +462,17 @@ var specialAddresses = []netip.Prefix{
 	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01}), 23),
 	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8}), 32),
 	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x02}), 16),
+	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x3f, 0xff}), 20),
 }
 
 var globalIPv6 = netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20}), 3)
 
 func publicAddress(ip netip.Addr) bool {
+	if ip.Zone() != "" {
+		return false
+	}
 	ip = ip.Unmap()
-	if ip.Zone() != "" || !ip.IsGlobalUnicast() || ip.IsPrivate() || (ip.Is6() && !globalIPv6.Contains(ip)) {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || (ip.Is6() && !globalIPv6.Contains(ip)) {
 		return false
 	}
 	for _, prefix := range specialAddresses {
