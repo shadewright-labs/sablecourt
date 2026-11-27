@@ -499,7 +499,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	conclaveBroker.RegisterMCPTools(dataActionGate)
 
 	scheduler := controlplane.NewScheduler(reconciler)
-	reloadFn := func() error {
+	// One reload at a time: the reload route, the dashboard and the manifests
+	// git sync can call it together, and the gate and the reconciler must end
+	// with the same bundle and policy.
+	reloadFn := serialized(func() error {
 		b, pol, err := loadAndSync()
 		if err != nil {
 			return err
@@ -516,7 +519,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 		}
 		return nil
-	}
+	})
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -1988,6 +1991,17 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// serialized returns fn guarded by one mutex, so calls never overlap and
+// each runs to the end before the next starts.
+func serialized(fn func() error) func() error {
+	var mu sync.Mutex
+	return func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		return fn()
+	}
 }
 
 // reloadGitOps applies a reloaded bundle and policy to the action gate and
