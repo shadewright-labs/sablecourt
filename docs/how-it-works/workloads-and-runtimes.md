@@ -12,13 +12,15 @@ A `Workload` manifest names a class and a zone. The adapter is chosen by the cla
 
 | Class | Adapter | Holds |
 | --- | --- | --- |
-| `coding-agent` | Coding adapter: a harness CLI (`claude`, `codex` or `agy`) in a Git worktree on the host | A `coding` block with harness and `repoPath`. |
+| `coding-agent` | Coding adapter: a harness CLI (`claude`, `codex` or `agy`) in a Git worktree on the host today (unsupported, see below) | A `coding` block with harness and `repoPath`. |
 | `long-lived-agent` | Docker adapter | A container image. |
 | `deterministic-controller` | Controller adapter wrapping the Docker adapter | A container image and no Model Gate grant. |
 
 The zone is `runtime` or `sandbox`. The loader refuses a sandbox workload that lists `actions` or `delegateTo` grants, and the policy engine denies `action:` and `delegate:` capabilities for it at run time, so a sandbox workload cannot use gate-mediated actions or delegate work. The host sandbox still allows outbound network traffic, so a sandbox coding workload on a host run can send a direct request that changes an external service. Moving a workload to the runtime zone is a reviewed change to its manifest. `sablectl promote <workload>` and the `sandbox.propose_promotion` action only create a branch named `sablecourt/promote-<workload>` (or check that the workload is in the sandbox zone); neither edits a manifest. The names `claude`, `codex` and `agy` are reserved for the council panel.
 
 ## Coding adapter: host sandbox
+
+Status: unsupported, and still the default today. This section describes what the code on `main` does for a standalone coding task. The [ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only supported path for 0.1.0 and host mode unsupported, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves coding tasks onto the council container path. Until it lands, a coding task runs on the host as described below. In host mode Sablecourt makes no claim that the harness cannot reach daemon-held secrets, and redaction is the only control on what it writes ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)).
 
 The adapter creates a Git worktree and a branch `sablecourt/<task id>` from the current commit of the configured repository, writes the session marker, and starts the harness with a stripped environment: `PATH`, `LANG`, `HOME` and `TMPDIR` (both set to a private scratch directory), `SABLECOURT_MANAGED=1`, `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, and, when set, `SABLECOURT_DATA_GATE_URL` and `SABLECOURT_TASK_TOKEN`. The process runs in its own process group with a wall-time limit of 15 minutes by default.
 
@@ -37,9 +39,9 @@ The controller adapter refuses to start a workload that is not a `deterministic-
 
 ## Not built yet
 
-- Host fallback for harnesses without a container runtime: separate harness state directories and a refusal of host-mode `codex` are described in [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) and are not in the code. Today the host harness gets a scratch `HOME`.
+- Coding tasks in harness containers ([issue 181](https://github.com/shadewright-labs/sablecourt/issues/181), decided in the [ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)). Until then the host harness gets a scratch `HOME`. The separate harness state directories and the host-mode `codex` check of the 2026-11-25 amendment are dropped, not planned.
 - Checkpointed suspend and resume for long-lived agents ([ADR-0002](../adr/0002-heterogeneous-mvp-workload-adapters.md)).
-- Linux host sandboxing ([ADR-0003](../adr/0003-hybrid-workload-isolation.md) names Bubblewrap; none exists).
+- Linux host sandboxing. [ADR-0003](../adr/0003-hybrid-workload-isolation.md) names Bubblewrap and none exists; the amendment above supersedes that line, so none is planned.
 
 ## In depth
 

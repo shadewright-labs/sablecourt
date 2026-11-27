@@ -8,7 +8,7 @@ Status: partly built. See "Not built yet".
 
 Everything below describes one setup: a Mac with a Docker-compatible engine running, the manifests that `sablectl init` writes, and the daemon started plainly (`sablecourtd --manifests <file>`) or by `sablectl service install`, which adds only `--mode=sanctum` and file locations. That leaves the mode at `sanctum`, the runtime at `docker`, the store in a SQLite file, the listener on `127.0.0.1:7432`, no external model gateway, no secret file and no `SABLECOURT_` environment variable set.
 
-The starter manifests declare a `coder` workload that runs a harness on the host, a `reviewer` workload that runs the built-in agent in a container, and a Conclave in which the two cooperate.
+The starter manifests declare a `coder` workload that runs a harness on the host today (unsupported; [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves it into a container), a `reviewer` workload that runs the built-in agent in a container, and a Conclave in which the two cooperate.
 
 Several switches change which part does what. They are listed in "Switches that change this picture" at the end; read that table before applying a sentence from this page to another setup.
 
@@ -52,7 +52,7 @@ Example: `codex`'s turn in round 2 fails; its retry is attempt 2 of that turn an
 
 ## Runtime adapter
 
-A runtime adapter is the part of the daemon that turns a task into something running, watches it and stops it. The workload's class picks the adapter. In the default configuration a harness workload runs as a host process under the macOS Seatbelt sandbox, a council turn runs in a harness container, and a long-lived agent or a deterministic controller runs in a Docker container.
+A runtime adapter is the part of the daemon that turns a task into something running, watches it and stops it. The workload's class picks the adapter. In the default configuration on `main` a harness workload runs as a host process under the macOS Seatbelt sandbox (unsupported for 0.1.0 under the [ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010), replaced by harness containers in [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181)), a council turn runs in a harness container, and a long-lived agent or a deterministic controller runs in a Docker container.
 
 Example: the `reviewer` task starts a container from the `sablecourt-agent` image. See [workloads and runtimes](workloads-and-runtimes.md).
 
@@ -130,7 +130,7 @@ Each row is a setting that changes which part holds a credential, which adapter 
 | `--mode`, or `SABLECOURT_MODE` | `sanctum` | `citadel` (or `enterprise`) turns runtime `docker` into `k8s`, moves the listener from `127.0.0.1:7432` to `0.0.0.0:7432`, registers no host coding adapter, no council containers and no council panel, and drops the macOS approval dialog. The environment variable is read when the flag is `sanctum`, `local` or empty, so it overrides the `--mode=sanctum` that `sablectl service install` writes. |
 | `--runtime` | `docker` | `k8s` gives the long-lived agent and deterministic controller classes to the Kubernetes adapter, which creates a Job; its Deployment path needs a `runtime.type` that the manifest loader refuses today. If the Kubernetes setup fails, those two classes have no adapter; under `docker`, a Docker client that cannot be configured stops the daemon. Harness workloads are not affected. |
 | `--k8s-namespace`, `--k8s-runtime-class`, `--kubeconfig` | `default`, none, none | Only under `k8s`: where the Jobs go, and a RuntimeClass (for example gVisor or Kata) for their pods. |
-| A Docker engine: `DOCKER_HOST`, or a socket of Docker Desktop, OrbStack, Colima, Rancher Desktop or Podman at its usual path | found when one is running | Without one, council turns run as host processes under Seatbelt instead of in harness containers with a council proxy, and the harness uses no login volume. |
+| A Docker engine: `DOCKER_HOST`, or a socket of Docker Desktop, OrbStack, Colima, Rancher Desktop or Podman at its usual path | found when one is running | Without one, council turns still run as host processes under Seatbelt instead of in harness containers with a council proxy, and the harness uses no login volume. That fallback is unsupported for 0.1.0. |
 | Host platform | macOS | The host coding adapter is registered only when the Seatbelt probe passes. On Linux a harness workload such as `coder` has no adapter, and a council is refused. |
 | `--model-gateway-url`, or `SABLECOURT_MODEL_GATEWAY_URL` | none | The Model Gate sends every provider's requests to that gateway, and no provider key is required in the daemon: the gateway can hold them. A key that is in the secret store is still added. |
 | Provider `local` in the task input | `anthropic` for the built-in agent | The Model Gate forwards to `http://127.0.0.1:11434` over plain HTTP and needs no key; `local_model_api_key` is added if stored. |
@@ -146,7 +146,7 @@ Flags not listed (`--listen`, `--socket`, `--allow-host`, `--db`, `--manifests` 
 
 - Posting a harness Vassal's final message to a room opened from a manifest Conclave (#28); councils already do.
 - Checking subscription windows before a council round (#36).
-- Separate harness state directories for host mode, described in the host fallback amendment of [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md); today a host harness gets an empty scratch home directory (#17).
+- Separate harness state directories for host mode: dropped by the [ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010), since host mode is unsupported. Today a host harness gets an empty scratch home directory.
 - Checkpointed suspend and resume (#14).
 - An audit chain that detects deletion of its newest rows (#10).
 - A status and learnings the Shadewright side can read (#53, #54).

@@ -17,13 +17,13 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | `internal/store` | `Store` interface implemented by `internal/store/sqlite` (WAL, `LIKE` memory search) and `internal/store/postgres` (`pgx/v5`, `ILIKE` memory search) |
 | `internal/secret` | `SecretStore` interface backed by macOS Keychain, encrypted local file, or Kubernetes `0400` volume mount |
 | `internal/policy` | Deterministic `allow` / `approve` / `deny` evaluator (fail-closed default `deny`) and failure `CircuitBreaker` |
-| `internal/redact` | Linear-time RE2 secret redactor scrubbing API keys, bearer tokens, and private keys before storage or broadcast |
+| `internal/redact` | Linear-time RE2 pattern redactor that masks some known secret shapes before storage or broadcast; best effort, defence in depth ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md)) |
 | `internal/gate/model` | HTTP/SSE proxy for OpenAI, Anthropic, Gemini, local endpoints, and upstream `agentgateway`; enforces `sc_task_` leases, budgets, SSRF protection, and `openai <-> local` fallback |
 | `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.open_pr`), and proxied upstream MCP servers |
 | `internal/approval` | Pinned SHA-256 approval queue, macOS native `osascript` out-of-band prompt, and ECDSA P-256 device signature verification |
 | `internal/conclave` | Multi-agent room broker enforcing `canMessage` graphs, one-time-on-open `always-on` and `on-mention` activation, `Wards` (`maxMessages`, `maxPingPong`), `spec.budgetRef`, operator `Decrees`, and shared `Relics` |
 | `internal/attach` | 64 KiB redacted ring buffer (`Scry` SSE streaming) and exclusive operator `stdin` lock (`Takeover`) |
-| `internal/runtime/*` | Execution adapters: `coding` (Git worktrees + Seatbelt/Bubblewrap), `docker` (Docker/Podman/OrbStack/Colima/Rancher), `k8s` (hardened Jobs and Deployments), `controller` (zero-LLM) |
+| `internal/runtime/*` | Execution adapters: `coding` (Git worktrees + macOS Seatbelt; no Bubblewrap exists, and host runs are unsupported for 0.1.0 per the [ADR-0011 amendment](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)), `docker` (Docker/Podman/OrbStack/Colima/Rancher), `k8s` (hardened Jobs and Deployments), `controller` (zero-LLM) |
 | `internal/notify` | Outbound alerts to Slack, Discord, ntfy, or generic webhooks on approvals, Ward pauses, and task failures |
 | `internal/voice` | Local-first OpenAI-compatible Whisper STT and Kokoro/Piper/macOS `say` TTS for voice Decrees and Conclave readback |
 | `internal/ui` | Server-rendered HTML/HTMX cockpit (`/` dashboard, `/tasks/{id}`, `/conclaves`, `/conclaves/{id}`, `/schedules`, `/audit`, `/memory`, `/providers`, `/studio`) |
@@ -37,7 +37,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | Default bind address | `127.0.0.1:7432` | `0.0.0.0:7432` behind TLS ingress or Tailscale |
 | Operator auth | Mandatory `op_<64 hex>` bearer (`0600` `operator.token` in `0700` state directory) or 30-minute `SameSite=Strict` `sablecourt_session` cookie from `POST /login`; same-origin CSRF enforced on writes; `sablectl` takes the token from `SABLECOURT_OPERATOR_TOKEN` or the token file, never a flag | Same mandatory `op_<64 hex>` bearer or `sablecourt_session` cookie (`--operator-auth-required` is deprecated and ignored) |
 | Database | Embedded SQLite WAL (`~/.sablecourt/sablecourt.db`) | PostgreSQL (`--postgres-dsn`) |
-| Container / sandbox | Auto-discovered Podman, Docker, OrbStack, Colima, Rancher Desktop, plus Seatbelt / Bubblewrap | Kubernetes `batch/v1 Job` and `apps/v1 Deployment` with `RuntimeClassName: gvisor`, `NetworkPolicy`, and `AutomountServiceAccountToken: false` |
+| Container / sandbox | Auto-discovered Podman, Docker, OrbStack, Colima, Rancher Desktop, plus macOS Seatbelt for the unsupported host path | Kubernetes `batch/v1 Job` and `apps/v1 Deployment` with `RuntimeClassName: gvisor`, `NetworkPolicy`, and `AutomountServiceAccountToken: false` |
 | Upstream AI routing | Direct provider keys in Keychain / `0400` file, or local Ollama/vLLM | Optional `--model-gateway-url` fronting Linux Foundation `agentgateway` |
 
 ## Request and execution lifecycle

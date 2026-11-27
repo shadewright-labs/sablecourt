@@ -48,7 +48,7 @@ spec:
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
     repoPath: /path/to/repo
-    sandbox: seatbelt # seatbelt | bubblewrap | docker
+    sandbox: seatbelt # only seatbelt is accepted today; bubblewrap and docker are not implemented for coding runs
   agentCard:
     description: Triages incoming repository issues and proposes bounded fixes.
     skills:
@@ -164,7 +164,7 @@ Data and Action Gate combines two surfaces behind one policy and redaction bound
 1. An MCP Streamable HTTP endpoint built on `github.com/modelcontextprotocol/go-sdk`. On `tools/list`, the gate filters the catalog to only the tools in the caller's `grants.mcpTools`. On `tools/call`, it evaluates `Policy`, executes allowed read tools, or pauses the task on `approve`.
 2. A closed typed action catalog for mutating operations (starting with GitOps actions: `git.create_branch`, `git.open_pr`, and `sandbox.propose_promotion`). Every mutating action validates strict typed JSON inputs, checks policy and circuit breakers, and runs with the gate's scoped credentials rather than workload credentials.
 
-Every tool response and external payload passes through `internal/redact` (a linear-time deterministic redactor modeled on Shadewright's `internal/redact`, avoiding backtracking regexes) before returning text to a workload.
+Every tool response and external payload passes through `internal/redact` (a linear-time deterministic redactor modeled on Shadewright's `internal/redact`, avoiding backtracking regexes) before returning text to a workload. Per [ADR-0015](adr/0015-redaction-is-defence-in-depth.md), its pattern rules are best effort and defence in depth, not a security boundary; exact-match redaction of secrets the daemon holds is decided and not built yet ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). The Model Gate forwards request bodies as sent.
 
 ## Runtime adapters and isolation
 
@@ -192,11 +192,11 @@ Used for long-lived AI agents, sandbox workloads, and deterministic controllers.
 
 ### Coding agent runtime (`internal/runtime/coding`)
 
-Used for local `claude` (Claude Code) and `codex` (Codex) runs:
+Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter is the host path, which is unsupported for 0.1.0. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) runs coding tasks in harness containers only, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves them there; until it lands, the list below is what the code does today, on macOS only.
 
 - Creates a dedicated Git worktree per task on a deterministic branch name (`sablecourt/<task-id>`).
 - Launches the CLI inside a detached session host so restarting `sablecourtd` does not terminate active coding runs.
-- Wraps execution in an OS sandbox (macOS Seatbelt profile restricting writes outside the worktree and temp dir, or Linux Bubblewrap) with a stripped environment allowlist.
+- Wraps execution in the macOS Seatbelt profile (restricting writes outside the worktree and temp dir) with a stripped environment allowlist. No Linux Bubblewrap exists, and [ADR-0003](adr/0003-hybrid-workload-isolation.md) on this point is superseded by the amendment above.
 - Sets a read-only starter marker (`SABLECOURT_MANAGED=1`, `SABLECOURT_TASK_ID=<id>`) so Nightloom can tag Sablecourt sessions cleanly without coupling the two codebases (ADR-0007).
 
 ### Deterministic controller runtime (`internal/runtime/controller`)
@@ -237,7 +237,7 @@ sablecourt/
     policy/             # deterministic allow/approve/deny engine and circuit breakers
     redact/             # linear-time deterministic boundary redactor
     runtime/
-      coding/           # Git worktree + OS sandbox + detached host for claude and codex
+      coding/           # Git worktree + Seatbelt + detached host for claude and codex (host path, unsupported for 0.1.0)
       controller/       # zero-LLM deterministic controller runner
       docker/           # Moby Go SDK container runtime on internal gate-only network
     secret/             # SecretStore interface (zalando/go-keyring + 0600 file fallback)
@@ -252,4 +252,4 @@ sablecourt/
 1. M1 (Core scaffold and store): `go.mod`, manifest loader (`sigs.k8s.io/yaml`), SQLite WAL store + migrations, `sablecourtd` and `sablectl` skeleton, `go test -race ./...` green.
 2. M2 (Model Gate and budgets): OpenAI, Anthropic, and Gemini HTTP/SSE proxy, task token leases, atomic `budget_ledger` enforcement, deterministic controller zero-LLM denial tests.
 3. M3 (Data/Action Gate and approvals): MCP Streamable HTTP server (`modelcontextprotocol/go-sdk`), linear-time redactor, typed GitOps PR action, runtime approval queue with pinned SHA-256 digest and macOS out-of-band `Approver`.
-4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + OS sandbox coding adapter (`claude` and `codex`), hub-and-spoke child delegation, and embedded `html/template` Web UI.
+4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + Seatbelt coding adapter (`claude` and `codex`; superseded for 0.1.0 by harness containers, issue 181), hub-and-spoke child delegation, and embedded `html/template` Web UI.

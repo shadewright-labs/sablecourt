@@ -165,7 +165,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablecourtd/councils.go`, `cmd/sablecour
 | `with` | list of strings | `claude`, `codex`, `agy` | Must list all three once each, in any order. |
 | `sequential` | bool | `false` | Run the members of a round one after another. |
 
-Header `Idempotency-Key`: at most 256 characters, no control characters, one header only, and no operator token or secret in it. A repeat with the same key and the same body returns the existing session; a different body is refused. Opening also needs the three harness executables on the daemon's path and a working Seatbelt sandbox, and is refused in Citadel mode.
+Header `Idempotency-Key`: at most 256 characters, no control characters, one header only, and no operator token or secret in it. A repeat with the same key and the same body returns the existing session; a different body is refused. Opening also needs the three harness executables on the daemon's path and a working Seatbelt sandbox (a check left over from the unsupported host mode), and is refused in Citadel mode.
 
 ### Dashboard
 

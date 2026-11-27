@@ -37,7 +37,7 @@ Watch a running task, open a Conclave from a manifest, steer it with a Decree, s
    sablectl conclave relic get <id> notes.md
    ```
 
-5. Watch the live output of a host-run coding task or a long-lived container workload. It is read-only and redacted. Council turns in containers have no live stream:
+5. Watch the live output of a host-run coding task (unsupported, and moving into harness containers with [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181)) or a long-lived container workload. It is read-only and redacted. Council turns in containers have no live stream:
 
    ```sh
    sablectl task scry <task-id>
