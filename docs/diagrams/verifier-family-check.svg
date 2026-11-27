@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 568" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Verifier family check</title>
+  <desc id="d">The author step, run with the developer card on the coding tier, records its provider, model and family in the run chain. Before the verifier step (reviewer card, critic tier) launches, a family check compares the verifier's model family with every family in the run chain: a different family lets it launch, and the same family or an unknown one sends it to Verifier refused, where it is never launched, the task records the reason and the workflow halts. A verifier that passes leads to the next verifier (security card), which faces its own family check against the same run chain. A verifier that requests changes starts a fix round, the developer card again with the failure handoff; the fix round records its family in the run chain and the verifier is rechecked before it runs again. A verifier with no model, on a deterministic workload, skips the check. The check, the run chain and the refusal are proposed and not built.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="568" rx="18" fill="#08060e"/>
+
+  <rect class="bad" x="300" y="32" width="568" height="64" rx="10"/>
+  <text class="h" x="316" y="58">Verifier refused</text>
+  <text class="s" x="316" y="79">never launched; the task records the reason and the workflow halts</text>
+
+  <rect class="box" x="44" y="152" width="200" height="64" rx="10"/>
+  <text class="h" x="60" y="178">Author step</text>
+  <text class="s" x="60" y="199">developer card, coding tier</text>
+
+  <polygon class="key" points="300,184 356,136 412,184 356,232"/>
+  <text class="s" x="356" y="180" text-anchor="middle">Family</text>
+  <text class="s" x="356" y="197" text-anchor="middle">check</text>
+
+  <rect class="box" x="484" y="152" width="200" height="64" rx="10"/>
+  <text class="h" x="500" y="178">Verifier step</text>
+  <text class="s" x="500" y="199">reviewer card, critic tier</text>
+
+  <polygon class="key" points="756,184 812,136 868,184 812,232"/>
+  <text class="s" x="812" y="180" text-anchor="middle">Family</text>
+  <text class="s" x="812" y="197" text-anchor="middle">check</text>
+
+  <rect class="box" x="924" y="152" width="172" height="64" rx="10"/>
+  <text class="h" x="940" y="178">Next verifier</text>
+  <text class="s" x="940" y="199">security card</text>
+
+  <rect class="box" x="484" y="296" width="200" height="72" rx="10"/>
+  <text class="h" x="500" y="322">Fix round</text>
+  <text class="s" x="500" y="343">developer card again</text>
+  <text class="s" x="500" y="360">with the failure handoff</text>
+
+  <rect class="plan" x="44" y="416" width="1052" height="64" rx="10"/>
+  <text class="h" x="60" y="442">Run chain</text>
+  <text class="s" x="60" y="463">provider, model and family of the author, its retries and every fix round; read at each verifier dispatch</text>
+
+  <path class="f" d="M244 184H294" marker-end="url(#a)"/>
+  <path class="f" d="M412 184H478" marker-end="url(#a)"/>
+  <text class="lbl" x="448" y="176" text-anchor="middle">differs</text>
+  <path class="f" d="M684 184H750" marker-end="url(#a)"/>
+  <text class="lbl" x="717" y="176" text-anchor="middle">pass</text>
+  <path class="f" d="M868 184H918" marker-end="url(#a)"/>
+  <text class="lbl" x="896" y="176" text-anchor="middle">differs</text>
+
+  <path class="deny" d="M356 136V98" marker-end="url(#x)"/>
+  <text class="no" x="368" y="122">same or unknown</text>
+  <path class="deny" d="M812 136V98" marker-end="url(#x)"/>
+  <text class="no" x="824" y="122">same or unknown</text>
+
+  <path class="f" d="M584 216V290" marker-end="url(#a)"/>
+  <text class="lbl" x="596" y="258">changes requested</text>
+  <path class="f" d="M484 332H356V238" marker-end="url(#a)"/>
+  <text class="lbl" x="420" y="324" text-anchor="middle">rechecked</text>
+
+  <path class="r" d="M144 216V410" marker-end="url(#m)"/>
+  <text class="lbl" x="156" y="316">records family</text>
+  <path class="r" d="M584 368V410" marker-end="url(#m)"/>
+  <text class="lbl" x="596" y="394">records family</text>
+
+  <text class="cap" x="44" y="508">A verifier with no model (a deterministic workload) skips the check. The check, the run chain and the refusal are proposed, not built.</text>
+
+  <rect class="plan" x="44" y="528" width="28" height="16" rx="4"/>
+  <text class="cap" x="82" y="541">proposed, not built</text>
+  <path class="deny" d="M260 536H300" marker-end="url(#x)"/>
+  <text class="cap" x="312" y="541">refused dispatch</text>
+</svg>

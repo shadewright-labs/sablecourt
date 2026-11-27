@@ -44,35 +44,67 @@ Status of this amendment: Proposed.
 
 Title: coding court roles, operator role cards and author/verifier family separation.
 
-This amendment adds to parts 3 and 5 above. The accepted text stays as written. On `main`, a workload's `spec.roleCard` is a string that the context assembler writes as a "Role Card" section above the packet header ([internal/domain/types.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/domain/types.go), [internal/contextpack/assembler.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/assembler.go)). A `WorkflowStep` has a `role` (`author`, `verifier` or `fast`) and a `tier` (`fast`, `coding` or `critic`), and a tier resolves to a provider and model from `system:model-tiers` at dispatch. Nothing on `main` stops a verifier step from resolving to the same model family as the author it checks, which defeats the reason part 3 exists.
+This amendment adds to parts 3 and 5 above. The accepted text stays as written.
+
+What `main` does today:
+
+- A workload's `spec.roleCard` is a plain string, and the context assembler writes it as a "Role Card" section above the packet header, in the part of the packet that is never trimmed ([internal/domain/types.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/domain/types.go), [internal/contextpack/assembler.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/assembler.go)).
+- A `WorkflowStep` has a `role` (`author`, `verifier` or `fast`, or none) and a `tier` (`fast`, `coding` or `critic`). At dispatch, a step with a tier resolves to a provider and model from `system:model-tiers`. The resolved pair goes only into the launch input held in memory; `tasks.input_json` keeps the tier, and nothing durable records which model a run was given ([internal/controlplane/workflow_evidence.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/controlplane/workflow_evidence.go)).
+- At manifest load, a step tier is checked against the compiled default routes, not the stored table, and a `coding-agent` step must resolve to its own workload's harness (`cli:<harness>`) ([internal/config/loader.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/config/loader.go)). The compiled defaults send both `coding` and `critic` to `cli:claude` ([internal/contextpack/tiers.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/contextpack/tiers.go)).
+- When a step finishes, the next verifier step records the task that just finished as its author, whatever that task's role was ([internal/controlplane/reconciler.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/controlplane/reconciler.go)).
+
+Nothing on `main` stops a verifier step from running on the same model family as the author it checks, which defeats the reason part 3 exists.
 
 ### First role set for the coding court
 
-The coding court starts with five roles, each an operator role card:
+The coding court starts with four workflow roles, each an operator role card, and one card for councils:
 
-| Card | Step role | Tier | Job |
+| Card | Used as | Tier the workflow step usually sets | Job |
 | --- | --- | --- | --- |
-| `developer-go` | `author` | `coding` | Writes Go changes and their table-driven tests in its assigned worktree. |
-| `developer-docs` | `author` | `coding` | Writes docs and ADR text in its assigned worktree. |
-| `reviewer` | `verifier` | `critic` | Reads the author's diff and evidence without writing, and ends with a `VERDICT:` line as part 3 requires. |
-| `security` | `verifier` | `critic` | Read-only verifier for changes on invariant paths: gates, leases, redaction, policy, isolation and the audit chain. |
-| `architect` | council seat | `critic` | Sits on a council ([ADR-0013](0013-bounded-council-rounds.md)) when the question is about design, not a diff. |
+| `developer-go` | `author` step | `coding` | Writes Go changes and their table-driven tests in its assigned worktree. |
+| `developer-docs` | `author` step | `coding` | Writes docs and ADR text in its assigned worktree. |
+| `reviewer` | `verifier` step | `critic` | Reads the author's diff and evidence without writing, and ends with a verdict line as part 3 requires. |
+| `security` | `verifier` step | `critic` | Read-only verifier for changes on invariant paths: gates, leases, redaction, policy, isolation and the audit chain. |
+| `architect` | prose for a council question | none | Text an operator can put into a council question ([ADR-0013](0013-bounded-council-rounds.md)) when the question is about design, not a diff. |
+
+The tier column is what the example workflow puts on its steps; the card itself names no tier. On `main`, council seats are the three built-in workloads `claude`, `codex` and `agy`, with no role card and no tier or model. Attaching a card or a tier to a council seat is not part of this amendment and needs an amendment of ADR-0013.
 
 A fix round is not a separate role. It is the developer card again, given the failure handoff from part 4. This keeps one card per kind of work and reuses a mechanism that already exists.
 
-A card names a tier and never a model. The operator maps tiers to models in `system:model-tiers`, so changing a model is one table edit and no card has to change. Example cards ship in `examples/coding-court/roles/` ([issue 208](https://github.com/shadewright-labs/sablecourt/issues/208)).
+The tier belongs to the workflow step (`WorkflowStep.tier`), and the harness belongs to the workload (`spec.coding.harness`). The tier table picks the model a harness runs, so changing a model within one harness is one table edit and no card changes. Moving a tier to a model on another harness also means changing the workloads whose steps use that tier, because a `coding-agent` workload is pinned to one harness. Until the load-time check reads the stored table, a step whose workload runs a different harness from the compiled default route names its `provider` and `model` explicitly. Because both compiled defaults resolve to Claude today, the family rule below would refuse every verifier step that relies on them, so the work in [issue 206](https://github.com/shadewright-labs/sablecourt/issues/206) also moves the default `critic` route to a family other than the default `coding` route's. Example cards and an example workflow ship in `examples/coding-court/` ([issue 208](https://github.com/shadewright-labs/sablecourt/issues/208)).
 
 ### Only the operator authors role cards
 
-A card comes from the manifest the operator applies, in one of two forms: inline `spec.roleCard`, or `spec.roleCardFile`, a path resolved relative to the manifest file. The daemon refuses a `roleCardFile` that resolves inside a task checkout, after following symbolic links. The SHA-256 of the card text is recorded on the task and printed in the packet header, so a reviewer can tell which card version a run received ([issue 207](https://github.com/shadewright-labs/sablecourt/issues/207)).
+A card is the inline `spec.roleCard` string in a Workload manifest of the bundle the daemon loads at start and loads again on reload (`sablectl apply` asks the running daemon to reload its configured manifest source; it does not upload a file). The daemon never reads a card from a file path. The bundle digest covers every manifest file, so editing a card changes the digest of the bundle, and the dispatch record below carries the digest that was in force when each task launched.
 
-The reason is invariant 3. Files in a task checkout come from the repository and from earlier agent runs, so they are untrusted input. They reach an agent only in two ways: as text the harness reads itself while it works, or as a learning the operator accepted under [ADR-0012](0012-learning-evidence-and-expiry.md). A repository file never becomes a role card, because the card sits above everything else in the packet and an agent reads it as its instructions.
+The reason is invariant 3. Files in a task checkout come from the repository and from earlier agent runs, so they are untrusted input. Repository content reaches an agent only as untrusted data: files the harness reads in its checkout, the daemon's bounded and redacted pre-check output, the author's diff and artifacts in a verifier prompt, failure handoffs, and learnings (scoped `learning:*` entries in Court Memory today, the reviewed learnings of [ADR-0012](0012-learning-evidence-and-expiry.md) once the assembler reads them). A repository file never becomes a role card, because the card sits above everything else in the packet and an agent reads it as its instructions.
 
-A card sets the prose an agent reads, a checklist, the verdict format and a tier name. It confers nothing. A card never grants a permission, a zone, a policy, an action, a budget, a Ward, a mount, a network host, a credential or an approval. Those come from the workload's grants, the workflow and the daemon's own checks, exactly as they do without a card. A card that asks for more access changes nothing the daemon enforces.
+A card is pure prose: what the role does, a checklist, and reminders. The daemon never parses a field out of card text. A card sets no tier, no model and no verdict format of its own; the verdict lines are the ones part 3 requires, and the control plane accepts only `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED` as the final line, whatever a card says. A card confers nothing. It never grants a permission, a zone, a policy, an action, a budget, a Ward, a mount, a network host, a credential or an approval. Those come from the workload's grants, the workflow and the daemon's own checks, exactly as they do without a card. A card that asks for more access changes nothing the daemon enforces.
+
+A card counts toward the packet like any other required text: a long card leaves less room for learnings, Relics and the pre-check, and a coding harness launch whose input passes its size limit is refused.
 
 ### Author and verifier come from different model families
 
-When the daemon dispatches a verifier step, it reads the model family of the author from the durable record of the author's run (invariant 5). It takes the family from the model the run resolved to, not from the harness name, because one harness can run models of more than one family and two harnesses can run models of the same family. If the verifier's resolved model is of the same family as the author's, or either family is unknown, the daemon refuses the step and records why (invariant 4). After a fix round, the next verifier must also differ in family from the model that ran the fix, not only from the first author ([issue 206](https://github.com/shadewright-labs/sablecourt/issues/206)).
+The rule: a verifier step that runs a model must run a model family that no model in its chain ran. The diagram shows the chain and the check; the parts below say what is recorded and where.
+
+[![An author step and every fix round record their model family in the run's chain, and each verifier dispatch is checked against the whole chain and refused on a match or an unknown family.](../diagrams/verifier-family-check.svg)](../diagrams/verifier-family-check.svg "Open full size")
+
+**Dispatch record.** Before a task launches, the daemon resolves its provider and model (from the step's tier or from explicit `provider` and `model` fields) and writes a dispatch fact on the task's event history (`task_events`): provider, model, family, where the route came from, and the bundle digest. For a workflow step it also adds the entry to the run's chain in the step registration (`system:workflow-steps`). A task that resolves no model records an unknown model. None of this exists on `main` and it is new work under issue 206.
+
+**Family.** One classifier, owned by the daemon, maps a model name to a family: names starting `claude-` and the aliases `opus`, `sonnet` and `haiku` are Anthropic; names starting `gpt-`, `codex-`, `o1`, `o3` or `o4` are OpenAI; names starting `gemini-` are Google. A route in the tier table may carry an explicit family, set by the operator, which wins over the prefix rule; that is how a local model or a gateway's model name gets a family. Any other name is unknown, and an unknown family refuses. The family comes from the model, not the harness name, because one harness can run models of more than one family (`agy` runs Gemini and Claude models) and two harnesses can run models of the same family.
+
+**What the record proves (invariant 5).** For a coding harness, the recorded model is the one the daemon passed at launch. The daemon cannot see which model the provider ran behind the harness's encrypted connection, so the record states what was asked for, not what was observed. For a Model Gate workload, the gate's spend ledger (`budget_ledger`) also holds the model of every request it admitted for the task, and those models count too.
+
+**The chain.** For each workflow run, the chain holds every step that ran a model and fed the change under review: the author step, `fast` steps and steps with no role before it, every retry of those steps (a retry keeps the earlier attempt's commit, so both attempts count), and every fix round after a `CHANGES_REQUESTED` verdict. An entry never leaves the chain during the run. A verifier never joins it. A deterministic step (no model) adds nothing.
+
+**The check.** At every dispatch of a verifier step that runs a model, including a manual or automatic retry of that step, the daemon refuses the step when the verifier's family is unknown, when the chain is empty or holds an unknown family, or when the verifier's family appears in the chain. A refused step does not launch, the task records the reason, and the workflow halts (invariant 4). The cases:
+
+- Consecutive verifiers, such as `reviewer` then `security`: each is checked against the same chain and must differ from the author and from every fixer. The second verifier's author is the chain's author step, never the verifier before it, and its `CHANGES_REQUESTED` sends the fix round back to that author step. On `main` the second verifier would record the first verifier as its author; issue 206 changes that.
+- A verifier as the first step of a workflow has an empty chain and is refused.
+- After three rounds on three different families, no family is left and the next verifier is refused. The daemon fails closed rather than forgetting an earlier author.
+- A verifier step on a `deterministic-controller` workload runs no model and is not subject to the family rule. It checks the change by fixed code, so there is no model opinion to separate.
+- A verifier step names a workload that no step in its chain uses, so the author and the verifier hold distinct identities (invariant 4). The manifest loader refuses a workflow that breaks this.
+- A Model Gate workload can choose its model per request, and on `main` the gate checks only that the provider is granted and may fall back to another provider when one fails. For a verifier task, the dispatch fact also binds the chain's families to the task's lease, and the gate classifies each request's model, and each fallback's, and refuses any whose family is in that set or unknown. The verifier step still resolves a model at dispatch and is checked like any other. Until the gate does this, a Model Gate workload cannot be a verifier step, and the loader refuses such a workflow.
 
 The refusal is the point of the rule. A verifier from the same family tends to share the author's blind spots, and the accepted Consequences above already promise that authoring and verification can run on different models. Today that depends on how the operator filled the tier table. With this amendment the daemon checks it at every verifier dispatch.
 
@@ -83,14 +115,15 @@ In 0.1.0 the orchestrator is the daemon's fixed workflow together with the opera
 ### Open questions for the user
 
 - Should a single-provider machine get a named override of the family refusal, recorded on each step it lets through, or does such a machine simply run without verifier steps?
+- Which family should the default `critic` route use (for example `cli:codex` with a GPT model), given that verifier workloads must then run that harness?
 - Is the `security` role mandatory for every change on an invariant path, or does each workflow opt in?
-- May the orchestrator seat ever dispatch a step without the operator confirming a plan first?
+- This question touches invariant 1. In the post-0.1.0 orchestrator ADR, may deterministic policy authorize a step the orchestrator seat proposes, against a pinned plan, without the operator confirming it, or must every proposal wait for the operator? A model's proposal alone never authorizes a step either way.
 - May a repository ever propose roles, for example as a card the operator reviews and accepts, or do cards stay out of repositories for good?
 
 ### Consequences of this amendment
 
-- A machine that resolves every tier to one model family cannot run a workflow with a verifier step until the operator adds a second family or the first open question is settled. Unknown families are refused, so a newly added model needs a family entry before it can verify.
-- Each verifier dispatch costs one read of the author's run record. A run without a recorded resolved model blocks the verifier that follows it.
-- The operator writes and keeps the cards. A card change is a manifest change, and the digest on each task shows which version ran.
-- Moving a card into a repository, or letting an agent edit one, is out. So is any card field that grants access, and a model that dispatches steps on its own in 0.1.0.
-- The family rule covers workflow verifier steps. Council seats are outside it; ADR-0013 already convenes three different harnesses, and a family check for councils would need its own decision.
+- A machine that resolves every tier to one model family cannot run a workflow with a model verifier step until the operator adds a second family or the first open question is settled. A new model whose name matches no prefix rule needs a family on its tier route before it can author or verify.
+- Every task launch writes one dispatch fact, and each verifier dispatch reads the run's chain. A step in the chain with no recorded model blocks every verifier after it.
+- The operator writes and keeps the cards inside the manifests. A card change is a manifest change, and the bundle digest on each dispatch fact shows which version ran.
+- A card read from a file, a card in a repository, an agent editing a card, and any card field that grants access or picks a tier are all out. So is a model that dispatches steps on its own in 0.1.0.
+- The family rule covers workflow verifier steps. Council seats, including review rounds in ADR-0013's writer mode, are outside it. Convening `claude`, `codex` and `agy` does not guarantee three families, because `agy` can run Claude models and council launches do not pass a model, so a family check for councils needs its own amendment of ADR-0013.
