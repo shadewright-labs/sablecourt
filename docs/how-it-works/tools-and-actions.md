@@ -43,7 +43,7 @@ Each failed run of an action records a failure for its capability, a target refu
 
 ## Audit rows
 
-Once the lease and the request envelope are accepted, the gate appends a row, category `data_action_gate`, for a policy denial, a handler error or refusal, an allowed call, an unknown action and an approval mismatch. Requests that fail the lease check or the envelope check (401, 403, 400, 413, 503) write no gate row, and neither does a failure to queue an approval. The memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. A tool call that returns `approval_required` writes nothing in the gate itself.
+Once the lease and the request envelope are accepted, the gate appends a row, category `data_action_gate`, for a policy denial, a handler error or refusal, an allowed call, an unknown action and an approval mismatch. Requests that fail the lease check or the envelope check (401, 403, 400, 413, 503) write no gate row, and neither does a failure to queue an approval. The memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. Gate rows are best effort: the gate ignores an error from the append, so a failed write loses the row and the call carries on. The exception is the `consumed` row of an approved action, which must be written before the action runs. A tool call that returns `approval_required` writes nothing in the gate itself.
 
 ## Known gaps
 
@@ -54,9 +54,9 @@ What the code does today, where it falls short of the design.
 - There is no action that commits or pushes, so the branch, commit and pull request path of [ADR-0004](../adr/0004-in-house-capability-gates-three-doors.md) stops at the branch and the pull request call.
 - The sandbox-zone rule covers `action:` and `delegate:` only; a mutating MCP tool such as `memory.put` is open to a sandbox workload when policy allows it.
 
-## Not built yet
+## Upstream MCP servers
 
-- Upstream MCP servers (`grants.mcpServers`) are built, but ADR-0011 puts them outside the current scope. At start-up and on reload the daemon registers, for each server with a name and a URL, each non-blank tool of `allowedTools` as `<name>.<tool>`. Registration is daemon-wide: a workload sees a tool only when its own `mcpTools` grant holds the full name, and the policy engine decides each call. The bridge adds the server's secret on the way out and reads at most 4 MiB of a response.
+Upstream MCP servers (`grants.mcpServers`) are built, but ADR-0011 puts them outside the current scope. At start-up and on reload the daemon registers, for each server with a name and a URL, each non-blank tool of `allowedTools` as `<name>.<tool>`. Registration is daemon-wide: a workload sees a tool only when its own `mcpTools` grant holds the full name, and the policy engine decides each call. The bridge adds the server's secret on the way out and reads at most 4 MiB of a response.
 
 ## In depth
 

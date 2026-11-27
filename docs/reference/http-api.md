@@ -81,7 +81,7 @@ Source: `cmd/sablecourtd/main.go`. Device pairing is disabled: both pairing rout
 | Route | Purpose |
 | --- | --- |
 | `GET /api/v1/approvals` | List approvals, newest first. `?status=` filters by state. |
-| `POST /api/v1/approvals/{id}/approve` | Approve after the out-of-band confirmation. Body `{"expectedSha256","decidedBy"}`; `expectedSha256` is required and must equal the approval's payload digest. A body with `deviceId` and `signature` takes the device-signature path. |
+| `POST /api/v1/approvals/{id}/approve` | Approve after the out-of-band confirmation. Body `{"expectedSha256","decidedBy"}`; `expectedSha256` is required and must equal the approval's payload digest: an empty or missing digest is refused with 409 (`expected payload digest is required`) before the approval is read, and the confirmation dialog on the daemon host shows the stored value and is checked against the same digest. A body with `deviceId` and `signature` takes the device-signature path. |
 | `POST /api/v1/approvals/{id}/deny` | Deny. Body `{"decidedBy","reason"}`. |
 | `POST /api/v1/devices/pair/start` | Disabled. |
 | `POST /api/v1/devices/pair/complete` | Disabled. |
@@ -129,7 +129,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/voice/voice.go`. The audio goes to 
 | --- | --- |
 | `GET /api/v1/voice/status` | The resolved speech settings. |
 | `POST /api/v1/voice/transcribe` | Speech to text: raw audio or `multipart/form-data` with a `file` part. Returns the redacted transcript. |
-| `POST /api/v1/voice/speak` | Text to speech: the redacted text is sent to the configured text-to-speech endpoint, and the audio comes back. Body `{"text","voice"}`. |
+| `POST /api/v1/voice/speak` | Text to speech: the text is redacted, cut to 4,000 bytes (after redaction, so a multi-byte character can be split) and sent to the configured text-to-speech endpoint, and the audio comes back. Body `{"text","voice"}`. |
 | `POST /api/v1/conclaves/{id}/voice-decree` | Audio Decree to a Conclave: the audio is transcribed as for `transcribe` and the redacted text is posted as a Decree to the role in `to` (query or form field, `all` if absent). |
 
 ### Councils and conclaves

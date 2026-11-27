@@ -47,7 +47,7 @@ The web UI does the same from the dashboard: each pending approval has Approve a
 ## Check it worked
 
 - `sablectl approval list` no longer shows the approval.
-- `sablectl task inspect <task-id>` shows the task back in `working` (event `approval_decided`) after the reconciler's next pass over it, and then the workload repeats its call.
+- `sablectl task inspect <task-id>` shows the task back in `working` (event `approval_decided`) after the reconciler's next pass over it, once no other approval for that task is still pending (an approval that is still pending and unexpired keeps the task waiting), and then the workload repeats its call.
 - `sablectl audit tail` shows an `approval` row with outcome `approved` or `denied`.
 
 ## If it fails
