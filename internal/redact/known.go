@@ -90,6 +90,12 @@ func RegisterBytes(values ...[]byte) {
 	defaultRegistry.RegisterBytes(values...)
 }
 
+// UnregisterBytes removes binary secret material from the default registry;
+// see Registry.UnregisterBytes.
+func UnregisterBytes(values ...[]byte) {
+	defaultRegistry.UnregisterBytes(values...)
+}
+
 // NewStream returns a streaming exact-secret redactor bound to the default registry.
 func NewStream() *Stream {
 	return defaultRegistry.NewStream()
@@ -334,6 +340,33 @@ func (r *Registry) RegisterBytes(values ...[]byte) {
 	if r == nil || len(values) == 0 {
 		return
 	}
+	r.Register(byteForms(values)...)
+}
+
+// UnregisterBytes removes the forms RegisterBytes recorded for values. Use it
+// only for material the daemon no longer holds and that no other caller
+// registered (a signing key replaced by a fresh random one), so nothing left
+// in the process can emit it.
+func (r *Registry) UnregisterBytes(values ...[]byte) {
+	if r == nil || len(values) == 0 {
+		return
+	}
+	forms := byteForms(values)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	changed := false
+	for _, f := range forms {
+		if _, ok := r.entries[f]; ok {
+			delete(r.entries, f)
+			changed = true
+		}
+	}
+	if changed {
+		r.rebuildLocked()
+	}
+}
+
+func byteForms(values [][]byte) []string {
 	var forms []string
 	for _, b := range values {
 		if len(b) < MinSecretLength {
@@ -349,31 +382,95 @@ func (r *Registry) RegisterBytes(values ...[]byte) {
 			base64.RawURLEncoding.EncodeToString(b),
 		)
 	}
-	r.Register(forms...)
+	return forms
 }
 
-// RedactText redacts exact registered secrets first (by the rule of
-// RedactExact), then applies pattern rules.
+// RedactText redacts exact registered secrets (by the rule of RedactExact)
+// and the pattern rules. Both passes find their spans on input itself, and the
+// spans are merged before anything is replaced, so neither pass cuts a match
+// of the other into fragments. A merged span that holds part of a registered
+// value gets the exact marker. The result is scanned again as RedactExact
+// does; a held value that a pattern marker forms with its neighbours turns the
+// whole text into the marker. A pattern match that lies inside a registered
+// value adds no hit or category.
 func (r *Registry) RedactText(input string) Result {
 	if input == "" {
 		return Result{}
 	}
-	out, exactHits := r.redactExact(input)
-	res := redactPatterns(out)
-	// A pattern marker next to other text must not rebuild a held value.
-	if r.ContainsHeld(res.Text) {
-		res.Text = r.marker()
-		exactHits++
+	spans, found := patternSpans(input)
+	var (
+		m     *acMatcher
+		exact []byteSpan
+	)
+	if r != nil {
+		m = r.matcher.Load()
+	}
+	if m != nil {
+		exact = matchSpans(m, input)
+		for _, sp := range exact {
+			spans = append(spans, markedSpan{start: sp.start, end: sp.end, marker: m.marker, exact: true})
+		}
+	}
+	res := Result{Categories: make([]string, 0, len(found)+1)}
+	seen := make(map[string]bool, len(found))
+	for _, f := range found {
+		if insideSpans(exact, f.start, f.end) {
+			continue
+		}
+		res.Hits++
+		if !seen[f.category] {
+			seen[f.category] = true
+			res.Categories = append(res.Categories, f.category)
+		}
+	}
+	exactHits := len(exact)
+	var patternMarkers []byteSpan
+	res.Text, patternMarkers = replaceMarkedSpans(input, mergeMarkedSpans(spans))
+	if m != nil {
+		if again := matchSpans(m, res.Text); len(again) > 0 {
+			if overlapsAny(again, patternMarkers) {
+				// A pattern marker formed a held value with its neighbours.
+				res.Text = m.marker
+				exactHits++
+			} else {
+				var n int
+				res.Text, n = m.redactString(res.Text)
+				exactHits += n
+			}
+		}
 	}
 	if exactHits > 0 {
 		res.Hits += exactHits
 		res.Categories = append(res.Categories, KnownSecretCategory)
-		sort.Strings(res.Categories)
 	}
+	sort.Strings(res.Categories)
 	return res
 }
 
-// RedactString redacts exact registered secrets first, then applies pattern rules.
+// insideSpans reports whether [start, end) lies within one of the sorted,
+// disjoint spans.
+func insideSpans(spans []byteSpan, start, end int) bool {
+	i := sort.Search(len(spans), func(i int) bool { return spans[i].start > start }) - 1
+	return i >= 0 && end <= spans[i].end
+}
+
+// overlapsAny reports whether a span of a shares a byte with a span of b. Both
+// are sorted and disjoint.
+func overlapsAny(a, b []byteSpan) bool {
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i].end <= b[j].start:
+			i++
+		case b[j].end <= a[i].start:
+			j++
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// RedactString returns the text of RedactText.
 func (r *Registry) RedactString(input string) string {
 	return r.RedactText(input).Text
 }
@@ -791,6 +888,12 @@ type Stream struct {
 	// closed is set when the batch redactor did not settle on a prefix or no
 	// safe cut appeared before the cap. The stream then emits nothing more.
 	closed bool
+	// checked counts the leading bytes of buf already known to hold no safe
+	// cut under cutM, so the search for a cut looks at each byte once.
+	checked int
+	cutM    *acMatcher
+	// examined counts the bytes the cut search has looked at (tests).
+	examined int
 }
 
 // String keeps fmt from printing the buffered start of a possible match.
@@ -811,6 +914,7 @@ func (s *Stream) Write(raw []byte, eof bool) []byte {
 	}
 	m := reg.matcher.Load()
 	if m == nil {
+		s.checked = 0
 		if len(s.buf) == 0 {
 			return raw
 		}
@@ -822,7 +926,7 @@ func (s *Stream) Write(raw []byte, eof bool) []byte {
 	s.buf = append(s.buf, raw...)
 	cut := len(s.buf)
 	if !eof {
-		cut = m.lastSafeCut(s.buf)
+		cut = s.lastSafeCut(m)
 	}
 	var out []byte
 	if cut > 0 {
@@ -833,6 +937,8 @@ func (s *Stream) Write(raw []byte, eof bool) []byte {
 		out = []byte(text)
 		rem := copy(s.buf, s.buf[cut:])
 		s.buf = s.buf[:rem]
+		// The bytes after the last safe cut were all looked at and hold none.
+		s.checked = rem
 	}
 	if len(s.buf) > maxStreamPending {
 		return append(out, s.close(m)...)
@@ -845,17 +951,28 @@ func (s *Stream) Write(raw []byte, eof bool) []byte {
 func (s *Stream) close(m *acMatcher) []byte {
 	s.closed = true
 	s.buf = nil
+	s.checked = 0
 	return []byte(m.marker)
 }
 
-// lastSafeCut returns the offset just after the last byte of b at which a cut
-// is safe (see Stream), or 0 when b has none.
-func (m *acMatcher) lastSafeCut(b []byte) int {
-	for i := len(b) - 1; i >= 0; i-- {
+// lastSafeCut returns the offset just after the last byte of the buffer at
+// which a cut is safe under m (see Stream), or 0 when it has none. It looks
+// only at bytes not yet checked under m: the bytes before s.checked hold no
+// safe cut. A new matcher (a value registered or dropped since) can change
+// which bytes are safe, so the search then starts over.
+func (s *Stream) lastSafeCut(m *acMatcher) int {
+	if m != s.cutM {
+		s.cutM = m
+		s.checked = 0
+	}
+	b := s.buf
+	for i := len(b) - 1; i >= s.checked; i-- {
+		s.examined++
 		if m.cutAfter[b[i]] {
 			return i + 1
 		}
 	}
+	s.checked = len(b)
 	return 0
 }
 

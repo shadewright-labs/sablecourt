@@ -271,8 +271,14 @@ func (a *operatorAuth) logout(w http.ResponseWriter, r *http.Request) {
 	rand.Read(key[:])
 	redact.RegisterBytes(key[:])
 	a.keyMu.Lock()
+	retired := a.signKey
 	a.signKey = key
 	a.keyMu.Unlock()
+	// The retired key has no lifetime left: sessionValue reads the current key
+	// only, and only its HMAC output ever leaves the daemon. Nothing can emit
+	// the old key now, so its registration is dropped and the registry stays
+	// bounded however many times the operator logs out.
+	redact.UnregisterBytes(retired[:])
 	http.SetCookie(w, &http.Cookie{
 		Name: operatorCookie, Path: "/", MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,

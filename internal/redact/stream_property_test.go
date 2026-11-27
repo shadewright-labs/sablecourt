@@ -307,3 +307,40 @@ func TestStreamCutsAndCap(t *testing.T) {
 		}
 	}
 }
+
+// The safe-cut search resumes where the last write left off, so each byte is
+// looked at once and many small writes with no safe cut cost linear time, not
+// the whole pending buffer per write.
+func TestStreamCutSearchIsLinear(t *testing.T) {
+	t.Parallel()
+	held := synthSecret("aaaa", "aaaa_lin_0001")
+	reg := NewRegistry()
+	reg.Register(held)
+	s := reg.NewStream()
+	const writes = 20000
+	for range writes {
+		if out := s.Write([]byte("a"), false); len(out) != 0 {
+			t.Fatalf("write with no safe cut emitted %q", out)
+		}
+	}
+	if s.examined > writes {
+		t.Fatalf("cut search examined %d bytes over %d one-byte writes, want at most %d", s.examined, writes, writes)
+	}
+	// A safe byte still releases everything, and the batch result holds.
+	if got, want := string(s.Write([]byte(" "), false)), strings.Repeat("a", writes)+" "; got != want {
+		t.Fatalf("safe byte released %d bytes, want %d", len(got), len(want))
+	}
+}
+
+func BenchmarkStreamSmallWrites(b *testing.B) {
+	held := synthSecret("aaaa", "aaaa_lin_0001")
+	reg := NewRegistry()
+	reg.Register(held)
+	one := []byte("a")
+	for b.Loop() {
+		s := reg.NewStream()
+		for range 32 * 1024 {
+			s.Write(one, false)
+		}
+	}
+}

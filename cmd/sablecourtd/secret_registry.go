@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"errors"
-	"net/url"
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
@@ -110,34 +110,27 @@ func preloadBundleSecrets(ctx context.Context, st secret.SecretStore, bundle *co
 }
 
 // registerDSN registers the password of a PostgreSQL DSN and the DSN itself,
-// or refuses a password too short to redact.
+// or refuses a password too short to redact. The password is the one the
+// driver sends: pgx parses the DSN (keyword/value or URL form, quoting,
+// escapes, percent encoding, and PGPASSWORD or the password file when the DSN
+// has none), and that value is registered. A DSN pgx cannot parse is refused,
+// because the store could not connect with it either.
 func registerDSN(dsn string) error {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
 		return nil
 	}
-	if u, err := url.Parse(dsn); err == nil && u.User != nil {
-		if pw, ok := u.User.Password(); ok && pw != "" {
-			if err := redact.RegisterSetting("postgres DSN password", pw); err != nil {
-				return err
-			}
-			redact.Register(dsn)
-			return nil
-		}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		// The parser's message can quote the DSN, so it is not wrapped.
+		return errors.New("postgres DSN does not parse, so its password cannot be registered for redaction")
 	}
-	for field := range strings.FieldsSeq(dsn) {
-		k, v, ok := strings.Cut(field, "=")
-		if !ok || !strings.EqualFold(k, "password") {
-			continue
-		}
-		v = strings.Trim(v, `"'`)
-		if v == "" {
-			continue
-		}
-		if err := redact.RegisterSetting("postgres DSN password", v); err != nil {
-			return err
-		}
-		redact.Register(dsn)
+	if cfg.Password == "" {
+		return nil
 	}
+	if err := redact.RegisterSetting("postgres DSN password", cfg.Password); err != nil {
+		return err
+	}
+	redact.Register(dsn)
 	return nil
 }

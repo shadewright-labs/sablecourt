@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -193,5 +194,64 @@ func TestShortCredentialsRefusedAtLoad(t *testing.T) {
 				t.Fatalf("error %q must name %q and not the value", err, tc.setting)
 			}
 		})
+	}
+}
+
+// registerDSN must register the password the driver sends, as pgx parses it:
+// quoted values with spaces or escapes, spaces around "=", and percent-decoded
+// URL passwords. The 8-byte rule applies to that parsed value.
+func TestRegisterDSNPasswordAsDriverParses(t *testing.T) {
+	t.Setenv("PGPASSWORD", "")
+	t.Setenv("PGPASSFILE", filepath.Join(t.TempDir(), "none"))
+	for _, tc := range []struct {
+		name, dsn, want string
+		short           bool
+	}{
+		{"quoted with spaces", "host=127.0.0.1 user=svc password='" + synthDaemonSecret("correct ", "horse ", "battery9") + "' dbname=x", synthDaemonSecret("correct ", "horse ", "battery9"), false},
+		{"quoted, short first word", "host=127.0.0.1 password='" + synthDaemonSecret("ab ", "cdefghij7") + "'", synthDaemonSecret("ab ", "cdefghij7"), false},
+		{"escaped quote", `host=127.0.0.1 password='` + synthDaemonSecret(`it\'s `, "a longpass8") + `'`, synthDaemonSecret("it's ", "a longpass8"), false},
+		{"escaped backslash", `host=127.0.0.1 password=` + synthDaemonSecret(`back\\`, "slashpw6"), synthDaemonSecret(`back\`, "slashpw6"), false},
+		{"spaces around equals", "host=127.0.0.1 password = " + synthDaemonSecret("spacedpw", "_5521") + " dbname=x", synthDaemonSecret("spacedpw", "_5521"), false},
+		{"url, percent encoded", "postgres://svc:" + synthDaemonSecret("p%40ss", "%20word", "9917") + "@127.0.0.1:5432/x", synthDaemonSecret("p@ss", " word", "9917"), false},
+		{"quoted, short in total", "host=127.0.0.1 password='" + synthDaemonSecret("a b ", "c") + "'", "", true},
+		{"url, short after decoding", "postgres://svc:" + synthDaemonSecret("%61%62", "cd") + "@127.0.0.1:5432/x", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := registerDSN(tc.dsn)
+			if tc.short {
+				var short *redact.ShortSecretError
+				if !errors.As(err, &short) {
+					t.Fatalf("registerDSN error = %v, want a short secret refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("registerDSN: %v", err)
+			}
+			if got, want := redact.String("x "+tc.want+" y"), "x "+redact.KnownSecretMarker+" y"; got != want {
+				t.Fatalf("redact.String = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// Each logout swaps in a new signing key. The retired key is gone from the
+// daemon, so it is unregistered: the registry does not grow with logouts.
+func TestLogoutKeepsRegistryBounded(t *testing.T) {
+	auth := newOperatorAuth("op_" + strings.Repeat("d4", 32))
+	before := redact.DefaultRegistry().Len()
+	for range 200 {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7432/logout", nil)
+		req.Header.Set("Origin", "http://127.0.0.1:7432")
+		auth.logout(httptest.NewRecorder(), req)
+	}
+	// One key has up to seven forms; how many are distinct depends on its
+	// bytes (hex without letters has one case), so the count can move by a few.
+	if grown := redact.DefaultRegistry().Len() - before; grown > 7 {
+		t.Fatalf("registry grew by %d entries over 200 logouts, want at most 7", grown)
+	}
+	current := hex.EncodeToString(auth.signKey[:])
+	if got := redact.String("k=" + current); strings.Contains(got, current) {
+		t.Fatal("current signing key is not redacted")
 	}
 }
