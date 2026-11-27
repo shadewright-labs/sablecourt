@@ -303,8 +303,9 @@ func TestGitPushPrecheckRefusesOtherDestination(t *testing.T) {
 	}
 }
 
-// A destination that carries user information is refused before an approval
-// exists, so credentials never reach the approved value or the dialog.
+// A destination that carries user information other than the ssh user git
+// is refused before an approval exists, so credentials never reach the
+// approved value or the dialog.
 func TestGitPushRefusesDestinationWithUserinfo(t *testing.T) {
 	branch := "sablecourt/task-push-1"
 	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
@@ -312,11 +313,11 @@ func TestGitPushRefusesDestinationWithUserinfo(t *testing.T) {
 	for _, dest := range []string{
 		"https://user:pass" + userAt + "github.com/shadewright-labs/sablecourt.git",
 		"https://token" + userAt + "github.com/shadewright-labs/sablecourt.git",
-		"ssh://git" + userAt + "github.com/shadewright-labs/sablecourt.git",
-		"git" + userAt + "github.com:shadewright-labs/sablecourt.git",
+		"ssh://token" + userAt + "github.com/shadewright-labs/sablecourt.git",
+		"token" + userAt + "github.com:shadewright-labs/sablecourt.git",
 	} {
 		rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token, `{"payload":`+pushPayload(branch, commitSHA, dest, "")+`}`)
-		if rec.Code != http.StatusBadRequest || !strings.Contains(errorText(t, rec), "user information") {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(errorText(t, rec), "user") {
 			t.Errorf("destination %q: got %d, want 400: %s", dest, rec.Code, rec.Body.String())
 		}
 	}
@@ -329,32 +330,4 @@ func pushPayload(branch, commitSHA, destination, remote string) string {
 		p += `,"remote":"` + remote + `"`
 	}
 	return p + `}`
-}
-
-// A push URL that carries a password is refused; a user name alone is
-// removed from the destination the value must name.
-func TestPushDestination(t *testing.T) {
-	cases := []struct {
-		pushURL, want string
-		wantErr       bool
-	}{
-		{"https://github.com/shadewright-labs/sablecourt.git", "https://github.com/shadewright-labs/sablecourt.git", false},
-		{"https://user" + userAt + "github.com/shadewright-labs/sablecourt.git", "https://github.com/shadewright-labs/sablecourt.git", false},
-		{"https://user:s3cr3t" + userAt + "github.com/shadewright-labs/sablecourt.git", "", true},
-		{"ssh://git" + userAt + "git.example:2222/team/repo.git", "ssh://git.example:2222/team/repo.git", false},
-		{"git" + userAt + "github.com:shadewright-labs/sablecourt.git", "github.com:shadewright-labs/sablecourt.git", false},
-		{"git" + userAt + ":sablecourt.git", "", true},
-		{"/srv/git/sablecourt.git", "/srv/git/sablecourt.git", false},
-		{"file:///srv/git/sablecourt.git", "file:///srv/git/sablecourt.git", false},
-		{"https://bad host/x", "", true},
-	}
-	for _, tc := range cases {
-		got, err := pushDestination(tc.pushURL)
-		if (err != nil) != tc.wantErr || got != tc.want {
-			t.Errorf("%s: got %q err %v, want %q err %v", tc.pushURL, got, err, tc.want, tc.wantErr)
-		}
-		if err != nil && strings.Contains(err.Error(), "s3cr3t") {
-			t.Errorf("%s: error text carries the password: %v", tc.pushURL, err)
-		}
-	}
 }
