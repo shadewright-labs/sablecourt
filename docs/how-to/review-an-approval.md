@@ -24,7 +24,7 @@ Look at a pending approval, check what it pins, and approve or deny it. Approvin
    sablectl approval list --json
    ```
 
-   Check `Capability`, `WorkloadName`, and `PayloadCanonicalJSON`. The dialog shows only the first 220 characters of that payload, so read long fields here.
+   Check `Capability`, `WorkloadName`, and `PayloadCanonicalJSON`. The dialog shows the target fields and the full digest, but shortens free text, so read long fields here.
 
 3. Approve, pinning the digest you read:
 
@@ -54,13 +54,14 @@ The web UI does the same from the dashboard: each pending approval has Approve a
 
 | Message | Meaning |
 | --- | --- |
+| `required flag(s) "digest" not set`, or `expected payload digest is required` from the API | No digest was passed. Pass `--digest`. |
 | `approval payload digest mismatch` | The digest you passed is not the stored one. List again. |
 | `approval expired` | 15 minutes passed. The workload must ask again. |
 | `out-of-band confirmation denied or cancelled` | You clicked Deny, closed the dialog, or 60 seconds passed. |
 | `conflict` | The approval is no longer pending. |
 | `no out-of-band approver configured` | The daemon runs without one (Citadel mode). |
 
-An approved action can be repeated by the same task until its lease ends; approving once is permission for that exact payload, not for one run. See [approvals](../how-it-works/approvals.md#known-gaps).
+An approval is used once: the workload's next call with it spends it, and a retry after a failed action needs a new approval. See [approvals](../how-it-works/approvals.md).
 
 ## Related
 

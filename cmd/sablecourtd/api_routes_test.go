@@ -159,13 +159,17 @@ func TestAPIApproveRefusalsAndPinnedApproval(t *testing.T) {
 			http.StatusConflict, "no out-of-band approver configured", domain.ApprovalPending, ""},
 		{"pinned digest differs", daemonApprover{}, func(domain.Approval) string { return `{"expectedSha256":"` + strings.Repeat("ab", 32) + `"}` },
 			http.StatusConflict, approval.ErrDigestMismatch.Error(), domain.ApprovalPending, ""},
-		{"approver confirms another digest", daemonApprover{digest: strings.Repeat("cd", 32)}, func(domain.Approval) string { return `{}` },
+		{"no expected digest", daemonApprover{}, func(domain.Approval) string { return `{}` },
+			http.StatusConflict, approval.ErrDigestRequired.Error(), domain.ApprovalPending, ""},
+		{"approver confirms another digest", daemonApprover{digest: strings.Repeat("cd", 32)}, func(a domain.Approval) string { return `{"expectedSha256":"` + a.PayloadSHA256 + `"}` },
 			http.StatusConflict, approval.ErrDigestMismatch.Error(), domain.ApprovalPending, ""},
-		{"operator declines dialog", daemonApprover{err: errors.New("dialog cancelled")}, func(domain.Approval) string { return `{}` },
+		{"operator declines dialog", daemonApprover{err: errors.New("dialog cancelled")}, func(a domain.Approval) string { return `{"expectedSha256":"` + a.PayloadSHA256 + `"}` },
 			http.StatusConflict, approval.ErrNotConfirmed.Error() + ": dialog cancelled", domain.ApprovalPending, ""},
 		{"approved with default decider", daemonApprover{}, func(a domain.Approval) string { return `{"expectedSha256":"` + a.PayloadSHA256 + `"}` },
 			http.StatusOK, "", domain.ApprovalApproved, "operator"},
-		{"approved with named decider", daemonApprover{}, func(domain.Approval) string { return `{"decidedBy":"alice"}` },
+		{"approved with named decider", daemonApprover{}, func(a domain.Approval) string {
+			return `{"expectedSha256":"` + a.PayloadSHA256 + `","decidedBy":"alice"}`
+		},
 			http.StatusOK, "", domain.ApprovalApproved, "alice"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,10 +192,11 @@ func TestAPIApproveRefusalsAndPinnedApproval(t *testing.T) {
 	t.Run("second approval conflicts", func(t *testing.T) {
 		env := newAPIEnv(t, apiEnvConfig{approver: daemonApprover{}})
 		apr := env.seedApproval(t)
-		if rec := apiCall(env.h, http.MethodPost, "/api/v1/approvals/"+apr.ID+"/approve", `{}`); rec.Code != http.StatusOK {
+		body := `{"expectedSha256":"` + apr.PayloadSHA256 + `"}`
+		if rec := apiCall(env.h, http.MethodPost, "/api/v1/approvals/"+apr.ID+"/approve", body); rec.Code != http.StatusOK {
 			t.Fatalf("first approval %d", rec.Code)
 		}
-		rec := apiCall(env.h, http.MethodPost, "/api/v1/approvals/"+apr.ID+"/approve", `{}`)
+		rec := apiCall(env.h, http.MethodPost, "/api/v1/approvals/"+apr.ID+"/approve", body)
 		if rec.Code != http.StatusConflict || apiError(t, rec) != store.ErrConflict.Error() {
 			t.Fatalf("second approval %d %s", rec.Code, rec.Body.String())
 		}
@@ -244,7 +249,7 @@ func TestAPIDeviceSignedApproval(t *testing.T) {
 				}
 			}
 			apr := env.seedApproval(t)
-			body, _ := json.Marshal(map[string]string{"deviceId": tc.device, "signature": tc.sig(apr)})
+			body, _ := json.Marshal(map[string]string{"deviceId": tc.device, "signature": tc.sig(apr), "expectedSha256": apr.PayloadSHA256})
 			rec := apiCall(env.h, http.MethodPost, "/api/v1/approvals/"+apr.ID+"/approve", string(body))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
