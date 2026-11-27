@@ -55,9 +55,24 @@ type Adapter struct {
 	discoverSocket func() string
 }
 
-// remoteEngine refuses a harness launch on an engine that is not reached over
-// a local Unix socket. The mount rule compares host file identities, which
-// say nothing about the files of a remote engine (tcp://, ssh://).
+// errRemoteEngine is the refusal of an engine not reached over a local Unix socket.
+var errRemoteEngine = errors.New("Sablecourt creates containers only on a local Docker engine; a remote engine (tcp:// or ssh://) is refused")
+
+// createContainer is the only place the adapter asks the engine to create a
+// container (a test holds every other function to it). It refuses a remote
+// engine first, so no harness, login probe, socket probe, proxy, tool install
+// or workload container is created on one, whichever entry point asks.
+func (a *Adapter) createContainer(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	if err := a.remoteEngine(); err != nil {
+		return client.ContainerCreateResult{}, err
+	}
+	return a.Client.ContainerCreate(ctx, o)
+}
+
+// remoteEngine refuses an engine that is not reached over a local Unix
+// socket. The mount rule compares host file identities, which say nothing
+// about the files of a remote engine (tcp://, ssh://). harnessContainerSpec
+// also calls it, to refuse a harness launch before resolving any mount.
 func (a *Adapter) remoteEngine() error {
 	hosts := []string{os.Getenv("DOCKER_HOST")}
 	if c, ok := a.Client.(interface{ DaemonHost() string }); ok {
@@ -69,7 +84,7 @@ func (a *Adapter) remoteEngine() error {
 		}
 		u, err := client.ParseHostURL(host)
 		if err != nil || u.Scheme != "unix" {
-			return errors.New("harness containers need a local Docker engine; a remote engine (tcp:// or ssh://) is refused")
+			return errRemoteEngine
 		}
 	}
 	return nil
@@ -318,7 +333,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		},
 	}
 
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.createContainer(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-" + spec.TaskID,
 		Config: &container.Config{
 			Image:     image.ID,

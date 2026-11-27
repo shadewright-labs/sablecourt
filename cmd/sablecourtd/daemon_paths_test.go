@@ -85,6 +85,15 @@ func TestDaemonStartRefusesDaemonFilesUnderWorktreeRoot(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runDaemon = %v, want an error containing %q", err, tc.want)
 			}
+			// A refused start creates neither the secret file nor the database.
+			for _, path := range []string{cfg.secretFile, filepath.Join(dbDir, "sablecourt.db")} {
+				if path == "" {
+					continue
+				}
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("refused start left %s behind: %v", filepath.Base(path), err)
+				}
+			}
 		})
 	}
 }

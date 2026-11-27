@@ -374,11 +374,6 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if secretFile, err = hostpath.ResolveFile(secretFile); err != nil {
 		return fmt.Errorf("resolve secret file path: %w", err)
 	}
-	if secretFile != "" {
-		if _, err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
-			return fmt.Errorf("create secret file: %w", err)
-		}
-	}
 	privateDirs := daemonPrivatePaths(dir, dbPath, secretFile)
 	// The worktree root is opened once. Checkouts the daemon makes are
 	// mounted only when reached through this handle, so none of the daemon's
@@ -391,6 +386,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		defer worktrees.Close() //nolint:errcheck // directory handle; closing it finalizes no write
 		if err := worktrees.RefuseInside(dbPath, secretFile, dir); err != nil {
 			return fmt.Errorf("daemon files under the worktree root: %w", err)
+		}
+	}
+	// The secret file is created only after the refusal above, so a refused
+	// start leaves no file inside the worktree root.
+	if secretFile != "" {
+		if _, err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
+			return fmt.Errorf("create secret file: %w", err)
 		}
 	}
 	mounts := &mountguard.Guard{Root: worktrees, Protected: privateDirs}

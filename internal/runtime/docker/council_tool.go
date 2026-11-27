@@ -209,7 +209,7 @@ func (a *Adapter) InstallCouncilTool(parent context.Context, harness string, bin
 		return err
 	}
 	pids := toolInstallPIDs
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.createContainer(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-tool-install-" + harness + "-" + strings.ToLower(rand.Text()[:10]),
 		Config: &container.Config{
 			Image:       imageID,

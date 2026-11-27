@@ -209,7 +209,7 @@ func (a *Adapter) probeLogin(parent context.Context, engine councilEngineAPI, im
 		opts.Config.Cmd = append([]string{"-c", toolProbeScript, "probe", councilToolDir + "/" + cfg.Tool.Binary, cfg.Tool.Version, cfg.Tool.SHA256}, cfg.LoginFiles...)
 		opts.HostConfig.Mounts = append(opts.HostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
-	created, err := a.Client.ContainerCreate(ctx, opts)
+	created, err := a.createContainer(ctx, opts)
 	if err != nil {
 		return false, fmt.Errorf("create login probe: %w", err)
 	}

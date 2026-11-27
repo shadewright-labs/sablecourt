@@ -85,7 +85,7 @@ The tables in this section and the Environment variable column of the voice tabl
 | `SABLECOURT_OPERATOR_TOKEN` | `sablectl` | The operator token. Without it, `sablectl` reads `operator.token` from the state directory when the daemon is local. Sent only over HTTPS or to a local daemon. There is no matching flag. |
 | `SABLECOURT_GITHUB_CLIENT_ID` | `sablectl` | Same as `auth github --client-id` (parked). |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
-| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. |
+| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. It must be a local `unix://` socket: on a `tcp://` or `ssh://` engine no container is created. |
 | `SABLECOURT_NOTIFY_WEBHOOK_URL` | `sablecourtd` | Chat alert webhook, used when the `notify_webhook_url` secret is not set (parked). |
 
 Some names are read only to copy them into the environment of a program the daemon or `sablectl` starts. Writable Git commands in `internal/runtime/coding/git.go` get the whole environment without the `GIT_*` variables. The table lists only names copied one by one; a child process started without an explicit environment inherits the whole one, and that is not listed.
