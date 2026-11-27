@@ -17,7 +17,7 @@ Every decision that fixes a runtime boundary, protocol contract, security invari
 | [ADR-0007](0007-strict-boundary-with-nightloom.md) | Strict separation from Nightloom | Accepted | 2026-11-22 |
 | [ADR-0008](0008-conclaves-wards-and-live-attach.md) | Multi-agent Conclaves, Wards, Decrees, Relics, and live Scry/Takeover | Accepted | 2026-11-23 |
 | [ADR-0009](0009-sanctum-citadel-audit-chain-and-crypto-approvals.md) | Sanctum and Citadel modes, audit hash chain, and cryptographic approvals | Accepted | 2026-11-23 |
-| [ADR-0010](0010-agentic-context-learnings-and-verification-pipeline.md) | Agentic context assembly, scoped learnings, and verification pipeline | Accepted | 2026-11-24 |
+| [ADR-0010](0010-agentic-context-learnings-and-verification-pipeline.md) | Agentic context assembly, scoped learnings, and verification pipeline | Accepted; amendment of 2026-11-27 Proposed | 2026-11-24 |
 | [ADR-0011](0011-sanctum-scope-trust-and-cli-harnesses.md) | Sanctum scope, trust, and CLI harnesses | Accepted | 2026-11-24 |
 | [ADR-0012](0012-learning-evidence-and-expiry.md) | Learning evidence, scope, and expiry | Accepted | 2026-11-24 |
 | [ADR-0013](0013-bounded-council-rounds.md) | Bounded council rounds in Conclaves | Accepted | 2026-11-24 |
