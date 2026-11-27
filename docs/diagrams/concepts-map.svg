@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 636" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Sablecourt concept map</title>
-  <desc id="d">YAML manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule and Conclave) are loaded and validated by the sablecourtd control plane. Operators reach the control plane from sablectl and the web UI with an operator token or session cookie. Inside the sablecourtd process sit both the control plane (reconciler, scheduler and Conclave broker) and the gates (Model Gate, MCP Gate and Approval Queue). Both the control plane and the gates record state and audit rows to the Store, which holds the SHA-256 audit chain in SQLite WAL (with PostgreSQL parked). The control plane mints a short-lived task lease and launches workloads through the runtimes (host coding run in macOS Seatbelt, Docker workload, deterministic controller and council harness containers), and workloads call the gates with that lease.</desc>
+  <desc id="d">YAML manifests of six kinds (Workload, Policy, Budget, Workflow, Schedule and Conclave) are loaded and validated by the sablecourtd control plane. Operators reach the control plane from sablectl and the web UI with an operator token or session cookie. Inside the sablecourtd process sit both the control plane (reconciler, scheduler and Conclave broker) and the gates (Model Gate, MCP Gate and Approval Queue). Both the control plane and the gates record state and audit rows to the Store, which holds the SHA-256 audit chain in SQLite WAL (with PostgreSQL parked). The control plane mints a short-lived task lease and launches workloads through the runtimes (harness containers for coding runs and council turns, Docker workload and deterministic controller), and workloads call the gates with that lease.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -69,8 +69,8 @@
   <text class="lanet" x="44" y="488">WORKLOADS</text>
   <rect class="box" x="336" y="508" width="680" height="84" rx="10"/>
   <text class="h" x="352" y="536">Runtimes</text>
-  <text class="s" x="352" y="558">host coding run (macOS Seatbelt), Docker workload, deterministic controller</text>
-  <text class="s" x="352" y="576">council harness container uses its own subscription login</text>
+  <text class="s" x="352" y="558">harness container (coding, council), Docker workload, deterministic controller</text>
+  <text class="s" x="352" y="576">harness container uses its own subscription login</text>
 
   <path class="f" d="M220 148V282" marker-end="url(#a)"/>
   <text class="lbl" x="232" y="206">loaded and validated</text>

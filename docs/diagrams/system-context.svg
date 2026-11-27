@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1112" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Sablecourt system context</title>
-  <desc id="d">Three callers reach the sablecourtd control plane: sablectl and the web UI submit, steer and approve; Shadewright sends incidents and verifications with a scoped token; Nightloom sends read-only requests with an observer token. The control plane, the Model Gate, the MCP Gate and the Approval Queue all run inside the sablecourtd process. The control plane records to the store, which holds the audit chain, and a dashed box lists the parts parked by ADR-0011: Citadel mode, the Kubernetes runtime, PostgreSQL, A2A and the GitHub webhook. The control plane launches three kinds of workload, each with a task lease: a Docker workload, a host coding run and a harness container for one council turn. The Docker workload calls the Model Gate for inference and the MCP Gate for tools. The host coding run calls the MCP Gate. The harness container reaches the MCP Gate through its proxy and reaches only its provider hosts for login and inference, outside the Model Gate. The Model Gate forwards to the model providers with the provider key. The MCP Gate sends actions that policy marks approve to the Approval Queue, which waits for a person, and opens pull requests on the Git host.</desc>
+  <desc id="d">Three callers reach the sablecourtd control plane: sablectl and the web UI submit, steer and approve; Shadewright sends incidents and verifications with a scoped token; Nightloom sends read-only requests with an observer token. The control plane, the Model Gate, the MCP Gate and the Approval Queue all run inside the sablecourtd process. The control plane records to the store, which holds the audit chain, and a dashed box lists the parts parked by ADR-0011: Citadel mode, the Kubernetes runtime, PostgreSQL, A2A and the GitHub webhook. The control plane launches two kinds of workload, each with a task lease: a Docker workload and a harness container for a coding task or a council turn. The Docker workload calls the Model Gate for inference and the MCP Gate for tools. The harness container reaches the MCP Gate for tools through its proxy and reaches only its provider hosts for login and inference, outside the Model Gate. The Model Gate forwards to the model providers with the provider key. The MCP Gate sends actions that policy marks approve to the Approval Queue, which waits for a person, and opens pull requests on the Git host.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -67,12 +67,9 @@
   <rect class="box" x="44" y="506" width="346" height="64" rx="10"/>
   <text class="h" x="60" y="532">Docker workload</text>
   <text class="s" x="60" y="553">long-lived agent or controller</text>
-  <rect class="box" x="430" y="506" width="210" height="64" rx="10"/>
-  <text class="h" x="446" y="532">Host coding run</text>
-  <text class="s" x="446" y="553">CLI harness in Seatbelt</text>
-  <rect class="box" x="670" y="506" width="210" height="64" rx="10"/>
-  <text class="h" x="686" y="532">Harness container</text>
-  <text class="s" x="686" y="553">council turn, internal net</text>
+  <rect class="box" x="580" y="506" width="300" height="64" rx="10"/>
+  <text class="h" x="596" y="532">Harness container</text>
+  <text class="s" x="596" y="553">coding task or council turn, internal net</text>
 
   <rect class="lane" x="24" y="624" width="1232" height="246" rx="14"/>
   <text class="lanet" x="44" y="654">GATES</text>
@@ -112,19 +109,15 @@
 
   <path class="f" d="M217 400V506" marker-end="url(#a)"/>
   <text class="lbl" x="229" y="440">launches with a lease</text>
-  <path class="f" d="M535 400V506" marker-end="url(#a)"/>
-  <text class="lbl" x="547" y="440">launches</text>
-  <path class="f" d="M775 400V506" marker-end="url(#a)"/>
-  <text class="lbl" x="787" y="440">launches</text>
+  <path class="f" d="M690 400V506" marker-end="url(#a)"/>
+  <text class="lbl" x="702" y="440">launches</text>
 
   <path class="f" d="M149 570V678" marker-end="url(#a)"/>
   <text class="lbl" x="161" y="612">inference</text>
   <path class="f" d="M340 570V678" marker-end="url(#a)"/>
   <text class="lbl" x="352" y="612">tools</text>
-  <path class="f" d="M535 570V678" marker-end="url(#a)"/>
-  <text class="lbl" x="547" y="612">tools</text>
-  <path class="f" d="M690 570V678" marker-end="url(#a)"/>
-  <text class="lbl" x="702" y="612">via proxy</text>
+  <path class="f" d="M640 570V678" marker-end="url(#a)"/>
+  <text class="lbl" x="652" y="612">tools via proxy</text>
   <path class="f" d="M820 570V952" marker-end="url(#a)"/>
   <text class="lbl" x="832" y="800">own login, via proxy</text>
 
