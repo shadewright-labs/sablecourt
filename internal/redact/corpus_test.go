@@ -1433,36 +1433,45 @@ func TestCorpusMustKeep(t *testing.T) {
 	}
 }
 
-func TestCorpusKnownGaps(t *testing.T) {
-	// Pin each documented known gap so that fixing one turns this test red
-	// and prompts moving the row into TestCorpusMustHide.
-	gaps := []struct {
-		name         string
-		input        string
-		leakedSubstr string
-		reason       string
-	}{
+type corpusGapRow struct {
+	// gap is the key of the knownGapDocs entry this row pins.
+	gap          string
+	name         string
+	input        string
+	leakedSubstr string
+	reason       string
+}
+
+func corpusKnownGapRows() []corpusGapRow {
+	return []corpusGapRow{
 		{
+			gap:          "unlabelled-hex",
 			name:         "unlabelled opaque hex secret",
 			input:        "deploy " + joinParts("9f8e7d6c5b4a39281716", "05f4e3d2c1b0a9876543"),
 			leakedSubstr: "9f8e7d6c5b4a39281716",
 			reason:       "unlabelled high-entropy strings are indistinguishable from git SHAs, UUIDs, and base64 image data without unacceptable over-redaction",
 		},
 		{
+			gap:          "token-split-by-space",
 			name:         "provider token split by ascii whitespace",
 			input:        "val=" + joinParts("ghp_", "0123456789", " ", "abcdefghij", "klmnopqrst"),
 			leakedSubstr: "abcdefghij",
 			reason:       "matching across spaces after a short token prefix would redact ordinary words that follow it",
 		},
 		{
+			gap:          "url-password-at-and-slash",
 			name:         "url password containing both at sign and slash",
 			input:        "postgres://app:p@ss/word@example.com",
 			leakedSubstr: "ss/word",
 			reason:       "when @ appears both before and after /, the first @host segment is indistinguishable from a real host followed by an email in the path",
 		},
 	}
+}
 
-	for _, tc := range gaps {
+func TestCorpusKnownGaps(t *testing.T) {
+	// Pin each documented known gap so that fixing one turns this test red
+	// and prompts moving the row into TestCorpusMustHide.
+	for _, tc := range corpusKnownGapRows() {
 		t.Run(tc.name, func(t *testing.T) {
 			got := String(tc.input)
 			if !strings.Contains(got, tc.leakedSubstr) {

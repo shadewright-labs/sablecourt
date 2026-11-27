@@ -53,7 +53,7 @@ The table below is generated from test cases in `internal/redact/examples_doc_te
 | Non-secret kept | `region: europe-west4` | `region: europe-west4` |
 | Status prose kept | `Authorization: skipping verification` | `Authorization: skipping verification` |
 | Known gap: key synonym leaks | `SECRET_KEY_BASE=<value>` | `SECRET_KEY_BASE=<value>` |
-| Known gap: value starting with ( leaks | `password=(<value>)` | `password=(<value>)` |
+| Value in parentheses | `password=(...)` | `password=[REDACTED:secret]` |
 | Known gap: logfmt auth header leaks | `authorization=Bearer <value>` | `authorization=Bearer <value>` |
 | Known gap: scheme-less Authorization leaks | `Authorization: <value>` | `Authorization: <value>` |
 | Known gap: short unquoted value leaks | `password=abc12` | `password=abc12` |
@@ -66,11 +66,13 @@ The table below is generated from test cases in `internal/redact/examples_doc_te
 
 ### Known redaction gaps
 
-These fourteen gaps are known and accepted today:
+These gaps are known and accepted today. The list is generated from the rows that pin them in `internal/redact` (`TestKnownGaps` and `TestCorpusKnownGaps`), and `TestKnownGapsDoc` fails when the list and the pinned rows differ.
+
+<!-- redact-gaps:start -->
 
 1. Key synonyms are not redacted: `SECRET_KEY_BASE=...`, `ENCRYPTION_KEY=...` and `master_key: ...` keep their value.
 2. A no-break space (U+00A0) between key and value is not a separator, so `password:` followed by a no-break space and a value keeps the value.
-3. A value that starts with `(`, `&` or `<` is not redacted: `password=(value)`, `password=&value` and `password=<value` keep it.
+3. An unquoted value stops at `&`, which reads as the start of the next query parameter: `password=&value` keeps the value, and so does `password=abc&value`, because `abc` is shorter than six characters.
 4. Double-escaped JSON, a JSON document embedded in a JSON string so that its quotes are escaped twice, keeps its secret fields.
 5. A `Cookie` header folded onto a continuation line (`Cookie:` then a line break) keeps its value.
 6. Logfmt pairs with `=` instead of `:` are not header matches: `authorization=Bearer ...` and `cookie="sid=..."` keep their value.
@@ -78,12 +80,22 @@ These fourteen gaps are known and accepted today:
 8. `curl --proxy-user user:value` and the cookie flags `-b` and `--cookie` keep their value.
 9. An unquoted value is redacted only up to its first whitespace, and only when it is six or more characters, so later words of a passphrase and short values stay.
 10. When a secret value contains a token that is redacted first, the text after the marker stays: `password=<value>-<aws key>xyz` ends in `[REDACTED:aws_access_key]xyz`.
-11. Variable references and secret names are over-redacted: `password: ${DB_PASSWORD}`, `token=$API_TOKEN`, `Authorization: Bearer $API_TOKEN` and `existingSecret: postgres-secret` lose their text.
-12. A GitHub token split by a line break can leak: with 20 characters after the prefix before a CRLF, the tail after the break stays; with only the prefix before the break, the characters after it stay.
-13. A quoted value that is cut short or spans lines can leak: an unterminated `password="abc12` keeps `abc12`, and a multiline double-quoted value stops at a continuation line that holds `:` or `=` (`password="abc`, a new line, `def:ghi"` keeps `ghi`).
-14. A key name that ends in `-tokens` is treated like `tokens`, so `max-tokens=123456` loses its value.
+11. A GitHub token split by a line break can leak: with 20 characters after the prefix before a CRLF, the tail after the break stays; with only the prefix before the break, the characters after it stay.
+12. A quoted value that is cut short or spans lines can leak: an unterminated `password="abc12` keeps `abc12`, and a multiline double-quoted value stops at a continuation line that holds `:` or `=` (`password="abc`, a new line, `def:ghi"` keeps `ghi`).
+13. A line break between key and separator (`password`, a new line, `= value`) or after the separator keeps the value when the key does not start a YAML line: `password=`, `x secret :` or `{"password":`, then the value on the next line. A YAML value on the line after a `password:` line is redacted.
+14. After a `:` separator, a lowercase word of up to 15 letters that ends like a status word (`-ed`, `-ing`, `-tion`, `-sion`, `-ment`, `-ness`, `-able`, `-ible`) is read as log prose and kept: `password: dragonslaying` keeps its value.
+15. An unquoted value shaped like a function call is kept: in `f(password=Xy9(value)` the value reads as a call to `Xy9`.
+16. An unquoted value shaped like a file path (starting with `/`, `./`, `../` or `~/`, with short path segments) is kept: `password=/x9/value` keeps it.
+17. A provider token split by a space leaks the part after the space: only the characters before the space match the token shape.
+18. A URL password that holds both `@` and `/` leaks its tail: in `postgres://app:p@ss/word@example.com` the text from the first `@` on reads as a host and a path.
+19. An unlabelled opaque hex string (`deploy <40 hex characters>`) is kept, because it cannot be told apart from a Git SHA, a UUID or image data.
+20. In a `{` or `[` collection that spans lines, a line indented no deeper than the line that opened it ends the collection unless it starts with `}`, `]` or `,`, so an item on such a line keeps its value. This keeps an unclosed collection from hiding the rest of the output.
+21. Redaction is not always idempotent when invalid UTF-8 or NUL bytes sit next to quotes: redacting the output again can redact more of it (`seCret:'[REDACTED:secret]'`, an invalid byte and `'` lose the text after the marker). No secret text comes back.
+22. A key name that ends in `-tokens` is treated like `tokens`, so `max-tokens=123456` loses its value.
+23. Variable references and secret names are over-redacted: `password: ${DB_PASSWORD}`, `token=$API_TOKEN`, `Authorization: Bearer $API_TOKEN` and `existingSecret: postgres-secret` lose their text.
+24. Go short assignments from an expression are over-redacted in diffs and source: `password := cfg.Password` loses `cfg.Password`.
 
-The test `TestKnownGaps` in `internal/redact` pins each of these as today's behaviour.
+<!-- redact-gaps:end -->
 
 ## Audit rows
 

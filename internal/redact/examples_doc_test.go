@@ -105,11 +105,10 @@ func redactionDocExamples() ([]docExample, []string) {
 			displayWant:  "SECRET_KEY_BASE=<value>",
 		},
 		{
-			label:        "Known gap: value starting with ( leaks",
+			label:        "Value in parentheses",
 			input:        "password=(" + secret + ")",
-			want:         "password=(" + secret + ")",
-			displayInput: "password=(<value>)",
-			displayWant:  "password=(<value>)",
+			want:         "password=[REDACTED:secret]",
+			displayInput: "password=(...)",
 		},
 		{
 			label:        "Known gap: logfmt auth header leaks",

@@ -551,8 +551,18 @@ func applySpans(out string, spans []span, pos []int, marker string, stats *scanS
 		if origStart >= origEnd {
 			continue
 		}
-		if isMarker(out[origStart:origEnd]) {
+		if isMarkersOnly(out[origStart:origEnd]) {
 			continue
+		}
+		if pos != nil {
+			// Take in the stripped bytes just before the span, so that they
+			// are not left as a separate value for the next rule to redact
+			// again (two adjacent markers that a second pass would merge).
+			if sp.start > 0 {
+				origStart = pos[sp.start-1] + 1
+			} else {
+				origStart = 0
+			}
 		}
 		if n := len(merged); n > 0 && origStart < merged[n-1].end {
 			if origEnd > merged[n-1].end {
@@ -579,6 +589,34 @@ func applySpans(out string, spans []span, pos []int, marker string, stats *scanS
 
 func isMarker(s string) bool {
 	return matchMarkerPrefix(s, 0) == len(s) && len(s) > 0
+}
+
+// isMarkersOnly reports whether s holds at least one redaction marker and
+// otherwise only whitespace and bytes that stripNoise removes. Such a span has
+// nothing left to redact; redacting it again would merge markers on a second
+// pass and break idempotence.
+func isMarkersOnly(s string) bool {
+	markers := 0
+	for i := 0; i < len(s); {
+		if end := matchMarkerPrefix(s, i); end > i {
+			markers++
+			i = end
+			continue
+		}
+		switch b := s[i]; {
+		case b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == 0:
+			i++
+			continue
+		case b < 0x80:
+			return false
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError && !unicode.Is(unicode.Cf, r) {
+			return false
+		}
+		i += size
+	}
+	return markers > 0
 }
 
 // matchMarkerPrefix returns the end index if s[pos:] begins with "[REDACTED]" or
@@ -1788,7 +1826,7 @@ func (st *yamlScanState) processLine(line string, lineAbsStart int, spans *[]spa
 			if st.headerJustOpened && !yamlKeyLineRe.MatchString(line) && !yamlListItemRe.MatchString(line) {
 				valEnd := trimRightSpaceIndex(line, contentOffset, contentEnd)
 				val := line[contentOffset:valEnd]
-				if val != "" && !isMarker(val) && !isYAMLNonSecretScalar(val) {
+				if val != "" && !isMarkedValue(val) && !isYAMLNonSecretScalar(val) && !isRedactedKVLine(val) {
 					if sp, ok := yamlValueSpan(lineAbsStart+contentOffset, val, st.escapedJSON); ok {
 						*spans = append(*spans, sp)
 					}
@@ -1836,7 +1874,7 @@ func (st *yamlScanState) processLine(line string, lineAbsStart int, spans *[]spa
 
 	// Inside a nested secret YAML block (indent > secretIndent).
 	trimmedEnd := trimRightSpaceIndex(line, contentOffset, contentEnd)
-	if isMarker(line[contentOffset:trimmedEnd]) {
+	if isMarkedValue(line[contentOffset:trimmedEnd]) {
 		st.flushPlain(spans)
 		return
 	}
@@ -2056,13 +2094,28 @@ func scanFlowCollection(s string, openPos int, spans *[]span, stats *scanStats) 
 		return openPos
 	}
 	stack := []flowFrame{{delim: s[openPos], expectKey: s[openPos] == '{'}}
+	openerIndent := -1
 	i := openPos + 1
 	for i < len(s) && len(stack) > 0 {
 		if stats != nil {
 			stats.scannerSteps++
 		}
 		b := s[i]
-		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+		if b == '\r' || b == '\n' {
+			// A collection that is never closed must not swallow the rest of
+			// the input (a stack trace after "tokens: {"). The collection ends
+			// at a line that is indented no deeper than the line that opened
+			// it, unless that line closes a collection or continues a list.
+			if openerIndent < 0 {
+				openerIndent = lineIndentAt(s, openPos, stats)
+			}
+			if flowEndsBeforeLine(s, i, openerIndent, stats) {
+				return i
+			}
+			i++
+			continue
+		}
+		if b == ' ' || b == '\t' {
 			i++
 			continue
 		}
@@ -2136,6 +2189,52 @@ func scanFlowCollection(s string, openPos int, spans *[]span, stats *scanStats) 
 	return i
 }
 
+// lineIndentAt returns the number of leading spaces and tabs on the line that
+// holds s[pos].
+func lineIndentAt(s string, pos int, stats *scanStats) int {
+	start := pos
+	for start > 0 && s[start-1] != '\n' && s[start-1] != '\r' {
+		if stats != nil {
+			stats.scannerSteps++
+		}
+		start--
+	}
+	n := 0
+	for start+n < len(s) && (s[start+n] == ' ' || s[start+n] == '\t') {
+		n++
+	}
+	return n
+}
+
+// flowEndsBeforeLine reports whether the line after the line break at s[nl]
+// ends an open flow collection: it is not blank, it is indented no deeper
+// than openerIndent, and it does not start with '}', ']' or ','.
+func flowEndsBeforeLine(s string, nl, openerIndent int, stats *scanStats) bool {
+	j := nl + 1
+	if s[nl] == '\r' && j < len(s) && s[j] == '\n' {
+		j++
+	}
+	n := 0
+	for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+		if stats != nil {
+			stats.scannerSteps++
+		}
+		j++
+		n++
+	}
+	if j >= len(s) || s[j] == '\r' || s[j] == '\n' {
+		return false
+	}
+	if n > openerIndent {
+		return false
+	}
+	switch s[j] {
+	case '}', ']', ',':
+		return false
+	}
+	return true
+}
+
 func scanQuotedLiteral(s string, start int, quote byte, stats *scanStats) int {
 	i := start + 1
 	for i < len(s) {
@@ -2190,9 +2289,11 @@ func findKVSpans(s string, stats *scanStats) []span {
 
 		first := s[valStart]
 		// Do not mistake the closing quote of `"password:"` (e.g. `grep "password:" file`)
-		// for the opening quote of a secret value.
+		// for the opening quote of a secret value. The quote closes the key only
+		// when no value text follows it (`"api_key="value"` is still a value).
 		if bareKey && loc[0] > 0 && (first == '"' || first == '\'') && s[loc[0]-1] == first &&
-			len(sep) > 0 && (sep[len(sep)-1] == ':' || sep[len(sep)-1] == '=') {
+			len(sep) > 0 && (sep[len(sep)-1] == ':' || sep[len(sep)-1] == '=') &&
+			(valStart+1 >= len(s) || closesQuotedKey(s[valStart+1])) {
 			continue
 		}
 
@@ -2244,14 +2345,29 @@ func findKVSpans(s string, stats *scanStats) []span {
 			continue
 		}
 
+		// A value that opens with '(' or '<' is a secret unless it is a
+		// placeholder such as (none) or <redacted>, or a call such as
+		// (os.getenv("X")).
+		if first == '(' || first == '<' {
+			end := scanBracketedValueEnd(s, valStart, stats)
+			cursor = end
+			end = trimUnquotedKVTrailing(s, valStart, end)
+			if end-valStart >= 6 && !isBracketPlaceholder(s[valStart:end]) &&
+				!(first == '(' && isParenthesizedCall(s, valStart, end, stats)) {
+				spans = append(spans, span{start: valStart, end: end})
+			}
+			continue
+		}
+
 		if first == ' ' || first == '\t' || first == '\r' || first == '\n' ||
-			first == '{' || first == '[' || first == '(' || first == '<' ||
+			first == '{' || first == '[' ||
 			first == ',' || first == ';' || first == '&' {
 			continue
 		}
 
 		valEnd := valStart
 		skippedCall := false
+		parenSeen := false
 		for valEnd < len(s) {
 			if stats != nil {
 				stats.scannerSteps++
@@ -2270,7 +2386,15 @@ func findKVSpans(s string, stats *scanStats) []span {
 			if (b == ',' || b == ';') && startsNextKV(s, valEnd+1) {
 				break
 			}
-			if b == '(' && isCodeCallAt(s, valStart, valEnd) {
+			// Only the first '(' can open a call: for any later one the name
+			// before it already holds a '(' and isCodeCallAt is false. Checking
+			// once keeps the scan linear on values like "a...a(((...".
+			if b == '(' && !parenSeen {
+				parenSeen = true
+				if !isCodeCallAt(s, valStart, valEnd, stats) {
+					valEnd++
+					continue
+				}
 				// Advance past '(' so any secret inside call arguments is still scanned.
 				cursor = valEnd + 1
 				skippedCall = true
@@ -2302,6 +2426,69 @@ func findKVSpans(s string, stats *scanStats) []span {
 		spans = append(spans, span{start: valStart, end: valEnd})
 	}
 	return spans
+}
+
+// closesQuotedKey reports whether b, the byte after a quote that follows a
+// key and its separator, ends that quoted string (as in `grep "password:" f`).
+func closesQuotedKey(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n', ',', ';', ')', ']', '}', '"', '\'':
+		return true
+	}
+	return false
+}
+
+// scanBracketedValueEnd returns the end of an unquoted value that starts with
+// '(' or '<'. It stops at whitespace, a quote, '&' or a redaction marker.
+func scanBracketedValueEnd(s string, start int, stats *scanStats) int {
+	i := start
+	for i < len(s) {
+		if stats != nil {
+			stats.scannerSteps++
+		}
+		if i > start && matchMarkerPrefix(s, i) > i {
+			break
+		}
+		b := s[i]
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == '"' || b == '\'' || b == '&' {
+			break
+		}
+		if b == 0xc2 && i+1 < len(s) && s[i+1] == 0xa0 {
+			break
+		}
+		i++
+	}
+	return i
+}
+
+// isBracketPlaceholder reports whether val is a whole (word) or <word> made of
+// letters, '-', '_' and '.', such as (none), <redacted> or <YOUR_API_KEY>.
+func isBracketPlaceholder(val string) bool {
+	if len(val) < 3 {
+		return false
+	}
+	open, closing := val[0], val[len(val)-1]
+	if !(open == '(' && closing == ')') && !(open == '<' && closing == '>') {
+		return false
+	}
+	for i := 1; i < len(val)-1; i++ {
+		b := val[i]
+		if !isASCIIAlpha(b) && b != '-' && b != '_' && b != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// isParenthesizedCall reports whether the value s[start:end], which starts
+// with '(', wraps a call such as (os.getenv("X")).
+func isParenthesizedCall(s string, start, end int, stats *scanStats) bool {
+	inner := start + 1
+	paren := strings.IndexByte(s[inner:end], '(')
+	if paren < 0 {
+		return false
+	}
+	return isCodeCallAt(s, inner, inner+paren, stats)
 }
 
 func scanEscapedJSONStringValue(s string, start int, stats *scanStats) (end int, closed bool) {
@@ -2424,7 +2611,7 @@ func scanSingleQuotedKVValue(s string, start int, stats *scanStats) (end int, cl
 // isCodeCallAt reports whether s[valStart:parenPos] + "(" looks like a function
 // or method call (such as os.Getenv("TOKEN") or getPassword()) rather than a
 // password containing a literal '(' (such as Xy9(kLm2nPq).
-func isCodeCallAt(s string, valStart, parenPos int) bool {
+func isCodeCallAt(s string, valStart, parenPos int, stats *scanStats) bool {
 	if parenPos <= valStart {
 		return false
 	}
@@ -2433,6 +2620,9 @@ func isCodeCallAt(s string, valStart, parenPos int) bool {
 		return false
 	}
 	for i := valStart + 1; i < parenPos; i++ {
+		if stats != nil {
+			stats.scannerSteps++
+		}
 		b := s[i]
 		if !(isASCIIAlpha(b) || (b >= '0' && b <= '9') || b == '_' || b == '.') {
 			return false
@@ -2760,7 +2950,30 @@ func yamlValueSpan(absStart int, val string, escapedJSON bool) (span, bool) {
 			}
 		}
 	}
+	// An unterminated quote before a marker (`"[REDACTED:secret]`) is what an
+	// earlier pass left of a cut quoted value: nothing to redact.
+	if isMarkedValue(val) {
+		return span{}, false
+	}
 	return span{start: absStart, end: absStart + len(val)}, true
+}
+
+// isMarkedValue reports whether val is a marker, or a marker after the
+// opening quote of a quoted value that an earlier pass cut short.
+func isMarkedValue(val string) bool {
+	if isMarker(val) {
+		return true
+	}
+	return len(val) > 1 && (val[0] == '"' || val[0] == '\'') && isMarkersOnly(val[1:])
+}
+
+// isRedactedKVLine reports whether val is a key=value or key: value line
+// whose value an earlier rule already replaced with a marker. Its key holds a
+// ':' or '=' before the marker; the YAML scan reads the same line as a key
+// line before redaction, so it must not redact the whole line afterwards.
+func isRedactedKVLine(val string) bool {
+	m := strings.Index(val, "[REDACTED")
+	return m > 0 && strings.ContainsAny(val[:m], ":=")
 }
 
 func normalizeKeyName(raw string) string {

@@ -269,6 +269,12 @@ func TestNewPatternsLinearGrowth(t *testing.T) {
 			},
 		},
 		{
+			name: "kv long identifier then many open parens",
+			build: func(n int) string {
+				return "password=" + strings.Repeat("a", n/2) + strings.Repeat("(", n/2)
+			},
+		},
+		{
 			name: "N1 kv repeated unclosed double quotes",
 			build: func(n int) string {
 				return strings.Repeat("password=\"abcdef\n", max(1, n/17))
