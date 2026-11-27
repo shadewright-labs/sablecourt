@@ -9,4 +9,4 @@ This file adds to the root AGENTS.md and does not repeat it.
 - Matching stays linear in input size. `TestRedactorLinearGrowth` in `growth_test.go` feeds each corpus class at two sizes 8x apart and fails if the time grows faster than a fixed ratio bound, not against an absolute wall-clock limit. Keep any new growth check relative in the same way.
 - Use only RE2 patterns from the standard library, so no backtracking is possible.
 - Tests are table-driven and pass under `go test -race ./internal/redact/...`.
-- Docs describe rules through examples generated from test rows, never through a list of what they catch (ADR-0015).
+- Do not describe the rules as a guarantee. The known-gap table in the docs is generated from test rows (`known_gaps_doc_test.go`), and docs should show examples from test rows, not extend a list of what the rules catch (ADR-0015).
