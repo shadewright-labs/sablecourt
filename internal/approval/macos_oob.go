@@ -94,7 +94,7 @@ func confirmationMessage(req ConfirmationRequest) string {
 	targets := targetFields[req.Capability]
 	isTarget := func(k string) bool {
 		for _, t := range targets {
-			// The typed decoder matches keys case-insensitively, so every spelling counts.
+			// The payload is the gate's own encoding, whose keys are the exact field names; the case-insensitive match is a safeguard so a key of another case is still shown as a target.
 			if strings.EqualFold(k, t) {
 				return true
 			}
