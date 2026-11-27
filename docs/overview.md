@@ -40,7 +40,7 @@ ADR-0011 stops feature work on the parts below. The code and its tests stay in t
 ## Requirements
 
 - The Go version named in `go.mod`, to build with `make install`.
-- macOS or Linux. The host coding sandbox, used for `coding-agent` workloads outside councils, is macOS Seatbelt only; on Linux the daemon disables the host coding adapter. Host mode is unsupported: the [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only path for 0.1.0, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves coding tasks there.
+- macOS or Linux. The host coding sandbox, used for `coding-agent` workloads outside councils, is macOS Seatbelt only; on Linux the daemon disables the host coding adapter. Host mode is unsupported and off by default: the [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only path for 0.1.0, and coding tasks run there.
 - For councils, a Docker engine at version 28.0 or newer. The per-launch network needs its isolated gateway mode, and the daemon refuses to launch when the engine does not apply it. The harness images are built locally for `linux/arm64`.
 
 ## How it sits next to the other products

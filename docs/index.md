@@ -51,7 +51,7 @@ Each area below carries one of four words:
 | --- | --- | --- | --- |
 | Tasks, reconciler, scheduler, restart recovery | Built | Faults in suspend and resume are tracked in #14 | [tasks](how-it-works/tasks.md) |
 | Task suspend and resume | Partly built | Suspend stops the workload, so resume cannot work (#14) | [tasks](how-it-works/tasks.md) |
-| Host coding runs | Unsupported, still the default today | macOS Seatbelt only, with an empty home directory. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only supported path for 0.1.0; [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves coding tasks onto them | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
+| Host coding runs | Unsupported, off by default | Coding tasks and council seats run only in harness containers; a host run needs `--unsafe-host-harnesses`, no container runtime, and macOS Seatbelt, with an empty home directory. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only supported path for 0.1.0 | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
 | Docker workloads and deterministic controllers | Built | Tracked in #11 | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
 | Kubernetes runtime and `deploy/k8s` | Parked | | [overview](overview.md#parked-parts) |
 | Model Gate | Built | Known faults in #8 | [model gate](how-it-works/model-gate.md) |

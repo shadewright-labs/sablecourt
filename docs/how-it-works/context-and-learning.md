@@ -21,7 +21,7 @@ The flow below shows how a task gets its packet: a deterministic controller outs
 
 Parts 1 to 5 are required and are not cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole and the size is checked again, the pre-check going last because it is stamped with the current time. When the required part leaves room, the packet ends with a marker that older context was omitted. A packet can exceed 32 KiB if the required part does. The required part and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
 
-A deterministic controller outside a council gets no packet, and the controller adapter refuses a model grant for it. Every other task carries the packet in the `context_packet` field of its launch input. The host coding adapter uses it as the harness prompt and, outside a council checkout, also writes it to a session file in the worktree. The built-in `sablecourt-agent` container sends it as the first message to the Model Gate, together with the task history. Docker and Kubernetes workloads receive it in `SABLECOURT_INPUT_JSON` and use it only if their own code reads it.
+A deterministic controller outside a council gets no packet, and the controller adapter refuses a model grant for it. Every other task carries the packet in the `context_packet` field of its launch input. The coding adapter uses it as the harness prompt and, outside a council checkout, also writes it to a session file in the worktree. The built-in `sablecourt-agent` container sends it as the first message to the Model Gate, together with the task history. Docker and Kubernetes workloads receive it in `SABLECOURT_INPUT_JSON` and use it only if their own code reads it.
 
 ## The repository pre-check
 
@@ -68,7 +68,7 @@ Every line is dashed because the store enforces the transitions but no route, pa
 - Proposing, accepting, confirming and retiring through a route, page or command. ADR-0014 would give acceptance to the `approver` role; it is Proposed.
 - Proposing candidates when a run ends.
 - Matching and injecting from the record: at most ten statements in an advisory section of at most 4 KiB, most specific first. The packet today takes up to 20 entries and only the 32 KiB cap applies. The 4 KiB in the store limits one statement.
-- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, is the harness prompt of a host coding task, and the built-in agent sends it to a model provider through the Model Gate.
+- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, is the harness prompt of a coding task, and the built-in agent sends it to a model provider through the Model Gate.
 - PostgreSQL has no learning table.
 
 ## Verifier steps

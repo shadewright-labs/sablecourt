@@ -194,7 +194,7 @@ Used for long-lived AI agents, sandbox workloads, and deterministic controllers.
 
 ### Coding agent runtime (`internal/runtime/coding`)
 
-Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter also launches the supported council containers; its non-container host path is unsupported for 0.1.0. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) runs coding tasks in harness containers only, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves them there; until it lands, the list below is what the code does today, on macOS only.
+Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter launches coding tasks and council seats in harness containers. Its non-container host path is unsupported for 0.1.0 and refused unless the daemon runs with `--unsafe-host-harnesses` and no container runtime is configured ([ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)). The list below describes that host path, on macOS only.
 
 - Creates a dedicated Git worktree per task on a deterministic branch name (`sablecourt/<task-id>`).
 - Launches the CLI inside a detached session host so restarting `sablecourtd` does not terminate active coding runs.
@@ -239,7 +239,7 @@ sablecourt/
     policy/             # deterministic allow/approve/deny engine and circuit breakers
     redact/             # linear-time deterministic boundary redactor
     runtime/
-      coding/           # Git worktree + Seatbelt + detached host for claude and codex (host path, unsupported for 0.1.0)
+      coding/           # Git worktree and harness container launch for claude and codex; Seatbelt host path (unsupported, forced only)
       controller/       # zero-LLM deterministic controller runner
       docker/           # Moby Go SDK container runtime on internal gate-only network
     secret/             # SecretStore interface (zalando/go-keyring + 0600 file fallback)
@@ -254,4 +254,4 @@ sablecourt/
 1. M1 (Core scaffold and store): `go.mod`, manifest loader (`sigs.k8s.io/yaml`), SQLite WAL store + migrations, `sablecourtd` and `sablectl` skeleton, `go test -race ./...` green.
 2. M2 (Model Gate and budgets): OpenAI, Anthropic, and Gemini HTTP/SSE proxy, task token leases, atomic `budget_ledger` enforcement, deterministic controller zero-LLM denial tests.
 3. M3 (Data/Action Gate and approvals): MCP Streamable HTTP server (`modelcontextprotocol/go-sdk`), linear-time redactor, typed GitOps PR action, runtime approval queue with pinned SHA-256 digest and macOS out-of-band `Approver`.
-4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + Seatbelt coding adapter (`claude` and `codex`; superseded for 0.1.0 by harness containers, issue 181), hub-and-spoke child delegation, and embedded `html/template` Web UI.
+4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + Seatbelt coding adapter (`claude` and `codex`; superseded for 0.1.0 by harness containers), hub-and-spoke child delegation, and embedded `html/template` Web UI.
