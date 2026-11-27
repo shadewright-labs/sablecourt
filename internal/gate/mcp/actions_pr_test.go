@@ -16,6 +16,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -30,14 +31,51 @@ type fakePRBackend struct {
 	mergeCalls    int
 	checkCalls    int
 	lastMerge     MergePRRequest
+	// opened is the URL of the pull request a create made; a later create
+	// for the same head and base answers 422 as GitHub does.
+	opened     string
+	openedHead string
+	openedBase string
+	openCalls  int
+	findCalls  int
+	// foundHeadSHA and foundEdit shape the pull request FindOpenPR lists.
+	foundHeadSHA string
+	foundEdit    func(*FoundPR)
 }
 
 func (f *fakePRBackend) OpenPR(_ context.Context, in OpenPRInput) (string, error) {
+	f.openCalls++
+	if f.opened != "" && f.openedHead == in.Head && f.openedBase == in.Base {
+		return "", &githubAPIError{Code: http.StatusUnprocessableEntity, Message: "Validation Failed"}
+	}
 	num := f.openNumber
 	if num == 0 {
 		num = 42
 	}
-	return "https://github.com/" + in.Owner + "/" + in.Repo + "/pull/" + json.Number(string(rune('0'+num/10))+string(rune('0'+num%10))).String(), nil
+	f.opened = "https://github.com/" + in.Owner + "/" + in.Repo + "/pull/" + json.Number(string(rune('0'+num/10))+string(rune('0'+num%10))).String()
+	f.openedHead, f.openedBase = in.Head, in.Base
+	return f.opened, nil
+}
+
+func (f *fakePRBackend) FindOpenPR(_ context.Context, in OpenPRInput) ([]FoundPR, error) {
+	f.findCalls++
+	if f.opened == "" || f.openedHead != in.Head || f.openedBase != in.Base {
+		return nil, nil
+	}
+	num, _ := parsePRNumber(f.opened)
+	sha := f.foundHeadSHA
+	if sha == "" {
+		sha = strings.Repeat("a1", 20)
+	}
+	p := FoundPR{
+		Number: num, URL: f.opened, State: "open",
+		HeadRef: in.Head, HeadSHA: sha, HeadRepo: in.Owner + "/" + in.Repo, HeadRepoID: 1,
+		BaseRef: in.Base, BaseRepoID: 1,
+	}
+	if f.foundEdit != nil {
+		f.foundEdit(&p)
+	}
+	return []FoundPR{p}, nil
 }
 
 func (f *fakePRBackend) CheckPR(_ context.Context, _ PRChecksInput) (PRCheckReport, error) {
@@ -75,6 +113,13 @@ func (f *fakePRBackend) MergePR(_ context.Context, req MergePRRequest) (MergePRR
 }
 
 func setupPRGate(t *testing.T, backend *fakePRBackend, mergeEffect domain.PolicyEffect, repos []string) (*Gate, *sqlite.SQLiteStore, *approval.Queue, string) {
+	t.Helper()
+	return setupPRGateWithStore(t, backend, mergeEffect, repos, nil)
+}
+
+// setupPRGateWithStore is setupPRGate with the store the gate uses wrapped,
+// so a test can make one store call fail.
+func setupPRGateWithStore(t *testing.T, backend *fakePRBackend, mergeEffect domain.PolicyEffect, repos []string, wrap func(store.Store) store.Store) (*Gate, *sqlite.SQLiteStore, *approval.Queue, string) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := sqlite.Open(filepath.Join(t.TempDir(), "sablecourt.db"))
@@ -122,16 +167,22 @@ func setupPRGate(t *testing.T, backend *fakePRBackend, mergeEffect domain.Policy
 	_ = st.CreateTask(ctx, domain.Task{
 		ID: "task-pr-1", IdempotencyKey: "idem-pr-1", WorkloadName: wl.Metadata.Name, State: domain.TaskStateWorking,
 	})
-	token, err := model.MintTaskToken(ctx, st, "task-pr-1", wl.Metadata.Name, time.Hour)
+	// The lease is minted on the gate's fixed clock, so it is valid at that
+	// clock whatever the host time is.
+	now := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
+	token, err := model.MintTaskTokenUntil(ctx, st, "task-pr-1", wl.Metadata.Name, now, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	now := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
 	eng := policy.NewEngine([]domain.Policy{bundle.Policies["default"]}, nil)
 	queue := approval.NewQueue(st, autoApprover{})
+	var gateStore store.Store = st
+	if wrap != nil {
+		gateStore = wrap(st)
+	}
 	gate := New(Options{
-		Store:     st,
+		Store:     gateStore,
 		Bundle:    bundle,
 		Policy:    eng,
 		Approvals: queue,
@@ -476,6 +527,23 @@ func TestPRChecksAndMergeRefusalPaths(t *testing.T) {
 			wantErr:   "invalid action payload",
 		},
 		{
+			name:      "merge_pr refuses a base changed after the gate opened the pull request",
+			openFirst: true,
+			report: PRCheckReport{
+				HeadSHA:        sha,
+				HeadBranch:     "sablecourt/task-pr-1",
+				BaseBranch:     "release",
+				PRState:        "open",
+				MergeableState: "clean",
+				RequiredChecks: []string{"ci-ok"},
+				Checks:         []CheckRunState{{Name: "ci-ok", Status: "completed", Conclusion: "success"}},
+			},
+			path:     "/git.merge_pr",
+			body:     `{"payload":{"owner":"shadewright-labs","repo":"sablecourt","pr_number":42,"commit_sha":"` + sha + `"}}`,
+			wantCode: http.StatusForbidden,
+			wantErr:  "base branch",
+		},
+		{
 			name:      "merge_pr refuses a repository other than the pinned one",
 			openFirst: false,
 			path:      "/git.merge_pr",
@@ -583,8 +651,8 @@ func TestGitHubPROpenerCheckAndMergeHTTPClient(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/app/commits/"+sha+"/check-runs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"total_count": 1,
-				"check_runs": []map[string]string{
-					{"name": "ci-ok", "status": "completed", "conclusion": "success", "completed_at": "2026-11-27T13:00:00Z"},
+				"check_runs": []map[string]any{
+					{"id": 1, "name": "ci-ok", "status": "completed", "conclusion": "success", "completed_at": "2026-11-27T13:00:00Z"},
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/app/commits/"+sha+"/status":

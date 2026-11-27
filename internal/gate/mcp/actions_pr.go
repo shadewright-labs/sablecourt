@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +37,11 @@ type OpenedPRRecord struct {
 	TaskID   string    `json:"task_id"`
 	Workload string    `json:"workload"`
 	OpenedAt time.Time `json:"opened_at"`
+	// Adopted is set when the gate did not create the pull request in this
+	// call but adopted an open one on a git.open_pr retry; HeadSHA is its
+	// head at adoption.
+	Adopted bool   `json:"adopted,omitempty"`
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 type PRChecksInput struct {
@@ -48,26 +55,39 @@ type CheckRunState struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	Required   bool   `json:"required,omitempty"`
+	// AppID is the GitHub App that reported a check run; 0 for a commit
+	// status, which no app reports.
+	AppID int64 `json:"app_id,omitempty"`
 	// CompletedAt is when GitHub recorded this result: completed_at of a
 	// check run, updated_at of a commit status. Zero while it runs.
 	CompletedAt time.Time `json:"completed_at,omitzero"`
 }
 
+// RequiredCheckApp is one app_id that branch protection requires for a check.
+type RequiredCheckApp struct {
+	Name  string `json:"name"`
+	AppID int64  `json:"app_id"`
+}
+
 // PRCheckReport is the timestamped evidence of check state on a pull request.
 type PRCheckReport struct {
-	Owner           string          `json:"owner"`
-	Repo            string          `json:"repo"`
-	PRNumber        int             `json:"pr_number"`
-	HeadSHA         string          `json:"head_sha"`
-	HeadBranch      string          `json:"head_branch"`
-	BaseBranch      string          `json:"base_branch"`
-	PRState         string          `json:"pr_state"`
-	Draft           bool            `json:"draft,omitempty"`
-	MergeableState  string          `json:"mergeable_state"`
-	RequiredChecks  []string        `json:"required_checks,omitempty"`
-	Checks          []CheckRunState `json:"checks"`
-	AllRequiredPass bool            `json:"all_required_pass"`
-	Summary         string          `json:"summary"`
+	Owner          string   `json:"owner"`
+	Repo           string   `json:"repo"`
+	PRNumber       int      `json:"pr_number"`
+	HeadSHA        string   `json:"head_sha"`
+	HeadBranch     string   `json:"head_branch"`
+	BaseBranch     string   `json:"base_branch"`
+	PRState        string   `json:"pr_state"`
+	Draft          bool     `json:"draft,omitempty"`
+	MergeableState string   `json:"mergeable_state"`
+	RequiredChecks []string `json:"required_checks,omitempty"`
+	// RequiredCheckApps binds a required check name to the apps branch
+	// protection names for it. A name listed here matches only results from
+	// one of its apps; a name not listed matches a result from any source.
+	RequiredCheckApps []RequiredCheckApp `json:"required_check_apps,omitempty"`
+	Checks            []CheckRunState    `json:"checks"`
+	AllRequiredPass   bool               `json:"all_required_pass"`
+	Summary           string             `json:"summary"`
 	// LastResultAt is the latest CompletedAt of the checks, zero when no
 	// check has a result time.
 	LastResultAt time.Time `json:"last_result_at,omitzero"`
@@ -174,11 +194,15 @@ const (
 )
 
 // getAllPages reads every page of a GitHub list endpoint that reports
-// total_count. It fails closed: a missing total_count, a page error, a list
-// longer than githubMaxPages pages, or fewer items than total_count is an
-// error, never a shorter list.
-func getAllPages[T any](ctx context.Context, gh *GitHubPROpener, endpoint, token string, cli *http.Client, items func(page *T) (total *int, n int)) error {
-	read := 0
+// total_count. It fails closed: a missing total_count, a total_count that
+// differs between pages, an item without an ID or with an ID already read, a
+// page error, a list longer than githubMaxPages pages, or fewer items than
+// total_count is an error, never a shorter list. items returns the
+// total_count of the page and the IDs of its items (0 for an item without
+// one).
+func getAllPages[T any](ctx context.Context, gh *GitHubPROpener, endpoint, token string, cli *http.Client, items func(page *T) (total *int, ids []int64)) error {
+	seen := make(map[int64]bool)
+	first := -1
 	for page := 1; ; page++ {
 		if page > githubMaxPages {
 			return fmt.Errorf("more than %d items; refusing a partial list", githubPerPage*githubMaxPages)
@@ -187,19 +211,33 @@ func getAllPages[T any](ctx context.Context, gh *GitHubPROpener, endpoint, token
 		if _, err := gh.doGitHubGET(ctx, fmt.Sprintf("%s?per_page=%d&page=%d", endpoint, githubPerPage, page), token, cli, &p); err != nil {
 			return err
 		}
-		total, n := items(&p)
+		total, ids := items(&p)
 		if total == nil || *total < 0 {
 			return errors.New("response carries no total_count")
 		}
-		read += n
-		if read >= *total {
-			if read > *total {
-				return fmt.Errorf("read %d items, total_count is %d", read, *total)
+		if first < 0 {
+			first = *total
+		} else if *total != first {
+			return fmt.Errorf("total_count changed from %d to %d between pages", first, *total)
+		}
+		for _, id := range ids {
+			if id <= 0 {
+				return errors.New("an item carries no id")
+			}
+			if seen[id] {
+				return fmt.Errorf("item %d appears twice (duplicate across pages)", id)
+			}
+			seen[id] = true
+		}
+		read := len(seen)
+		if read >= first {
+			if read > first {
+				return fmt.Errorf("read %d items, total_count is %d", read, first)
 			}
 			return nil
 		}
-		if n == 0 {
-			return fmt.Errorf("read %d of %d items", read, *total)
+		if len(ids) == 0 {
+			return fmt.Errorf("read %d of %d items", read, first)
 		}
 	}
 }
@@ -238,24 +276,34 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 	type checkRunsPage struct {
 		TotalCount *int `json:"total_count"`
 		CheckRuns  []struct {
+			ID          int64     `json:"id"`
 			Name        string    `json:"name"`
 			Status      string    `json:"status"`
 			Conclusion  string    `json:"conclusion"`
 			CompletedAt time.Time `json:"completed_at"`
+			App         *struct {
+				ID int64 `json:"id"`
+			} `json:"app"`
 		} `json:"check_runs"`
 	}
 	var checks []CheckRunState
 	runsURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", apiBase, owner, repo, url.PathEscape(headSHA))
-	if err := getAllPages(ctx, gh, runsURL, token, cli, func(p *checkRunsPage) (*int, int) {
+	if err := getAllPages(ctx, gh, runsURL, token, cli, func(p *checkRunsPage) (*int, []int64) {
+		ids := make([]int64, 0, len(p.CheckRuns))
 		for _, r := range p.CheckRuns {
-			checks = append(checks, CheckRunState{
+			cs := CheckRunState{
 				Name:        redact.String(strings.TrimSpace(r.Name)),
 				Status:      strings.ToLower(strings.TrimSpace(r.Status)),
 				Conclusion:  strings.ToLower(strings.TrimSpace(r.Conclusion)),
 				CompletedAt: r.CompletedAt.UTC(),
-			})
+			}
+			if r.App != nil {
+				cs.AppID = r.App.ID
+			}
+			checks = append(checks, cs)
+			ids = append(ids, r.ID)
 		}
-		return p.TotalCount, len(p.CheckRuns)
+		return p.TotalCount, ids
 	}); err != nil {
 		return PRCheckReport{}, fmt.Errorf("fetch check runs: %w", err)
 	}
@@ -265,14 +313,17 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 	type statusPage struct {
 		TotalCount *int `json:"total_count"`
 		Statuses   []struct {
+			ID        int64     `json:"id"`
 			Context   string    `json:"context"`
 			State     string    `json:"state"`
 			UpdatedAt time.Time `json:"updated_at"`
 		} `json:"statuses"`
 	}
 	statusURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status", apiBase, owner, repo, url.PathEscape(headSHA))
-	if err := getAllPages(ctx, gh, statusURL, token, cli, func(p *statusPage) (*int, int) {
+	if err := getAllPages(ctx, gh, statusURL, token, cli, func(p *statusPage) (*int, []int64) {
+		ids := make([]int64, 0, len(p.Statuses))
 		for _, s := range p.Statuses {
+			ids = append(ids, s.ID)
 			st, concl := normalizeCommitStatus(s.State)
 			cs := CheckRunState{
 				Name:       redact.String(strings.TrimSpace(s.Context)),
@@ -284,7 +335,7 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 			}
 			checks = append(checks, cs)
 		}
-		return p.TotalCount, len(p.Statuses)
+		return p.TotalCount, ids
 	}); err != nil {
 		return PRCheckReport{}, fmt.Errorf("fetch commit status: %w", err)
 	}
@@ -293,47 +344,42 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 	// one of noRequiredChecksMessages when the branch has none; any other
 	// error, a 403 or a 404 without access among them, refuses the report.
 	var required []string
+	var requiredApps []RequiredCheckApp
 	if strings.TrimSpace(pr.Base.Ref) != "" {
 		var prot struct {
 			Contexts []string `json:"contexts"`
 			Checks   []struct {
 				Context string `json:"context"`
+				AppID   *int64 `json:"app_id"`
 			} `json:"checks"`
 		}
 		protURL := fmt.Sprintf("%s/repos/%s/%s/branches/%s/protection/required_status_checks", apiBase, owner, repo, url.PathEscape(pr.Base.Ref))
 		if _, err := gh.doGitHubGET(ctx, protURL, token, cli, &prot); err == nil {
-			seen := make(map[string]bool)
-			for _, c := range prot.Contexts {
-				c = strings.TrimSpace(c)
-				if c != "" && !seen[c] {
-					seen[c] = true
-					required = append(required, c)
+			required, requiredApps = requiredChecksOf(prot.Contexts, func(yield func(string, *int64) bool) {
+				for _, c := range prot.Checks {
+					if !yield(c.Context, c.AppID) {
+						return
+					}
 				}
-			}
-			for _, c := range prot.Checks {
-				name := strings.TrimSpace(c.Context)
-				if name != "" && !seen[name] {
-					seen[name] = true
-					required = append(required, name)
-				}
-			}
+			})
 		} else if !isNoRequiredChecks(err) {
 			return PRCheckReport{}, fmt.Errorf("fetch required status checks: %w", err)
 		}
 	}
 
 	return PRCheckReport{
-		Owner:          in.Owner,
-		Repo:           in.Repo,
-		PRNumber:       in.PRNumber,
-		HeadSHA:        headSHA,
-		HeadBranch:     strings.TrimSpace(pr.Head.Ref),
-		BaseBranch:     strings.TrimSpace(pr.Base.Ref),
-		PRState:        strings.ToLower(strings.TrimSpace(pr.State)),
-		Draft:          pr.Draft,
-		MergeableState: strings.ToLower(strings.TrimSpace(pr.MergeableState)),
-		RequiredChecks: required,
-		Checks:         checks,
+		Owner:             in.Owner,
+		Repo:              in.Repo,
+		PRNumber:          in.PRNumber,
+		HeadSHA:           headSHA,
+		HeadBranch:        strings.TrimSpace(pr.Head.Ref),
+		BaseBranch:        strings.TrimSpace(pr.Base.Ref),
+		PRState:           strings.ToLower(strings.TrimSpace(pr.State)),
+		Draft:             pr.Draft,
+		MergeableState:    strings.ToLower(strings.TrimSpace(pr.MergeableState)),
+		RequiredChecks:    required,
+		RequiredCheckApps: requiredApps,
+		Checks:            checks,
 	}, nil
 }
 
@@ -392,6 +438,60 @@ func (gh *GitHubPROpener) MergePR(ctx context.Context, req MergePRRequest) (Merg
 		MergeMethod: method,
 		Status:      "merged",
 	}, nil
+}
+
+// requiredChecksOf turns the required status checks of branch protection
+// into the required names and the app each name is bound to. An entry of
+// checks with an app_id above 0 binds its name to that app; a name that also
+// has an entry without one (or with -1, any app), or that appears only in
+// contexts, matches a result from any source.
+func requiredChecksOf(contexts []string, checks iter.Seq2[string, *int64]) ([]string, []RequiredCheckApp) {
+	var names []string
+	seen := make(map[string]bool)
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	anyApp := make(map[string]bool)
+	inChecks := make(map[string]bool)
+	apps := make(map[string][]int64)
+	for name, appID := range checks {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		add(name)
+		inChecks[name] = true
+		if appID != nil && *appID > 0 {
+			if !slices.Contains(apps[name], *appID) {
+				apps[name] = append(apps[name], *appID)
+			}
+		} else {
+			anyApp[name] = true
+		}
+	}
+	for _, c := range contexts {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		add(c)
+		if !inChecks[c] {
+			anyApp[c] = true
+		}
+	}
+	var bound []RequiredCheckApp
+	for _, name := range names {
+		if anyApp[name] {
+			continue
+		}
+		for _, id := range apps[name] {
+			bound = append(bound, RequiredCheckApp{Name: name, AppID: id})
+		}
+	}
+	return names, bound
 }
 
 // noRequiredChecksMessages are the 404 messages with which GitHub says a
@@ -457,19 +557,26 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 	// evidence even when another check has a time.
 	var hasFailing, hasPending, hasMissing, hasNoTime bool
 	if len(report.RequiredChecks) > 0 {
-		reqSet := make(map[string]bool, len(report.RequiredChecks))
-		for _, name := range report.RequiredChecks {
-			reqSet[name] = true
-		}
-		for i := range report.Checks {
-			if reqSet[report.Checks[i].Name] {
-				report.Checks[i].Required = true
+		// A required name bound to apps matches only results from them.
+		boundApps := make(map[string]map[int64]bool)
+		for _, b := range report.RequiredCheckApps {
+			if boundApps[b.Name] == nil {
+				boundApps[b.Name] = make(map[int64]bool)
 			}
+			boundApps[b.Name][b.AppID] = true
+		}
+		matches := func(c CheckRunState, reqName string) bool {
+			if c.Name != reqName {
+				return false
+			}
+			apps := boundApps[reqName]
+			return apps == nil || apps[c.AppID]
 		}
 		for _, reqName := range report.RequiredChecks {
 			var matched []CheckRunState
-			for _, c := range report.Checks {
-				if c.Name == reqName {
+			for i, c := range report.Checks {
+				if matches(c, reqName) {
+					report.Checks[i].Required = true
 					matched = append(matched, c)
 				}
 			}
@@ -699,7 +806,8 @@ func validateMergePRInput(in MergePRInput) error {
 // checkMergeReady reads the live check state of the pull request, records it
 // as evidence, and refuses unless the pull request is one Sablecourt opened in
 // the pinned and granted repository, its head is still the approved
-// commit_sha, and every required check has passed with a result time.
+// commit_sha, its base is still the recorded base, and every required check
+// has passed with a result time.
 func checkMergeReady(ctx context.Context, g *Gate, checker PRChecker, wl domain.Workload, taskID string, in MergePRInput) (PRCheckReport, error) {
 	pinned := g.snapshotFromContext(ctx).allowedRepo
 	if pinned == "" {
@@ -727,6 +835,12 @@ func checkMergeReady(ctx context.Context, g *Gate, checker PRChecker, wl domain.
 	}
 	if validateSafeBranch(report.HeadBranch) != nil || report.HeadBranch != opened.Head {
 		return PRCheckReport{}, newActionError(http.StatusForbidden, "wrong_branch", "pull request head branch does not match opened Sablecourt branch")
+	}
+	// The merge call names no base, so a pull request retargeted after the
+	// gate opened it would merge into a branch nobody asked for. The base can
+	// still change between this read and the merge call.
+	if report.BaseBranch == "" || report.BaseBranch != opened.Base {
+		return PRCheckReport{}, newActionError(http.StatusForbidden, "wrong_base", "pull request base branch does not match the base the gate opened it against")
 	}
 	if report.HeadSHA != in.CommitSHA {
 		return PRCheckReport{}, newActionError(http.StatusConflict, "commit_mismatch", "pull request head commit does not match the approved commit_sha")

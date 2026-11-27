@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // The typed inputs below are the canonical encoding of each action: the
@@ -50,6 +52,27 @@ type PromoteSandboxInput struct {
 // PROpener creates a GitHub pull request using gate-owned credentials.
 type PROpener interface {
 	OpenPR(ctx context.Context, in OpenPRInput) (string, error)
+}
+
+// FoundPR is an open pull request as GitHub lists it, with the fields the
+// gate checks before it adopts one.
+type FoundPR struct {
+	Number     int
+	URL        string
+	State      string
+	HeadRef    string
+	HeadSHA    string
+	HeadRepo   string // full name, "owner/repo"
+	HeadRepoID int64
+	BaseRef    string
+	BaseRepoID int64
+}
+
+// PRFinder lists the open pull requests of a head branch into a base branch
+// in the repository, at most two, so a git.open_pr retry can recover a pull
+// request whose provenance record was not written.
+type PRFinder interface {
+	FindOpenPR(ctx context.Context, in OpenPRInput) ([]FoundPR, error)
 }
 
 type GitHubPROpener struct {
@@ -111,7 +134,11 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("github API returned HTTP %d", resp.StatusCode)
+		var body struct {
+			Message string `json:"message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body)
+		return "", &githubAPIError{Code: resp.StatusCode, Message: strings.TrimSpace(body.Message)}
 	}
 	var out struct {
 		HTMLURL string `json:"html_url"`
@@ -120,6 +147,147 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 		return "", err
 	}
 	return out.HTMLURL, nil
+}
+
+// FindOpenPR lists the open pull requests of in.Owner:in.Head into in.Base.
+// It reads one page of at most two and returns what GitHub listed; the
+// caller checks every field before it trusts one.
+func (gh *GitHubPROpener) FindOpenPR(ctx context.Context, in OpenPRInput) ([]FoundPR, error) {
+	if err := validateRepoName("owner", in.Owner); err != nil {
+		return nil, err
+	}
+	if err := validateRepoName("repo", in.Repo); err != nil {
+		return nil, err
+	}
+	apiBase, token, cli, err := gh.githubAPIClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("head", in.Owner+":"+in.Head)
+	q.Set("base", in.Base)
+	q.Set("per_page", "2")
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?%s", apiBase, url.PathEscape(in.Owner), url.PathEscape(in.Repo), q.Encode())
+	type repoRef struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	}
+	var pulls []struct {
+		Number  int    `json:"number"`
+		State   string `json:"state"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref  string   `json:"ref"`
+			SHA  string   `json:"sha"`
+			Repo *repoRef `json:"repo"`
+		} `json:"head"`
+		Base struct {
+			Ref  string   `json:"ref"`
+			Repo *repoRef `json:"repo"`
+		} `json:"base"`
+	}
+	if _, err := gh.doGitHubGET(ctx, endpoint, token, cli, &pulls); err != nil {
+		return nil, fmt.Errorf("list open pull requests: %w", err)
+	}
+	out := make([]FoundPR, 0, len(pulls))
+	for _, p := range pulls {
+		f := FoundPR{
+			Number:  p.Number,
+			URL:     p.HTMLURL,
+			State:   p.State,
+			HeadRef: p.Head.Ref,
+			HeadSHA: strings.ToLower(p.Head.SHA),
+			BaseRef: p.Base.Ref,
+		}
+		if p.Head.Repo != nil {
+			f.HeadRepo, f.HeadRepoID = p.Head.Repo.FullName, p.Head.Repo.ID
+		}
+		if p.Base.Repo != nil {
+			f.BaseRepoID = p.Base.Repo.ID
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// recoverOpenedPR handles a create that GitHub refused with 422, as after a
+// create whose provenance record failed. It adopts the open pull request of
+// the head into the base only when every check holds: exactly one is listed,
+// it is open, its head repository is the pinned repository itself (same full
+// name, and the same repository ID as its base, so not a fork), its head is
+// the task's branch, its base is the base asked for, its URL carries its
+// number, and its head SHA is the commit the gate last pushed for the task
+// when one is recorded. Anything else is refused with 409 and nothing is
+// recorded. The record is marked adopted; git.merge_pr still needs an
+// approval for it.
+func recoverOpenedPR(ctx context.Context, g *Gate, finder PRFinder, wl domain.Workload, taskID string, in OpenPRInput, createErr error) (map[string]string, error) {
+	refuse := func(why string) error {
+		return newActionError(http.StatusConflict, "adopt_refused", "an open pull request was not adopted: "+why)
+	}
+	pinned := g.snapshotFromContext(ctx).allowedRepo
+	taskBranch := expectedTaskBranch(ctx, g.store, taskID)
+	if in.Head != taskBranch {
+		return nil, refuse(fmt.Sprintf("head %s is not the task branch %s", in.Head, taskBranch))
+	}
+	found, err := finder.FindOpenPR(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	switch len(found) {
+	case 0:
+		return nil, createErr
+	case 1:
+	default:
+		return nil, refuse("more than one open pull request for the head and base")
+	}
+	p := found[0]
+	num, ok := parsePRNumber(p.URL)
+	switch {
+	case p.State != "open":
+		return nil, refuse("it is not open")
+	case pinned == "" || !strings.EqualFold(p.HeadRepo, pinned) || p.HeadRepoID <= 0 || p.HeadRepoID != p.BaseRepoID:
+		return nil, refuse("its head repository is not the pinned repository")
+	case p.HeadRef != taskBranch:
+		return nil, refuse("its head is not the task branch " + taskBranch)
+	case p.BaseRef != in.Base:
+		return nil, refuse("its base is not " + in.Base)
+	case !ok || num != p.Number:
+		return nil, refuse("its URL does not carry its number")
+	case !isCommitID(p.HeadSHA):
+		return nil, refuse("its head SHA is invalid")
+	}
+	pushed, hasPush, err := lookupPushedCommit(ctx, g.store, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if hasPush && pushed.Branch == taskBranch && pushed.Commit != p.HeadSHA {
+		return nil, refuse("its head is not the commit the gate pushed for the task")
+	}
+	res := map[string]string{"pr_url": p.URL, "head": in.Head, "base": in.Base, "pr_number": strconv.Itoa(num), "status": "adopted"}
+	entry, err := g.store.GetMemory(ctx, openedPRsNamespace, prKey(in.Owner, in.Repo, num))
+	switch {
+	case err == nil:
+		var rec OpenedPRRecord
+		if entry.Author != "gate" || json.Unmarshal([]byte(entry.Value), &rec) != nil ||
+			rec.TaskID != taskID || rec.Head != in.Head || rec.Base != in.Base {
+			return nil, refuse("it is recorded for another task or branch")
+		}
+		if !rec.Adopted {
+			res["status"] = "existing"
+		}
+		return res, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return nil, err
+	}
+	if err := recordOpenedPR(ctx, g, OpenedPRRecord{
+		Owner: in.Owner, Repo: in.Repo, Number: num, URL: p.URL, Head: in.Head, Base: in.Base,
+		TaskID: taskID, Workload: wl.Metadata.Name, OpenedAt: g.now(),
+		Adopted: true, HeadSHA: p.HeadSHA,
+	}); err != nil {
+		return nil, fmt.Errorf("record adopted pull request: %w", err)
+	}
+	return res, nil
 }
 
 // RepoBinding holds the GitHub repository the GitOps actions may target: the
@@ -329,6 +497,12 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 			}
 			prURL, err := prOpener.OpenPR(ctx, in)
 			if err != nil {
+				// A retry after a failed provenance write finds the pull
+				// request the first call opened instead of stranding it.
+				var apiErr *githubAPIError
+				if finder, ok := prOpener.(PRFinder); ok && errors.As(err, &apiErr) && apiErr.Code == http.StatusUnprocessableEntity {
+					return recoverOpenedPR(ctx, g, finder, wl, taskID, in, err)
+				}
 				return nil, err
 			}
 			res := map[string]string{"pr_url": prURL, "head": in.Head, "base": in.Base}
@@ -369,7 +543,16 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 			if err != nil {
 				return nil, err
 			}
-			return pusher.PushBranch(ctx, req)
+			res, err := pusher.PushBranch(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			// The record lets a git.open_pr retry check the head of a pull
+			// request it would adopt against the commit pushed here.
+			if err := recordPushedCommit(ctx, g, taskID, res); err != nil {
+				return nil, fmt.Errorf("the push of %s to %s succeeded, but recording it failed: %w", res.Commit, res.Branch, err)
+			}
+			return res, nil
 		},
 	})
 

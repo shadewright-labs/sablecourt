@@ -146,6 +146,11 @@ func TestGitPushApprovedFlowAndCommitPinning(t *testing.T) {
 	if pushedSHA != commitSHA {
 		t.Fatalf("remote branch SHA = %q, want %q", pushedSHA, commitSHA)
 	}
+	// The gate records the push, so a git.open_pr retry can check the head of
+	// a pull request it would adopt.
+	if got, ok, err := lookupPushedCommit(ctx, gate.store, "task-push-1"); err != nil || !ok || got.Commit != commitSHA || got.Branch != branch {
+		t.Fatalf("pushed commit record = %+v, %v, %v", got, ok, err)
+	}
 
 	// Reusing the same approval must fail closed.
 	rec = postAction(t, h, http.MethodPost, "/git.push", token, `{"approvalId":"`+pending.ApprovalID+`","payload":`+payload+`}`)

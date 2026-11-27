@@ -121,7 +121,7 @@ func TestMergePRBogusApprovalReadsNoChecks(t *testing.T) {
 // runs are paged by per_page (GitHub's default 30) and page.
 type fakeGitHubChecks struct {
 	sha        string
-	runs       []map[string]string
+	runs       []map[string]any
 	totalRuns  int // reported total_count; len(runs) when zero
 	statusCode int // of the commit status endpoint; 200 when zero
 	protCode   int // of the required status checks endpoint; 200 when zero
@@ -186,16 +186,16 @@ func (f *fakeGitHubChecks) opener() *GitHubPROpener {
 // check data instead of treating it as no checks.
 func TestGitHubPROpenerCheckPRFailsClosedOnPartialData(t *testing.T) {
 	sha := strings.Repeat("d4", 20)
-	passing := func(n int) []map[string]string {
-		runs := make([]map[string]string, n)
+	passing := func(n int) []map[string]any {
+		runs := make([]map[string]any, n)
 		for i := range runs {
-			runs[i] = map[string]string{"name": "ci-ok", "status": "completed", "conclusion": "success", "completed_at": "2026-11-27T13:00:00Z"}
+			runs[i] = map[string]any{"id": i + 1, "name": "ci-ok", "status": "completed", "conclusion": "success", "completed_at": "2026-11-27T13:00:00Z"}
 		}
 		return runs
 	}
 
 	t.Run("failing run past the first pages", func(t *testing.T) {
-		runs := append(passing(130), map[string]string{"name": "ci-ok", "status": "completed", "conclusion": "failure", "completed_at": "2026-11-27T13:05:00Z"})
+		runs := append(passing(130), map[string]any{"id": 131, "name": "ci-ok", "status": "completed", "conclusion": "failure", "completed_at": "2026-11-27T13:05:00Z"})
 		f := &fakeGitHubChecks{sha: sha, runs: runs}
 		report, err := f.opener().CheckPR(context.Background(), PRChecksInput{Owner: "org", Repo: "app", PRNumber: 7})
 		if err == nil {

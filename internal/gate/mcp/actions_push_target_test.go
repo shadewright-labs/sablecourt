@@ -202,3 +202,34 @@ func TestGitBranchPusherIgnoresSystemAndGlobalConfig(t *testing.T) {
 		})
 	}
 }
+
+// A SHA-256 task repository pushes to a SHA-256 receiver: the temporary bare
+// repository takes the object format of the task repository, so it can read
+// the borrowed objects. The SHA-1 case is covered by the tests above.
+func TestGitBranchPusherPushesSHA256Repository(t *testing.T) {
+	branch := "sablecourt/task-push-1"
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--quiet", "--object-format=sha256")
+	runGit(t, repoDir, "symbolic-ref", "HEAD", "refs/heads/"+branch)
+	if err := os.WriteFile(filepath.Join(repoDir, "change.txt"), []byte("task change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "change.txt")
+	runGit(t, repoDir, "-c", "user.name=Sablecourt Test", "-c", "user.email=test", "commit", "--quiet", "-m", "task work")
+	commitSHA := runGit(t, repoDir, "rev-parse", "HEAD")
+	if len(commitSHA) != 64 {
+		t.Fatalf("commit %q is not a SHA-256 object name", commitSHA)
+	}
+	bareDir := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, t.TempDir(), "init", "--quiet", "--bare", "--object-format=sha256", bareDir)
+
+	p := &GitBranchPusher{}
+	if _, err := p.PushBranch(context.Background(), PushBranchRequest{
+		RepoDir: repoDir, Remote: "origin", URL: bareDir, Branch: branch, Commit: commitSHA,
+	}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if got := runGit(t, bareDir, "rev-parse", "refs/heads/"+branch); got != commitSHA {
+		t.Fatalf("receiver has %q, want %q", got, commitSHA)
+	}
+}

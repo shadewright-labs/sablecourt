@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
@@ -22,6 +23,55 @@ import (
 )
 
 const runtimeHandlesNamespace = "system:runtime-handles"
+
+// pushedCommitsNamespace holds, per task, the branch and commit of the last
+// git.push the gate made for it.
+const pushedCommitsNamespace = "system:pushed-commits"
+
+// PushedCommitRecord is the last push the gate made for a task.
+type PushedCommitRecord struct {
+	TaskID   string    `json:"task_id"`
+	Branch   string    `json:"branch"`
+	Commit   string    `json:"commit"`
+	PushedAt time.Time `json:"pushed_at"`
+}
+
+func recordPushedCommit(ctx context.Context, g *Gate, taskID string, res PushBranchResult) error {
+	if g == nil || g.store == nil || taskID == "" {
+		return nil
+	}
+	raw, err := json.Marshal(PushedCommitRecord{TaskID: taskID, Branch: res.Branch, Commit: res.Commit, PushedAt: g.now()})
+	if err != nil {
+		return err
+	}
+	return g.store.PutMemory(ctx, domain.MemoryEntry{
+		Namespace: pushedCommitsNamespace,
+		Key:       taskID,
+		Value:     string(raw),
+		Author:    "gate",
+		UpdatedAt: g.now(),
+	})
+}
+
+// lookupPushedCommit returns the last push recorded for the task. A record
+// that is not the gate's or does not parse is an error, not "none".
+func lookupPushedCommit(ctx context.Context, st store.Store, taskID string) (PushedCommitRecord, bool, error) {
+	if st == nil || taskID == "" {
+		return PushedCommitRecord{}, false, nil
+	}
+	entry, err := st.GetMemory(ctx, pushedCommitsNamespace, taskID)
+	if errors.Is(err, store.ErrNotFound) {
+		return PushedCommitRecord{}, false, nil
+	}
+	if err != nil {
+		return PushedCommitRecord{}, false, err
+	}
+	var rec PushedCommitRecord
+	if entry.Author != "gate" || json.Unmarshal([]byte(entry.Value), &rec) != nil || rec.TaskID != taskID || !isCommitID(rec.Commit) {
+		return PushedCommitRecord{}, false, errors.New("the pushed commit record of the task is invalid")
+	}
+	return rec, true, nil
+}
 
 // PushBranchInput is the approved value of git.push. CommitSHA and
 // Destination are required and the dialog shows both as targets. The push
@@ -111,8 +161,13 @@ func (p *GitBranchPusher) PushBranch(ctx context.Context, req PushBranchRequest)
 	if err != nil {
 		return PushBranchResult{}, err
 	}
+	objectFormat, err := gitObjectFormat(ctx, req.RepoDir)
+	if err != nil {
+		return PushBranchResult{}, err
+	}
 	// The push runs from an empty bare repository of the gate's own that
-	// borrows the task repository's objects. It has no refs, so the commit_sha
+	// borrows the task repository's objects and has its object format (SHA-1
+	// or SHA-256), so it can read them. It has no refs, so the commit_sha
 	// in the refspec can only be read as that object, and no configuration of
 	// the task repository (remotes, pushurl, insteadOf, hooks) applies to it.
 	pushDir, err := os.MkdirTemp("", "sablecourt-push-")
@@ -132,7 +187,7 @@ func (p *GitBranchPusher) PushBranch(ctx context.Context, req PushBranchRequest)
 	// checked URL. HOME is not set. These come last and win over any earlier
 	// entry with the same name.
 	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-	initCmd := exec.CommandContext(ctx, "git", "init", "--quiet", "--bare", "--template=", "--", pushDir)
+	initCmd := exec.CommandContext(ctx, "git", "init", "--quiet", "--bare", "--template=", "--object-format="+objectFormat, "--", pushDir)
 	initCmd.Env = env
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		return PushBranchResult{}, fmt.Errorf("prepare push repository: %w (%s)", err, redact.String(strings.TrimSpace(string(out))))
@@ -503,6 +558,26 @@ func gitObjectsDir(ctx context.Context, repoDir string) (string, error) {
 		return "", errors.New("repository object directory not found")
 	}
 	return dir, nil
+}
+
+// gitObjectFormat returns the object format of the repository, "sha1" or
+// "sha256"; anything else is an error.
+func gitObjectFormat(ctx context.Context, repoDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git",
+		"-c", "core.hooksPath=/dev/null",
+		"-C", repoDir,
+		"rev-parse", "--show-object-format",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("read the repository's object format")
+	}
+	switch f := strings.TrimSpace(string(out)); f {
+	case "sha1", "sha256":
+		return f, nil
+	default:
+		return "", errors.New("repository object format is neither sha1 nor sha256")
+	}
 }
 
 // githubPushAuth returns the URL to push to and the git configuration that
