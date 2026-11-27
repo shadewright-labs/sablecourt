@@ -54,7 +54,7 @@ func TestReloadRefusedByGateAppliesNothing(t *testing.T) {
 	if applied {
 		t.Fatal("apply ran after the gate refused the bundle")
 	}
-	if !strings.Contains(logBuf.String(), "manifest reload refused; previous bundle, policy and upstream tools kept") {
+	if !strings.Contains(logBuf.String(), "manifest reload refused; previous bundle, policy, upstream tools and stored workloads kept") {
 		t.Fatalf("log does not say the reload was refused:\n%s", logBuf.String())
 	}
 

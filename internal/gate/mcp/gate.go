@@ -64,7 +64,8 @@ type Gate struct {
 	// tools holds the gate's own tools. upstream holds the tools proxied to
 	// upstream MCP servers, rebuilt from the bundle on every reload. The two
 	// never share a name: an upstream tool that takes a built-in name or
-	// namespace is refused, and a lookup tries tools first.
+	// namespace is refused, and a lookup tries tools first. upstream is
+	// replaced, never changed in place, because snapshots share it.
 	tools       map[string]ToolDef
 	upstream    map[string]ToolDef
 	bridge      *UpstreamBridge
@@ -110,9 +111,13 @@ func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) error {
 	return nil
 }
 
+// gateSnapshot is the state one request uses from start to end. upstream is
+// never written after it is stored on the gate (every change builds a new
+// map), so a snapshot may read it without the lock.
 type gateSnapshot struct {
 	bundle      *config.Bundle
 	policy      *policy.Engine
+	upstream    map[string]ToolDef
 	allowedRepo string
 }
 
@@ -124,6 +129,7 @@ func (g *Gate) snapshot() gateSnapshot {
 	return gateSnapshot{
 		bundle:      g.bundle,
 		policy:      g.policy,
+		upstream:    g.upstream,
 		allowedRepo: g.allowedRepo,
 	}
 }
@@ -214,8 +220,16 @@ type authContext struct {
 	Workload domain.Workload
 }
 
-// NewServerForWorkload constructs an MCP Server exposing only tools granted to the workload.
+// NewServerForWorkload constructs an MCP Server exposing only tools granted to
+// the workload, using the gate's current snapshot for every call it serves.
 func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload) *mcp.Server {
+	return g.newServerForSnapshot(lease, workload, g.snapshot())
+}
+
+// newServerForSnapshot builds the per-request MCP server from snap: upstream
+// tools come from snap.upstream and each call evaluates snap.policy, so a
+// reload after snap was taken changes neither.
+func (g *Gate) newServerForSnapshot(lease domain.Lease, workload domain.Workload, snap gateSnapshot) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "sablecourt-data-gate",
 		Version: "0.1.0",
@@ -227,7 +241,7 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 	for _, toolName := range workload.Spec.Grants.MCPTools {
 		def, ok := g.tools[toolName]
 		if !ok {
-			def, ok = g.upstream[toolName]
+			def, ok = snap.upstream[toolName]
 		}
 		if !ok {
 			continue
@@ -238,6 +252,7 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 			Description: captured.Description,
 			InputSchema: captured.InputSchema,
 		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ctx = context.WithValue(ctx, snapshotCtxKey{}, snap)
 			return g.invokeTool(ctx, lease, workload, captured, req.Params.Arguments)
 		})
 	}
@@ -305,7 +320,11 @@ func (g *Gate) MCPHandler() http.Handler {
 		if !ok {
 			return nil
 		}
-		return g.NewServerForWorkload(ac.Lease, ac.Workload)
+		snap, ok := r.Context().Value(snapshotCtxKey{}).(gateSnapshot)
+		if !ok {
+			return nil
+		}
+		return g.newServerForSnapshot(ac.Lease, ac.Workload, snap)
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

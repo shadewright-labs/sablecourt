@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -356,25 +358,34 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
-	policies := newPolicyLoader(st, manifestsPath)
+	policies := newPolicyLoader(manifestsPath)
+	councilPanelOn := !isCitadel && adapters[domain.ClassCodingAgent] != nil
+	// loadAndSync reads the manifests and writes nothing; recordBundle writes
+	// the workloads to the store once every check has accepted the bundle.
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
 		b, pol, err := policies.Load(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
+		if councilPanelOn {
 			var err error
-			b, err = ensureCouncilPanelWorkloads(ctx, st, b, councilSandbox(councilDocker != nil))
+			b, err = addCouncilPanelWorkloads(b, councilSandbox(councilDocker != nil))
 			if err != nil {
 				return nil, nil, fmt.Errorf("register council panel workloads: %w", err)
 			}
 		}
 		return b, pol, nil
 	}
+	recordBundle := func(b *config.Bundle) error {
+		return recordWorkloads(ctx, st, b, councilPanelOn)
+	}
 
 	var policyEng *policy.Engine
 	bundle, policyEng, err = loadAndSync()
 	if err != nil {
+		return err
+	}
+	if err := recordBundle(bundle); err != nil {
 		return err
 	}
 	if manifestsPath != "" && bundle != nil {
@@ -496,7 +507,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
 	reloadFn := serialized(reloadSteps{
-		load: loadAndSync,
+		load:    loadAndSync,
+		check:   dataActionGate.CheckReload,
+		persist: recordBundle,
 		gate: func(b *config.Bundle, pol *policy.Engine) error {
 			return reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
 		},
@@ -1945,16 +1958,15 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
 }
 
-// policyLoader reads the manifests, records the declared workloads and builds
-// the policy engine for each load.
+// policyLoader reads the manifests and builds the policy engine for each load.
+// It writes nothing; recordWorkloads stores the workloads of an accepted bundle.
 type policyLoader struct {
-	st            store.Store
 	manifestsPath string
 	gateBreaker   *policy.CircuitBreaker
 }
 
-func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
-	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+func newPolicyLoader(manifestsPath string) *policyLoader {
+	return &policyLoader{manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
 }
 
 // Breaker returns the circuit breaker the action gate records outcomes on.
@@ -1971,17 +1983,9 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 		return nil, nil, fmt.Errorf("load manifests: %w", err)
 	}
 	for _, w := range loaded.Workloads {
-		cardBytes, err := json.Marshal(w.Spec.AgentCard)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := l.st.UpsertWorkload(ctx, domain.WorkloadRecord{
-			Name:           w.Metadata.Name,
-			Zone:           w.Metadata.Zone,
-			Class:          w.Spec.Class,
-			ManifestDigest: loaded.ManifestDigest,
-			AgentCardJSON:  string(cardBytes),
-		}); err != nil {
+		// Refuse an agent card that cannot be recorded now, before any
+		// check accepts the bundle and recordWorkloads writes it.
+		if _, err := json.Marshal(w.Spec.AgentCard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1991,6 +1995,32 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// recordWorkloads writes every workload of b to the store. With councilPanel
+// set, the built-in council panel workloads (whose names a manifest may then
+// not use) are written without a manifest digest or agent card, as they come
+// from no manifest.
+func recordWorkloads(ctx context.Context, st store.Store, b *config.Bundle, councilPanel bool) error {
+	if b == nil {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(b.Workloads)) {
+		w := b.Workloads[name]
+		rec := domain.WorkloadRecord{Name: w.Metadata.Name, Zone: w.Metadata.Zone, Class: w.Spec.Class}
+		if !councilPanel || !isCouncilPanelRole(name) {
+			cardBytes, err := json.Marshal(w.Spec.AgentCard)
+			if err != nil {
+				return err
+			}
+			rec.ManifestDigest = b.ManifestDigest
+			rec.AgentCardJSON = string(cardBytes)
+		}
+		if err := st.UpsertWorkload(ctx, rec); err != nil {
+			return fmt.Errorf("record workload %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // serialized returns fn guarded by one mutex, so calls never overlap and
@@ -2022,15 +2052,24 @@ func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, 
 	return nil
 }
 
-// reloadSteps is the order of a manifest reload. The gate step runs first and
-// is all or nothing: when it refuses the bundle, apply never runs, so the
-// daemon keeps its previous bundle, policy and upstream tools everywhere, and
-// the caller gets an error that says the reload was refused.
+// reloadSteps is the order of a manifest reload, and a refused reload changes
+// nothing. load reads the manifests and writes nothing. check runs every test
+// that can refuse the bundle (the gate's CheckReload) before anything is
+// written or swapped. Only then does persist write the workloads to the store,
+// gate swap the gate's bundle, policy and upstream tools, and apply swap the
+// rest. When load fails or check refuses, nothing is written or swapped; a
+// refusal is returned and logged as "reload refused". When persist fails (a
+// store error, which may leave some rows written), the gate and apply steps
+// never run. gate refuses only what check refuses, since reloads are
+// serialized and built-in tools are registered at start. check and persist
+// may be nil.
 type reloadSteps struct {
-	load   func() (*config.Bundle, *policy.Engine, error)
-	gate   func(*config.Bundle, *policy.Engine) error
-	apply  func(*config.Bundle, *policy.Engine)
-	logger *slog.Logger
+	load    func() (*config.Bundle, *policy.Engine, error)
+	check   func(*config.Bundle) error
+	persist func(*config.Bundle) error
+	gate    func(*config.Bundle, *policy.Engine) error
+	apply   func(*config.Bundle, *policy.Engine)
+	logger  *slog.Logger
 }
 
 func (s reloadSteps) run() error {
@@ -2038,15 +2077,30 @@ func (s reloadSteps) run() error {
 	if err != nil {
 		return err
 	}
+	if s.check != nil {
+		if err := s.check(b); err != nil {
+			return s.refused(err)
+		}
+	}
+	if s.persist != nil {
+		if err := s.persist(b); err != nil {
+			return err
+		}
+	}
 	if err := s.gate(b, pol); err != nil {
-		if !strings.HasPrefix(err.Error(), "reload refused") {
-			err = fmt.Errorf("reload refused: %w", err)
-		}
-		if s.logger != nil {
-			s.logger.Warn("manifest reload refused; previous bundle, policy and upstream tools kept", "error", err)
-		}
-		return err
+		return s.refused(err)
 	}
 	s.apply(b, pol)
 	return nil
+}
+
+// refused returns err as a refused reload and logs it.
+func (s reloadSteps) refused(err error) error {
+	if !strings.HasPrefix(err.Error(), "reload refused") {
+		err = fmt.Errorf("reload refused: %w", err)
+	}
+	if s.logger != nil {
+		s.logger.Warn("manifest reload refused; previous bundle, policy, upstream tools and stored workloads kept", "error", err)
+	}
+	return err
 }

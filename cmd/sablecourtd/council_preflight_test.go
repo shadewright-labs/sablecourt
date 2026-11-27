@@ -142,7 +142,7 @@ func TestCouncilPanelWorkloadsFollowMode(t *testing.T) {
 			if councilSandbox(tc.container) != tc.kind {
 				t.Fatalf("councilSandbox(%v) = %q", tc.container, councilSandbox(tc.container))
 			}
-			bundle, err := ensureCouncilPanelWorkloads(t.Context(), daemonTestStore(t), nil, tc.kind)
+			bundle, err := addCouncilPanelWorkloads(nil, tc.kind)
 			if err != nil {
 				t.Fatal(err)
 			}
