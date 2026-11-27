@@ -43,7 +43,7 @@ func TestCanonicalEncodingOfTypedActionsIsFixed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(canonical) != tc.canonical || digest != tc.digest {
+		if canonical != tc.canonical || digest != tc.digest {
 			t.Errorf("%s: canonical %s digest %s, want %s %s", tc.name, canonical, digest, tc.canonical, tc.digest)
 		}
 	}

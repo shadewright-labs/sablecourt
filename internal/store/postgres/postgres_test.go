@@ -103,7 +103,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var ok atomic.Int32
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -122,7 +122,7 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 
 	old := "apr-old-" + suffix
 	seed(old, now.Add(-time.Second))
-	for i := 0; i < 2; i++ { // a refusal changes nothing and refuses again
+	for i := range 2 { // a refusal changes nothing and refuses again
 		if err := st.ConsumeApproval(ctx, old, taskID, "action:git.open_pr", "d1"); !errors.Is(err, store.ErrExpired) {
 			t.Fatalf("expired, use %d: err %v, want ErrExpired", i+1, err)
 		}

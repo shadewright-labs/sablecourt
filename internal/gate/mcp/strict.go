@@ -23,7 +23,7 @@ func invalidPayload(format string, args ...any) error {
 // jsonFieldNames lists the JSON names of the exported fields of struct type t.
 func jsonFieldNames(t reflect.Type) []string {
 	var names []string
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		f := t.Field(i)
 		if !f.IsExported() {
 			continue

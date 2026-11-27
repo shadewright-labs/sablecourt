@@ -111,7 +111,7 @@ func TestApprovedValueIsTheExecutedValue(t *testing.T) {
 	rng := rand.New(rand.NewSource(111))
 	tg := setupTypedGate(t, typedGateOptions{effect: domain.EffectApprove})
 	titles := []string{"Fix", "Fix <b>&amp;</b>", "Zażółć", "line\nbreak", `quote " and \ slash`}
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		pairs := []kv{
 			{"owner", fmt.Sprintf("%q", []string{"acme", "ACME", "Acme"}[rng.Intn(3)])},
 			{"repo", fmt.Sprintf("%q", []string{"widgets", "Widgets"}[rng.Intn(2)])},

@@ -40,7 +40,7 @@ func TestConsumeApproval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
 			seedApproval(t, st, "apr-c", tc.expiresAt, tc.status)
-			for i := 0; i < 2; i++ { // a refusal leaves the row able to refuse again
+			for i := range 2 { // a refusal leaves the row able to refuse again
 				err := st.ConsumeApproval(ctx, "apr-c", tc.task, tc.cap, tc.digest)
 				if i == 1 && tc.wantErr == nil {
 					tc.wantErr = store.ErrConflict // the second use of a spent approval
@@ -72,7 +72,7 @@ func TestConsumeApproval(t *testing.T) {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		ok := 0
-		for i := 0; i < 8; i++ {
+		for range 8 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

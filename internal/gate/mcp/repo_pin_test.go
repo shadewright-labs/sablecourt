@@ -89,7 +89,7 @@ func TestReloadNeverRepinsAndRecordsEachDriftOnce(t *testing.T) {
 		return err
 	}
 	tg.setOrigin(t, "https://github.com/acme/other.git")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := reload(); err == nil {
 			t.Fatalf("reload %d: Recheck must report the drift", i+1)
 		}
