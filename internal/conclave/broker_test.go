@@ -465,3 +465,66 @@ func TestWardNotificationCancellation(t *testing.T) {
 		t.Fatal("notification outlived the ward request")
 	}
 }
+
+func TestClosePlainRoomKeepsTerminalStateAndAuditsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  domain.ConclaveState
+		second domain.ConclaveState
+	}{
+		{"completed then cancelled", domain.ConclaveStateCompleted, domain.ConclaveStateCancelled},
+		{"completed then completed", domain.ConclaveStateCompleted, domain.ConclaveStateCompleted},
+		{"cancelled then completed", domain.ConclaveStateCancelled, domain.ConclaveStateCompleted},
+		{"cancelled then cancelled", domain.ConclaveStateCancelled, domain.ConclaveStateCancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			st := brokerTestStore(t)
+			bundle := limitsBundle(domain.ConclaveWards{}, domain.ConclaveVassal{Role: "coder", Workload: "worker"})
+			b := NewBroker(Options{Store: st, GetBundle: func() *config.Bundle { return bundle }})
+			sess, err := b.Open(ctx, "council", "plain room", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Close(ctx, sess.ID, tc.first); err != nil {
+				t.Fatalf("first close: %v", err)
+			}
+			afterFirst, err := st.GetConclave(ctx, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if afterFirst.State != tc.first {
+				t.Fatalf("state after first close = %s, want %s", afterFirst.State, tc.first)
+			}
+			if err := b.Close(ctx, sess.ID, tc.second); err != nil {
+				t.Fatalf("second close: %v", err)
+			}
+			afterSecond, err := st.GetConclave(ctx, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if afterSecond.State != tc.first || !afterSecond.UpdatedAt.Equal(afterFirst.UpdatedAt) {
+				t.Fatalf("second close mutated room: got %+v, want state %s updated_at %v", afterSecond, tc.first, afterFirst.UpdatedAt)
+			}
+			audits, err := st.ListAudit(ctx, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var closes []domain.AuditRecord
+			for _, rec := range audits {
+				if rec.Action == "conclave.close" {
+					closes = append(closes, rec)
+				}
+			}
+			if len(closes) != 1 {
+				t.Fatalf("conclave.close audit rows = %d, want 1: %+v", len(closes), closes)
+			}
+			if closes[0].Outcome != string(tc.first) || !strings.Contains(closes[0].DetailJSON, fmt.Sprintf(`"conclave_id":%q`, sess.ID)) {
+				t.Fatalf("conclave.close audit = %+v, want outcome %s", closes[0], tc.first)
+			}
+			if _, err := st.VerifyAuditChain(ctx); err != nil {
+				t.Fatalf("VerifyAuditChain: %v", err)
+			}
+		})
+	}
+}

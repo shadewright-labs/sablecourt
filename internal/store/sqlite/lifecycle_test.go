@@ -349,6 +349,59 @@ func TestCloseCouncil(t *testing.T) {
 	}
 }
 
+func TestCloseCouncilAuditAndRollback(t *testing.T) {
+	ctx := t.Context()
+	s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
+	room, spec := councilFixture()
+	if err := s.CreateCouncil(ctx, room, spec); err != nil {
+		t.Fatal(err)
+	}
+	// If writing the audit row fails, CloseCouncil must roll back both state and digest.
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_close_audit BEFORE INSERT ON audit_log
+		WHEN NEW.action = 'conclave.close' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CloseCouncil(ctx, room.ID, domain.ConclaveStateCompleted, "round_cap"); err == nil {
+		t.Fatal("CloseCouncil succeeded when audit insert failed")
+	}
+	if got, err := s.GetConclave(ctx, room.ID); err != nil || got.State != domain.ConclaveStateActive {
+		t.Fatalf("failed audit left room %+v, %v", got, err)
+	}
+	if _, err := s.GetConclaveRelic(ctx, room.ID, store.CouncilDigestRelicName); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed audit left digest: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TRIGGER fail_close_audit"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.CloseCouncil(ctx, room.ID, domain.ConclaveStateCompleted, "round_cap"); err != nil {
+		t.Fatalf("CloseCouncil: %v", err)
+	}
+	// Replaying CloseCouncil and matching UpdateConclaveState must not duplicate the audit row.
+	if _, err := s.CloseCouncil(ctx, room.ID, domain.ConclaveStateCancelled, "other"); err != nil {
+		t.Fatalf("replay CloseCouncil: %v", err)
+	}
+	if err := s.UpdateConclaveState(ctx, room.ID, domain.ConclaveStateCompleted, "round_cap"); err != nil {
+		t.Fatalf("replay UpdateConclaveState: %v", err)
+	}
+	audits, err := s.ListAudit(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closes []domain.AuditRecord
+	for _, rec := range audits {
+		if rec.Action == "conclave.close" {
+			closes = append(closes, rec)
+		}
+	}
+	if len(closes) != 1 || closes[0].Outcome != string(domain.ConclaveStateCompleted) || !strings.Contains(closes[0].DetailJSON, `"conclave_id":"panel"`) {
+		t.Fatalf("conclave.close audits = %+v, want 1 completed row", closes)
+	}
+	if _, err := s.VerifyAuditChain(ctx); err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+}
+
 func TestReconcileCouncilsAndCheckpoints(t *testing.T) {
 	s := councilDB(t, filepath.Join(t.TempDir(), "state.db"))
 	ctx := t.Context()

@@ -154,7 +154,7 @@ func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
 		`, t.ID, t.ParentTaskID, t.IdempotencyKey, t.WorkloadName, string(t.State),
 			defaultJSON(t.InputJSON, "{}"), defaultJSON(t.ArtifactsJSON, "[]"), defaultJSON(t.BudgetCeilingJSON, "{}"), created, updated)
 		return err
-	})
+	}, s.appendAuditTx)
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return fmt.Errorf("%w: %v", store.ErrConflict, err)
 	}
@@ -234,7 +234,7 @@ func (s *PostgresStore) ListTaskMessages(ctx context.Context, taskID string) ([]
 }
 
 func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, nil, to, reason)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, nil, to, reason, s.appendAuditTx)
 	if err != nil {
 		return err
 	}

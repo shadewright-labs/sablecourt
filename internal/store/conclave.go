@@ -211,9 +211,79 @@ func runConclavePost(ctx context.Context, st Store, msg domain.ConclaveMessage, 
 	return id, post.reason, post.retryAt, err
 }
 
+// AuditTxFunc writes an audit row inside an open store transaction.
+type AuditTxFunc func(context.Context, *sql.Tx, domain.AuditRecord) error
+
+func isTerminalConclaveState(state domain.ConclaveState) bool {
+	return state == domain.ConclaveStateCompleted || state == domain.ConclaveStateCancelled
+}
+
+// UpdateConclaveState transitions a Conclave and audits close and pause changes in the same transaction.
+// It returns handled=false when a council moves to a terminal state so the caller can close it with a digest.
+func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, id string, state domain.ConclaveState, wardReason string, now time.Time, audit AuditTxFunc) (bool, error) {
+	tx, room, err := lockConclave(ctx, db, policy, id)
+	if err != nil {
+		return true, err
+	}
+	defer tx.Rollback()
+
+	terminal := isTerminalConclaveState(state)
+	if room.policy != nil && terminal {
+		return false, nil
+	}
+	if isTerminalConclaveState(room.State) {
+		if terminal {
+			return true, nil
+		}
+		return true, ErrConclaveClosed
+	}
+	if room.State == state && room.WardReason == wardReason {
+		return true, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE conclaves SET state = $1, ward_reason = $2, updated_at = $3 WHERE id = $4
+	`, string(state), wardReason, now.Format(time.RFC3339Nano), id); err != nil {
+		return true, err
+	}
+	switch {
+	case terminal:
+		if audit == nil {
+			return true, errors.New("conclave close audit writer unavailable")
+		}
+		if err := audit(ctx, tx, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.close",
+			Outcome:    string(state),
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q}`, id),
+			CreatedAt:  now,
+		}); err != nil {
+			return true, err
+		}
+	case state == domain.ConclaveStateInputRequired:
+		if audit == nil {
+			return true, errors.New("conclave ward audit writer unavailable")
+		}
+		if err := audit(ctx, tx, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.ward",
+			Outcome:    "paused",
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"ward":%q}`, id, wardReason),
+			CreatedAt:  now,
+		}); err != nil {
+			return true, err
+		}
+	}
+	return true, tx.Commit()
+}
+
 // AppendGuardedConclavePost handles broker writes. Bare Store appends are also
 // used for importing stored messages and do not carry a guard.
-func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (bool, int64, error) {
+func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, audit AuditTxFunc) (bool, int64, error) {
 	post, ok := ctx.Value(conclavePostKey{}).(*conclavePost)
 	if !ok {
 		return false, 0, nil
@@ -223,7 +293,7 @@ func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, policy CouncilPo
 	return true, id, err
 }
 
-func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, post *conclavePost, audit func(context.Context, *sql.Tx, domain.AuditRecord) error) (int64, error) {
+func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, post *conclavePost, audit AuditTxFunc) (int64, error) {
 	tx, room, err := lockConclave(ctx, db, policy, msg.ConclaveID)
 	if err != nil {
 		return 0, err
@@ -367,7 +437,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 	}
 	switch {
 	case reason != "":
-		if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+		if err := pauseConclave(ctx, tx, room, msg.TaskID, reason, now, audit); err != nil {
 			return 0, err
 		}
 	case paused: // A successful operator decree opens one new run window.
@@ -475,9 +545,12 @@ func FinishConclaveWake(ctx context.Context, db *sql.DB, id int64) error {
 	return err
 }
 
-func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time) error {
+func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID, reason string, now time.Time, audit AuditTxFunc) error {
 	if room.State == domain.ConclaveStateInputRequired && room.WardReason == reason {
 		return nil
+	}
+	if audit == nil {
+		return errors.New("conclave ward audit writer unavailable")
 	}
 	if _, err := insertConclaveMessage(ctx, tx, domain.ConclaveMessage{
 		ConclaveID: room.ID, FromRole: "system", ToRole: "operator", Kind: "system",
@@ -485,10 +558,19 @@ func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, reason 
 	}); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE conclaves SET state = $1, ward_reason = $2, updated_at = $3 WHERE id = $4
-	`, string(domain.ConclaveStateInputRequired), reason, now.Format(time.RFC3339Nano), room.ID)
-	return err
+	`, string(domain.ConclaveStateInputRequired), reason, now.Format(time.RFC3339Nano), room.ID); err != nil {
+		return err
+	}
+	return audit(ctx, tx, domain.AuditRecord{
+		Category:   "conclave",
+		TaskID:     taskID,
+		Action:     "conclave.ward",
+		Outcome:    "paused",
+		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"ward":%q}`, room.ID, reason),
+		CreatedAt:  now,
+	})
 }
 
 type conclaveTurnKey struct{}
@@ -515,7 +597,7 @@ type TaskInserter interface {
 
 // InsertTask applies the council guard to the task insert in the same transaction.
 // The persisted task is the run reservation. Failed inserts consume no slots.
-func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, task domain.Task, insert func(TaskInserter) error) error {
+func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, task domain.Task, insert func(TaskInserter) error, audit AuditTxFunc) error {
 	turn, ok := ctx.Value(conclaveTurnKey{}).(*conclaveTurn)
 	if !ok && strings.HasPrefix(task.IdempotencyKey, councilKeyPrefix) {
 		if a, assigned := TaskConclaveAssignment(task); !assigned || a.Round != 0 {
@@ -562,11 +644,11 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 	limits := room.limits(turn.limits)
 	now := limits.Now().UTC()
 	if conclaveExpired(room, limits, now) {
-		return refuseTurn(ctx, tx, room, conclaveDeadline, now, ErrConclavePaused)
+		return refuseTurn(ctx, tx, room, conclaveDeadline, now, ErrConclavePaused, audit)
 	}
 	if limits.BudgetMissing {
 		if room.policy != nil {
-			return refuseTurn(ctx, tx, room, "budget_evidence_unavailable", now, ErrConclavePaused)
+			return refuseTurn(ctx, tx, room, "budget_evidence_unavailable", now, ErrConclavePaused, audit)
 		}
 		return ErrConclavePaused
 	}
@@ -583,7 +665,7 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 	}
 	if reason != "" {
 		if room.policy != nil {
-			return refuseTurn(ctx, tx, room, reason, now, ErrConclavePaused)
+			return refuseTurn(ctx, tx, room, reason, now, ErrConclavePaused, audit)
 		}
 		return ErrConclavePaused
 	}
@@ -596,7 +678,7 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 		return ErrConclaveRunLimit
 	}
 	if runs-room.baseline >= min(limits.MaxRuns, domain.ConclaveRunCeiling) {
-		return refuseTurn(ctx, tx, room, ConclaveMaxRunsWard, now, ErrConclaveRunLimit)
+		return refuseTurn(ctx, tx, room, ConclaveMaxRunsWard, now, ErrConclaveRunLimit, audit)
 	}
 	if room.policy != nil {
 		if err := reserveCouncilAttempt(ctx, tx, room, task, a); err != nil {
@@ -614,8 +696,8 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 	return tx.Commit()
 }
 
-func refuseTurn(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time, refusal error) error {
-	if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+func refuseTurn(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time, refusal error, audit AuditTxFunc) error {
+	if err := pauseConclave(ctx, tx, room, "", reason, now, audit); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -667,7 +749,7 @@ func ClaimConclaveTask(ctx context.Context, st Store, taskID, roomID string, now
 	return nil
 }
 
-func BeginTaskTransition(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, to domain.TaskState, reason string) (*sql.Tx, domain.TaskState, string, error) {
+func BeginTaskTransition(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, to domain.TaskState, reason string, audit AuditTxFunc) (*sql.Tx, domain.TaskState, string, error) {
 	claim, guarded := ctx.Value(conclaveClaimKey{}).(*conclaveClaim)
 	if !guarded {
 		tx, err := db.BeginTx(ctx, nil)
@@ -685,7 +767,7 @@ func BeginTaskTransition(ctx context.Context, db *sql.DB, policy CouncilPolicyRe
 	if (room.State == domain.ConclaveStateActive || room.State == domain.ConclaveStateInputRequired) &&
 		conclaveExpired(room, ConclaveLimits{MaxAge: ConclaveWallTime}, now) {
 		reason = conclaveDeadline
-		if err := pauseConclave(ctx, tx, room, reason, now); err != nil {
+		if err := pauseConclave(ctx, tx, room, claim.taskID, reason, now, audit); err != nil {
 			_ = tx.Rollback()
 			return nil, to, reason, err
 		}

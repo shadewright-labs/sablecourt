@@ -68,34 +68,18 @@ func (s *SQLiteStore) ListConclaves(ctx context.Context) ([]domain.ConclaveSessi
 }
 
 func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error {
-	query := "UPDATE conclaves SET state=?,ward_reason=?,updated_at=? WHERE id=?"
-	terminal := state == domain.ConclaveStateCompleted || state == domain.ConclaveStateCancelled
-	if terminal {
-		// Council creation and the membership check serialize with this update.
-		query += " AND id NOT IN (SELECT id FROM councils)"
-	}
-	res, err := s.db.ExecContext(ctx, query, state, wardReason, nowRFC3339(), id)
-	if err != nil {
+	handled, err := store.UpdateConclaveState(ctx, s.db, readCouncilPolicy, id, state, wardReason, time.Now().UTC(), s.appendAuditTx)
+	if err != nil || handled {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 && terminal {
-		if wardReason == "" {
-			wardReason = "owner_close"
-			if state == domain.ConclaveStateCancelled {
-				wardReason = "owner_stop"
-			}
+	if wardReason == "" {
+		wardReason = "owner_close"
+		if state == domain.ConclaveStateCancelled {
+			wardReason = "owner_stop"
 		}
-		_, err := s.closeCouncil(ctx, id, state, wardReason, true)
-		return err
 	}
-	if n == 0 {
-		return store.ErrNotFound
-	}
-	return nil
+	_, err = s.closeCouncil(ctx, id, state, wardReason, true)
+	return err
 }
 
 func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
