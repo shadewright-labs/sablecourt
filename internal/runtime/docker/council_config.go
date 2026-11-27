@@ -16,10 +16,9 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
-	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
-	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 // CouncilHarness is trusted daemon configuration for one locally built image,
@@ -127,18 +126,22 @@ func proxyEndpoint(raw string) (*url.URL, error) {
 }
 
 // councilWorkspace builds the checkout bind mount and, for a linked worktree,
-// the bind mount of its per-launch Git metadata directory. It refuses a
-// checkout that is or contains the home directory, a container runtime socket
-// (discovered or named by DOCKER_HOST), the daemon state directory or another
-// protected daemon path. A checkout inside a protected directory (a task
-// worktree under the worktree root) is allowed: it cannot reach its parent.
-func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) ([]mount.Mount, error) {
+// the bind mount of its per-launch Git metadata directory. Which host
+// directories may be mounted is decided by mountguard alone: a checkout the
+// daemon made must be reached through the worktree root handle with no
+// symlink component, and a live checkout is checked by file identity against
+// the protected paths and runtime sockets.
+func councilWorkspace(s rt.CouncilCheckout, sockets []string, guard *mountguard.Guard) ([]mount.Mount, error) {
 	switch s.Kind {
 	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter, rt.CouncilTask:
 	default:
 		return nil, errors.New("invalid council checkout kind")
 	}
-	path, err := safeBindSource(s.Path, sockets, protected)
+	live := s.Kind == rt.CouncilLive
+	if live && s.GitDir != "" {
+		return nil, errors.New("a live checkout carries its own Git metadata")
+	}
+	path, err := guard.MountSource(s.Path, live, sockets)
 	if err != nil {
 		return nil, err
 	}
@@ -146,18 +149,18 @@ func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) ([]moun
 	if s.GitDir == "" {
 		return mounts, nil
 	}
-	gitDir, err := safeBindSource(s.GitDir, sockets, protected)
+	gitDir, err := guard.MountSource(s.GitDir, false, sockets)
 	if err != nil {
 		return nil, err
 	}
-	if gitDir == path || strings.HasPrefix(gitDir, path+string(filepath.Separator)) || strings.HasPrefix(path, gitDir+string(filepath.Separator)) {
+	if overlap, err := mountguard.Overlap(path, gitDir); err != nil || overlap {
 		return nil, errors.New("checkout Git metadata overlaps the checkout")
 	}
 	// Only a self-contained metadata directory is mounted. A linked worktree
 	// registration (commondir), an alternates file or a repository with
 	// registered worktrees would reach the shared refs and objects.
 	for _, name := range []string{"commondir", "worktrees", filepath.Join("objects", "info", "alternates")} {
-		if _, err := os.Lstat(filepath.Join(gitDir, name)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := guard.Root.Lstat(gitDir + string(filepath.Separator) + name); !errors.Is(err, os.ErrNotExist) {
 			return nil, errors.New("checkout Git metadata is not self-contained")
 		}
 	}
@@ -167,60 +170,6 @@ func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) ([]moun
 // councilGitDir is where a launch's own Git metadata directory is mounted.
 // GIT_DIR and GIT_WORK_TREE point Git in the container at it and /workspace.
 const councilGitDir = "/workspace-git"
-
-// safeBindSource checks one host directory before it is bind mounted into a
-// harness container and returns it with symlinks resolved.
-func safeBindSource(dir string, sockets, protected []string) (string, error) {
-	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
-		return "", errors.New("expected absolute checkout directory")
-	}
-	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() {
-		return "", errors.New("checkout must be a directory")
-	}
-	path, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return "", err
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	home, err = filepath.EvalSymlinks(home)
-	if err != nil {
-		return "", err
-	}
-	contains := func(target string) bool {
-		return target != "" && (path == target || strings.HasPrefix(target, path+string(filepath.Separator)))
-	}
-	// guarded resolves a socket or protected path with hostpath.Resolve, the
-	// rule the daemon also uses for its own files, and reports whether the
-	// checkout holds it. A path that cannot be fully resolved counts as held,
-	// so the guard fails closed. Paths are never cleaned before resolution: in
-	// link/../name the ".." applies to the link's target, as when it is opened.
-	guarded := func(p string) bool {
-		resolved, err := hostpath.Resolve(p)
-		return err != nil || contains(resolved)
-	}
-	if filepath.Dir(path) == path || contains(home) {
-		return "", errors.New("unsafe checkout directory")
-	}
-	for _, sock := range sockets {
-		if sock != "" && guarded(sock) {
-			return "", errors.New("unsafe checkout directory")
-		}
-	}
-	stateDir, err := operatortoken.StateDir()
-	if err != nil {
-		return "", errors.New("cannot resolve daemon state directory")
-	}
-	for _, p := range append([]string{stateDir}, protected...) {
-		if p != "" && guarded(p) {
-			return "", errors.New("unsafe checkout directory")
-		}
-	}
-	return path, nil
-}
 
 func preparePrompt(s rt.CouncilLaunch) (string, error) {
 	if s.TaskToken == "" || len(s.TaskToken) > 4096 || strings.ContainsAny(s.TaskToken, "\x00\r\n") ||
@@ -253,6 +202,9 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 		}
 	}
 	if err := a.validateCouncilTool(s.Harness, cfg); err != nil {
+		return o, err
+	}
+	if err := a.remoteEngine(); err != nil {
 		return o, err
 	}
 	if !councilName.MatchString(s.TaskID) || !councilName.MatchString(s.Workload) {
@@ -299,7 +251,7 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
-		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.ProtectedPaths)
+		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.Mounts)
 		if err != nil {
 			return o, err
 		}

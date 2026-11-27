@@ -16,6 +16,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 type CouncilProxyLauncher interface {
@@ -30,7 +31,10 @@ type CouncilProxyLauncher interface {
 // sandbox) runs only when HostModeUnsafe is set and no container runner is
 // configured; such a run is outside invariants 2 and 3.
 type Adapter struct {
-	WorktreeRoot       string // Directory for worktrees and their state.
+	WorktreeRoot string // Directory for worktrees and their state.
+	// Root is the worktree root handle the daemon opened at startup. Crash
+	// cleanup deletes through it. When nil, it is opened on first use.
+	Root               *mountguard.Root
 	DryRun             bool
 	AttachHub          *attach.Hub
 	BranchRetention    time.Duration     // Prune merged branches after this age on the next start.
@@ -52,6 +56,7 @@ type Adapter struct {
 	setupTimeout    time.Duration
 	beforeTaskState func(taskID string) // Test hook invoked before writing task state.
 
+	rootMu     sync.Mutex
 	mu         sync.Mutex
 	gates      map[string]*taskGate
 	running    sync.Map // Worktree path to *codingProcess.
@@ -65,6 +70,21 @@ func (a *Adapter) SupportsCouncilContainers() bool {
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
+
+// worktreeHandle returns the worktree root handle, opening it once when the
+// daemon did not provide one.
+func (a *Adapter) worktreeHandle() (*mountguard.Root, error) {
+	a.rootMu.Lock()
+	defer a.rootMu.Unlock()
+	if a.Root == nil {
+		r, err := mountguard.OpenRoot(a.WorktreeRoot)
+		if err != nil {
+			return nil, err
+		}
+		a.Root = r
+	}
+	return a.Root, nil
+}
 
 func NewAdapter(worktreeRoot string) *Adapter {
 	return &Adapter{WorktreeRoot: worktreeRoot}

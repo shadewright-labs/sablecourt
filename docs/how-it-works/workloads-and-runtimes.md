@@ -24,6 +24,8 @@ Standalone coding tasks and council seats run in harness containers, as the 2026
 
 The reconciler asks for a container for every coding task when the coding adapter has a container runner, which the daemon wires when a Docker engine is configured. Without one, coding tasks and councils are refused; there is no silent fallback to the host.
 
+Only directories the daemon reaches through its worktree root handle, with no symlink on the way, are mounted for the worktrees it makes; the configured repository, mounted read-only for a `live` council checkout, is checked against the daemon's own files, the home credential paths and the runtime sockets by device and inode, not by comparing path spellings. A remote Docker engine (`tcp://`, `ssh://`) is refused for these launches. The rule and its stated limits (a process with the daemon user's rights racing a rename or planting a hard link, and daemon paths in a directory another user can write) are on [harness containers](harness-containers.md).
+
 ### Host mode (unsafe, off by default)
 
 The host launcher stays in the code only behind the daemon flag `--unsafe-host-harnesses`. A run in host mode is outside invariants 2 and 3: Sablecourt makes no claim that the harness cannot reach secrets the daemon holds, and redaction is the only control on what it writes ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)). The flag takes effect only when no container runtime is configured; with Docker present, the adapter refuses a host launch even with the flag set. The daemon logs a warning at startup and at each host launch, and `sablectl doctor` shows the mode (`GET /api/v1/runtime/coding`).
@@ -46,6 +48,7 @@ The controller adapter refuses to start a workload that is not a `deterministic-
 ## Not built yet
 
 - A machine without a container runtime cannot run coding tasks or councils in 0.1.0, except in forced host mode. In host mode a harness gets a scratch `HOME` and finds no login (issue 63). The separate harness state directories and the host-mode `codex` check of the 2026-11-25 amendment are dropped, not planned.
+- Harness containers on a remote Docker engine. The mount rule compares host file identities, so `tcp://` and `ssh://` engines are refused.
 - Checkpointed suspend and resume for long-lived agents ([ADR-0002](../adr/0002-heterogeneous-mvp-workload-adapters.md)).
 - Linux host sandboxing. [ADR-0003](../adr/0003-hybrid-workload-isolation.md) names Bubblewrap and none exists; the ADR-0011 amendment of 2026-11-27 supersedes that line, so none is planned.
 

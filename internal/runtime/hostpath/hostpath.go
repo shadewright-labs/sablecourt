@@ -1,5 +1,6 @@
-// Package hostpath resolves the host paths the daemon opens and the paths the
-// checkout guard compares, with one rule, so both name the same file.
+// Package hostpath resolves and creates the daemon's own files (the database
+// and the secret file). Which directories a harness container may mount is
+// decided by package mountguard, by handle and file identity, not here.
 //
 // Paths are never cleaned lexically before they are resolved: in link/../name
 // the kernel follows link before "..", so a cleaned spelling can name a
@@ -54,63 +55,36 @@ func ResolveFile(raw string) (string, error) {
 	return filepath.Join(dir, base), nil
 }
 
-// Resolve returns an absolute path with every symlink resolved, for the
-// checkout guard. An existing path is resolved whole. A path that does not
-// exist yet resolves to its resolved parent directory plus its final
-// component; the parent must exist, and a dangling symlink is refused because
-// its target is not known until it is created. Anything that cannot be fully
-// resolved is an error, so the guard fails closed.
-func Resolve(path string) (string, error) {
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%q is not absolute", path)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		return resolved, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
-	}
-	if _, err := os.Lstat(path); err == nil {
-		return "", fmt.Errorf("%q is a dangling symlink", path)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
-	}
-	parent, base, err := split(path)
-	if err != nil {
-		return "", fmt.Errorf("%q: %w", path, err)
-	}
-	dir, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		return "", fmt.Errorf("resolve the directory of %q: %w", path, err)
-	}
-	return filepath.Join(dir, base), nil
-}
-
 // CreateFile creates a resolved daemon file that does not exist yet, with
 // mode 0600 and the given content. O_EXCL refuses any existing entry,
 // including a symlink planted at the path, so the file is created exactly at
 // path. An existing regular file is left alone; anything else is refused.
-func CreateFile(path string, content []byte) error {
+// It returns the identity of the file, for a later os.SameFile check that
+// whatever opens the path opened this file.
+func CreateFile(path string, content []byte) (fs.FileInfo, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path comes from ResolveFile.
 	if errors.Is(err, fs.ErrExist) {
 		info, err := os.Lstat(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("%q is not a regular file", path)
+			return nil, fmt.Errorf("%q is not a regular file", path)
 		}
-		return nil
+		return info, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := f.Write(content); err != nil {
+	info, err := f.Stat()
+	if err == nil {
+		_, err = f.Write(content)
+	}
+	if err != nil {
 		_ = f.Close()
-		return err
+		return nil, err
 	}
-	return f.Close()
+	return info, f.Close()
 }
 
 // split cuts path at its last separator without cleaning it.

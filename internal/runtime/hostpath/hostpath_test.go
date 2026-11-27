@@ -28,7 +28,7 @@ func TestCreateFile(t *testing.T) {
 			_ = os.Remove(target)
 			path := filepath.Join(t.TempDir(), "secrets.json")
 			tc.setup(path)
-			err := CreateFile(path, []byte("{}\n"))
+			created, err := CreateFile(path, []byte("{}\n"))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("CreateFile accepted an unsafe entry")
@@ -48,6 +48,9 @@ func TestCreateFile(t *testing.T) {
 			info, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !os.SameFile(created, info) {
+				t.Fatal("CreateFile returned the identity of another file")
 			}
 			if tc.name == "new file" && info.Mode().Perm() != 0o600 {
 				t.Fatalf("mode = %v, want 0600", info.Mode().Perm())

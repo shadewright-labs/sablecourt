@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 // recoveryFixture is a council root with a real primary repository, laid
@@ -80,7 +82,7 @@ func (f recoveryFixture) branchExists(t *testing.T, branch string) bool {
 }
 
 func TestReconcileWithoutCouncilDirectory(t *testing.T) {
-	if err := reconcileCouncilJournals(context.Background(), t.TempDir(), "absent"); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, t.TempDir()), "absent"); err != nil {
 		t.Fatalf("reconcile of a missing council = %v", err)
 	}
 }
@@ -120,7 +122,7 @@ func TestReconcileInterruptedWriterLaunch(t *testing.T) {
 			})
 
 			for round := range 2 {
-				if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+				if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 					t.Fatalf("reconcile round %d: %v", round, err)
 				}
 				if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
@@ -175,7 +177,7 @@ func TestReconcileInterruptedSetupClearsReservations(t *testing.T) {
 		TaskID: task, CommonDir: f.common, Mode: checkoutModeRef,
 		CreatedCouncilDir: true, CreatedRefWT: true, CreatedReviewDir: true,
 	})
-	if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 		t.Fatal(err)
 	}
 	if f.worktreeListed(t, refDir) {
@@ -205,7 +207,7 @@ func TestReconcileKeepsPinnedCouncilState(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.crashedJournal(t, councilStartJournal{TaskID: task, CreatedCouncilDir: true, CreatedRefWT: true})
-	if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readCouncilState(councilStatePath(f.root, f.key))
@@ -233,7 +235,7 @@ func TestReconcileWithoutCouncilStateRemovesCreatedCheckouts(t *testing.T) {
 		TaskID: task, CommonDir: f.common, WriterBranch: branch, BaseCommit: f.base,
 		CreatedCouncilDir: true, CreatedRefWT: true, CreatedWriterWT: true, CreatedReviewDir: true,
 	})
-	if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{refDir, writerDir} {
@@ -295,7 +297,7 @@ func TestReconcileLaunchedTaskIsNotUndone(t *testing.T) {
 			journal := f.crashedJournal(t, councilStartJournal{
 				TaskID: task, TaskBase: taskBase, IsWriter: true, CreatedWriterLock: true,
 			})
-			if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+			if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
@@ -343,7 +345,7 @@ func TestReconcileSkipsActiveJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	testWrite(t, f.councilDir, "notes.txt", "{", 0o600)
-	if err := reconcileCouncilJournals(context.Background(), f.root, f.key); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(live.path); err != nil {
@@ -380,7 +382,7 @@ func TestReconcileRefusesCorruptRecords(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRecoveryFixture(t)
 			tc.setup(t, f)
-			err := reconcileCouncilJournals(context.Background(), f.root, f.key)
+			err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("reconcile error = %v, want %q", err, tc.want)
 			}
@@ -482,5 +484,80 @@ func TestLockCouncilRefusesUnusableRoot(t *testing.T) {
 		t.Fatalf("gate still held after failure: %v", err)
 	} else {
 		release()
+	}
+}
+
+// openTestRoot opens dir as the worktree root handle, as the daemon does at
+// startup.
+func openTestRoot(t *testing.T, dir string) *mountguard.Root {
+	t.Helper()
+	r, err := mountguard.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return r
+}
+
+// TestReconcileRefusesTamperedTaskBase covers crash cleanup in the decision of
+// 2026-11-27 on issue 181: the task directory comes from the root and the task
+// ID, and a journal naming any other directory is invalid and deletes nothing.
+func TestReconcileRefusesTamperedTaskBase(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T, f recoveryFixture) (taskBase, mustSurvive string)
+	}{
+		{name: "directory outside the root", target: func(t *testing.T, f recoveryFixture) (string, string) {
+			victim := filepath.Join(t.TempDir(), "victim")
+			return victim, victim + ".git"
+		}},
+		{name: "repository with a trailing separator", target: func(t *testing.T, f recoveryFixture) (string, string) {
+			return f.repo + string(filepath.Separator), f.common
+		}},
+		{name: "another task under the root", target: func(t *testing.T, f recoveryFixture) (string, string) {
+			other := filepath.Join(f.root, "other-task")
+			return other, other + ".git"
+		}},
+		{name: "dot-dot spelling of the task's own directory", target: func(t *testing.T, f recoveryFixture) (string, string) {
+			sep := string(filepath.Separator)
+			base := f.root + sep + "x" + sep + ".." + sep + "writer-3"
+			return base, filepath.Join(f.root, "writer-3.git")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRecoveryFixture(t)
+			taskBase, survive := tc.target(t, f)
+			if err := os.MkdirAll(survive, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(f.root, "x"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			f.crashedJournal(t, councilStartJournal{TaskID: "writer-3", TaskBase: taskBase})
+			err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key)
+			if err == nil || !strings.Contains(err.Error(), "invalid council start journal") {
+				t.Errorf("reconcile error = %v, want an invalid journal", err)
+			}
+			if _, statErr := os.Stat(survive); statErr != nil {
+				t.Errorf("reconcile deleted %s: %v", survive, statErr)
+			}
+		})
+	}
+}
+
+// TestReconcileRemovesOwnGitDirThroughRoot keeps the cleanup working for a
+// journal that names the task's own directory.
+func TestReconcileRemovesOwnGitDirThroughRoot(t *testing.T) {
+	f := newRecoveryFixture(t)
+	base := filepath.Join(f.root, "writer-5")
+	if err := os.MkdirAll(harnessGitDirPath(base), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.crashedJournal(t, councilStartJournal{TaskID: "writer-5", TaskBase: base})
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, f.root), f.key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(harnessGitDirPath(base)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("own Git metadata left behind: %v", err)
 	}
 }

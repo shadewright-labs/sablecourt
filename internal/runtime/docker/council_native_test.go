@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -155,9 +156,10 @@ func TestCouncilNativeDocker(t *testing.T) {
 	})
 	a.NetworkName = name
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: id, LoginVolume: name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8080/gate/data"}}
+	root := withWorktreeRoot(t, a)
 	for _, kind := range []rt.CouncilCheckoutKind{rt.CouncilWriter, rt.CouncilReview} {
 		t.Run(string(kind), func(t *testing.T) {
-			path := t.TempDir()
+			path := mkdirAll(t, filepath.Join(root, string(kind)))
 			if err := os.Chmod(path, 0777); err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +210,7 @@ func TestCouncilNativeDocker(t *testing.T) {
 	}
 	t.Run("detached wall limit", func(t *testing.T) {
 		// Leave bootstrap waiting for input and disconnect. PID 1 must enforce the deadline.
-		s := rt.CouncilLaunch{TaskID: name, Workload: "review", Harness: "claude", Checkout: rt.CouncilCheckout{Kind: rt.CouncilReview, Path: t.TempDir()}, Limits: rt.CouncilLimits{WallTime: time.Second, MemoryBytes: 64 << 20, NanoCPUs: 500000000, PIDs: 32}}
+		s := rt.CouncilLaunch{TaskID: name, Workload: "review", Harness: "claude", Checkout: rt.CouncilCheckout{Kind: rt.CouncilReview, Path: mkdirAll(t, filepath.Join(root, "detached"))}, Limits: rt.CouncilLimits{WallTime: time.Second, MemoryBytes: 64 << 20, NanoCPUs: 500000000, PIDs: 32}}
 		o, err := a.harnessContainerSpec(t.Context(), cli, s, false)
 		if err != nil {
 			t.Fatal(err)

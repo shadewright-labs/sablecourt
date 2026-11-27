@@ -23,6 +23,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 const stubContainerCLI = `#!/bin/bash
@@ -224,6 +225,7 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	wtRoot := filepath.Join(t.TempDir(), "worktrees")
 	adapter := NewAdapter(wtRoot)
 	adapter.CouncilRunner = da
+	wireMountGuard(t, adapter, da)
 	adapter.CouncilProxy = da
 	adapter.CouncilProxyImage = proxyImageID
 	adapter.DaemonListen = listen
@@ -436,6 +438,7 @@ func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
 	testWrite(t, repo, "challenge.txt", challenge, 0644)
 	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
 	a.CouncilRunner = da
+	wireMountGuard(t, a, da)
 	a.CouncilProxy = da
 	a.CouncilProxyImage = harnessimages.ProxyImage()
 	a.DaemonListen = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 7432).String()
@@ -491,4 +494,16 @@ func integrationSocketRoot(t *testing.T) string {
 		}
 	})
 	return dir
+}
+
+// wireMountGuard gives the Docker adapter the coding adapter's worktree root
+// handle, as the daemon does at startup.
+func wireMountGuard(t *testing.T, a *Adapter, da *docker.Adapter) {
+	t.Helper()
+	root, err := a.worktreeHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	da.Mounts = &mountguard.Guard{Root: root}
 }

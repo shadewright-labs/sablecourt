@@ -35,7 +35,7 @@ func TestHarnessContainerSpecRefusesSocketsTheClientDials(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			checkout := filepath.Join(t.TempDir(), tc.dir)
+			checkout := filepath.Join(liveDir(t), tc.dir)
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("SABLECOURT_STATE_DIR", filepath.Join(t.TempDir(), "state"))
 			t.Setenv("DOCKER_HOST", "")
@@ -54,7 +54,7 @@ func TestHarnessContainerSpecRefusesSocketsTheClientDials(t *testing.T) {
 			a := NewAdapter(engine, "")
 			a.discoverSocket = func() string { return "" }
 			a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}
-			s := rt.CouncilLaunch{TaskID: "task-sock", Workload: "guard", Harness: "claude", Checkout: rt.CouncilCheckout{Path: checkout, Kind: rt.CouncilTask},
+			s := rt.CouncilLaunch{TaskID: "task-sock", Workload: "guard", Harness: "claude", Checkout: rt.CouncilCheckout{Path: checkout, Kind: rt.CouncilLive},
 				Limits: rt.CouncilLimits{NanoCPUs: 1, MemoryBytes: 1 << 20, PIDs: 1, WallTime: 1e9}, Prompt: "p", TaskToken: "lease"}
 			if _, err := a.harnessContainerSpec(t.Context(), engine, s, false); err == nil {
 				t.Fatalf("checkout holding the socket %q was accepted", sock)

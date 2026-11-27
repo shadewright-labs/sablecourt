@@ -17,6 +17,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 type logStreamer interface {
@@ -46,12 +47,32 @@ type Adapter struct {
 	Client           EngineClient
 	NetworkName      string
 	AttachHub        *attach.Hub
-	// ProtectedPaths are daemon files and directories (database, worktree
-	// root, secret file) that no harness checkout may equal or contain. The
-	// daemon state directory is always protected, whether or not it is listed.
-	ProtectedPaths []string
+	// Mounts decides which host directories a harness container may bind
+	// mount: the worktree root handle and the daemon's own protected paths.
+	// Without it, no harness checkout is mounted.
+	Mounts         *mountguard.Guard
 	attachCtx      context.Context
 	discoverSocket func() string
+}
+
+// remoteEngine refuses a harness launch on an engine that is not reached over
+// a local Unix socket. The mount rule compares host file identities, which
+// say nothing about the files of a remote engine (tcp://, ssh://).
+func (a *Adapter) remoteEngine() error {
+	hosts := []string{os.Getenv("DOCKER_HOST")}
+	if c, ok := a.Client.(interface{ DaemonHost() string }); ok {
+		hosts = append(hosts, c.DaemonHost())
+	}
+	for _, host := range hosts {
+		if host == "" {
+			continue
+		}
+		u, err := client.ParseHostURL(host)
+		if err != nil || u.Scheme != "unix" {
+			return errors.New("harness containers need a local Docker engine; a remote engine (tcp:// or ssh://) is refused")
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) dockerSocket() string {

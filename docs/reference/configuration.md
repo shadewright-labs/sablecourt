@@ -23,7 +23,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. Its directory must exist and the file must not be a symlink; the daemon creates a missing file at startup. `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
+| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. Its directory must exist, the file must not be a symlink and the path must not contain `?`; the daemon creates a missing file at startup and refuses to start if the file, the secret file or the state directory lies under the worktree root (`worktrees` beside the database). `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
 | `worktrees/` next to the database | Coding adapter | Per task: `<task>/` (the Git worktree), `<task>.state.json`, `<task>.log`, `<task>.run/`, `<task>.exclude-config`, plus a `.councils/` directory and `.coding-scratch-*` directories. |
 | `.sablecourt-session.json`, `.sablecourt-context.md` | Coding adapter | Written into the task worktree. |
 | `sablecourtd.out.log`, `sablecourtd.err.log` | The launchd job (macOS only) | Standard output and error of the job, in `.local/share/sablecourt` under the home directory. The Linux systemd unit sets no log files. |

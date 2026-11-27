@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -46,6 +47,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
@@ -181,8 +183,28 @@ type daemonConfig struct {
 	logger               *slog.Logger
 }
 
+// worktreeRootPath is the directory that holds every checkout the daemon
+// makes: worktrees beside the database.
+func worktreeRootPath(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "worktrees")
+}
+
+// sameDatabaseFile checks that the file SQLite opened for the main database
+// is the file the daemon created, by identity.
+func sameDatabaseFile(ctx context.Context, sq *sqlite.SQLiteStore, created fs.FileInfo) error {
+	file, err := sq.MainFile(ctx)
+	if err != nil {
+		return fmt.Errorf("read the database file: %w", err)
+	}
+	opened, err := os.Stat(file)
+	if err != nil || !os.SameFile(opened, created) {
+		return errors.New("the database opened is not the file the daemon created")
+	}
+	return nil
+}
+
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
-	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
+	adapter := coding.NewAdapter(worktreeRootPath(dbPath))
 	adapter.BranchRetention = retention
 	adapter.AttachHub = hub
 	return adapter
@@ -228,13 +250,14 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 }
 
 // daemonPrivatePaths lists the daemon's own files and directories: the state
-// directory, the database, the worktree root and the secret file. dbPath and
+// directory, the database and its directory, the worktree root and the secret file. dbPath and
 // secretFile must come from hostpath.ResolveFile, so the list names the files
 // the daemon opens.
 func daemonPrivatePaths(stateDir, dbPath, secretFile string) []string {
 	out := []string{stateDir}
 	if dbPath != "" {
-		out = append(out, dbPath, filepath.Join(filepath.Dir(dbPath), "worktrees"))
+		// The directory too: SQLite keeps its write-ahead files beside the database.
+		out = append(out, dbPath, filepath.Dir(dbPath), worktreeRootPath(dbPath))
 	}
 	if secretFile != "" {
 		out = append(out, secretFile)
@@ -340,6 +363,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// Resolve once: the store, the secret store and the checkout guard all use
 	// these exact paths. A secret file that does not exist yet is created now,
 	// at the resolved path, so nothing can later place a symlink there.
+	// The SQLite driver reads anything after "?" as options, so such a path
+	// would open a different file from the one resolved here.
+	if strings.ContainsRune(dbPath, '?') {
+		return errors.New("database path must not contain '?'")
+	}
 	if dbPath, err = hostpath.ResolveFile(dbPath); err != nil {
 		return fmt.Errorf("resolve database path: %w", err)
 	}
@@ -347,11 +375,25 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		return fmt.Errorf("resolve secret file path: %w", err)
 	}
 	if secretFile != "" {
-		if err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
+		if _, err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
 			return fmt.Errorf("create secret file: %w", err)
 		}
 	}
 	privateDirs := daemonPrivatePaths(dir, dbPath, secretFile)
+	// The worktree root is opened once. Checkouts the daemon makes are
+	// mounted only when reached through this handle, so none of the daemon's
+	// own files may lie under it.
+	var worktrees *mountguard.Root
+	if !isCitadel {
+		if worktrees, err = mountguard.OpenRoot(worktreeRootPath(dbPath)); err != nil {
+			return err
+		}
+		defer worktrees.Close() //nolint:errcheck // directory handle; closing it finalizes no write
+		if err := worktrees.RefuseInside(dbPath, secretFile, dir); err != nil {
+			return fmt.Errorf("daemon files under the worktree root: %w", err)
+		}
+	}
+	mounts := &mountguard.Guard{Root: worktrees, Protected: privateDirs}
 	operatorToken, stateLock, err := initDaemonState(dir)
 	if err != nil {
 		return err
@@ -396,11 +438,21 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	} else {
 		// SQLite takes an empty file as an empty database, and creating it
 		// here puts it exactly at the resolved path.
+		var created fs.FileInfo
 		if dbPath != "" {
-			err = hostpath.CreateFile(dbPath, nil)
+			created, err = hostpath.CreateFile(dbPath, nil)
 		}
 		if err == nil {
-			st, err = sqlite.Open(dbPath)
+			var sq *sqlite.SQLiteStore
+			if sq, err = sqlite.Open(dbPath); err == nil {
+				st = sq
+				if created != nil {
+					if err = sameDatabaseFile(ctx, sq, created); err != nil {
+						_ = sq.Close()
+						st = nil
+					}
+				}
+			}
 		}
 	}
 	if err != nil {
@@ -432,7 +484,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		if da, err := docker.NewFromEnv(); err == nil {
 			da.SetAttachHub(ctx, attachHub)
 			// No harness checkout may equal or contain these daemon paths.
-			da.ProtectedPaths = privateDirs
+			da.Mounts = mounts
 			adapters[domain.ClassLongLivedAgent] = da
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
 			if da.CouncilRuntimeConfigured() {
@@ -444,6 +496,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		} else {
 			return fmt.Errorf("configure Docker runtime: %w", err)
 		}
+	}
+	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca != nil && worktrees != nil {
+		// Crash cleanup deletes through the same handle the mount rule uses.
+		ca.Root = worktrees
 	}
 
 	var (
@@ -655,7 +711,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			incidentTemplate:    cfg.incidentTemplate,
 			operatorToken:       operatorToken,
 			councilsDisabled:    isCitadel,
-			councilPrivateDirs:  privateDirs,
+			councilMounts:       mounts,
 			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters, councilSandbox(councilDocker != nil)),
 			codingRuntime: func() codingRuntimeStatus {
 				return codingRuntime(adapters, cfg.unsafeHostHarnesses)
@@ -870,7 +926,7 @@ type handlerConfig struct {
 	incidentTemplate    string
 	operatorToken       string
 	councilsDisabled    bool
-	councilPrivateDirs  []string
+	councilMounts       *mountguard.Guard
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 	// routeSink, when set, is told every route pattern the handler registers.

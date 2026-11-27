@@ -27,7 +27,13 @@ type SQLiteStore struct {
 
 var _ store.Store = (*SQLiteStore)(nil)
 
+// Open opens the database at path. A path with "?" is refused: the driver
+// reads everything after it as connection options, so it would open a
+// different file from the one the daemon resolved and created.
 func Open(path string) (*SQLiteStore, error) {
+	if strings.ContainsRune(path, '?') {
+		return nil, errors.New("sqlite database path must not contain '?'")
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
@@ -47,6 +53,31 @@ func Open(path string) (*SQLiteStore, error) {
 	}
 
 	return &SQLiteStore{db: db}, nil
+}
+
+// MainFile returns the file the connection really opened for the main
+// database, as SQLite reports it (PRAGMA database_list). The daemon compares
+// its identity with the file it created.
+func (s *SQLiteStore) MainFile(ctx context.Context) (string, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA database_list;")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return "", err
+		}
+		if name == "main" {
+			return file, rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", errors.New("sqlite reports no main database")
 }
 
 func (s *SQLiteStore) Close() error {

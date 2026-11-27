@@ -33,7 +33,10 @@ var harnessEnvAllowlist = map[string]bool{
 // directory and a self-contained per-launch metadata directory.
 func linkedCheckout(t *testing.T) (checkout, common, gitDir string) {
 	t.Helper()
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	common = filepath.Join(base, "repo", ".git")
 	reg := filepath.Join(common, "worktrees", "task-guard")
 	checkout = filepath.Join(base, "worktrees", "task-guard")
@@ -131,9 +134,14 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 			a.CouncilHarnesses = map[string]CouncilHarness{tc.harness: cfg}
 			// Every kind but live is a linked worktree and carries its own
 			// metadata directory; a live checkout's .git is mounted with it.
-			checkout, common, gitDir := t.TempDir(), "", ""
+			checkout, common, gitDir := liveDir(t), "", ""
 			if tc.kind != rt.CouncilLive {
 				checkout, common, gitDir = linkedCheckout(t)
+			}
+			if tc.kind == rt.CouncilLive {
+				withWorktreeRoot(t, a)
+			} else {
+				openRootAt(t, a, filepath.Dir(checkout))
 			}
 			s := rt.CouncilLaunch{
 				TaskID: "task-guard", Workload: "guard", Harness: tc.harness,
@@ -254,119 +262,14 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 	}
 }
 
-// TestHarnessContainerSpecRefusesUnsafeCheckouts applies the checkout guard to
-// a standalone task and a council seat alike. Each row removes one guard's
-// reason to exist, so the table fails if that check is removed.
-func TestHarnessContainerSpecRefusesUnsafeCheckouts(t *testing.T) {
-	cases := []string{
-		"checkout contains home", "checkout contains runtime socket", "checkout contains DOCKER_HOST socket",
-		"checkout is the state dir", "checkout contains the state dir", "checkout is the default state dir",
-		"checkout is a protected path", "checkout contains a protected path",
-		"protected path through a symlink and dot-dot",
-		"leaf symlink", "dot-dot path", "unknown kind",
-		"git dir is a worktree registration", "git dir is the shared repository", "git dir has alternates",
-		"git dir inside the checkout", "git dir contains a protected path", "git dir is a symlink",
-	}
-	for _, kind := range []rt.CouncilCheckoutKind{rt.CouncilTask, rt.CouncilWriter, rt.CouncilLive} {
-		for _, tc := range cases {
-			t.Run(string(kind)+"/"+tc, func(t *testing.T) {
-				checkout := t.TempDir()
-				t.Setenv("HOME", t.TempDir())
-				t.Setenv("SABLECOURT_STATE_DIR", filepath.Join(t.TempDir(), "state"))
-				t.Setenv("DOCKER_HOST", "")
-				f := newCouncilEngine()
-				a := NewAdapter(f, "")
-				a.discoverSocket = func() string { return "" }
-				a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}
-				s := rt.CouncilLaunch{TaskID: "task-guard", Workload: "guard", Harness: "claude", Checkout: rt.CouncilCheckout{Path: checkout, Kind: kind},
-					Limits: rt.CouncilLimits{NanoCPUs: 1, MemoryBytes: 1 << 20, PIDs: 1, WallTime: 1e9}, Prompt: "p", TaskToken: "lease"}
-				mkdir := func(p string) string {
-					if err := os.MkdirAll(p, 0o700); err != nil {
-						t.Fatal(err)
-					}
-					return p
-				}
-				switch tc {
-				case "checkout contains home":
-					t.Setenv("HOME", mkdir(filepath.Join(checkout, "home")))
-				case "checkout contains runtime socket":
-					a.discoverSocket = func() string { return filepath.Join(checkout, "docker.sock") }
-				case "checkout contains DOCKER_HOST socket":
-					t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(checkout, "run", "engine.sock"))
-				case "checkout is the state dir":
-					t.Setenv("SABLECOURT_STATE_DIR", checkout)
-				case "checkout contains the state dir":
-					t.Setenv("SABLECOURT_STATE_DIR", mkdir(filepath.Join(checkout, "state")))
-				case "checkout is the default state dir":
-					home := t.TempDir()
-					t.Setenv("HOME", home)
-					t.Setenv("SABLECOURT_STATE_DIR", "")
-					s.Checkout.Path = mkdir(filepath.Join(home, ".local", "share", "sablecourt"))
-				case "checkout is a protected path":
-					a.ProtectedPaths = []string{checkout}
-				case "checkout contains a protected path":
-					a.ProtectedPaths = []string{filepath.Join(mkdir(filepath.Join(checkout, "db")), "sablecourt.db")}
-				case "protected path through a symlink and dot-dot":
-					// link points into the checkout, so link/../sablecourt.db opens a
-					// file inside it, while the cleaned spelling names a sibling of link.
-					// The file does not exist yet, as before the first start.
-					outside := t.TempDir()
-					sub := mkdir(filepath.Join(checkout, "sub"))
-					if err := os.Symlink(sub, filepath.Join(outside, "link")); err != nil {
-						t.Fatal(err)
-					}
-					a.ProtectedPaths = []string{filepath.Join(outside, "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "sablecourt.db"}
-				case "leaf symlink":
-					link := filepath.Join(t.TempDir(), "link")
-					if err := os.Symlink(checkout, link); err != nil {
-						t.Fatal(err)
-					}
-					s.Checkout.Path = link
-				case "dot-dot path":
-					s.Checkout.Path = filepath.Join(checkout, "sub") + string(filepath.Separator) + ".."
-					mkdir(filepath.Join(checkout, "sub"))
-				case "unknown kind":
-					s.Checkout.Kind = "host"
-				case "git dir is a worktree registration":
-					_, common, _ := linkedCheckout(t)
-					s.Checkout.GitDir = filepath.Join(common, "worktrees", "task-guard")
-				case "git dir is the shared repository":
-					_, common, _ := linkedCheckout(t)
-					s.Checkout.GitDir = common
-				case "git dir has alternates":
-					_, _, gitDir := linkedCheckout(t)
-					mkdir(filepath.Join(gitDir, "objects", "info"))
-					if err := os.WriteFile(filepath.Join(gitDir, "objects", "info", "alternates"), []byte("/elsewhere/objects\n"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					s.Checkout.GitDir = gitDir
-				case "git dir inside the checkout":
-					s.Checkout.GitDir = mkdir(filepath.Join(checkout, "meta"))
-				case "git dir contains a protected path":
-					_, _, gitDir := linkedCheckout(t)
-					s.Checkout.GitDir = gitDir
-					a.ProtectedPaths = []string{filepath.Join(gitDir, "sablecourt.db")}
-				case "git dir is a symlink":
-					_, _, gitDir := linkedCheckout(t)
-					link := filepath.Join(t.TempDir(), "meta")
-					if err := os.Symlink(gitDir, link); err != nil {
-						t.Fatal(err)
-					}
-					s.Checkout.GitDir = link
-				}
-				if _, err := a.harnessContainerSpec(t.Context(), f, s, false); err == nil {
-					t.Fatal("unsafe checkout accepted")
-				}
-			})
-		}
-	}
-}
-
 // TestHarnessContainerSpecAllowsTaskWorktreeUnderStateDir keeps the state
 // directory guard from refusing a task's own worktree when the database, and
 // so the worktree root, lives inside the state directory.
 func TestHarnessContainerSpecAllowsTaskWorktreeUnderStateDir(t *testing.T) {
-	state := t.TempDir()
+	state, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SABLECOURT_STATE_DIR", state)
 	t.Setenv("DOCKER_HOST", "")
@@ -378,7 +281,7 @@ func TestHarnessContainerSpecAllowsTaskWorktreeUnderStateDir(t *testing.T) {
 	f := newCouncilEngine()
 	a := NewAdapter(f, "")
 	a.discoverSocket = func() string { return "" }
-	a.ProtectedPaths = []string{filepath.Join(state, "sablecourt.db"), root}
+	openRootAt(t, a, root, filepath.Join(state, "sablecourt.db"), state)
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8888/gate/mcp"}}
 	s := rt.CouncilLaunch{TaskID: "task-guard", Workload: "guard", Harness: "claude", Checkout: rt.CouncilCheckout{Path: checkout, Kind: rt.CouncilTask},
 		Limits: rt.CouncilLimits{NanoCPUs: 1, MemoryBytes: 1 << 20, PIDs: 1, WallTime: 1e9}, Prompt: "p", TaskToken: "lease"}

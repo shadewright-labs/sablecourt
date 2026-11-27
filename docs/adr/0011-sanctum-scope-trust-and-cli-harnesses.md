@@ -131,6 +131,14 @@ What this does not change: the container restrictions, one login volume per harn
 
 Stated limit: a machine without a container runtime cannot run coding tasks or councils in 0.1.0.
 
+## Amendment (2026-11-27, Proposed): bind mounts by handle and file identity
+
+Status of this amendment: Proposed. It records the decision of 2026-11-27 on [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181), taken after three review passes each found new path spellings where the mount check and the daemon's own file opens disagreed. It narrows what may be mounted and changes no accepted text above.
+
+Bind mounts. The daemon opens its worktree root once at startup and mounts a checkout it made (a task worktree, a council ref, review or writer checkout, or a launch's own Git metadata) only when every component below that root is a plain directory checked through the handle, passing Docker the root's canonical path plus those components. The one checkout an operator names, the live repository, is compared by device and inode with the database and its directory, the secret file, the state directory, the worktree root, the home credential paths and the runtime sockets, each walked up to the file system root with `..`, and is refused if it is, contains or lies under one of them. The daemon refuses to start when the database, the secret file or the state directory lies under the worktree root or when `--db` contains `?`, checks after opening that SQLite opened the file it created, refuses harness launches on a remote Docker engine (`tcp://`, `ssh://`), and derives a crashed launch's task directory from the root and the task ID instead of the journal.
+
+Stated limits: a process that already has the daemon user's rights can rename directories the daemon owns between the check and container create, and can plant a hard link to a protected file inside the live repository. An operator who places these paths in a directory another user can write gives that user the same chance.
+
 ## Summary
 
 - Accept the two-milestone scope and retained components to unblock #2.
