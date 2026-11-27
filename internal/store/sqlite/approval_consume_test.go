@@ -113,28 +113,28 @@ func seedApproval(t *testing.T, st *SQLiteStore, id string, expiresAt time.Time,
 
 // The expiry is compared as a time, not as text: RFC 3339 text drops trailing
 // zeros of the fraction, so "...:05Z" sorts after "...:05.5Z" although it is
-// earlier. The database clock cannot be set, so the test waits until the
-// current second is at least 300 ms old and seeds expiries around it.
+// earlier. The database clock cannot be set, so each case opens its store
+// first, then waits until the current second is at least 300 ms old and seeds
+// its expiry around that second, so setup time cannot move the clock past it.
 func TestConsumeApprovalComparesExpiryAsTime(t *testing.T) {
 	ctx := context.Background()
-	now := time.Now().UTC()
-	if frac := now.Sub(now.Truncate(time.Second)); frac < 300*time.Millisecond || frac > 700*time.Millisecond {
-		time.Sleep(time.Second - frac + 400*time.Millisecond)
-		now = time.Now().UTC()
-	}
-	whole := now.Truncate(time.Second)
 	cases := []struct {
 		name    string
-		expires time.Time
+		expires func(whole time.Time) time.Time
 		wantErr error
 	}{
-		{"expiry on the whole second just past", whole, store.ErrExpired},
-		{"expiry with a fraction in the next second", whole.Add(1500 * time.Millisecond), nil},
+		{"expiry on the whole second just past", func(whole time.Time) time.Time { return whole }, store.ErrExpired},
+		{"expiry with a fraction in a later second", func(whole time.Time) time.Time { return whole.Add(10*time.Second + 500*time.Millisecond) }, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
-			seedApproval(t, st, "apr-t", tc.expires, domain.ApprovalApproved)
+			now := time.Now().UTC()
+			if frac := now.Sub(now.Truncate(time.Second)); frac < 300*time.Millisecond || frac > 700*time.Millisecond {
+				time.Sleep(time.Second - frac + 400*time.Millisecond)
+				now = time.Now().UTC()
+			}
+			seedApproval(t, st, "apr-t", tc.expires(now.Truncate(time.Second)), domain.ApprovalApproved)
 			if err := st.ConsumeApproval(ctx, "apr-t", "task-1", "action:git.open_pr", "d1"); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err %v, want %v", err, tc.wantErr)
 			}
