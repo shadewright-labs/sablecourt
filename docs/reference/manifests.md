@@ -117,7 +117,7 @@ Source: `internal/domain/types.go` (`WorkflowSpec`, `WorkflowStep`), `internal/c
 | `spec.steps` | list of objects | yes | The steps, at least one. |
 | `spec.steps[].name` | string | yes | Step name. |
 | `spec.steps[].workload` | string | yes | Name of the declared Workload that runs the step. |
-| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. |
+| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. The loader refuses a `verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads`, or whose workload a non-verifier step before it also uses, and a verifier on a model workload when no earlier step runs a model. |
 | `spec.steps[].tier` | string | no | `fast`, `coding` or `critic`; the tier's model route must suit the workload. |
 | `spec.steps[].maxRetries` | integer | no | How many times a failed verifier step may send the author step back with a failure handoff. |
 | `spec.steps[].provider` | string | no | Provider for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |

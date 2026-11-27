@@ -151,11 +151,14 @@ The daemon assigns a family from the model name, never from the harness, because
 | Model name | Family |
 | --- | --- |
 | starts with `claude-`, or is exactly `opus`, `sonnet` or `haiku` | `anthropic` |
-| starts with `gpt-`, `codex-`, `o1`, `o3` or `o4` | `openai` |
+| starts with `gpt-`, `chatgpt-` or `codex-`, or is `o1`, `o3` or `o4` alone or followed by `-` and more | `openai` |
 | starts with `gemini-` | `google` |
-| anything else | unknown |
+| `anthropic/claude-...` | `anthropic` |
+| `openai/gpt-...`, `openai/chatgpt-...`, or `openai/o` and one digit, alone or followed by `-` and more | `openai` |
+| `google/gemini-...` or `models/gemini-...` | `google` |
+| anything else, including any other path | unknown |
 
-Matching ignores case and surrounding spaces. A saved route may carry a `family` field for a model no rule matches, such as a local model or a gateway's model name: up to 32 lower-case letters, digits and hyphens, starting with a letter. The built-in rules always win for the names they match, so `POST /api/v1/providers/tiers` refuses the whole request with 400, writing none of its routes, when a route's `family` disagrees with its model's built-in family (`model_family_override_conflict`) or is malformed (`model_family_override_invalid`). The `/providers` page shows and posts the family of each route. A model with no family stays unknown. Under the amendment of 2026-11-27 to [ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), an unknown family, or a family already in the run's chain, refuses a verifier step at dispatch; that dispatch check is not wired into the daemon yet ([issue 206](https://github.com/shadewright-labs/sablecourt/issues/206)).
+Matching ignores case and surrounding spaces. Something must follow a prefix that ends in `-`, so `o10`, `o1x` and `claude-` stay unknown, and so does a name with a space, a character outside ASCII or a second `/`. A saved route may carry a `family` field for a model no rule matches, such as a local model or a gateway's model name. It must be one of `anthropic`, `openai`, `google`, `meta`, `mistral`, `deepseek`, `qwen`, `xai`, `cohere`, `microsoft` or `amazon`; `unknown` and any other label are refused. The built-in rules always win for the names they match, so `POST /api/v1/providers/tiers` refuses the whole request with 400, writing none of its routes, when a route's `family` disagrees with its model's built-in family (`model_family_override_conflict`) or is malformed (`model_family_override_invalid`). The `/providers` page shows and posts the family of each route. A model with no family stays unknown. Under the amendment of 2026-11-27 to [ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), an unknown family, or a family already in the run's chain, refuses a verifier step at dispatch; that dispatch check is not wired into the daemon yet ([issue 206](https://github.com/shadewright-labs/sablecourt/issues/206)).
 
 ## In depth
 

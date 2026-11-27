@@ -18,6 +18,8 @@ func TestAPIProviderTiersFamily(t *testing.T) {
 		{"agreeing family", `[{"tier":"critic","provider":"cli:codex","model":"gpt-6.2-astra","family":"openai"}]`, http.StatusOK, ""},
 		{"family disagrees with the prefix", `[{"tier":"critic","provider":"cli:codex","model":"gpt-6.2-astra","family":"anthropic"}]`, http.StatusBadRequest, "model_family_override_conflict"},
 		{"malformed family", `[{"tier":"fast","provider":"local","model":"llama-3","family":"a b"}]`, http.StatusBadRequest, "model_family_override_invalid"},
+		{"family unknown", `[{"tier":"fast","provider":"local","model":"llama-3","family":"unknown"}]`, http.StatusBadRequest, "model_family_override_invalid"},
+		{"family outside the known set", `[{"tier":"fast","provider":"local","model":"llama-3","family":"local"}]`, http.StatusBadRequest, "model_family_override_invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

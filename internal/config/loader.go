@@ -450,19 +450,13 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 	return nil
 }
 
-// validateVerifierStep refuses a verifier step whose workload could write,
-// act or pick its own model, or that shares an identity with a step before
-// it (ADR-0010 amendment of 2026-11-27, invariant 4). The family check itself
+// validateVerifierStep refuses a verifier step whose workload holds any
+// grant outside the read-only allow-list in verifier_grants.go, or that
+// shares an identity with a step before it (ADR-0010 amendment of 2026-11-27, invariant 4). The family check itself
 // runs at dispatch; the loader refuses only what is fixed in the manifest.
 func validateVerifierStep(bundle *Bundle, earlier []domain.WorkflowStep, step domain.WorkflowStep, wl domain.Workload) error {
-	if len(wl.Spec.Grants.Actions) > 0 || len(wl.Spec.Grants.DelegateTo) > 0 {
-		return fmt.Errorf("verifier workload %q must hold no actions or delegateTo grants", step.Workload)
-	}
-	// The Model Gate lets a workload pick its model and fall back to another
-	// provider per request, which the family check at dispatch cannot see
-	// until the gate binds the chain's families to the task's lease.
-	if wl.Spec.Grants.ModelGate.Allowed {
-		return fmt.Errorf("verifier workload %q holds a Model Gate grant; the gate does not check model families yet", step.Workload)
+	if err := validateVerifierGrants(bundle, step.Workload, wl.Spec.Grants); err != nil {
+		return err
 	}
 	modelBefore := false
 	for _, prev := range earlier {

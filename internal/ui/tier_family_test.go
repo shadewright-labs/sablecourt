@@ -30,7 +30,7 @@ func TestProviderTiersFormKeepsFamily(t *testing.T) {
 		wantFamily string
 	}{
 		{"family kept", "meta", "", "meta"},
-		{"family changed", "Local", "", "local"},
+		{"family changed", "Mistral", "", "mistral"},
 		{"family cleared", "", "", ""},
 		{"disagreeing family refused", "anthropic", "model_family_override_conflict", ""},
 	}
