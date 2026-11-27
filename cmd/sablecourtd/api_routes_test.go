@@ -167,7 +167,9 @@ func TestAPIApproveRefusalsAndPinnedApproval(t *testing.T) {
 			http.StatusConflict, approval.ErrNotConfirmed.Error() + ": dialog cancelled", domain.ApprovalPending, ""},
 		{"approved with default decider", daemonApprover{}, func(a domain.Approval) string { return `{"expectedSha256":"` + a.PayloadSHA256 + `"}` },
 			http.StatusOK, "", domain.ApprovalApproved, "operator"},
-		{"approved with named decider", daemonApprover{}, func(a domain.Approval) string { return `{"expectedSha256":"` + a.PayloadSHA256 + `","decidedBy":"alice"}` },
+		{"approved with named decider", daemonApprover{}, func(a domain.Approval) string {
+			return `{"expectedSha256":"` + a.PayloadSHA256 + `","decidedBy":"alice"}`
+		},
 			http.StatusOK, "", domain.ApprovalApproved, "alice"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
