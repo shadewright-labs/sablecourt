@@ -55,10 +55,10 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 
 ## Agentic context, learnings, and verification pipeline (ADR-0010)
 
-Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Matching scoped learnings are currently attached automatically to CLI coding tasks. The packet combines:
+Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Learnings enter the packet only when its model destination is local (see [context and learning](how-it-works/context-and-learning.md#destination-check)). The packet combines:
 
 1. Task intent (`prompt`, `input`, workflow step metadata, and any failure handoff).
-2. Scoped learnings matched from `Court Memory` under `learning:global`, `learning:repo:<name>`, and `learning:path:<glob>` namespaces.
+2. For a local destination only, up to ten accepted, unexpired learnings from the ADR-0012 learning record, in a section of at most 4 KiB. Legacy `learning:*` rows in Court Memory are not read.
 3. Recent Conclave Decrees and Relics when the task runs inside a Conclave.
 4. A read-only repository pre-check (10-second timeout, 16 KiB cap) running `git status --short`, `git diff --stat`, `go vet ./...` for Go modules, and `sg scan` when `sgconfig.yml` is present.
 

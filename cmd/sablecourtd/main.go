@@ -614,14 +614,19 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Warn("kubernetes runtime unavailable", "error", err)
 		}
 	}
+	_, dockerAgents := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	packetDest := contextpack.Destination{DockerAgents: dockerAgents, ModelGateway: cfg.modelGatewayURL != ""}
+	logger.Info("context packet learning destination fixed at startup",
+		"dockerAgents", packetDest.DockerAgents, "modelGateway", packetDest.ModelGateway)
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:        st,
-		Bundle:       bundle,
-		Policy:       policyEng,
-		Adapters:     adapters,
-		ModelGateURL: "http://" + gateHost + "/gate/model",
-		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		PacketDestination: packetDest,
+		Store:             st,
+		Bundle:            bundle,
+		Policy:            policyEng,
+		Adapters:          adapters,
+		ModelGateURL:      "http://" + gateHost + "/gate/model",
+		DataGateURL:       "http://" + gateHost + "/gate/mcp",
 		// Host coding agents reach the gate over loopback, not a container alias.
 		HostDataGateURL: cfg.hostGateURL(),
 		MaxConcurrent:   cfg.maxConcurrent,

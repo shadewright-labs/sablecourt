@@ -43,7 +43,7 @@ esac
 	t.Setenv("GIT_TRACE", "present")
 	pkt := Assemble(t.Context(), nil, domain.Task{}, domain.Workload{
 		Spec: domain.WorkloadSpec{Coding: &domain.CodingConfig{RepoPath: repo}},
-	})
+	}, Destination{})
 	if !pkt.PrecheckRan || !slices.Equal(pkt.ChangedPaths, []string{"notes"}) || !strings.Contains(pkt.Markdown, "notes | 1 +") {
 		t.Errorf("missing Git precheck output: %+v", pkt)
 	}
@@ -87,7 +87,7 @@ func TestDecreesRequireOperatorSender(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			pkt := Assemble(ctx, st, domain.Task{InputJSON: `{"prompt":"work","conclaveId":"room"}`}, domain.Workload{})
+			pkt := Assemble(ctx, st, domain.Task{InputJSON: `{"prompt":"work","conclaveId":"room"}`}, domain.Workload{}, Destination{})
 			if !strings.Contains(pkt.Markdown, "operator-instruction") || strings.Contains(pkt.Markdown, "coder-instruction") || strings.Contains(pkt.Markdown, "system-instruction") {
 				t.Fatalf("only operator messages belong in decrees:\n%s", pkt.Markdown)
 			}
@@ -108,7 +108,7 @@ func workloadWithRoleCard(t *testing.T, class domain.WorkloadClass) domain.Workl
 func TestRoleCardComesFirstForEveryClass(t *testing.T) {
 	for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent, domain.ClassDeterministicController} {
 		t.Run(string(class), func(t *testing.T) {
-			pkt := Assemble(context.Background(), nil, domain.Task{InputJSON: `{"prompt":"task intent"}`}, workloadWithRoleCard(t, class))
+			pkt := Assemble(context.Background(), nil, domain.Task{InputJSON: `{"prompt":"task intent"}`}, workloadWithRoleCard(t, class), Destination{})
 			if !strings.HasPrefix(pkt.Markdown, "## Role Card\n\nReview changes. Do not authorize execution. Return findings.\n") {
 				t.Fatalf("role card must come first:\n%s", pkt.Markdown)
 			}
@@ -134,7 +134,7 @@ func TestPacketLimitPreservesRequiredSectionsAndNewestContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pkt := Assemble(ctx, st, domain.Task{InputJSON: string(input)}, workloadWithRoleCard(t, class))
+			pkt := Assemble(ctx, st, domain.Task{InputJSON: string(input)}, workloadWithRoleCard(t, class), Destination{})
 			for _, want := range []string{"Review changes. Do not authorize execution. Return findings.", "keep entire intent", "keep entire failure handoff", "context-4:"} {
 				if !strings.Contains(pkt.Markdown, want) {
 					t.Errorf("missing %q", want)
@@ -161,41 +161,6 @@ func newTestStore(t *testing.T) store.Store {
 		t.Fatalf("migrate: %v", err)
 	}
 	return st
-}
-
-func TestScopedLearningsAndAssemble(t *testing.T) {
-	ctx := context.Background()
-	st := newTestStore(t)
-
-	if _, err := PutLearning(ctx, st, "global", "no-dashes", "Never use em dashes in docs", "operator"); err != nil {
-		t.Fatalf("PutLearning global: %v", err)
-	}
-	if _, err := PutLearning(ctx, st, "repo:sablecourt", "go-tests", "Always run go test -race", "operator"); err != nil {
-		t.Fatalf("PutLearning repo: %v", err)
-	}
-	if _, err := PutLearning(ctx, st, "path:internal/gate/**", "ssrf-guard", "Validate upstream URLs", "operator"); err != nil {
-		t.Fatalf("PutLearning path: %v", err)
-	}
-
-	matched := MatchLearnings(ctx, st, "sablecourt", []string{"internal/gate/model/proxy.go"}, 10)
-	if len(matched) != 3 {
-		t.Fatalf("expected 3 matched learnings, got %d: %+v", len(matched), matched)
-	}
-	matchedNoPath := MatchLearnings(ctx, st, "sablecourt", []string{"cmd/sablectl/main.go"}, 10)
-	if len(matchedNoPath) != 2 {
-		t.Fatalf("expected 2 matched learnings without gate path, got %d", len(matchedNoPath))
-	}
-
-	pkt := Assemble(ctx, st, domain.Task{
-		ID:           "task_1",
-		WorkloadName: "coder",
-		InputJSON:    `{"prompt":"Fix model proxy"}`,
-	}, domain.Workload{
-		Metadata: domain.ObjectMeta{Name: "coder"},
-	})
-	if !strings.Contains(pkt.Markdown, "Never use em dashes in docs") {
-		t.Fatalf("expected global learning in context packet, got:\n%s", pkt.Markdown)
-	}
 }
 
 func TestVerdictAndFailureHandoffAndTiers(t *testing.T) {
@@ -250,7 +215,7 @@ func TestPeerPacketBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			task := domain.Task{InputJSON: `{"activation":"on-mention","fromRole":"coder","messageId":1,"conclaveId":"room","prompt":"legacy peer body"}`}
-			md := Assemble(ctx, st, task, domain.Workload{}).Markdown
+			md := Assemble(ctx, st, task, domain.Workload{}, Destination{}).Markdown
 			if !strings.Contains(md, "log sample") || strings.Contains(md, "\n## log sample") {
 				t.Errorf("Relic field escaped its block: %s", md)
 			}
@@ -272,7 +237,7 @@ func TestMentionPacketKeepsMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := domain.Task{InputJSON: fmt.Sprintf(`{"activation":"on-mention","fromRole":"coder","role":"reader","messageId":%d,"prompt":"Read the message.","conclaveId":"room"}`, id)}
-	md := Assemble(ctx, st, task, domain.Workload{}).Markdown
+	md := Assemble(ctx, st, task, domain.Workload{}, Destination{}).Markdown
 	_, data, ok := strings.Cut(md, "<untrusted-peer-message>")
 	body, _, closed := strings.Cut(data, "</untrusted-peer-message>")
 	if !ok || !closed || !strings.Contains(body, "line count was five") {

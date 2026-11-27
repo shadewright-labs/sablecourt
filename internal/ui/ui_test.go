@@ -243,7 +243,7 @@ func TestConclaveSaveLearningCreatesProposalWithoutInjecting(t *testing.T) {
 			}
 
 			// Critical invariant: "Save as learning" must NEVER inject anything into MatchLearnings until accepted.
-			matched := contextpack.MatchLearnings(ctx, st, "sablecourt", []string{"internal/gate/mcp/memory.go"}, 20)
+			matched := contextpack.MatchLearnings(ctx, st, "", []string{"internal/gate/mcp/memory.go"}, 20)
 			if len(matched) != 0 {
 				t.Fatalf("expected 0 injected learnings before acceptance, got %+v", matched)
 			}

@@ -48,6 +48,9 @@ type Options struct {
 	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
+	// PacketDestination holds the startup facts that decide whether context
+	// packets may carry learnings. The zero value withholds them.
+	PacketDestination contextpack.Destination
 }
 
 type launchReservation struct {
@@ -67,6 +70,7 @@ type Reconciler struct {
 	maxConcurrent   int
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
+	packetDest      contextpack.Destination
 
 	instance          string
 	recovering        map[string]bool
@@ -397,6 +401,7 @@ func NewReconciler(opts Options) *Reconciler {
 		maxConcurrent:     opts.MaxConcurrent,
 		onTaskFailed:      opts.OnTaskFailed,
 		now:               nowFn,
+		packetDest:        opts.PacketDestination,
 		handles:           make(map[string]scruntime.Handle),
 		handleAdapters:    make(map[string]scruntime.Adapter),
 		partialStarts:     make(map[string]bool),

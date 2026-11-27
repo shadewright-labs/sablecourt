@@ -318,7 +318,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 
 	if !council {
-		markdown = contextpack.Assemble(ctx, r.store, task, wl).Markdown
+		markdown = contextpack.Assemble(ctx, r.store, task, wl, r.packetDest).Markdown
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)

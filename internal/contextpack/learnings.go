@@ -2,8 +2,6 @@ package contextpack
 
 import (
 	"context"
-	"fmt"
-	"path"
 	"strings"
 	"time"
 
@@ -16,6 +14,13 @@ const (
 	LearningNamespaceGlobal     = "learning:global"
 	LearningNamespaceRepoPrefix = "learning:repo:"
 	LearningNamespacePathPrefix = "learning:path:"
+
+	// MaxPacketLearnings and MaxLearningSectionBytes bound the learnings section (ADR-0012).
+	MaxPacketLearnings      = 10
+	MaxLearningSectionBytes = 4 << 10
+
+	// LocalModelProvider is the only Model Gate provider whose requests stay on this machine.
+	LocalModelProvider = "local"
 )
 
 // NormalizeLearningNamespace converts user-facing scopes ("global", "repo:foo", "path:internal/**")
@@ -37,104 +42,83 @@ func NormalizeLearningNamespace(scope string) string {
 	return "learning:" + s
 }
 
-// PutLearning redacts and persists a scoped learning entry in Court Memory.
-func PutLearning(ctx context.Context, st store.Store, scope, key, rule, author string) (domain.MemoryEntry, error) {
-	if st == nil {
-		return domain.MemoryEntry{}, fmt.Errorf("store is unavailable")
-	}
-	ns := NormalizeLearningNamespace(scope)
-	k := strings.TrimSpace(key)
-	v := strings.TrimSpace(rule)
-	if k == "" || v == "" {
-		return domain.MemoryEntry{}, fmt.Errorf("learning key and rule are required")
-	}
-	if strings.TrimSpace(author) == "" {
-		author = "operator"
-	}
-	entry := domain.MemoryEntry{
-		Namespace: ns,
-		Key:       k,
-		Value:     redact.String(v),
-		Author:    author,
-		UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.PutMemory(ctx, entry); err != nil {
-		return domain.MemoryEntry{}, err
-	}
-	return entry, nil
+// Destination holds the daemon facts that decide where model requests of a
+// packet can go. The daemon fixes them once at startup. The zero value means
+// the destination is unknown, so no packet carries learnings.
+type Destination struct {
+	// DockerAgents is true when long-lived agents run in the Docker adapter,
+	// on its internal network without egress.
+	DockerAgents bool
+	// ModelGateway is true when a model gateway URL is set. The gateway then
+	// receives requests for every provider, local included.
+	ModelGateway bool
 }
 
-// MatchLearnings returns global, repo-scoped, and path-glob-scoped learnings relevant to a task.
-func MatchLearnings(ctx context.Context, st store.Store, repoName string, changedPaths []string, limit int) []domain.MemoryEntry {
+// LearningsAllowed reports whether a packet for wl may carry learnings.
+// ADR-0012 keeps learnings out of remote and unknown destinations, so only a
+// workload whose every model request stays on this machine qualifies.
+func (d Destination) LearningsAllowed(wl domain.Workload) bool {
+	if !d.DockerAgents || d.ModelGateway {
+		return false
+	}
+	if wl.Spec.Class == domain.ClassCodingAgent || wl.Spec.Coding != nil {
+		return false
+	}
+	grant := wl.Spec.Grants.ModelGate
+	return grant.Allowed && len(grant.Providers) == 1 && grant.Providers[0] == LocalModelProvider
+}
+
+// MatchLearnings returns accepted, unexpired learnings from the dedicated
+// learning store whose every scope selector matches. Legacy Court Memory
+// learning rows are never read. A store without learning records, or any
+// store error, yields none. An empty repoRemoteURL matches only learnings
+// without a repository selector.
+func MatchLearnings(ctx context.Context, st store.Store, repoRemoteURL string, changedPaths []string, limit int) []domain.Learning {
 	if st == nil {
 		return nil
 	}
-	if limit <= 0 {
-		limit = 20
-	}
-	entries, err := st.SearchMemory(ctx, "", "", 200)
+	ls, err := store.Learnings(st)
 	if err != nil {
 		return nil
 	}
-	repoNS := ""
-	if strings.TrimSpace(repoName) != "" {
-		repoNS = LearningNamespaceRepoPrefix + strings.TrimSpace(repoName)
+	if limit <= 0 {
+		limit = MaxPacketLearnings
 	}
-
-	var matched []domain.MemoryEntry
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Namespace, "learning:") {
-			continue
-		}
-		include := false
-		switch {
-		case e.Namespace == LearningNamespaceGlobal:
-			include = true
-		case repoNS != "" && e.Namespace == repoNS:
-			include = true
-		case strings.HasPrefix(e.Namespace, LearningNamespacePathPrefix):
-			glob := strings.TrimPrefix(e.Namespace, LearningNamespacePathPrefix)
-			if matchAnyPath(glob, changedPaths) {
-				include = true
-			}
-		}
-		if include {
-			matched = append(matched, e)
-			if len(matched) >= limit {
-				break
-			}
+	now := time.Now().UTC()
+	matched, err := ls.ListLearnings(ctx, store.LearningFilter{
+		Status:        domain.LearningStatusAccepted,
+		RepoRemoteURL: repoRemoteURL,
+		Paths:         changedPaths,
+		Now:           now,
+		Limit:         limit,
+	})
+	if err != nil {
+		return nil
+	}
+	eligible := matched[:0]
+	for _, l := range matched {
+		if l.IsEligible(now) {
+			eligible = append(eligible, l)
 		}
 	}
-	return matched
+	return eligible
 }
 
-func matchAnyPath(glob string, paths []string) bool {
-	glob = strings.TrimSpace(glob)
-	if glob == "" {
-		return false
-	}
-	if len(paths) == 0 {
-		return false
-	}
-	// Support "**" recursive prefix patterns like "internal/gate/**".
-	if strings.HasSuffix(glob, "/**") {
-		prefix := strings.TrimSuffix(glob, "/**")
-		for _, p := range paths {
-			p = strings.TrimPrefix(strings.TrimSpace(p), "./")
-			if p == prefix || strings.HasPrefix(p, prefix+"/") {
-				return true
-			}
+// learningSection renders up to MaxPacketLearnings redacted entries, most
+// specific first, within MaxLearningSectionBytes. Overflow is omitted.
+func learningSection(learnings []domain.Learning) []packetContext {
+	var lines []packetContext
+	total := 0
+	for _, l := range learnings {
+		if len(lines) == MaxPacketLearnings {
+			break
 		}
-		return false
-	}
-	for _, p := range paths {
-		p = strings.TrimPrefix(strings.TrimSpace(p), "./")
-		if ok, _ := path.Match(glob, p); ok {
-			return true
+		line := redact.String("- [" + l.ID + "] " + strings.TrimSpace(l.Statement) + "\n")
+		if total+len(line) > MaxLearningSectionBytes {
+			break
 		}
-		if ok, _ := path.Match(glob, path.Base(p)); ok {
-			return true
-		}
+		total += len(line)
+		lines = append(lines, packetContext{section: "Scoped Learnings", text: line, at: l.UpdatedAt})
 	}
-	return false
+	return lines
 }

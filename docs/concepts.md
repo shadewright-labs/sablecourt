@@ -88,7 +88,7 @@ Status: Court Memory and context packets built. Learning partly built.
 
 [![Context packet assembly: a deterministic controller outside a council gets no packet, a council turn gets its reserved packet, and other tasks combine required and redacted optional parts, dropping the oldest optional entry while over 32 KiB.](diagrams/context-packet.svg)](diagrams/context-packet.svg "Open full size")
 
-Court Memory is a key-value store in the store, shown on `/memory`, with MCP tools `memory.get`, `memory.put`, `memory.search` and `memory.delete`. Before a task starts, the daemon assembles a redacted context packet, except for tasks of a deterministic controller, which get none. Optional sections are dropped to keep it within 32 KiB; the required sections stay whole and can take it past that size. A learning is a rule the operator wants future runs to follow. Today matching entries from `learning:*` memory namespaces enter packets. The dedicated record of ADR-0012 (states `proposed`, `accepted`, `retired`, a 90-day review clock) exists in the SQLite store, but nothing proposes, accepts or injects through it yet (#43 to #47). See [context and learning](how-it-works/context-and-learning.md).
+Court Memory is a key-value store in the store, shown on `/memory`, with MCP tools `memory.get`, `memory.put`, `memory.search` and `memory.delete`. Before a task starts, the daemon assembles a redacted context packet, except for tasks of a deterministic controller, which get none. Optional sections are dropped to keep it within 32 KiB; the required sections stay whole and can take it past that size. A learning is a rule the operator wants future runs to follow. Learnings come only from the dedicated record of ADR-0012 (states `proposed`, `accepted`, `retired`, a 90-day review clock) in the SQLite store, and enter a packet only when its model destination is local. Legacy `learning:*` memory rows no longer reach packets. Nothing proposes or accepts through the record yet (#43 to #47), so no packet carries a learning today. See [context and learning](how-it-works/context-and-learning.md).
 
 ## Audit chain
 
@@ -106,7 +106,7 @@ Status: Sanctum built. Citadel built, parked.
 
 ## Not built yet
 
-- Learning acceptance, scoped matching and injection through the ADR-0012 record (decided in [ADR-0012](adr/0012-learning-evidence-and-expiry.md), not built).
+- Learning acceptance through the ADR-0012 record, and repository and incident scope matching in the packet (decided in [ADR-0012](adr/0012-learning-evidence-and-expiry.md), not built).
 - Passkeys, server-side sessions and roles (decided in [ADR-0014](adr/0014-identity-and-authentication.md), Proposed, not built).
 - Signed audit heads (ADR-0014 Stage 3, Proposed).
 
