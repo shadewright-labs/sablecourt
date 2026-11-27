@@ -43,6 +43,9 @@ func initGitRepo(t *testing.T) string {
 		}
 	}
 	run("init")
+	// A fixed first branch: init.defaultBranch may name one validateRefName
+	// refuses (such as "_work"), and tests use this branch as a base.
+	run("symbolic-ref", "HEAD", "refs/heads/main")
 	run("config", "user.email", "test@sablecourt.local")
 	run("config", "user.name", "Sablecourt Test")
 	_ = os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi\n"), 0o600)
@@ -112,11 +115,11 @@ func TestBuiltinGitOpsActions(t *testing.T) {
 	h := gate.ActionHandler()
 
 	// 1. Rejects unsafe branch name (main) as invalid input, before any git call.
-	req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.create_branch", strings.NewReader(`{"payload":{"branch":"main"}}`))
+	req := httptest.NewRequest(http.MethodPost, "http://sablecourt.local/git.create_branch", strings.NewReader(`{"payload":{"branch":"main","base":"main"}}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "must start with sablecourt/") {
 		t.Fatalf("expected refusal for protected branch main, got %d: %s", rec.Code, rec.Body.String())
 	}
 
