@@ -71,7 +71,7 @@ For `codex`, the launch check covers the image tag and its configuration, not th
 
 ## Antigravity terms
 
-Sablecourt assumes that Google's terms for the Antigravity CLI restrict third-party tools that access the service, and it does not check them. Every council has an `agy` seat, in container mode and in host mode, so what you decide, under your own agreement with Google, is whether to run councils.
+Sablecourt assumes that Google's terms for the Antigravity CLI restrict third-party tools that access the service, and it does not check them. Every council has an `agy` seat, in container mode and in the unsupported host mode, so what you decide, under your own agreement with Google, is whether to run councils.
 
 ## In depth
 

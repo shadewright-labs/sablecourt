@@ -103,7 +103,7 @@ Some names are read only to copy them into the environment of a program the daem
 
 Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/coding`.
 
-| Variable | Docker and Kubernetes | Host coding runtime | Council container |
+| Variable | Docker and Kubernetes | Host coding runtime (unsupported) | Council container |
 | --- | --- | --- | --- |
 | `SABLECOURT_MANAGED` | `1` | `1` | `1` |
 | `SABLECOURT_TASK_ID` | task ID | task ID | task ID |

@@ -2,7 +2,7 @@
 
 Status: partly built. Missing: the check that refuses a round when an image or a login is absent (#79). See "Not built yet".
 
-Each council turn runs one harness CLI in its own container, on its own internal network, behind its own proxy. The container can read its checkout and its own login volume. Its only network peer is the proxy, which forwards gate calls to the daemon and opens tunnels to the harness's provider hosts. The daemon mounts no host home directory, Docker socket or daemon state into it, and its network has no gateway. This page describes the Docker path, which the daemon uses when a Docker engine is configured (`DOCKER_HOST` set, or a Docker or Podman socket found in one of the usual locations). Without one, councils run in the weaker host mode (see the end).
+Each council turn runs one harness CLI in its own container, on its own internal network, behind its own proxy. The container can read its checkout and its own login volume. Its only network peer is the proxy, which forwards gate calls to the daemon and opens tunnels to the harness's provider hosts. The daemon mounts no host home directory, Docker socket or daemon state into it, and its network has no gateway. This page describes the Docker path, which the daemon uses when a Docker engine is configured (`DOCKER_HOST` set, or a Docker or Podman socket found in one of the usual locations). Without one, councils still fall back to host mode today, which is unsupported (see the end).
 
 [![Trust boundaries of a harness container, its proxy and the daemon.](../diagrams/harness-container.svg)](../diagrams/harness-container.svg "Open full size")
 
@@ -43,7 +43,7 @@ When a turn ends, is stopped or fails, the runtime adapter removes the harness c
 
 ## Host mode
 
-With no Docker engine configured, a council turn runs as a host process under a macOS Seatbelt profile. It is weaker, because there is no container and no proxy: the harness reaches the gate over loopback with its lease. On a host where the Seatbelt probe fails, the daemon refuses to open a council. The "Host fallback" amendment of [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) lists what host mode does not enforce.
+Host mode is unsupported. The [ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only path for 0.1.0, and a machine without a container runtime cannot run councils or coding tasks then. On `main` today the fallback is still in the code: with no Docker engine configured, a council turn runs as a host process under a macOS Seatbelt profile, and where the Seatbelt probe fails the daemon refuses to open a council. There is no container and no proxy: the harness reaches the gate over loopback with its lease and gets an empty home directory. In that mode Sablecourt makes no claim that the harness cannot reach daemon-held secrets, and redaction is the only control on what it writes ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)). A standalone coding task also runs this way today; [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves it into a harness container. The "Host fallback" section of the 2026-11-25 amendment is superseded.
 
 ## Not built yet
 

@@ -56,6 +56,8 @@ Compared against `internal/runtime/coding/launch.go`, `internal/runtime/coding/s
 
 ## Separate state directories
 
+Status: this section records the 2026-11-25 spike for host mode. Host mode is unsupported since the [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010), and the separate state directories below are not used by the code (the host launch sets `HOME` to a scratch directory). Kept as a record of what was measured.
+
 Tested on macOS (`darwin`) on 2026-11-25 against the installed binaries (`claude 2.1.332`, `codex 0.171.0`, `agy 1.5.16`) using empty state directories under `.tmp/`, `</dev/null`, and `sandbox-exec` profiles denying read and write access to `$HOME/.claude`, `$HOME/.claude.json`, `$HOME/.codex`, `$HOME/.gemini`, and `$HOME/.agents`. Planned Sablecourt state roots: `$SABLECOURT_STATE_DIR/harness/claude`, `$SABLECOURT_STATE_DIR/harness/codex`, and `$SABLECOURT_STATE_DIR/harness/agy`.
 
 ### `claude`
