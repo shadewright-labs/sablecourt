@@ -330,6 +330,12 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		return textToolResult(string(msg)), nil
 
 	case domain.EffectAllow:
+		// A tool declares no effect, so every call is treated as one that may
+		// change state: it is recorded before it runs, and a record that
+		// cannot be written refuses it.
+		if err := g.record(ctx, lease.TaskID, workload.Metadata.Name, capability, "started", `{}`); err != nil {
+			return errorToolResult("tool call refused: its audit record could not be written"), nil
+		}
 		out, err := def.Handler(ctx, workload, lease.TaskID, args)
 		if err != nil {
 			outcome := "error"
@@ -341,7 +347,9 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		}
 		red := redact.Text(out)
 		detail := fmt.Sprintf(`{"redaction_hits":%d}`, red.Hits)
-		g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, "allowed", detail)
+		if err := g.record(ctx, lease.TaskID, workload.Metadata.Name, capability, "allowed", detail); err != nil {
+			return errorToolResult("the tool ran, but its audit record could not be written"), nil
+		}
 		return textToolResult(red.Text), nil
 
 	default:
@@ -555,7 +563,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				consumed["allowed_repo"] = snap.allowedRepo
 			}
 			consumedJSON, _ := json.Marshal(consumed)
-			if err := g.store.AppendAudit(ctx, domain.AuditRecord{
+			if err := store.RecordAudit(ctx, g.store, domain.AuditRecord{
 				Category:     "approval",
 				TaskID:       ac.Lease.TaskID,
 				WorkloadName: wlName,
@@ -570,7 +578,18 @@ func (g *Gate) ActionHandler() http.Handler {
 			ctx = context.WithValue(ctx, approvalCtxKey{}, req.ApprovalID)
 
 		case domain.EffectAllow:
-			// Permitted directly.
+			// Permitted directly. The run is recorded before it starts, as an
+			// approved run is by its consumed row: a record that cannot be
+			// written refuses the action before its side effect.
+			started := map[string]any{}
+			if snap.allowedRepo != "" {
+				started["allowed_repo"] = snap.allowedRepo
+			}
+			startedJSON, _ := json.Marshal(started)
+			if err := g.record(ctx, ac.Lease.TaskID, wlName, capability, "started", string(startedJSON)); err != nil || ctx.Err() != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "action refused: its audit record could not be written, the action did not run"})
+				return
+			}
 		default:
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy failed closed"})
 			return
@@ -598,7 +617,17 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		resBytes, _ := json.Marshal(result)
 		red := redact.Text(string(resBytes))
-		auditAction("allowed", map[string]any{"redaction_hits": red.Hits, "approval_id": approvalUsed})
+		allowed := map[string]any{"redaction_hits": red.Hits, "approval_id": approvalUsed}
+		if snap.allowedRepo != "" {
+			allowed["allowed_repo"] = snap.allowedRepo
+		}
+		allowedJSON, _ := json.Marshal(allowed)
+		if err := g.record(ctx, ac.Lease.TaskID, wlName, capability, "allowed", string(allowedJSON)); err != nil {
+			// The side effect has happened and cannot be undone here; the
+			// caller is told so instead of receiving the result.
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the action ran, but its audit record could not be written; do not repeat it"})
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -642,8 +671,20 @@ func (g *Gate) authenticateWithSnapshot(w http.ResponseWriter, r *http.Request, 
 	return authContext{Lease: lease, Workload: wl}, true
 }
 
+// audit writes a record that cannot change what happens next, a refusal or
+// a failed call, and logs a failed write.
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
-	_ = g.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, g.store, g.auditRecord(taskID, workload, action, outcome, detailJSON))
+}
+
+// record writes a record the caller depends on and returns an error wrapping
+// store.ErrAuditWrite when the write fails.
+func (g *Gate) record(ctx context.Context, taskID, workload, action, outcome, detailJSON string) error {
+	return store.RecordAudit(ctx, g.store, g.auditRecord(taskID, workload, action, outcome, detailJSON))
+}
+
+func (g *Gate) auditRecord(taskID, workload, action, outcome, detailJSON string) domain.AuditRecord {
+	return domain.AuditRecord{
 		Category:     "data_action_gate",
 		TaskID:       taskID,
 		WorkloadName: workload,
@@ -651,7 +692,7 @@ func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, det
 		Outcome:      outcome,
 		DetailJSON:   detailJSON,
 		CreatedAt:    g.now(),
-	})
+	}
 }
 
 func textToolResult(text string) *mcp.CallToolResult {

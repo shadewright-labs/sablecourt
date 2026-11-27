@@ -729,8 +729,9 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 		"last_result_at":    report.LastResultAt.Format(time.RFC3339Nano),
 		"observed_at":       report.ObservedAt.Format(time.RFC3339Nano),
 	})
-	g.audit(ctx, taskID, workloadName, "evidence:git.pr_checks", report.Summary, string(detail))
-	return nil
+	// A failed audit write fails the check call, as a failed evidence write
+	// above does, instead of leaving evidence the audit log does not show.
+	return g.record(ctx, taskID, workloadName, "evidence:git.pr_checks", report.Summary, string(detail))
 }
 
 func checkOwnerRepoGrant(wl domain.Workload, owner, repo string) error {

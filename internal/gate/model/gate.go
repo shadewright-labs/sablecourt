@@ -483,8 +483,11 @@ func (g *Gate) settleReservation(ctx context.Context, reservationID string, actu
 	return err
 }
 
+// audit writes a Model Gate record and logs a failed write. Every record here
+// either follows a refusal that stands, or follows a response the client has
+// already received, so a failed write cannot change the outcome.
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
-	_ = g.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, g.store, domain.AuditRecord{
 		Category:     "model_gate",
 		TaskID:       taskID,
 		WorkloadName: workload,

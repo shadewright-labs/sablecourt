@@ -404,6 +404,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	logger := cfg.logger
 	if logger == nil {
 		logger = telemetry.NewLogger()
+		// Packages without a logger of their own, such as the failed audit
+		// writes store.RecordAudit logs, write through the daemon's logger.
+		slog.SetDefault(logger)
 	}
 
 	var gitSyncer *config.GitSyncer
@@ -1048,6 +1051,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.CancelTask(r.Context(), id, "api_cancelled"); err != nil {
+			if errors.Is(err, store.ErrAuditWrite) {
+				writeAuditFailed(w, "task "+id+" was cancelled")
+				return
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1067,7 +1074,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if created {
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			// The retried task exists once RetryTaskWithHandoff returns (its
+			// task.submit row was written first), so a failed row here is
+			// reported, not undone.
+			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:     "task",
 				TaskID:       retried.ID,
 				WorkloadName: retried.WorkloadName,
@@ -1075,7 +1085,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				Outcome:      "submitted",
 				DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 				CreatedAt:    time.Now().UTC(),
-			})
+			}); err != nil {
+				writeAuditFailed(w, "retry task "+retried.ID+" was submitted")
+				return
+			}
 		}
 		writeJSON(w, http.StatusCreated, retried)
 	})
@@ -1092,6 +1105,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.SuspendTask(r.Context(), id, "api_suspended"); err != nil {
+			if errors.Is(err, store.ErrAuditWrite) {
+				writeAuditFailed(w, "task "+id+" was suspended")
+				return
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1100,6 +1117,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.ResumeTask(r.Context(), id); err != nil {
+			if errors.Is(err, store.ErrAuditWrite) {
+				writeAuditRefused(w, "resume")
+				return
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1120,7 +1141,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 				return
 			}
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			store.LogAudit(r.Context(), st, domain.AuditRecord{
 				Category:  "attach",
 				TaskID:    id,
 				Action:    "task.scry",
@@ -1174,15 +1195,21 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				writeJSON(w, code, map[string]string{"error": err.Error()})
 				return
 			}
-			_ = st.RecordHeartbeat(r.Context(), id, time.Now().UTC())
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			// Taking over is not evidence that the task's process is alive, so
+			// it records no heartbeat. A takeover whose record cannot be
+			// written is handed back before any input reaches the task.
+			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:   "attach",
 				TaskID:     id,
 				Action:     "task.takeover",
 				Outcome:    "acquired",
 				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
 				CreatedAt:  time.Now().UTC(),
-			})
+			}); err != nil {
+				attachHub.ReleaseTakeover(id, body.Operator)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "takeover refused: its audit record could not be written"})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "takeover", "id": id, "operator": body.Operator})
 		})
 		mux.HandleFunc("POST /api/v1/tasks/{id}/stdin", func(w http.ResponseWriter, r *http.Request) {
@@ -1204,7 +1231,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				writeJSON(w, code, map[string]string{"error": err.Error()})
 				return
 			}
-			_ = st.RecordHeartbeat(r.Context(), id, time.Now().UTC())
+			// Operator input is not evidence that the task's process is alive,
+			// so it records no heartbeat.
 			writeJSON(w, http.StatusOK, map[string]any{"status": "written", "bytes": n})
 		})
 		mux.HandleFunc("POST /api/v1/tasks/{id}/detach", func(w http.ResponseWriter, r *http.Request) {
@@ -1213,15 +1241,20 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				Operator string `json:"operator"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			// Releasing control stops operator input, so it is never refused;
+			// a record that cannot be written is reported instead.
 			attachHub.ReleaseTakeover(id, body.Operator)
-			_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:   "attach",
 				TaskID:     id,
 				Action:     "task.detach",
 				Outcome:    "released",
 				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
 				CreatedAt:  time.Now().UTC(),
-			})
+			}); err != nil {
+				writeAuditFailed(w, "the takeover was released")
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "detached", "id": id})
 		})
 	}
@@ -1285,7 +1318,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+		store.LogAudit(r.Context(), st, domain.AuditRecord{
 			Category:   "voice",
 			Action:     "voice.transcribe",
 			Outcome:    "ok",
@@ -1509,6 +1542,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		task, err := reconciler.SubmitTask(r.Context(), body.Workload, body.IdempotencyKey, body.InputJSON)
+		if errors.Is(err, store.ErrAuditWrite) {
+			writeAuditRefused(w, "task submission")
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -1600,6 +1637,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		if body.DeviceID != "" && body.Signature != "" {
 			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
+			if errors.Is(err, store.ErrAuditWrite) {
+				writeAuditRefused(w, "approval")
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -1611,6 +1652,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Approve(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DecidedBy)
+		if errors.Is(err, store.ErrAuditWrite) {
+			writeAuditRefused(w, "approval")
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -1647,6 +1692,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Deny(r.Context(), r.PathValue("id"), body.DecidedBy, body.Reason)
+		if errors.Is(err, store.ErrAuditWrite) {
+			writeAuditRefused(w, "denial")
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -1718,14 +1767,23 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
 		}
-		_ = st.AppendAudit(r.Context(), domain.AuditRecord{
+		if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 			Category:     "gitops",
 			WorkloadName: name,
 			Action:       "sandbox.propose_promotion",
 			Outcome:      "branch_created",
 			DetailJSON:   fmt.Sprintf(`{"branch":%q}`, branch),
 			CreatedAt:    time.Now().UTC(),
-		})
+		}); err != nil {
+			// The branch is removed again so that no unrecorded branch stays.
+			undo := exec.CommandContext(context.WithoutCancel(r.Context()), "git", "branch", "-D", "--", branch) // #nosec G702 -- same single argument after -- as the git branch call above, without a shell.
+			if out, undoErr := undo.CombinedOutput(); undoErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the promotion branch " + branch + " was created but its audit record could not be written, and removing the branch failed: " + strings.TrimSpace(string(out))})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "promotion refused: its audit record could not be written; the branch was removed"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":   "branch_created",
 			"workload": name,
@@ -2075,6 +2133,18 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeAuditFailed reports an effect that has already happened but whose
+// audit record could not be written. done names the effect.
+func writeAuditFailed(w http.ResponseWriter, done string) {
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": done + ", but its audit record could not be written"})
+}
+
+// writeAuditRefused reports a request refused because the audit record that
+// must precede its effect could not be written. Nothing was changed.
+func writeAuditRefused(w http.ResponseWriter, what string) {
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": what + " refused: its audit record could not be written, nothing was changed"})
+}
+
 func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
@@ -2105,21 +2175,23 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 type policyLoader struct {
 	st            store.Store
 	manifestsPath string
-	gateBreaker   *policy.CircuitBreaker
+	breaker       *policy.CircuitBreaker
 }
 
 func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
-	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+	return &policyLoader{st: st, manifestsPath: manifestsPath, breaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
 }
 
-// Breaker returns the circuit breaker the action gate records outcomes on.
+// Breaker returns the one circuit breaker of the daemon. The action gate
+// records outcomes on it and every engine Load builds checks it, so failures
+// counted by the gate trip the policy decision, and a reload keeps the count.
 func (l *policyLoader) Breaker() *policy.CircuitBreaker {
-	return l.gateBreaker
+	return l.breaker
 }
 
 func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine, error) {
 	if l.manifestsPath == "" {
-		return nil, policy.NewEngine(nil, nil), nil
+		return nil, policy.NewEngine(nil, l.breaker), nil
 	}
 	loaded, err := config.LoadPath(l.manifestsPath)
 	if err != nil {
@@ -2144,8 +2216,7 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	for _, p := range loaded.Policies {
 		policies = append(policies, p)
 	}
-	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
-	return loaded, policy.NewEngine(policies, breaker), nil
+	return loaded, policy.NewEngine(policies, l.breaker), nil
 }
 
 // serialized returns fn guarded by one mutex, so calls never overlap and

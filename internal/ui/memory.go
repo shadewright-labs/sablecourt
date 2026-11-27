@@ -120,7 +120,7 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	// Same row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd, written
 	// only when this call created the task, not on an idempotent replay.
 	if created {
-		_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
+		if err := store.RecordAudit(r.Context(), d.store, domain.AuditRecord{
 			Category:     "task",
 			TaskID:       retried.ID,
 			WorkloadName: retried.WorkloadName,
@@ -128,7 +128,11 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 			Outcome:      "submitted",
 			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 			CreatedAt:    time.Now().UTC(),
-		})
+		}); err != nil {
+			msg := "Retry task " + retried.ID + " was submitted, but its audit record could not be written"
+			http.Redirect(w, r, "/tasks/"+url.PathEscape(retried.ID)+"?err="+url.QueryEscape(msg), http.StatusSeeOther)
+			return
+		}
 	}
 	msg := "Retried from " + id
 	if withHandoff {
@@ -242,10 +246,6 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		Author:    "operator",
 		UpdatedAt: now,
 	}
-	if err := d.store.PutMemory(r.Context(), entry); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
-		return
-	}
 	detailBytes, _ := json.Marshal(map[string]any{
 		"namespace":        entry.Namespace,
 		"target_namespace": targetNS,
@@ -253,14 +253,31 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		"conclave_id":      id,
 		"message_id":       msgID,
 	})
-	_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
+	// Recorded before it is stored: a record that cannot be written refuses
+	// the proposal.
+	if err := store.RecordAudit(r.Context(), d.store, domain.AuditRecord{
 		Category:     "memory",
 		WorkloadName: "operator",
 		Action:       "learning.propose",
 		Outcome:      "proposed",
 		DetailJSON:   string(detailBytes),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		redirectConclaveErr(w, r, id, "proposal refused: its audit record could not be written, nothing was changed")
+		return
+	}
+	if err := d.store.PutMemory(r.Context(), entry); err != nil {
+		store.LogAudit(r.Context(), d.store, domain.AuditRecord{
+			Category:     "memory",
+			WorkloadName: "operator",
+			Action:       "learning.propose",
+			Outcome:      "error",
+			DetailJSON:   string(detailBytes),
+			CreatedAt:    time.Now().UTC(),
+		})
+		redirectConclaveErr(w, r, id, err.Error())
+		return
+	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Proposed learning saved (pending review): "+entry.Namespace+"/"+entry.Key), http.StatusSeeOther)
 }
 

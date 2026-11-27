@@ -116,17 +116,27 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if err := b.store.CreateConclave(ctx, session); err != nil {
-		return domain.ConclaveSession{}, err
-	}
-
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
+	// The opening is recorded before the session exists: a record that
+	// cannot be written refuses it and creates no session.
+	if err := store.RecordAudit(ctx, b.store, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.open",
 		Outcome:    "active",
 		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"template":%q,"vassals":%d}`, session.ID, templateName, len(tpl.Spec.Vassals)),
 		CreatedAt:  now,
-	})
+	}); err != nil {
+		return domain.ConclaveSession{}, err
+	}
+	if err := b.store.CreateConclave(ctx, session); err != nil {
+		store.LogAudit(ctx, b.store, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.open",
+			Outcome:    "error",
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"reason":"create_failed"}`, session.ID),
+			CreatedAt:  b.now(),
+		})
+		return domain.ConclaveSession{}, err
+	}
 
 	fail := func(cause error) (domain.ConclaveSession, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -286,7 +296,7 @@ func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession
 				detail, _ := json.Marshal(map[string]string{
 					"conclave_id": session.ID, "from": redact.String(fromRole), "to": redact.String(toRole),
 				})
-				_ = b.store.AppendAudit(ctx, domain.AuditRecord{
+				store.LogAudit(ctx, b.store, domain.AuditRecord{
 					Category: "conclave", TaskID: taskID, Action: "conclave.post",
 					Outcome: "denied", DetailJSON: string(detail), CreatedAt: b.now(),
 				})
@@ -373,7 +383,11 @@ func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.Concl
 		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
 	}
 	if newRelic != nil {
-		b.recordRelic(ctx, relic)
+		// The report and its relic are stored together above, so a record
+		// that cannot be written is reported, not undone.
+		if err := b.recordRelic(ctx, relic); err != nil {
+			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, fmt.Errorf("report stored, but %w", err)
+		}
 	}
 	msg.ID = id
 	return msg, relic, nil
@@ -485,10 +499,21 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 	if err != nil {
 		return domain.ConclaveRelic{}, err
 	}
-	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
+	// Recorded before it is stored: a record that cannot be written refuses
+	// the relic.
+	if err := b.recordRelic(ctx, relic); err != nil {
 		return domain.ConclaveRelic{}, err
 	}
-	b.recordRelic(ctx, relic)
+	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
+		store.LogAudit(ctx, b.store, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.relic_put",
+			Outcome:    "error",
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"name":%q,"reason":"store_failed"}`, relic.ConclaveID, relic.Name),
+			CreatedAt:  b.now(),
+		})
+		return domain.ConclaveRelic{}, err
+	}
 	return relic, nil
 }
 
@@ -513,8 +538,8 @@ func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body st
 	}, nil
 }
 
-func (b *Broker) recordRelic(ctx context.Context, relic domain.ConclaveRelic) {
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
+func (b *Broker) recordRelic(ctx context.Context, relic domain.ConclaveRelic) error {
+	return store.RecordAudit(ctx, b.store, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.relic_put",
 		Outcome:    "stored",

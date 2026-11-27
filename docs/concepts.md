@@ -98,6 +98,19 @@ Status: built, with limits. Signed heads are decided only.
 
 Each audit row written now stores the hash of the previous row, anchored at the word `genesis`. `sablectl audit verify` calls `GET /api/v1/audit/verify` on the daemon, which has the store walk `audit_log` in id order and recompute the chain over hashed rows, returning 200 with the verified count or 409 on a `prev_hash` or `row_hash` mismatch. Verification skips rows without a hash (older rows) and cannot see deletion of the last rows (#10); ADR-0009 claims more than this, and the code is what is described here. See [audit](how-it-works/audit.md).
 
+### When an audit row cannot be written
+
+Every audit write goes through one of two functions in `internal/store`: `RecordAudit` returns the failure to the caller, and `LogAudit` logs it at error level. Which one a call site uses depends on what the row records (issue 107, row 3):
+
+| Row records | On a failed write | Examples |
+| --- | --- | --- |
+| A refusal | The refusal stands and the failure is logged. | A policy denial at the gates, a refused delegation, a Conclave post a Vassal may not send, a Model Gate refusal. |
+| A change about to happen | The row is written first. A failed write refuses the request (HTTP 500) and nothing changes. If the change then fails, a second row with outcome `error` or `not_created` follows. | Task submission, delegation, resume, an approval request, approve and deny, device pairing, a typed action (its `started` row, or `consumed` for an approved run), an MCP tool call (`started`), opening a Conclave, storing a Relic, a learning proposal, takeover, a promotion branch. |
+| A change that already happened | The change stays and the caller is told its row is missing (HTTP 500, or an error result for a tool). | The `allowed` row after an action or tool ran, cancel, suspend, detach, the `task.retry` row, the `stored` and `deleted` rows of the memory tools, the `evidence:git.pr_checks` row. |
+| A read or a background step | The work goes on and the failure is logged. | Scry, voice transcription, workflow steps, auto-remediation, Model Gate rows written after the response. |
+
+Stopping work (cancel, suspend, detach) is never refused for a missing row, because refusing it would keep work running. An MCP tool declares no effect yet, so every tool call is treated as one that may change state.
+
 ## Mode
 
 Status: Sanctum built. Citadel built, parked.

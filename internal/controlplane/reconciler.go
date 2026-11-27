@@ -128,11 +128,13 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 		reservation.tokenMu.Unlock()
 	}
 	cleanupErr := errors.Join(leaseErr, r.stopTask(cleanupCtx, taskID))
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// Cancelling stops execution, so it is never refused for a missing
+	// record; a record that cannot be written is returned to the caller.
+	auditErr := store.RecordAudit(cleanupCtx, r.store, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
 		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
 	})
-	return cleanupErr
+	return errors.Join(cleanupErr, auditErr)
 }
 
 func terminalTaskState(state domain.TaskState) bool {
@@ -279,7 +281,9 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateWorking, domain.TaskStateSuspended, reason, fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
 		return err
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// Suspending stops execution, so it is never refused for a missing
+	// record; a record that cannot be written is returned to the caller.
+	return store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       taskID,
 		WorkloadName: task.WorkloadName,
@@ -288,7 +292,6 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, reason),
 		CreatedAt:    r.now(),
 	})
-	return nil
 }
 
 // ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.
@@ -346,6 +349,20 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			}
 		}
 	}()
+	// Resuming restarts execution, so it is recorded first: a record that
+	// cannot be written refuses the resume, and the deferred cleanup revokes
+	// the lease minted above. The task stays suspended.
+	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.resume",
+		Outcome:      "working",
+		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
+		CreatedAt:    r.now(),
+	}); err != nil {
+		return err
+	}
 	if hasHandle && adapter != nil {
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		err := adapter.Resume(callCtx, handle, cp)
@@ -362,15 +379,6 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 		return err
 	}
 	_ = r.store.RecordHeartbeat(ctx, taskID, r.now())
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-		Category:     "controlplane",
-		TaskID:       taskID,
-		WorkloadName: task.WorkloadName,
-		Action:       "task.resume",
-		Outcome:      "working",
-		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
-		CreatedAt:    r.now(),
-	})
 	return nil
 }
 
@@ -461,31 +469,65 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+	var entry domain.MemoryEntry
 	if step != nil {
-		entry, encodeErr := r.workflowStepEntry(id, *step)
+		var encodeErr error
+		entry, encodeErr = r.workflowStepEntry(id, *step)
 		if encodeErr != nil {
 			return domain.Task{}, encodeErr
 		}
+	}
+	submitted := domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       task.ID,
+		WorkloadName: workloadName,
+		Action:       "task.submit",
+		Outcome:      "submitted",
+		CreatedAt:    now,
+	}
+	// The submission is recorded before the task exists, so no task runs
+	// without its task.submit row, and a failed write refuses it. A replay
+	// of an earlier submission writes no row; it still goes through
+	// CreateTask, whose guards decide what the replay returns.
+	_, replay := r.replayedSubmission(ctx, id, idempotencyKey, workloadName, parentID, step != nil)
+	if !replay {
+		if err := store.RecordAudit(ctx, r.store, submitted); err != nil {
+			return domain.Task{}, err
+		}
+	}
+	if step != nil {
 		err = store.CreateTaskWithMemory(ctx, r.store, task, entry)
 	} else {
 		err = r.store.CreateTask(ctx, task)
 	}
+	if err == nil && replay {
+		// The earlier task was not found by CreateTask after all. The task
+		// now exists, so the row is written late and a failure is returned.
+		if auditErr := store.RecordAudit(ctx, r.store, submitted); auditErr != nil {
+			return domain.Task{}, fmt.Errorf("task %s was created, but %w", task.ID, auditErr)
+		}
+	}
 	if err != nil {
+		if !replay {
+			// The row above names a task that was not created; say so.
+			store.LogAudit(ctx, r.store, domain.AuditRecord{
+				Category:     "controlplane",
+				TaskID:       task.ID,
+				WorkloadName: workloadName,
+				Action:       "task.submit",
+				Outcome:      "not_created",
+				CreatedAt:    r.now(),
+			})
+		}
 		if errors.Is(err, store.ErrConflict) {
-			if step != nil {
-				existing, getErr := r.store.GetTask(ctx, id)
-				if getErr == nil && existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
-					return existing, nil
-				}
-				return domain.Task{}, err
-			}
 			// The unique key selects the winner even when submissions race.
-			existing, lookupErr := r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey)
-			if lookupErr == nil && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
+			if existing, ok := r.replayedSubmission(ctx, id, idempotencyKey, workloadName, parentID, step != nil); ok {
 				return existing, nil
 			}
-			if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
-				return domain.Task{}, lookupErr
+			if step == nil {
+				if _, lookupErr := r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey); lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+					return domain.Task{}, lookupErr
+				}
 			}
 		}
 		return domain.Task{}, err
@@ -501,15 +543,24 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 			CreatedAt: now,
 		})
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-		Category:     "controlplane",
-		TaskID:       task.ID,
-		WorkloadName: workloadName,
-		Action:       "task.submit",
-		Outcome:      "submitted",
-		CreatedAt:    now,
-	})
 	return task, nil
+}
+
+// replayedSubmission returns the task an earlier submission with the same
+// idempotency key created, when it matches this one. A workflow step's task ID
+// is derived from its key, so it is looked up by ID.
+func (r *Reconciler) replayedSubmission(ctx context.Context, id, idempotencyKey, workloadName, parentID string, byID bool) (domain.Task, bool) {
+	var existing domain.Task
+	var err error
+	if byID {
+		existing, err = r.store.GetTask(ctx, id)
+	} else {
+		existing, err = r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey)
+	}
+	if err != nil || existing.IdempotencyKey != idempotencyKey || existing.WorkloadName != workloadName || existing.ParentTaskID != parentID {
+		return domain.Task{}, false
+	}
+	return existing, true
 }
 
 // StartWorkflow dispatches the first step of a declared Workflow and records workflow metadata
@@ -734,7 +785,8 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 	capability := "delegate:" + targetWorkload
 	decision := pol.Evaluate(parentWL, capability)
 	if decision.Effect != domain.EffectAllow {
-		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		// The delegation is refused either way; a failed record is logged.
+		store.LogAudit(ctx, r.store, domain.AuditRecord{
 			Category:     "controlplane",
 			TaskID:       parentTaskID,
 			WorkloadName: parent.WorkloadName,
@@ -765,10 +817,9 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	if err := r.store.CreateTask(ctx, child); err != nil {
-		return domain.Task{}, err
-	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// The delegation is recorded before the child task exists; a record that
+	// cannot be written refuses it.
+	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       child.ID,
 		WorkloadName: parent.WorkloadName,
@@ -776,7 +827,21 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		Outcome:      "allowed",
 		DetailJSON:   fmt.Sprintf(`{"parent_task_id":%q,"child_task_id":%q}`, parentTaskID, child.ID),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	if err := r.store.CreateTask(ctx, child); err != nil {
+		store.LogAudit(ctx, r.store, domain.AuditRecord{
+			Category:     "controlplane",
+			TaskID:       child.ID,
+			WorkloadName: parent.WorkloadName,
+			Action:       capability,
+			Outcome:      "not_created",
+			DetailJSON:   fmt.Sprintf(`{"parent_task_id":%q,"child_task_id":%q}`, parentTaskID, child.ID),
+			CreatedAt:    r.now(),
+		})
+		return domain.Task{}, err
+	}
 	return child, nil
 }
 
@@ -1498,7 +1563,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		}
 		verdict, findings := finalVerifierVerdict(completedTask.ArtifactsJSON, meta.Prompt, digest)
 		if verdict == "" {
-			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+			store.LogAudit(ctx, r.store, domain.AuditRecord{
 				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
 				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
 			})
@@ -1523,7 +1588,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				Content:   "Verifier returned VERDICT: CHANGES_REQUESTED.",
 				CreatedAt: r.now(),
 			})
-			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+			store.LogAudit(ctx, r.store, domain.AuditRecord{
 				Category:     "workflow",
 				TaskID:       completedTask.ID,
 				WorkloadName: completedTask.WorkloadName,
@@ -1637,7 +1702,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
 		CreatedAt: now,
 	})
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "workflow",
 		TaskID:       child.ID,
 		WorkloadName: nextStep.Workload,
@@ -1669,7 +1734,7 @@ func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task,
 	if err != nil {
 		return err
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       rem.ID,
 		WorkloadName: rem.WorkloadName,

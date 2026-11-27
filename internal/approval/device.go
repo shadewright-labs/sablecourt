@@ -96,16 +96,27 @@ func (pm *PairingManager) CompletePairing(ctx context.Context, code, name, platf
 		PublicKeyPEM: strings.TrimSpace(publicKeyPEM),
 		CreatedAt:    pm.now(),
 	}
-	if err := pm.store.CreateDevice(ctx, dev); err != nil {
-		return domain.PairedDevice{}, err
-	}
-	_ = pm.store.AppendAudit(ctx, domain.AuditRecord{
+	// A paired device can approve, so the pairing is recorded first: a
+	// record that cannot be written refuses it and stores no device.
+	if err := store.RecordAudit(ctx, pm.store, domain.AuditRecord{
 		Category:   "device",
 		Action:     "device.paired",
 		Outcome:    "paired",
 		DetailJSON: fmt.Sprintf(`{"device_id":%q,"name":%q,"platform":%q}`, dev.ID, dev.Name, dev.Platform),
 		CreatedAt:  dev.CreatedAt,
-	})
+	}); err != nil {
+		return domain.PairedDevice{}, err
+	}
+	if err := pm.store.CreateDevice(ctx, dev); err != nil {
+		store.LogAudit(ctx, pm.store, domain.AuditRecord{
+			Category:   "device",
+			Action:     "device.paired",
+			Outcome:    "error",
+			DetailJSON: fmt.Sprintf(`{"device_id":%q,"reason":"create_failed"}`, dev.ID),
+			CreatedAt:  pm.now(),
+		})
+		return domain.PairedDevice{}, err
+	}
 	return dev, nil
 }
 
@@ -149,10 +160,8 @@ func (q *Queue) ApproveWithSignature(ctx context.Context, approvalID, expectedSH
 	}
 	proofBytes, _ := json.Marshal(proof)
 	decidedBy := "device:" + dev.ID
-	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalApproved, decidedBy, string(proofBytes)); err != nil {
-		return domain.Approval{}, err
-	}
-	_ = q.store.AppendAudit(ctx, domain.AuditRecord{
+	// Recorded before it is stored, as in Approve.
+	if err := store.RecordAudit(ctx, q.store, domain.AuditRecord{
 		Category:     "approval",
 		TaskID:       apr.TaskID,
 		WorkloadName: apr.WorkloadName,
@@ -160,7 +169,13 @@ func (q *Queue) ApproveWithSignature(ctx context.Context, approvalID, expectedSH
 		Outcome:      "approved",
 		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"device_id":%q,"method":"ecdsa-p256-device"}`, apr.ID, dev.ID),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		return domain.Approval{}, err
+	}
+	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalApproved, decidedBy, string(proofBytes)); err != nil {
+		q.recordFailedStep(ctx, apr, "approve_failed")
+		return domain.Approval{}, err
+	}
 	return q.store.GetApproval(ctx, apr.ID)
 }
 
