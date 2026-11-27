@@ -42,6 +42,7 @@ var verifierGrantFields = map[string]verifierGrant{
 	"MCPServers": verifierGrantEmpty,
 	"Actions":    verifierGrantEmpty,
 	"DelegateTo": verifierGrantEmpty,
+	"Repos":      verifierGrantEmpty,
 }
 
 // validateVerifierGrants refuses a verifier workload that holds any grant
