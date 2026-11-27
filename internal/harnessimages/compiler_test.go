@@ -74,6 +74,15 @@ func TestLocalProxyCompiler(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(tokenDir, "token.go"), []byte("package operatortoken"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			redactDir := filepath.Join(source, "internal", "redact")
+			if err := os.MkdirAll(redactDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range []string{"redact.go", "known.go"} {
+				if err := os.WriteFile(filepath.Join(redactDir, file), []byte("package redact"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			scratch := t.TempDir()
 			t.Setenv("TMPDIR", scratch)
 			t.Setenv("GOFLAGS", "-invalid-flag")

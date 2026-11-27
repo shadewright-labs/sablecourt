@@ -300,6 +300,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if pgDSN == "" {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
+	registerDSN(pgDSN)
 	var st store.Store
 	if cfg.openStore != nil {
 		st, err = cfg.openStore()
@@ -410,10 +411,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	}
 
 	stores := []secret.SecretStore{secret.NewKeyringStore("sablecourt")}
+	var fileSecretStore *secret.FileStore
 	if secretFile != "" {
-		stores = append(stores, secret.NewFileStore(secretFile))
+		fileSecretStore = secret.NewFileStore(secretFile)
+		stores = append(stores, fileSecretStore)
 	}
-	secretStore := &secret.ChainStore{Stores: stores}
+	secretStore := secret.NewObservingStore(&secret.ChainStore{Stores: stores}, registerDaemonSecret)
+	preloadDaemonSecrets(ctx, secretStore, fileSecretStore, bundle)
 
 	modelGate := model.New(model.Options{
 		Store:      gateLeaseStore{st},
@@ -456,6 +460,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		if b == nil {
 			return
 		}
+		preloadBundleSecrets(ctx, secretStore, b)
 		for _, w := range b.Workloads {
 			if len(w.Spec.Grants.MCPServers) > 0 {
 				dataActionGate.RegisterUpstreamTools(w.Spec.Grants.MCPServers, mcpBridge)

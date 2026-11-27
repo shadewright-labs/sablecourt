@@ -53,10 +53,15 @@ func New(opts Options) *Notifier {
 func (n *Notifier) webhookURL(ctx context.Context) string {
 	if n.secrets != nil {
 		if u, err := n.secrets.Get(ctx, "notify_webhook_url"); err == nil && strings.TrimSpace(u) != "" {
+			redact.Register(u)
 			return strings.TrimSpace(u)
 		}
 	}
-	return strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL"))
+	u := strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL"))
+	if u != "" {
+		redact.Register(u)
+	}
+	return u
 }
 
 // Send dispatches a redacted notification if notify_webhook_url is configured.

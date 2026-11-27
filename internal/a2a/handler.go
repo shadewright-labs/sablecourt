@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -47,6 +48,7 @@ func BrokerHandler(opts Options) http.Handler {
 			writeRPCError(w, nil, -32001, "A2A bearer token not configured")
 			return
 		}
+		redact.Register(expectedToken)
 		auth := r.Header.Get("Authorization")
 		gotToken := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(gotToken), []byte(strings.TrimSpace(expectedToken))) != 1 {

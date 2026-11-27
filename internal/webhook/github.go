@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
@@ -44,6 +45,7 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "webhook secret not configured"})
 			return
 		}
+		redact.Register(whSecret)
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err != nil {

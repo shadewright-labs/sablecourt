@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
@@ -53,6 +54,7 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	if err != nil {
 		return "", fmt.Errorf("load github_token: %w", err)
 	}
+	redact.Register(token)
 	apiBase := gh.APIURL
 	if apiBase == "" {
 		apiBase = "https://api.github.com"

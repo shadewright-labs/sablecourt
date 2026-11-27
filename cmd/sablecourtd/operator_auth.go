@@ -21,6 +21,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -61,6 +62,8 @@ func newOperatorAuth(token string) *operatorAuth {
 		limiter:   newLoginLimiter(loginMaxFailures, loginFailureWindow, loginLimiterMaxClients),
 	}
 	rand.Read(auth.signKey[:])
+	redact.Register(token)
+	redact.RegisterBytes(auth.signKey[:])
 	return auth
 }
 
@@ -134,10 +137,12 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 				}
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
 					!strings.HasPrefix(token, "op_") && !strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
-					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil &&
-						tokenDigestEqual(token, strings.TrimSpace(want)) {
-						scoped.ServeHTTP(w, r)
-						return
+					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil {
+						redact.Register(want)
+						if tokenDigestEqual(token, strings.TrimSpace(want)) {
+							scoped.ServeHTTP(w, r)
+							return
+						}
 					}
 				}
 			}
@@ -263,6 +268,7 @@ func (a *operatorAuth) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	var key [32]byte
 	rand.Read(key[:])
+	redact.RegisterBytes(key[:])
 	a.keyMu.Lock()
 	a.signKey = key
 	a.keyMu.Unlock()

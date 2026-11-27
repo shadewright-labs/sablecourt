@@ -29,7 +29,8 @@ func (c LocalProxyCompiler) Compile(ctx context.Context) (binary []byte, resultE
 	}()
 	packageDir := filepath.Join("internal", "gate", "councilproxy")
 	for _, name := range []string{"gate/councilproxy/proxy.go", "gate/councilproxy/proxy_main.go",
-		"gate/councilproxy/docker.go", "gate/councilproxy/socket.go", "gate/councilproxy/limits.go", "operatortoken/token.go"} {
+		"gate/councilproxy/docker.go", "gate/councilproxy/socket.go", "gate/councilproxy/limits.go", "operatortoken/token.go",
+		"redact/redact.go", "redact/known.go"} {
 		rel := filepath.Join("internal", filepath.FromSlash(name))
 		source := filepath.Join(c.Source, rel)
 		dest := filepath.Join(scratch, rel)

@@ -21,6 +21,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -65,6 +66,8 @@ func NewFromConfig(kubeconfigPath, namespace, runtimeClassName string) (*Adapter
 	if err != nil {
 		return nil, fmt.Errorf("load kubernetes config: %w", err)
 	}
+	redact.Register(cfg.BearerToken, cfg.Password)
+	redact.RegisterBytes(cfg.KeyData)
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create kubernetes clientset: %w", err)
