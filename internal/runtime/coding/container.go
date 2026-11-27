@@ -154,6 +154,37 @@ func councilCheckoutKind(mode string, readOnly bool) (scruntime.CouncilCheckoutK
 	}
 }
 
+// harnessGitDirPath is the per-launch Git metadata directory of a task. The
+// path is reserved with the task's other files before any checkout exists.
+func harnessGitDirPath(taskBase string) string { return taskBase + ".git" }
+
+// prepareHarnessGitDir gives a harness container Git metadata it can resolve.
+// A linked worktree's .git file points at its registration in the shared
+// repository, and the container never mounts that registration or the shared
+// object store: other branches' refs and objects would be readable and, for a
+// writable seat, rewritable. The launch gets its own directory instead, built
+// the same way as a live checkout's (objects reachable from HEAD, HEAD, the
+// checkout's index and info/exclude). The workload may change it; the daemon
+// never runs Git against it, finishes from the host registration and the
+// checkout files, and removes the directory when the task finishes. A live
+// checkout is a primary worktree whose .git is mounted with it, so it needs
+// none.
+func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *worktreeState) (string, error) {
+	if state.Mode == checkoutModeLive {
+		return "", nil
+	}
+	checkout := state.checkoutGit(dir)
+	head, err := checkout.commitID(ctx, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	gitDir := harnessGitDirPath(taskBase)
+	if err := createLiveGitDir(ctx, checkout, gitDir, head); err != nil {
+		return "", fmt.Errorf("create harness Git metadata: %w", err)
+	}
+	return gitDir, nil
+}
+
 func (a *Adapter) resolveProxyImageID(ctx context.Context) (string, error) {
 	ref := strings.TrimSpace(a.CouncilProxyImage)
 	if ref == "" {
@@ -179,6 +210,7 @@ func (a *Adapter) startCouncilContainer(
 	input launchInput,
 	dir string,
 	taskBase string,
+	gitDir string,
 	state *worktreeState,
 	readOnly bool,
 	commitJournal func() error,
@@ -274,7 +306,7 @@ func (a *Adapter) startCouncilContainer(
 		Workload:      spec.Workload.Metadata.Name,
 		Harness:       cfg.Harness,
 		Model:         input.model,
-		Checkout:      scruntime.CouncilCheckout{Path: dir, Kind: kind},
+		Checkout:      scruntime.CouncilCheckout{Path: dir, Kind: kind, GitDir: gitDir},
 		Limits:        limits,
 		Prompt:        input.prompt,
 		TaskToken:     spec.TaskToken,

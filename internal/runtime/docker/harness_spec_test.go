@@ -24,6 +24,36 @@ var harnessEnvAllowlist = map[string]bool{
 	"NO_PROXY": true, "no_proxy": true, "DISABLE_UPDATES": true,
 	"SABLECOURT_MANAGED": true, "SABLECOURT_TASK_ID": true, "SABLECOURT_WORKLOAD": true,
 	"SABLECOURT_DATA_GATE_URL": true, "GIT_OPTIONAL_LOCKS": true,
+	"GIT_DIR": true, "GIT_WORK_TREE": true,
+}
+
+// linkedCheckout lays out a linked worktree the way git worktree add does:
+// the checkout's .git file names a registration under the shared repository's
+// worktrees directory. It returns the checkout, the shared repository's Git
+// directory and a self-contained per-launch metadata directory.
+func linkedCheckout(t *testing.T) (checkout, common, gitDir string) {
+	t.Helper()
+	base := t.TempDir()
+	common = filepath.Join(base, "repo", ".git")
+	reg := filepath.Join(common, "worktrees", "task-guard")
+	checkout = filepath.Join(base, "worktrees", "task-guard")
+	gitDir = checkout + ".git"
+	for _, dir := range []string{filepath.Join(common, "objects"), filepath.Join(common, "refs"), reg, checkout, filepath.Join(gitDir, "objects", "pack")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		filepath.Join(reg, "commondir"): "../..\n",
+		filepath.Join(reg, "gitdir"):    filepath.Join(checkout, ".git") + "\n",
+		filepath.Join(checkout, ".git"): "gitdir: " + reg + "\n",
+		filepath.Join(gitDir, "HEAD"):   "ref: refs/heads/sablecourt/task-guard\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return checkout, common, gitDir
 }
 
 // TestHarnessContainerSpecGuardsForStandaloneAndCouncil runs a standalone
@@ -95,10 +125,15 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 				f.tool = &tv
 			}
 			a.CouncilHarnesses = map[string]CouncilHarness{tc.harness: cfg}
-			checkout := t.TempDir()
+			// Every kind but live is a linked worktree and carries its own
+			// metadata directory; a live checkout's .git is mounted with it.
+			checkout, common, gitDir := t.TempDir(), "", ""
+			if tc.kind != rt.CouncilLive {
+				checkout, common, gitDir = linkedCheckout(t)
+			}
 			s := rt.CouncilLaunch{
 				TaskID: "task-guard", Workload: "guard", Harness: tc.harness,
-				Checkout: rt.CouncilCheckout{Path: checkout, Kind: tc.kind},
+				Checkout: rt.CouncilCheckout{Path: checkout, Kind: tc.kind, GitDir: gitDir},
 				Limits:   rt.CouncilLimits{NanoCPUs: 500_000_000, MemoryBytes: 64 << 20, PIDs: 32, WallTime: 1e9},
 				Prompt:   prompt, TaskToken: lease,
 				Network: netNm, NetworkID: f.net.ID, ProxyURL: proxy, DataGateURL: gate,
@@ -109,15 +144,23 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 			}
 			c, h := o.Config, o.HostConfig
 
-			// Mounts: checkout, login volume and, for vendor tools, the read-only tool volume. Nothing else.
+			// Mounts: checkout, its own Git metadata for a linked worktree, login
+			// volume and, for vendor tools, the read-only tool volume. Nothing else.
 			src, err := filepath.EvalSymlinks(checkout)
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := []mount.Mount{
 				{Type: mount.TypeBind, Source: src, Target: "/workspace", ReadOnly: !tc.writable, BindOptions: &mount.BindOptions{NonRecursive: true}},
-				{Type: mount.TypeVolume, Source: f.vol.Name, Target: harnessimages.StateDir},
 			}
+			if gitDir != "" {
+				gitSrc, err := filepath.EvalSymlinks(gitDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = append(want, mount.Mount{Type: mount.TypeBind, Source: gitSrc, Target: councilGitDir, ReadOnly: !tc.writable, BindOptions: &mount.BindOptions{NonRecursive: true}})
+			}
+			want = append(want, mount.Mount{Type: mount.TypeVolume, Source: f.vol.Name, Target: harnessimages.StateDir})
 			if tc.tool {
 				want = append(want, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 			}
@@ -132,6 +175,22 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 				if got.Type == mount.TypeBind && (strings.HasPrefix(home, got.Source+string(filepath.Separator)) || strings.HasPrefix(got.Source, stateDir)) {
 					t.Fatalf("mount %d exposes the home directory or daemon state: %s", i, got.Source)
 				}
+			}
+			// The shared repository (its registration directory, refs and
+			// object store) is never a mount source, nor inside or above one.
+			if common != "" {
+				commonSrc, err := filepath.EvalSymlinks(common)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, got := range h.Mounts {
+					if got.Type == mount.TypeBind && (got.Source == commonSrc || strings.HasPrefix(got.Source, commonSrc+string(filepath.Separator)) || strings.HasPrefix(commonSrc, got.Source+string(filepath.Separator))) {
+						t.Fatalf("mount %d exposes the shared repository metadata: %s", i, got.Source)
+					}
+				}
+			}
+			if hasGit := slices.Contains(c.Env, "GIT_DIR="+councilGitDir) && slices.Contains(c.Env, "GIT_WORK_TREE=/workspace"); hasGit != (gitDir != "") {
+				t.Fatalf("GIT_DIR and GIT_WORK_TREE must be set exactly when the launch has its own Git metadata: %v", c.Env)
 			}
 			if len(h.Tmpfs) != 1 || h.Tmpfs["/scratch"] == "" || !strings.Contains(h.Tmpfs["/scratch"], "noexec") {
 				t.Fatalf("tmpfs = %v, want only a noexec /scratch", h.Tmpfs)
@@ -199,7 +258,10 @@ func TestHarnessContainerSpecRefusesUnsafeCheckouts(t *testing.T) {
 		"checkout contains home", "checkout contains runtime socket", "checkout contains DOCKER_HOST socket",
 		"checkout is the state dir", "checkout contains the state dir", "checkout is the default state dir",
 		"checkout is a protected path", "checkout contains a protected path",
+		"protected path through a symlink and dot-dot",
 		"leaf symlink", "dot-dot path", "unknown kind",
+		"git dir is a worktree registration", "git dir is the shared repository", "git dir has alternates",
+		"git dir inside the checkout", "git dir contains a protected path", "git dir is a symlink",
 	}
 	for _, kind := range []rt.CouncilCheckoutKind{rt.CouncilTask, rt.CouncilWriter, rt.CouncilLive} {
 		for _, tc := range cases {
@@ -240,6 +302,18 @@ func TestHarnessContainerSpecRefusesUnsafeCheckouts(t *testing.T) {
 					a.ProtectedPaths = []string{checkout}
 				case "checkout contains a protected path":
 					a.ProtectedPaths = []string{filepath.Join(mkdir(filepath.Join(checkout, "db")), "sablecourt.db")}
+				case "protected path through a symlink and dot-dot":
+					// link points into the checkout, so link/../sablecourt.db opens a
+					// file inside it, while the cleaned spelling names a sibling of link.
+					outside := t.TempDir()
+					sub := mkdir(filepath.Join(checkout, "sub"))
+					if err := os.WriteFile(filepath.Join(checkout, "sablecourt.db"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(sub, filepath.Join(outside, "link")); err != nil {
+						t.Fatal(err)
+					}
+					a.ProtectedPaths = []string{filepath.Join(outside, "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "sablecourt.db"}
 				case "leaf symlink":
 					link := filepath.Join(t.TempDir(), "link")
 					if err := os.Symlink(checkout, link); err != nil {
@@ -251,6 +325,32 @@ func TestHarnessContainerSpecRefusesUnsafeCheckouts(t *testing.T) {
 					mkdir(filepath.Join(checkout, "sub"))
 				case "unknown kind":
 					s.Checkout.Kind = "host"
+				case "git dir is a worktree registration":
+					_, common, _ := linkedCheckout(t)
+					s.Checkout.GitDir = filepath.Join(common, "worktrees", "task-guard")
+				case "git dir is the shared repository":
+					_, common, _ := linkedCheckout(t)
+					s.Checkout.GitDir = common
+				case "git dir has alternates":
+					_, _, gitDir := linkedCheckout(t)
+					mkdir(filepath.Join(gitDir, "objects", "info"))
+					if err := os.WriteFile(filepath.Join(gitDir, "objects", "info", "alternates"), []byte("/elsewhere/objects\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					s.Checkout.GitDir = gitDir
+				case "git dir inside the checkout":
+					s.Checkout.GitDir = mkdir(filepath.Join(checkout, "meta"))
+				case "git dir contains a protected path":
+					_, _, gitDir := linkedCheckout(t)
+					s.Checkout.GitDir = gitDir
+					a.ProtectedPaths = []string{filepath.Join(gitDir, "sablecourt.db")}
+				case "git dir is a symlink":
+					_, _, gitDir := linkedCheckout(t)
+					link := filepath.Join(t.TempDir(), "meta")
+					if err := os.Symlink(gitDir, link); err != nil {
+						t.Fatal(err)
+					}
+					s.Checkout.GitDir = link
 				}
 				if _, err := a.harnessContainerSpec(t.Context(), f, s, false); err == nil {
 					t.Fatal("unsafe checkout accepted")

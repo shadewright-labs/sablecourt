@@ -227,20 +227,57 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 }
 
 // daemonPrivatePaths lists the daemon's own files and directories: the state
-// directory, the database, the worktree root and the secret file.
+// directory, the database, the worktree root and the secret file. dbPath and
+// secretFile must come from resolveDaemonFile, so the list names the files the
+// daemon opens.
 func daemonPrivatePaths(stateDir, dbPath, secretFile string) []string {
 	out := []string{stateDir}
 	if dbPath != "" {
-		if absDB, err := filepath.Abs(dbPath); err == nil {
-			out = append(out, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
-		}
+		out = append(out, dbPath, filepath.Join(filepath.Dir(dbPath), "worktrees"))
 	}
 	if secretFile != "" {
-		if absSecret, err := filepath.Abs(secretFile); err == nil {
-			out = append(out, absSecret)
-		}
+		out = append(out, secretFile)
 	}
 	return out
+}
+
+// resolveDaemonFile turns a configured file path into the one path the daemon
+// opens and the checkout guard compares. A lexical clean is not enough: in
+// link/../name the link is followed before "..", so the file opened can sit
+// somewhere the cleaned spelling does not name. The existing parent is
+// resolved with its symlinks and the base name is kept; a file that already
+// exists is resolved whole, so a symlinked file names its target.
+func resolveDaemonFile(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	path := raw
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		// Joined without cleaning, so ".." still follows any symlink before it.
+		path = wd + string(filepath.Separator) + path
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	i := strings.LastIndex(path, string(filepath.Separator))
+	parent, base := path[:i], path[i+1:]
+	if parent == "" {
+		parent = string(filepath.Separator)
+	}
+	if base == "" || base == "." || base == ".." {
+		return "", fmt.Errorf("%q does not name a file", raw)
+	}
+	dir, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, base), nil
 }
 
 // codingRuntimeStatus is what GET /api/v1/runtime/coding reports and
@@ -337,6 +374,14 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	dir, err := operatortoken.StateDir()
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
+	}
+	// Resolve once: the store, the secret store and the checkout guard all use
+	// these exact paths.
+	if dbPath, err = resolveDaemonFile(dbPath); err != nil {
+		return fmt.Errorf("resolve database path: %w", err)
+	}
+	if secretFile, err = resolveDaemonFile(secretFile); err != nil {
+		return fmt.Errorf("resolve secret file path: %w", err)
 	}
 	privateDirs := daemonPrivatePaths(dir, dbPath, secretFile)
 	operatorToken, stateLock, err := initDaemonState(dir)

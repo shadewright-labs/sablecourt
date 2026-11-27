@@ -194,7 +194,15 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	}
 
 	if spec.CouncilContainer {
-		return a.startCouncilContainer(ctx, spec, input, dir, taskBase, state, readOnly, commitJournal)
+		gitDir, err := prepareHarnessGitDir(ctx, dir, taskBase, state)
+		if err != nil {
+			return scruntime.Handle{}, err
+		}
+		if gitDir != "" {
+			prev := rollback
+			rollback = func(rbCtx context.Context) error { return errors.Join(prev(rbCtx), os.RemoveAll(gitDir)) }
+		}
+		return a.startCouncilContainer(ctx, spec, input, dir, taskBase, gitDir, state, readOnly, commitJournal)
 	}
 
 	if input.checkoutMode == "" && input.context != "" {

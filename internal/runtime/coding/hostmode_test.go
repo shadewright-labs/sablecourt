@@ -1,7 +1,11 @@
 package coding
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -174,5 +178,110 @@ func TestRecoveryOnlyAdapterObservesAndStopsHostWorker(t *testing.T) {
 	next.TaskID = "task-after-upgrade"
 	if _, err := upgraded.Start(t.Context(), next); !errors.Is(err, ErrHostModeOff) {
 		t.Fatalf("Start after upgrade = %v, want ErrHostModeOff", err)
+	}
+}
+
+// TestHarnessContainerGetsOwnGitMetadata checks the Git layout a harness
+// container receives for a linked-worktree checkout. The task worktree's .git
+// file names its registration in the shared repository, which the container
+// never mounts, so the launch carries a self-contained metadata directory:
+// Git resolves HEAD, status and a commit through it alone, it never points
+// back at the shared registration or object store, and it is gone after the
+// task finishes while the host still saves the edit from the checkout files.
+func TestHarnessContainerGetsOwnGitMetadata(t *testing.T) {
+	repo := initTempGitRepo(t)
+	base := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+	common, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	runner := newFakeCouncilRunner()
+	a.CouncilRunner = runner
+	a.CouncilProxy = newFakeProxyDocker()
+	a.CouncilProxyImage = "sha256:" + strings.Repeat("a", 64)
+	a.DaemonListen = "127.0.0.1:7432"
+	var inContainer error
+	runner.onRun = func(ctx context.Context, s scruntime.CouncilLaunch) (string, string, int, error) {
+		inContainer = func() error {
+			gitDir := s.Checkout.GitDir
+			if gitDir == "" || strings.HasPrefix(gitDir, common+string(filepath.Separator)) || strings.HasPrefix(gitDir, s.Checkout.Path+string(filepath.Separator)) {
+				return fmt.Errorf("launch GitDir = %q, want a directory outside the shared repository and the checkout", gitDir)
+			}
+			for _, name := range []string{"commondir", "worktrees", filepath.Join("objects", "info", "alternates")} {
+				if _, err := os.Lstat(filepath.Join(gitDir, name)); !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("GitDir has %s, so it reaches shared metadata", name)
+				}
+			}
+			// The container's view: GIT_DIR and GIT_WORK_TREE, as the spec sets them.
+			run := func(args ...string) (string, error) {
+				cmd := exec.CommandContext(ctx, "git", args...)
+				cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir, "GIT_WORK_TREE="+s.Checkout.Path, "GIT_CONFIG_GLOBAL="+os.DevNull)
+				cmd.Dir = s.Checkout.Path
+				out, err := cmd.CombinedOutput()
+				return strings.TrimSpace(string(out)), err
+			}
+			if out, err := run("rev-parse", "--path-format=absolute", "--git-common-dir"); err != nil || out != gitDir {
+				return fmt.Errorf("common dir = %q, %v, want the launch's own directory", out, err)
+			}
+			if out, err := run("symbolic-ref", "HEAD"); err != nil || out != "refs/heads/sablecourt/task-gitdir" {
+				return fmt.Errorf("HEAD = %q, %v", out, err)
+			}
+			if out, err := run("rev-parse", "HEAD"); err != nil || out != base {
+				return fmt.Errorf("HEAD commit = %q, %v, want %s", out, err, base)
+			}
+			if out, err := run("status", "--porcelain"); err != nil || out != "" {
+				return fmt.Errorf("status = %q, %v, want a clean checkout", out, err)
+			}
+			if err := os.WriteFile(filepath.Join(s.Checkout.Path, "edit.txt"), []byte("container edit\n"), 0o644); err != nil {
+				return err
+			}
+			if out, err := run("add", "edit.txt"); err != nil {
+				return fmt.Errorf("add: %v (%s)", err, out)
+			}
+			if out, err := run("-c", "user.name=t", "-c", "user.email=t", "commit", "-q", "-m", "in container"); err != nil {
+				return fmt.Errorf("commit: %v (%s)", err, out)
+			}
+			return nil
+		}()
+		return "done\n", "", 0, nil
+	}
+	spec := scruntime.LaunchSpec{
+		TaskID: "task-gitdir", TaskToken: "sc_task_" + "gitdirlease", CouncilContainer: true,
+		InputJSON: `{"prompt":"implement the change"}`,
+		Workload: domain.Workload{Metadata: domain.ObjectMeta{Name: "coder"}, Spec: domain.WorkloadSpec{
+			Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: "claude", RepoPath: repo, Sandbox: "container"},
+		}},
+	}
+	h, err := a.Start(t.Context(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Stop(t.Context(), h) })
+	waitUntil(t, func() bool {
+		obs, err := a.Observe(t.Context(), h)
+		return err == nil && (obs.State == scruntime.StateCompleted || obs.State == scruntime.StateFailed)
+	})
+	if inContainer != nil {
+		t.Fatal(inContainer)
+	}
+	arts, err := a.CollectArtifacts(t.Context(), h)
+	if err != nil {
+		t.Fatalf("CollectArtifacts: %v", err)
+	}
+	runner.mu.Lock()
+	gitDir := runner.launches[0].Checkout.GitDir
+	runner.mu.Unlock()
+	if _, err := os.Lstat(gitDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("harness Git metadata left after finish: %v", err)
+	}
+	var commit string
+	for _, art := range arts {
+		if art.Name == "git-commit" {
+			commit = strings.TrimSpace(art.Text)
+		}
+	}
+	if got := strings.TrimSpace(testGit(t, repo, "show", commit+":edit.txt")); got != "container edit" {
+		t.Fatalf("host branch edit.txt = %q, want the container's edit", got)
 	}
 }

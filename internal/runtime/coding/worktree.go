@@ -79,7 +79,7 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 		return "", nil, err
 	}
 	dir = filepath.Join(dir, sanitizeSegment(taskID))
-	for _, path := range []string{dir, dir + stateSuffix, dir + ".log", dir + excludeConfigSuffix} {
+	for _, path := range []string{dir, dir + stateSuffix, dir + ".log", harnessGitDirPath(dir), dir + excludeConfigSuffix} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			if err == nil {
 				err = os.ErrExist
@@ -594,6 +594,10 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 		}
 	}
 	if err := removeWorktree(ctx, dir, state, true); err != nil {
+		return err
+	}
+	// The harness container's own Git metadata; the host never reads it.
+	if err := os.RemoveAll(harnessGitDirPath(dir)); err != nil {
 		return err
 	}
 	if err := removeFile(dir + ".log"); err != nil {

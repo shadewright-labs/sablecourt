@@ -111,6 +111,11 @@ func (e *MissingBinaryError) Unwrap() error { return e.Err }
 type CouncilCheckout struct {
 	Path string
 	Kind CouncilCheckoutKind
+	// GitDir, when set, is a self-contained Git metadata directory built for
+	// this launch. A linked worktree's .git file points at its registration
+	// in the shared repository, which a harness container never mounts, so
+	// the container gets this directory as its Git metadata instead.
+	GitDir string
 }
 
 type CouncilCheckoutKind string

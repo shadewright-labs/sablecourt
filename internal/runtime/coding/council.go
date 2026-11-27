@@ -1480,10 +1480,10 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		releaseCouncil()
 	}
 
-	if state.Mode == checkoutModeLive {
-		if err := os.RemoveAll(taskBase + ".git"); err != nil {
-			return err
-		}
+	// A live checkout's snapshot metadata, or the harness container's own Git
+	// metadata for the other kinds. Both live at the reserved path.
+	if err := os.RemoveAll(harnessGitDirPath(taskBase)); err != nil {
+		return err
 	}
 	if err := removeFile(taskBase + ".log"); err != nil {
 		return err

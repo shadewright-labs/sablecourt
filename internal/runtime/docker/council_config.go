@@ -125,35 +125,69 @@ func proxyEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// councilWorkspace builds the checkout bind mount. It refuses a checkout that
-// is or contains the home directory, a container runtime socket (discovered
-// or named by DOCKER_HOST), the daemon state directory or another protected
-// daemon path. A checkout inside a protected directory (a task worktree under
-// the worktree root) is allowed: it cannot reach its parent.
-func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) (mount.Mount, error) {
+// councilWorkspace builds the checkout bind mount and, for a linked worktree,
+// the bind mount of its per-launch Git metadata directory. It refuses a
+// checkout that is or contains the home directory, a container runtime socket
+// (discovered or named by DOCKER_HOST), the daemon state directory or another
+// protected daemon path. A checkout inside a protected directory (a task
+// worktree under the worktree root) is allowed: it cannot reach its parent.
+func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) ([]mount.Mount, error) {
 	switch s.Kind {
 	case rt.CouncilLive, rt.CouncilRef, rt.CouncilReview, rt.CouncilWriter, rt.CouncilTask:
 	default:
-		return mount.Mount{}, errors.New("invalid council checkout kind")
+		return nil, errors.New("invalid council checkout kind")
 	}
-	if !filepath.IsAbs(s.Path) || filepath.Clean(s.Path) != s.Path {
-		return mount.Mount{}, errors.New("expected absolute checkout directory")
-	}
-	info, err := os.Lstat(s.Path)
-	if err != nil || !info.IsDir() {
-		return mount.Mount{}, errors.New("checkout must be a directory")
-	}
-	path, err := filepath.EvalSymlinks(s.Path)
+	path, err := safeBindSource(s.Path, sockets, protected)
 	if err != nil {
-		return mount.Mount{}, err
+		return nil, err
+	}
+	mounts := []mount.Mount{{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}}
+	if s.GitDir == "" {
+		return mounts, nil
+	}
+	gitDir, err := safeBindSource(s.GitDir, sockets, protected)
+	if err != nil {
+		return nil, err
+	}
+	if gitDir == path || strings.HasPrefix(gitDir, path+string(filepath.Separator)) || strings.HasPrefix(path, gitDir+string(filepath.Separator)) {
+		return nil, errors.New("checkout Git metadata overlaps the checkout")
+	}
+	// Only a self-contained metadata directory is mounted. A linked worktree
+	// registration (commondir), an alternates file or a repository with
+	// registered worktrees would reach the shared refs and objects.
+	for _, name := range []string{"commondir", "worktrees", filepath.Join("objects", "info", "alternates")} {
+		if _, err := os.Lstat(filepath.Join(gitDir, name)); !errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("checkout Git metadata is not self-contained")
+		}
+	}
+	return append(mounts, mount.Mount{Type: mount.TypeBind, Source: gitDir, Target: councilGitDir, ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}), nil
+}
+
+// councilGitDir is where a launch's own Git metadata directory is mounted.
+// GIT_DIR and GIT_WORK_TREE point Git in the container at it and /workspace.
+const councilGitDir = "/workspace-git"
+
+// safeBindSource checks one host directory before it is bind mounted into a
+// harness container and returns it with symlinks resolved.
+func safeBindSource(dir string, sockets, protected []string) (string, error) {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return "", errors.New("expected absolute checkout directory")
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return "", errors.New("checkout must be a directory")
+	}
+	path, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return mount.Mount{}, err
+		return "", err
 	}
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
-		return mount.Mount{}, err
+		return "", err
 	}
 	contains := func(target string) bool {
 		return target != "" && (path == target || strings.HasPrefix(target, path+string(filepath.Separator)))
@@ -162,34 +196,37 @@ func councilWorkspace(s rt.CouncilCheckout, sockets, protected []string) (mount.
 		if sock == "" {
 			return false
 		}
-		if contains(sock) {
+		if contains(filepath.Clean(sock)) {
 			return true
 		}
+		// EvalSymlinks walks the raw spelling, so in link/../name the ".."
+		// applies to the link's target, as it does when the file is opened.
 		if resolved, err := filepath.EvalSymlinks(sock); err == nil && contains(resolved) {
 			return true
 		}
 		return contains(resolveExistingPrefix(sock))
 	}
 	if filepath.Dir(path) == path || contains(home) {
-		return mount.Mount{}, errors.New("unsafe checkout directory")
+		return "", errors.New("unsafe checkout directory")
 	}
 	for _, sock := range sockets {
 		if containsSocket(sock) {
-			return mount.Mount{}, errors.New("unsafe checkout directory")
+			return "", errors.New("unsafe checkout directory")
 		}
 	}
 	stateDir, err := operatortoken.StateDir()
 	if err != nil {
-		return mount.Mount{}, errors.New("cannot resolve daemon state directory")
+		return "", errors.New("cannot resolve daemon state directory")
 	}
 	// containsSocket also resolves the target and its parent, which suits any
-	// protected path that may not exist yet.
+	// protected path that may not exist yet. It gets the raw path: a lexical
+	// clean first would drop a symlink that comes before "..".
 	for _, p := range append([]string{stateDir}, protected...) {
-		if p != "" && (!filepath.IsAbs(p) || containsSocket(filepath.Clean(p))) {
-			return mount.Mount{}, errors.New("unsafe checkout directory")
+		if p != "" && (!filepath.IsAbs(p) || containsSocket(p)) {
+			return "", errors.New("unsafe checkout directory")
 		}
 	}
-	return mount.Mount{Type: mount.TypeBind, Source: path, Target: "/workspace", ReadOnly: !s.Kind.Writable(), BindOptions: &mount.BindOptions{NonRecursive: true}}, nil
+	return path, nil
 }
 
 // resolveExistingPrefix resolves symlinks in the longest existing prefix of p
@@ -285,13 +322,19 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 	var mounts []mount.Mount
 	wd := "/scratch"
 	if !login {
-		m, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.ProtectedPaths)
+		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.ProtectedPaths)
 		if err != nil {
 			return o, err
 		}
-		mounts = append(mounts, m)
+		mounts = append(mounts, ms...)
+		m := ms[0]
 		wd = m.Target
 		env = append(env, "SABLECOURT_MANAGED=1", "SABLECOURT_TASK_ID="+s.TaskID, "SABLECOURT_WORKLOAD="+s.Workload, "SABLECOURT_DATA_GATE_URL="+gateRaw)
+		if len(ms) > 1 {
+			// The checkout's .git file names a host path; Git here uses the
+			// launch's own metadata, mounted beside the checkout.
+			env = append(env, "GIT_DIR="+councilGitDir, "GIT_WORK_TREE="+m.Target)
+		}
 		if m.ReadOnly {
 			env = append(env, "GIT_OPTIONAL_LOCKS=0")
 		}

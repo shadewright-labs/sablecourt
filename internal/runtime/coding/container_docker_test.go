@@ -47,6 +47,8 @@ unauth=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${SABLECOURT_DATA
 [[ "$unauth" == "401" ]]
 
 workspace_ro() { awk '$5 == "/workspace" && $6 ~ /^ro(,|$)/ {found=1} END{exit !found}' /proc/self/mountinfo; }
+# Git must resolve the checkout's metadata inside the container.
+git -C /workspace status --porcelain >/dev/null || exit 50
 
 prompt="${!#}"
 case "$prompt" in
@@ -74,11 +76,18 @@ case "$prompt" in
     grep -q "committed-v2" /workspace/committed.txt
     if workspace_ro; then exit 49; fi
     printf 'standalone change\n' > /workspace/standalone.txt
+    [[ $(git -C /workspace symbolic-ref HEAD) == refs/heads/sablecourt/* ]] || exit 51
+    git -C /workspace add standalone.txt || exit 52
+    git -C /workspace -c user.name=t -c user.email=t commit -q -m 'container commit' || exit 53
+    # The shared registration named by the .git file is not mounted.
+    reg=$(sed -n 's/^gitdir: //p' /workspace/.git)
+    [[ -n $reg && ! -e $reg ]] || exit 54
     printf 'standalone done\n'
     ;;
   *MODE_WRITER*)
     grep -q "committed-v1" /workspace/committed.txt
     printf 'implemented in container\n' > /workspace/feature.txt
+    git -C /workspace add feature.txt || exit 55
     printf 'writer done\n'
     ;;
   *)
