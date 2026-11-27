@@ -85,6 +85,8 @@ What the code does today, where it falls short of the design.
 
 Upstream MCP servers (`grants.mcpServers`) are built, but ADR-0011 puts them outside the current scope. At start-up and on reload the daemon registers, for each server with a name and a URL, each non-blank tool of `allowedTools` as `<name>.<tool>`. Registration is daemon-wide: a workload sees a tool only when its own `mcpTools` grant holds the full name, and the policy engine decides each call. The bridge adds the server's secret on the way out and reads at most 4 MiB of a response.
 
+Upstream tools never take a built-in name. The loader refuses a server whose name, before the first dot and compared trimmed and in lower case, is a built-in tool namespace: `memory`, `conclave`, `sablecourt`, `git` or `sandbox`. The gate keeps its own tools and upstream tools in separate registries, looks a name up in its own tools first, and refuses an upstream tool that takes a built-in tool name or namespace. On reload the gate rebuilds the upstream registry from the new bundle only, so the tools of a server the bundle no longer declares are gone. The gate is the first step of a reload and accepts a bundle whole or not at all: if it refuses one upstream tool, the reload is refused, the daemon keeps its previous bundle, policy and upstream tools everywhere, logs "manifest reload refused", and `POST /api/v1/reload` answers 400 with an error that starts with "reload refused". At start-up a refusal leaves the daemon with no upstream tools.
+
 ## In depth
 
 - [Approvals](approvals.md), [model gate](model-gate.md), concepts (page planned)

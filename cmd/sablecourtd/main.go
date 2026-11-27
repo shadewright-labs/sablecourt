@@ -433,18 +433,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
 	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
-	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
-	registerUpstreamMCP := func(b *config.Bundle) {
-		if b == nil {
-			return
-		}
-		for _, w := range b.Workloads {
-			if len(w.Spec.Grants.MCPServers) > 0 {
-				dataActionGate.RegisterUpstreamTools(w.Spec.Grants.MCPServers, mcpBridge)
-			}
-		}
+	// Upstream MCP tools live apart from the built-in ones; every reload
+	// rebuilds them from the new bundle (gate.Reload).
+	if err := dataActionGate.SetUpstreamBridge(mcpgate.NewUpstreamBridge(secretStore, nil)); err != nil {
+		logger.Warn("upstream MCP tools refused at start-up; no upstream tools registered", "error", err)
 	}
-	registerUpstreamMCP(bundle)
 
 	if isCitadel {
 		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
@@ -502,24 +495,24 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// One reload at a time: the reload route, the dashboard and the manifests
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
-	reloadFn := serialized(func() error {
-		b, pol, err := loadAndSync()
-		if err != nil {
-			return err
-		}
-		bundleMu.Lock()
-		bundle = b
-		bundleMu.Unlock()
-		modelGate.SetBundle(b)
-		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
-		registerUpstreamMCP(b)
-		reconciler.Reload(b, pol)
-		_ = scheduler.Reload(ctx, b)
-		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
-		}
-		return nil
-	})
+	reloadFn := serialized(reloadSteps{
+		load: loadAndSync,
+		gate: func(b *config.Bundle, pol *policy.Engine) error {
+			return reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
+		},
+		apply: func(b *config.Bundle, pol *policy.Engine) {
+			bundleMu.Lock()
+			bundle = b
+			bundleMu.Unlock()
+			modelGate.SetBundle(b)
+			reconciler.Reload(b, pol)
+			_ = scheduler.Reload(ctx, b)
+			if b != nil {
+				logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
+			}
+		},
+		logger: logger,
+	}.run)
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -2017,9 +2010,43 @@ func serialized(fn func() error) func() error {
 // sync) runs it through the daemon's one reload function. It never re-pins: a
 // changed or unreadable origin keeps git.open_pr refused, is logged here, and
 // Recheck writes it to the audit log once per change of the observed origin.
-func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
-	gate.Reload(b, pol)
+// reloadGitOps reloads the Data and Action Gate and rechecks the git.open_pr
+// target. A gate refusal is returned with nothing changed in the gate.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) error {
+	if err := gate.Reload(b, pol); err != nil {
+		return err
+	}
 	if err := binding.Recheck(ctx); err != nil {
 		logger.Warn("git.open_pr refused after reload", "error", err)
 	}
+	return nil
+}
+
+// reloadSteps is the order of a manifest reload. The gate step runs first and
+// is all or nothing: when it refuses the bundle, apply never runs, so the
+// daemon keeps its previous bundle, policy and upstream tools everywhere, and
+// the caller gets an error that says the reload was refused.
+type reloadSteps struct {
+	load   func() (*config.Bundle, *policy.Engine, error)
+	gate   func(*config.Bundle, *policy.Engine) error
+	apply  func(*config.Bundle, *policy.Engine)
+	logger *slog.Logger
+}
+
+func (s reloadSteps) run() error {
+	b, pol, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := s.gate(b, pol); err != nil {
+		if !strings.HasPrefix(err.Error(), "reload refused") {
+			err = fmt.Errorf("reload refused: %w", err)
+		}
+		if s.logger != nil {
+			s.logger.Warn("manifest reload refused; previous bundle, policy and upstream tools kept", "error", err)
+		}
+		return err
+	}
+	s.apply(b, pol)
+	return nil
 }

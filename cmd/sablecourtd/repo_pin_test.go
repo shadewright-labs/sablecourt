@@ -109,8 +109,7 @@ func TestDaemonReloadKeepsTheStartPin(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		reloadGitOps(ctx, logger, gate, binding, b, p)
-		return nil
+		return reloadGitOps(ctx, logger, gate, binding, b, p)
 	}
 	h := newHandler(st, nil, func() *config.Bundle { return bundle }, reloadFn, nil, gate, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
 

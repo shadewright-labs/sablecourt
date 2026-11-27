@@ -7,7 +7,7 @@ This guide documents how Sablecourt connects to external MCP servers, Kubernetes
 Sablecourt's Data and Action Gate (`internal/gate/mcp/upstream.go`) proxies remote MCP Streamable HTTP servers (such as Linear, Jira, Sentry, or read-only Postgres MCP) so that:
 
 - Credentials remain inside `sablecourtd`'s `SecretStore` and never enter the workload container or process environment.
-- Only tools listed in `allowedTools` are registered on the workload's MCP server under `<serverName>.<toolName>`.
+- Only tools listed in `allowedTools` are registered on the workload's MCP server under `<serverName>.<toolName>`. A server name in a built-in tool namespace (`memory`, `conclave`, `sablecourt`, `git`, `sandbox`) is refused at load, so an upstream tool never answers a call to a built-in tool. A reload rebuilds the upstream tools from the new bundle, dropping those of removed servers.
 - Every tool call passes through the deterministic Policy Engine (`mcp:<serverName>.<toolName>`) and, when policy effect is `approve`, the Approval Queue, which returns an approval-required reply without running the tool. When the tool runs, its result and any error go through the linear-time pattern redactor (`internal/redact`, best effort for known secret shapes, not a boundary) before returning to the agent; the approval-required reply and approval queue errors are not redacted.
 
 ### Example `Workload` manifest

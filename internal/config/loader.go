@@ -438,6 +438,14 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		}
 	}
 
+	serverNames := make([]string, 0, len(w.Spec.Grants.MCPServers))
+	for _, srv := range w.Spec.Grants.MCPServers {
+		serverNames = append(serverNames, srv.Name)
+	}
+	if err := validateUpstreamServerNames(name, serverNames); err != nil {
+		return err
+	}
+
 	for _, target := range w.Spec.Grants.DelegateTo {
 		if target == name {
 			return fmt.Errorf("workload %q: cannot delegate to itself", name)

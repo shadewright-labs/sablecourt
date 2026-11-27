@@ -60,8 +60,14 @@ type Gate struct {
 	approvals *approval.Queue
 	now       func() time.Time
 
-	mu          sync.RWMutex
+	mu sync.RWMutex
+	// tools holds the gate's own tools. upstream holds the tools proxied to
+	// upstream MCP servers, rebuilt from the bundle on every reload. The two
+	// never share a name: an upstream tool that takes a built-in name or
+	// namespace is refused, and a lookup tries tools first.
 	tools       map[string]ToolDef
+	upstream    map[string]ToolDef
+	bridge      *UpstreamBridge
 	actions     map[string]actionDef
 	allowedRepo string
 }
@@ -79,15 +85,29 @@ func New(opts Options) *Gate {
 		approvals: opts.Approvals,
 		now:       nowFn,
 		tools:     make(map[string]ToolDef),
+		upstream:  make(map[string]ToolDef),
 		actions:   make(map[string]actionDef),
 	}
 }
 
-func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) {
+// Reload swaps the bundle and policy. When an upstream bridge is set, it also
+// rebuilds the upstream tools from the new bundle only, so the tools of a
+// server the bundle no longer declares are gone. If any upstream tool of the
+// new bundle takes a built-in name, the whole reload is refused: the previous
+// bundle, policy and upstream tools stay as they were.
+func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.bridge != nil {
+		next, err := g.buildUpstreamLocked(bundle, g.bridge)
+		if err != nil {
+			return fmt.Errorf("reload refused: %w", err)
+		}
+		g.upstream = next
+	}
 	g.bundle = bundle
 	g.policy = pol
+	return nil
 }
 
 type gateSnapshot struct {
@@ -206,6 +226,9 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 
 	for _, toolName := range workload.Spec.Grants.MCPTools {
 		def, ok := g.tools[toolName]
+		if !ok {
+			def, ok = g.upstream[toolName]
+		}
 		if !ok {
 			continue
 		}

@@ -53,7 +53,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.grants.modelGate.allowed` | bool | no | Lets the workload call the Model Gate; a `deterministic-controller` must leave it `false`. |
 | `spec.grants.modelGate.providers` | list of strings | no | Provider routes the workload may call; an empty list allows all of them. |
 | `spec.grants.modelGate.budgetRef` | string | conditional | Name of a declared Budget, required when `allowed` is `true`. |
-| `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
+| `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load, except on the workload of a `verifier` step (see [Workflow](#workflow)). |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
@@ -64,7 +64,7 @@ Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/ups
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `spec.grants.mcpServers[].name` | string | no | Prefix of the proxied tool names; an entry without a name is skipped. |
+| `spec.grants.mcpServers[].name` | string | no | Prefix of the proxied tool names; an entry without a name is skipped. The loader refuses a name whose part before the first dot is a built-in tool namespace (`memory`, `conclave`, `sablecourt`, `git`, `sandbox`), compared trimmed and in lower case. |
 | `spec.grants.mcpServers[].url` | string | no | Streamable HTTP endpoint of the server; an entry without a URL is skipped. A call needs an `http` or `https` URL with a host. With `http`, the `secretName` credential crosses the network unencrypted. |
 | `spec.grants.mcpServers[].secretName` | string | no | Secret store entry sent as the credential on every call, whatever the URL scheme; with none, calls carry no credential. |
 | `spec.grants.mcpServers[].authHeader` | string | no | Header that carries the secret, `Authorization` when empty. |
@@ -117,7 +117,7 @@ Source: `internal/domain/types.go` (`WorkflowSpec`, `WorkflowStep`), `internal/c
 | `spec.steps` | list of objects | yes | The steps, at least one. |
 | `spec.steps[].name` | string | yes | Step name. |
 | `spec.steps[].workload` | string | yes | Name of the declared Workload that runs the step. |
-| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. The loader refuses a `verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads`, or whose workload a non-verifier step before it also uses, and a verifier on a model workload when no earlier step runs a model. |
+| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. The loader refuses a `verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads` (no upstream server can register these names, because the loader refuses an `mcpServers` name in a built-in namespace), or whose workload a non-verifier step before it also uses, and a verifier on a model workload when no earlier step runs a model. |
 | `spec.steps[].tier` | string | no | `fast`, `coding` or `critic`; the tier's model route must suit the workload. |
 | `spec.steps[].maxRetries` | integer | no | How many times a failed verifier step may send the author step back with a failure handoff. |
 | `spec.steps[].provider` | string | no | Provider for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |

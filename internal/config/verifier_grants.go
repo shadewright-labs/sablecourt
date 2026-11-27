@@ -47,8 +47,10 @@ var verifierGrantFields = map[string]verifierGrant{
 // validateVerifierGrants refuses a verifier workload that holds any grant
 // outside the read-only allow-list (ADR-0010 amendment of 2026-11-27,
 // invariant 4). It also refuses a read-only tool name that an upstream MCP
-// server in the bundle would register under the same name, because the gate
-// keeps one tool per name.
+// server in the bundle would register under the same name. The loader already
+// refuses an mcpServers name in a built-in namespace (tool_namespaces.go) and
+// the gate never lets an upstream tool take a built-in name, so this is a
+// third line.
 func validateVerifierGrants(bundle *Bundle, name string, grants domain.GrantSet) error {
 	v := reflect.ValueOf(grants)
 	t := v.Type()
