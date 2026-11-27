@@ -842,3 +842,88 @@ func TestLaunchInputRedactsRegisteredSecrets(t *testing.T) {
 		t.Fatalf("launch input is no longer JSON: %s", a.lastSpec.InputJSON)
 	}
 }
+
+// uEsc starts a JSON unicode escape (backslash, u).
+const uEsc = "\\" + "u"
+
+// Exact match on the serialized launch input must neither change its JSON
+// structure nor miss a held value written with JSON escapes.
+func TestLaunchInputRedactsDecodedJSONValues(t *testing.T) {
+	for i, tc := range []struct {
+		name     string
+		held     func(base string) string
+		input    func(base string) string
+		wantKeys []string
+	}{
+		{"held value ends in a quote",
+			func(b string) string { return b + `"` },
+			func(b string) string { return `{"prompt":"` + b + `","extra":"ok"}` },
+			[]string{"prompt", "extra"}},
+		{"held value ends in a backslash",
+			func(b string) string { return b + `\` },
+			func(b string) string { return `{"prompt":"` + b + `\"ok"}` },
+			[]string{"prompt"}},
+		{"held value spans fields",
+			func(b string) string { return b + `","extra":"2` },
+			func(b string) string { return `{"prompt":"` + b + `","extra":"2"}` },
+			[]string{"prompt", "extra"}},
+		{"held value written with unicode escapes",
+			func(b string) string { return b },
+			// "l" written as a JSON unicode escape.
+			func(b string) string { return `{"prompt":"` + uEsc + `006c` + b[1:] + `","n":12345678901234567890}` },
+			[]string{"prompt", "n"}},
+		{"held value in a key",
+			func(b string) string { return b },
+			func(b string) string { return `{"` + b + `":"v","extra":"ok"}` },
+			[]string{redact.KnownSecretMarker, "extra"}},
+	} {
+		// The default registry is process wide, so each case holds its own value.
+		base := fmt.Sprintf("launch_json_%d_", i) + strings.Repeat("q7", 12)
+		t.Run(tc.name, func(t *testing.T) {
+			r, _, _, task := regressionFixture(t)
+			held := tc.held(base)
+			redact.Register(held)
+			task.InputJSON = tc.input(base)
+			wl := r.bundle.Workloads["worker"]
+			a := &fakeAdapter{}
+			if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			dec := json.NewDecoder(strings.NewReader(a.lastSpec.InputJSON))
+			dec.UseNumber()
+			if err := dec.Decode(&got); err != nil {
+				t.Fatalf("launch input is no longer JSON: %v: %s", err, a.lastSpec.InputJSON)
+			}
+			if len(got) != len(tc.wantKeys) {
+				t.Fatalf("launch input keys changed: %s", a.lastSpec.InputJSON)
+			}
+			for _, k := range tc.wantKeys {
+				if _, ok := got[k]; !ok {
+					t.Fatalf("launch input lost key %q: %s", k, a.lastSpec.InputJSON)
+				}
+			}
+			for k, v := range got {
+				if s, ok := v.(string); (ok && strings.Contains(s, held)) || strings.Contains(k, held) {
+					t.Fatalf("launch input carries a held value after decoding: %s", a.lastSpec.InputJSON)
+				}
+			}
+			if n, ok := got["n"]; ok && n.(json.Number).String() != "12345678901234567890" {
+				t.Fatalf("launch input changed a number: %s", a.lastSpec.InputJSON)
+			}
+		})
+	}
+}
+
+// Input that holds no registered value reaches the workload byte for byte.
+func TestLaunchInputWithoutHeldValuesIsUnchanged(t *testing.T) {
+	r, _, _, task := regressionFixture(t)
+	task.InputJSON = `{"z":"` + uEsc + `0041 <b>","a":1.50}`
+	a := &fakeAdapter{}
+	if err := launchForTest(context.Background(), r, task, r.bundle.Workloads["worker"], a); err != nil {
+		t.Fatal(err)
+	}
+	if a.lastSpec.InputJSON != task.InputJSON {
+		t.Fatalf("launch input = %s, want it unchanged", a.lastSpec.InputJSON)
+	}
+}

@@ -498,9 +498,14 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 }
 
 func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body string) (domain.ConclaveRelic, error) {
-	name = redact.String(strings.TrimSpace(name))
+	// The name is the stored key, so it is never rewritten: a name that holds a
+	// daemon-held value is refused, and readers redact it on the way out.
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return domain.ConclaveRelic{}, errors.New("relic name is required")
+	}
+	if redact.DefaultRegistry().RedactExact(name) != name {
+		return domain.ConclaveRelic{}, errors.New("relic name holds a secret the daemon keeps")
 	}
 	if contentType == "" {
 		contentType = "text/plain"

@@ -1254,9 +1254,10 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if err != nil {
 		return err
 	}
-	// The input reaches the workload as an environment value; exact-match only,
-	// so ordinary task text is not rewritten by pattern rules.
-	inputJSON = redact.DefaultRegistry().RedactExact(inputJSON)
+	// The input reaches the workload as an environment value. Exact match only,
+	// so ordinary task text is not rewritten by pattern rules, and on decoded
+	// JSON strings, so escapes cannot hide a value and the structure stays valid.
+	inputJSON = redact.DefaultRegistry().RedactExactJSON(inputJSON)
 	if readOnly {
 		var payload struct {
 			Packet string `json:"context_packet"`

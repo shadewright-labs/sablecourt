@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"slices"
 	"sort"
 	"strconv"
@@ -325,6 +326,65 @@ func (r *Registry) RedactExact(input string) string {
 		return out
 	}
 	return input
+}
+
+// RedactExactJSON applies RedactExact to every decoded string value and object
+// key of a JSON document and encodes the result again, so a replacement cannot
+// cross a quote or field boundary and a value written with JSON escapes is still
+// found. Input holding no registered value comes back byte for byte. Input that
+// is not a single JSON value falls back to RedactExact on the raw text.
+func (r *Registry) RedactExactJSON(input string) string {
+	if r == nil || input == "" || r.matcher.Load() == nil {
+		return input
+	}
+	dec := json.NewDecoder(strings.NewReader(input))
+	dec.UseNumber()
+	var doc any
+	if err := dec.Decode(&doc); err != nil {
+		return r.RedactExact(input)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return r.RedactExact(input)
+	}
+	doc, changed := r.redactJSONValue(doc)
+	if !changed {
+		return input
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		return r.RedactExact(input)
+	}
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+func (r *Registry) redactJSONValue(v any) (any, bool) {
+	switch t := v.(type) {
+	case string:
+		out := r.RedactExact(t)
+		return out, out != t
+	case []any:
+		changed := false
+		for i, e := range t {
+			var c bool
+			t[i], c = r.redactJSONValue(e)
+			changed = changed || c
+		}
+		return t, changed
+	case map[string]any:
+		changed := false
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			nk := r.RedactExact(k)
+			ne, c := r.redactJSONValue(e)
+			changed = changed || c || nk != k
+			out[nk] = ne
+		}
+		return out, changed
+	default:
+		return v, false
+	}
 }
 
 // ContainsSensitive reports whether input matches any registered secret or pattern rule.
