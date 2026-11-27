@@ -296,8 +296,8 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 		for _, r := range p.CheckRuns {
 			cs := CheckRunState{
 				Name:        redact.String(strings.TrimSpace(r.Name)),
-				Status:      strings.ToLower(strings.TrimSpace(r.Status)),
-				Conclusion:  strings.ToLower(strings.TrimSpace(r.Conclusion)),
+				Status:      checkStatusOf(r.Status),
+				Conclusion:  checkConclusionOf(r.Conclusion),
 				CompletedAt: r.CompletedAt.UTC(),
 			}
 			if r.App != nil {
@@ -377,9 +377,9 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 		HeadSHA:           headSHA,
 		HeadBranch:        strings.TrimSpace(pr.Head.Ref),
 		BaseBranch:        strings.TrimSpace(pr.Base.Ref),
-		PRState:           strings.ToLower(strings.TrimSpace(pr.State)),
+		PRState:           prStateOf(pr.State),
 		Draft:             pr.Draft,
-		MergeableState:    strings.ToLower(strings.TrimSpace(pr.MergeableState)),
+		MergeableState:    mergeableStateOf(pr.MergeableState),
 		RequiredChecks:    required,
 		RequiredCheckApps: requiredApps,
 		Checks:            checks,
@@ -530,15 +530,18 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 		now = time.Now().UTC()
 	}
 	report.ObservedAt = now.UTC()
-	report.PRState = strings.ToLower(strings.TrimSpace(report.PRState))
-	report.MergeableState = strings.ToLower(strings.TrimSpace(report.MergeableState))
+	report.PRState = prStateOf(report.PRState)
+	report.MergeableState = mergeableStateOf(report.MergeableState)
 	report.HeadSHA = strings.ToLower(strings.TrimSpace(report.HeadSHA))
+	if !isCommitID(report.HeadSHA) {
+		report.HeadSHA = ""
+	}
 
 	report.LastResultAt = time.Time{}
 	for i := range report.Checks {
 		report.Checks[i].Name = redact.String(strings.TrimSpace(report.Checks[i].Name))
-		report.Checks[i].Status = strings.ToLower(strings.TrimSpace(report.Checks[i].Status))
-		report.Checks[i].Conclusion = strings.ToLower(strings.TrimSpace(report.Checks[i].Conclusion))
+		report.Checks[i].Status = checkStatusOf(report.Checks[i].Status)
+		report.Checks[i].Conclusion = checkConclusionOf(report.Checks[i].Conclusion)
 		if t := report.Checks[i].CompletedAt; t.After(report.LastResultAt) {
 			report.LastResultAt = t.UTC()
 		}
@@ -647,6 +650,50 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 	report.Summary = "passing"
 }
 
+// GitHub reports these fields from fixed vocabularies. They are lowercased for
+// comparison, and a value outside the vocabulary becomes "unknown", so no free
+// text from GitHub passes the case change that exact redaction cannot see
+// through. "unknown" is never a passing value, so the merge decision is
+// unchanged.
+var (
+	prStates        = []string{"open", "closed"}
+	mergeableStates = []string{"clean", "dirty", "blocked", "behind", "unstable", "draft", "unknown", "has_hooks"}
+	checkStatuses   = []string{"queued", "in_progress", "completed", "waiting", "requested", "pending"}
+	checkConclusion = []string{"", "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale", "startup_failure"}
+)
+
+func vocabularyOf(v string, known []string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if slices.Contains(known, v) {
+		return v
+	}
+	return "unknown"
+}
+
+func prStateOf(v string) string         { return vocabularyOf(v, prStates) }
+func mergeableStateOf(v string) string  { return vocabularyOf(v, mergeableStates) }
+func checkStatusOf(v string) string     { return vocabularyOf(v, checkStatuses) }
+func checkConclusionOf(v string) string { return vocabularyOf(v, checkConclusion) }
+
+// putGateRecord writes a record the gate keeps in memory. Fields read from
+// GitHub are redacted in place by the caller; the marshalled record then
+// passes RedactJSONRecord, so one that still shows a held value is refused as
+// a whole and a reader of it fails closed.
+func putGateRecord(ctx context.Context, g *Gate, namespace, key string, rec any, updatedAt time.Time) error {
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	value, _ := redact.DefaultRegistry().RedactJSONRecord(string(raw))
+	return g.store.PutMemory(ctx, domain.MemoryEntry{
+		Namespace: namespace,
+		Key:       key,
+		Value:     value,
+		Author:    "gate",
+		UpdatedAt: updatedAt,
+	})
+}
+
 func prKey(owner, repo string, number int) string {
 	return strings.ToLower(strings.TrimSpace(owner)) + "/" + strings.ToLower(strings.TrimSpace(repo)) + "#" + strconv.Itoa(number)
 }
@@ -671,17 +718,11 @@ func recordOpenedPR(ctx context.Context, g *Gate, rec OpenedPRRecord) error {
 	if g == nil || g.store == nil || rec.Number <= 0 {
 		return nil
 	}
-	raw, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	return g.store.PutMemory(ctx, domain.MemoryEntry{
-		Namespace: openedPRsNamespace,
-		Key:       prKey(rec.Owner, rec.Repo, rec.Number),
-		Value:     string(raw),
-		Author:    "gate",
-		UpdatedAt: g.now(),
-	})
+	// URL and HeadSHA come from GitHub; the other fields are the request's,
+	// checked before the call, and later reads compare them as written.
+	rec.URL = redact.String(rec.URL)
+	rec.HeadSHA = redact.String(rec.HeadSHA)
+	return putGateRecord(ctx, g, openedPRsNamespace, prKey(rec.Owner, rec.Repo, rec.Number), rec, g.now())
 }
 
 func lookupOpenedPR(ctx context.Context, st store.Store, owner, repo string, number int) (OpenedPRRecord, error) {
@@ -709,21 +750,11 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 	if g == nil || g.store == nil {
 		return nil
 	}
+	// The evidence is not a typed boundary (ADR-0015): held values in the
+	// GitHub strings are replaced in place, and putGateRecord refuses the
+	// whole record only if one still shows after that.
 	report = redactPRCheckReport(report)
-	raw, err := json.Marshal(report)
-	if err != nil {
-		return err
-	}
-	// The stored evidence is a typed record: one that still shows a held
-	// value is refused as a whole rather than kept with the value.
-	value, _ := redact.DefaultRegistry().RedactJSONRecord(string(raw))
-	if err := g.store.PutMemory(ctx, domain.MemoryEntry{
-		Namespace: prChecksNamespace,
-		Key:       prKey(report.Owner, report.Repo, report.PRNumber),
-		Value:     value,
-		Author:    "gate",
-		UpdatedAt: report.ObservedAt,
-	}); err != nil {
+	if err := putGateRecord(ctx, g, prChecksNamespace, prKey(report.Owner, report.Repo, report.PRNumber), report, report.ObservedAt); err != nil {
 		return err
 	}
 	detail, _ := json.Marshal(map[string]any{

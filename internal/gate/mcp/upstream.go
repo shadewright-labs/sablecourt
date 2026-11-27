@@ -99,6 +99,10 @@ func (b *UpstreamBridge) CallTool(ctx context.Context, srv domain.UpstreamMCPSer
 			return "", errors.New("upstream MCP secret store unavailable")
 		}
 		val, err := b.Secrets.Get(ctx, srv.SecretName)
+		var shortErr *redact.ShortSecretError
+		if errors.As(err, &shortErr) {
+			return "", err
+		}
 		if err != nil || strings.TrimSpace(val) == "" {
 			return "", fmt.Errorf("upstream MCP secret %q unavailable", srv.SecretName)
 		}

@@ -40,17 +40,8 @@ func recordPushedCommit(ctx context.Context, g *Gate, taskID string, res PushBra
 	if g == nil || g.store == nil || taskID == "" {
 		return nil
 	}
-	raw, err := json.Marshal(PushedCommitRecord{TaskID: taskID, Branch: res.Branch, Commit: res.Commit, PushedAt: g.now()})
-	if err != nil {
-		return err
-	}
-	return g.store.PutMemory(ctx, domain.MemoryEntry{
-		Namespace: pushedCommitsNamespace,
-		Key:       taskID,
-		Value:     string(raw),
-		Author:    "gate",
-		UpdatedAt: g.now(),
-	})
+	return putGateRecord(ctx, g, pushedCommitsNamespace, taskID,
+		PushedCommitRecord{TaskID: taskID, Branch: res.Branch, Commit: res.Commit, PushedAt: g.now()}, g.now())
 }
 
 // lookupPushedCommit returns the last push recorded for the task. A record
@@ -149,10 +140,16 @@ func (p *GitBranchPusher) PushBranch(ctx context.Context, req PushBranchRequest)
 	if err := checkPushTarget(pushURL); err != nil {
 		return PushBranchResult{}, newActionError(http.StatusForbidden, "unknown_target", "the push URL "+err.Error())
 	}
+	// A missing github_token pushes without credentials; any other error from
+	// the store, a credential too short to redact among them, refuses the push.
 	var token string
 	if p != nil && p.Secrets != nil {
-		if tok, err := p.Secrets.Get(ctx, "github_token"); err == nil {
+		tok, err := p.Secrets.Get(ctx, "github_token")
+		switch {
+		case err == nil:
 			token = strings.TrimSpace(tok)
+		case !errors.Is(err, secret.ErrSecretNotFound):
+			return PushBranchResult{}, fmt.Errorf("load github_token: %w", err)
 		}
 	}
 	if token != "" {
