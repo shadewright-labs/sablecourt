@@ -196,7 +196,9 @@ func (p *Player) stop() {
 	p.once.Do(func() {
 		p.mu.Lock()
 		p.clear()
-		p.write(showCursor)
+		// Written directly: write refuses once drawing is disabled, and the
+		// show inside disable may have failed while the writer was down.
+		_, _ = io.WriteString(p.w, showCursor)
 		p.stopped = true
 		p.mu.Unlock()
 		close(p.quit)

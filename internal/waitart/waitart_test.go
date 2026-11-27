@@ -600,6 +600,38 @@ func TestFrameWriteFailureOnRedraw(t *testing.T) {
 	}
 }
 
+// TestStopShowsCursorAfterFailedShowInDisable covers a frame write that fails
+// together with the cursor show inside disable, on a writer that recovers
+// before Stop: Stop must still restore the cursor.
+func TestStopShowsCursorAfterFailedShowInDisable(t *testing.T) {
+	var term fakeTerm
+	w := &flakyWriter{fakeTerm: &term, failCalls: map[int]bool{2: true, 3: true}}
+	p := onTerminal(nil).Start(t.Context(), w, hourScene(), "Waiting")
+	p.Stop()
+	if out := term.String(); !strings.HasSuffix(out, showCursor) {
+		t.Fatalf("output does not end with the show-cursor sequence: %q", out)
+	}
+}
+
+// flakyWriter fails the numbered calls (counting from 1) and passes the rest.
+type flakyWriter struct {
+	*fakeTerm
+	mu        sync.Mutex
+	calls     int
+	failCalls map[int]bool
+}
+
+func (f *flakyWriter) Write(b []byte) (int, error) {
+	f.mu.Lock()
+	f.calls++
+	fail := f.failCalls[f.calls]
+	f.mu.Unlock()
+	if fail {
+		return 0, errors.New("terminal went away")
+	}
+	return f.fakeTerm.Write(b)
+}
+
 // TestNarrowedTerminalStopsDrawing checks that the width is read again before
 // each frame: once the terminal is narrower than a frame the player draws
 // nothing and does not clear with geometry that no longer holds.
