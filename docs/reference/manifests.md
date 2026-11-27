@@ -56,6 +56,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
+| `spec.grants.repos` | list of strings | no | Granted repositories for GitOps actions; an entry must not be empty, have outer whitespace or contain spaces, tabs or newlines. `git.push` accepts `owner/repo`, a URL or an absolute path. `git.open_pr`, `git.pr_checks` and `git.merge_pr` compare entries, when the list is not empty, as normalized `owner/repo` (outer slashes and a `.git` suffix removed). `git.create_branch` ignores the field. In `git.push`, a plain `owner/repo` entry matches only a GitHub push URL. A `git.push` destination must match an entry unless it is `origin` at the repository pinned at start, and it must also equal the `destination` field of the approved value exactly. Both must be an accepted form: `https://host[:port]/path` with no user information, `ssh://[git@]host[:port]/path`, the scp-like `git@host:path` or an absolute local path; `::` helper syntax, `file://` and other schemes, opaque URLs and any user other than plain `git` are refused (see [tools and actions](../how-it-works/tools-and-actions.md)). |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
 
 ### Upstream MCP server (parked)
@@ -77,8 +78,8 @@ Source: `internal/gate/mcp/actions.go`, `internal/gate/mcp/memory.go`, `internal
 
 | Grant list | Names the daemon registers |
 | --- | --- |
-| `mcpTools` | `sablecourt.list_workloads`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
-| `actions` | `git.create_branch`, `git.open_pr`, `sandbox.propose_promotion`. |
+| `mcpTools` | `sablecourt.list_workloads`, `git.pr_checks`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
+| `actions` | `git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`, `sandbox.propose_promotion`. |
 
 ## Policy
 
