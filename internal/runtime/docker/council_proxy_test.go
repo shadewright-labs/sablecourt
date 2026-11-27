@@ -117,7 +117,7 @@ func (f *fakeProxyEngine) ContainerRemove(_ context.Context, id string, _ client
 
 func TestCouncilProxyDockerLifecycleAndLabelRefusals(t *testing.T) {
 	eng := &readinessEngine{fakeProxyEngine: newFakeProxyEngine()}
-	a := NewAdapter(eng, "")
+	a := testAdapter(eng, "")
 	imgID := eng.imageID
 
 	session, err := councilproxy.Provision(t.Context(), a, imgID, councilproxy.Config{
@@ -168,7 +168,7 @@ func TestProxyReadinessRequiresExecEvidence(t *testing.T) {
 	for _, fault := range []string{"create", "empty id", "start", "inspect", "failed probe", "missing binary", "empty response", "wrong status", "malformed response"} {
 		t.Run(fault, func(t *testing.T) {
 			eng := &readinessEngine{fakeProxyEngine: newFakeProxyEngine(), fault: fault}
-			a := NewAdapter(eng, "")
+			a := testAdapter(eng, "")
 			eng.containers["proxy"] = container.InspectResponse{ID: "cid", Config: &container.Config{}}
 			if err := a.StartProxy(t.Context(), "proxy"); err == nil {
 				t.Fatal("started without a successful readiness probe")
@@ -226,7 +226,7 @@ func (f *fakeProxyEngine) ServerVersion(context.Context, client.ServerVersionOpt
 
 func TestProxyRejectsReplacedNetwork(t *testing.T) {
 	e := newFakeProxyEngine()
-	a := NewAdapter(e, "")
+	a := testAdapter(e, "")
 	spec := councilproxy.InternalNetworkSpec{Name: "private-network"}
 	info, err := a.CreateInternalNetwork(t.Context(), spec)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestSocketProbeChecksExitAndCleansUp(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := &socketProbeEngine{councilEngine: newCouncilEngine(), exit: tc.code}
 			engine.step = tc.step
-			a := NewAdapter(engine, "")
+			a := testAdapter(engine, "")
 			spec := councilproxy.GateSocketProbe{Name: "probe", ImageID: engine.imageID, User: "10001:10001", HostSocketPath: "/source.sock", ContainerSocketPath: councilproxy.ContainerGateSocket}
 			err := a.ProbeGateSocket(t.Context(), spec)
 			if (err != nil) != tc.wantErr || errors.Is(err, councilproxy.ErrGateSocketUnsupported) != tc.unsupported {
@@ -294,7 +294,7 @@ func TestProxyImageRejectsInheritedSecretsAndMounts(t *testing.T) {
 		for _, stage := range []string{"probe", "proxy"} {
 			t.Run(fault+"/"+stage, func(t *testing.T) {
 				engine := &proxyImageEngine{fakeProxyEngine: newFakeProxyEngine(), fault: fault}
-				a := NewAdapter(engine, "")
+				a := testAdapter(engine, "")
 				var err error
 				if stage == "probe" {
 					err = a.ProbeGateSocket(t.Context(), councilproxy.GateSocketProbe{Name: "probe", ImageID: engine.imageID})
@@ -367,7 +367,7 @@ func (e *lateListenerEngine) ExecInspect(_ context.Context, execID string, _ cli
 
 func TestProxyReadinessRetriesUntilListenerBinds(t *testing.T) {
 	eng := &lateListenerEngine{readinessEngine: &readinessEngine{fakeProxyEngine: newFakeProxyEngine()}, refusals: 2}
-	a := NewAdapter(eng, "")
+	a := testAdapter(eng, "")
 	eng.containers["proxy"] = container.InspectResponse{ID: "cid", Config: &container.Config{}}
 	if err := a.StartProxy(t.Context(), "proxy"); err != nil {
 		t.Fatalf("probe did not retry a refused connection: %v", err)

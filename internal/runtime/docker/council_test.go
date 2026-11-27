@@ -208,10 +208,13 @@ func (f *councilEngine) ContainerRemove(ctx context.Context, id string, o client
 }
 func fixtureRun(t *testing.T) (*Adapter, *councilEngine, rt.CouncilLaunch) {
 	t.Helper()
+	isolateHome(t)
 	f := newCouncilEngine()
-	a := NewAdapter(f, "")
+	a := testAdapter(f, "")
+	a.discoverSocket = func() string { return "" }
+	root := withWorktreeRoot(t, a)
 	a.CouncilHarnesses = map[string]CouncilHarness{"claude": {Image: "fixture", LoginVolume: f.vol.Name, ProxyURL: "http://relay:8888", DataGateURL: "http://relay:8080/gate/data"}}
-	s := rt.CouncilLaunch{TaskID: "task", Workload: "writer", Harness: "claude", Model: "model", Checkout: rt.CouncilCheckout{Path: t.TempDir(), Kind: rt.CouncilReview},
+	s := rt.CouncilLaunch{TaskID: "task", Workload: "writer", Harness: "claude", Model: "model", Checkout: rt.CouncilCheckout{Path: mkdirAll(t, filepath.Join(root, "task")), Kind: rt.CouncilReview},
 		Limits: rt.CouncilLimits{NanoCPUs: 500000000, MemoryBytes: 64 << 20, PIDs: 32, WallTime: time.Second}, Prompt: "fixture question", TaskToken: "fixture-lease"}
 	return a, f, s
 }
@@ -220,6 +223,9 @@ func TestCouncilCreateAndEvidence(t *testing.T) {
 		t.Run(string(kind), func(t *testing.T) {
 			a, f, s := fixtureRun(t)
 			s.Checkout.Kind = kind
+			if kind == rt.CouncilLive {
+				s.Checkout.Path = liveDir(t)
+			}
 			s.Prompt += " password=hidden-fixture"
 			f.output = append(frame(1, "answer"), frame(2, s.TaskToken)...)
 			result, err := a.RunCouncil(t.Context(), s, func(_ context.Context, r rt.CouncilResult) error {
@@ -369,7 +375,7 @@ func TestCouncilRefusals(t *testing.T) {
 				if err := os.Symlink(realDir, linkDir); err != nil {
 					t.Fatal(err)
 				}
-				s.Checkout.Path = realDir
+				s.Checkout.Path, s.Checkout.Kind = realDir, rt.CouncilLive
 				a.discoverSocket = func() string { return filepath.Join(linkDir, "docker.sock") }
 			case "symlinked socket target":
 				targetDir := filepath.Join(t.TempDir(), "engine")
@@ -388,7 +394,7 @@ func TestCouncilRefusals(t *testing.T) {
 				if err := os.Symlink(targetSock, linkSock); err != nil {
 					t.Fatal(err)
 				}
-				s.Checkout.Path = targetDir
+				s.Checkout.Path, s.Checkout.Kind = targetDir, rt.CouncilLive
 				a.discoverSocket = func() string { return linkSock }
 			case "harness":
 				s.Harness = "sh"
@@ -513,7 +519,7 @@ func TestCouncilInheritedConfig(t *testing.T) {
 	for _, config := range []string{`null`, `{"Volumes":{"/extra":{}}}`, `{"Env":["SABLECOURT_MODEL_GATE_URL=unexpected"]}`, `{"Env":["BASH_ENV=/workspace/startup"]}`, `{"Env":["API_KEY=private-fixture"]}`} {
 		t.Run(config, func(t *testing.T) {
 			a, f, s := fixtureRun(t)
-			a.Client = configuredImageEngine{f, config}
+			a.cli = configuredImageEngine{f, config}
 			_, err := a.RunCouncil(t.Context(), s, discardResult)
 			if err == nil || f.exists || len(f.calls) != 0 {
 				t.Fatal("unverified image config reached create")
@@ -547,7 +553,7 @@ func TestCouncilDeadlineClosesAttachment(t *testing.T) {
 			local, peer := net.Pipe()
 			defer peer.Close()
 			conn := &stalledConn{Conn: local}
-			a.Client = &stalledEngine{f, conn}
+			a.cli = &stalledEngine{f, conn}
 			s.Limits.WallTime = 200 * time.Millisecond
 			if mode == "output" {
 				go func() { _, _ = io.Copy(io.Discard, peer) }()
@@ -604,7 +610,7 @@ func TestCouncilRevalidatesLoginVolumeAfterCreate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, f, s := fixtureRun(t)
-			a.Client = &swappedVolumeEngine{councilEngine: f, afterCreate: tc.vol}
+			a.cli = &swappedVolumeEngine{councilEngine: f, afterCreate: tc.vol}
 			_, err := a.RunCouncil(t.Context(), s, discardResult)
 			if err == nil || f.exists || slices.Contains(f.calls, "start") || slices.Contains(f.calls, "attach") {
 				t.Fatalf("calls=%v present=%t err=%v", f.calls, f.exists, err)
@@ -635,7 +641,7 @@ func TestCouncilExitDrainsUnbufferedWaitOnCancel(t *testing.T) {
 	release := make(chan struct{})
 	sent := make(chan struct{})
 	engine := &unbufferedWaitEngine{councilEngine: f, release: release, sent: sent}
-	a.Client = engine
+	a.cli = engine
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	res := rt.CouncilResult{ContainerID: "container-id"}

@@ -21,6 +21,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 const (
@@ -276,7 +277,26 @@ func (h *startJournalHandle) discard() error {
 // and before reconcile tries to lock it.
 var reconcileAfterOpen func(path string)
 
-func reconcileCouncilJournals(ctx context.Context, root, key string) error {
+// reconcileJournals runs reconcileCouncilJournals with the adapter's worktree
+// root handle, which must be the directory root names.
+func (a *Adapter) reconcileJournals(ctx context.Context, root, key string) error {
+	wt, err := a.worktreeHandle()
+	if err != nil {
+		return err
+	}
+	if wt.Path() != root {
+		return errors.New("worktree root does not match the opened worktree root handle")
+	}
+	return reconcileCouncilJournals(ctx, wt, key)
+}
+
+// reconcileCouncilJournals finishes or undoes launches that crashed while
+// holding a start journal. The task directory of a journal is derived from
+// the worktree root and its task ID; a stored task_base that differs is an
+// invalid journal, reported without deleting anything. Deletions of the
+// task's own files go through the worktree root handle.
+func reconcileCouncilJournals(ctx context.Context, wt *mountguard.Root, key string) error {
+	root := wt.Path()
 	councilDir := councilDirPath(root, key)
 	entries, err := os.ReadDir(councilDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -338,11 +358,21 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 			_ = f.Close()
 			return fmt.Errorf("invalid council start journal %q", name)
 		}
+		// The journal's stored path is never trusted as a deletion target.
+		taskBase := ""
+		if rec.TaskBase != "" {
+			taskBase = filepath.Join(root, sanitizeSegment(rec.TaskID))
+			if rec.TaskBase != taskBase {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+				return fmt.Errorf("invalid council start journal %q: task directory is not the task's own", name)
+			}
+		}
 
 		// Determine if this task actually launched or was interrupted before launch completed.
 		incomplete := false
-		if rec.TaskBase != "" {
-			st, stErr := readWorktreeState(rec.TaskBase + stateSuffix)
+		if taskBase != "" {
+			st, stErr := readWorktreeState(taskBase + stateSuffix)
 			switch {
 			case errors.Is(stErr, os.ErrNotExist):
 				incomplete = true
@@ -351,10 +381,10 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 				_ = f.Close()
 				return stErr
 			case st.Worker == nil && st.Container == nil:
-				if _, runErr := os.Lstat(rec.TaskBase + ".run"); errors.Is(runErr, os.ErrNotExist) {
+				if _, runErr := wt.Lstat(taskBase + ".run"); errors.Is(runErr, os.ErrNotExist) {
 					incomplete = true
-					_ = removeFile(rec.TaskBase + stateSuffix)
-					_ = removeFile(rec.TaskBase + ".log")
+					_ = wt.Remove(taskBase + stateSuffix)
+					_ = wt.Remove(taskBase + ".log")
 				}
 			}
 		} else {
@@ -362,6 +392,17 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 		}
 
 		if incomplete {
+			// The launch may have prepared its own Git metadata directory
+			// before the crash. Left behind, it would refuse every retry of
+			// this task ID. RemoveAll does not follow symlinks inside it. On
+			// failure the journal stays, so the next reconcile tries again.
+			if taskBase != "" {
+				if err := wt.RemoveAll(harnessGitDirPath(taskBase)); err != nil {
+					_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+					_ = f.Close()
+					return err
+				}
+			}
 			if rec.CreatedWriterLock {
 				_ = releaseWriterLock(root, key, rec.TaskID)
 			}
@@ -682,7 +723,7 @@ func (a *Adapter) prepareRefCheckout(ctx context.Context, repo, taskID string, i
 		if err != nil {
 			return "", "", nil, nil, nil, err
 		}
-		if err := reconcileCouncilJournals(setupCtx, root, key); err != nil {
+		if err := a.reconcileJournals(setupCtx, root, key); err != nil {
 			releaseCouncil()
 			return "", "", nil, nil, nil, err
 		}
@@ -964,7 +1005,7 @@ func (a *Adapter) prepareWriterCheckout(ctx context.Context, repo, taskID string
 		if err != nil {
 			return "", "", nil, nil, nil, err
 		}
-		if err := reconcileCouncilJournals(setupCtx, root, key); err != nil {
+		if err := a.reconcileJournals(setupCtx, root, key); err != nil {
 			releaseCouncil()
 			return "", "", nil, nil, nil, err
 		}
@@ -1480,10 +1521,10 @@ func (a *Adapter) finishCouncilTask(ctx context.Context, taskBase string, state 
 		releaseCouncil()
 	}
 
-	if state.Mode == checkoutModeLive {
-		if err := os.RemoveAll(taskBase + ".git"); err != nil {
-			return err
-		}
+	// A live checkout's snapshot metadata, or the harness container's own Git
+	// metadata for the other kinds. Both live at the reserved path.
+	if err := os.RemoveAll(harnessGitDirPath(taskBase)); err != nil {
+		return err
 	}
 	if err := removeFile(taskBase + ".log"); err != nil {
 		return err
@@ -1654,7 +1695,7 @@ func (a *Adapter) CleanupCouncil(ctx context.Context, conclaveID string) error {
 	}
 	defer releaseCouncil()
 
-	if err := reconcileCouncilJournals(ctx, root, key); err != nil {
+	if err := a.reconcileJournals(ctx, root, key); err != nil {
 		return err
 	}
 
@@ -1967,6 +2008,9 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 		if err := copyRegularFile(srcIndex, filepath.Join(liveGitDir, "index")); err != nil {
 			return err
 		}
+		if err := copySharedIndex(ctx, owner, liveGitDir); err != nil {
+			return err
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -1997,6 +2041,30 @@ func createLiveGitDir(ctx context.Context, owner gitRepo, liveGitDir, headCommit
 		return err
 	}
 	return nil
+}
+
+// copySharedIndex copies the shared index file a split index names
+// (core.splitIndex), which Git keeps beside the index as
+// sharedindex.<object ID>. Without it Git cannot read the copied index. An
+// index that is not split prints no path (or an all-zero object ID) and
+// needs nothing.
+func copySharedIndex(ctx context.Context, owner gitRepo, liveGitDir string) error {
+	out, err := owner.run(ctx, "rev-parse", "--shared-index-path")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	name := filepath.Base(strings.TrimSpace(out))
+	id, ok := strings.CutPrefix(name, "sharedindex.")
+	if !ok || !isCommitID(id) {
+		return errors.New("primary repository names an invalid shared index")
+	}
+	if strings.Trim(id, "0") == "" {
+		return nil
+	}
+	return copyRegularFile(filepath.Join(owner.gitDir, name), filepath.Join(liveGitDir, name))
 }
 
 func copyRegularFile(src, dst string) error {

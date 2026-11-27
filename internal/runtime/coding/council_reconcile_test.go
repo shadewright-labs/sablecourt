@@ -58,7 +58,7 @@ func TestReconcileIgnoresJournalCommittedAfterOpen(t *testing.T) {
 	}
 	t.Cleanup(func() { reconcileAfterOpen = nil })
 
-	if err := reconcileCouncilJournals(context.Background(), root, key); err != nil {
+	if err := reconcileCouncilJournals(context.Background(), openTestRoot(t, root), key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(taskBase + stateSuffix); err != nil {

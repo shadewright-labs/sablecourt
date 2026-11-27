@@ -23,7 +23,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
+| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. Its directory must exist, the file must not be a symlink and the path must not contain `?`; the daemon creates a missing file at startup and refuses to start if the file, the secret file or the state directory lies under the worktree root (`worktrees` beside the database). `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
 | `worktrees/` next to the database | Coding adapter | Per task: `<task>/` (the Git worktree), `<task>.state.json`, `<task>.log`, `<task>.run/`, `<task>.exclude-config`, plus a `.councils/` directory and `.coding-scratch-*` directories. |
 | `.sablecourt-session.json`, `.sablecourt-context.md` | Coding adapter | Written into the task worktree. |
 | `sablecourtd.out.log`, `sablecourtd.err.log` | The launchd job (macOS only) | Standard output and error of the job, in `.local/share/sablecourt` under the home directory. The Linux systemd unit sets no log files. |
@@ -33,7 +33,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 ## Secrets
 
-Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values.
+Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. That file's directory must exist and the file must not be a symlink; the daemon creates a missing one at startup as an empty JSON map with mode 0600. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values.
 
 | Name | Used by | Required for |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ The tables in this section and the Environment variable column of the voice tabl
 | `TERM` | `sablectl` | `dumb` turns off the wait animation. |
 | `COLORTERM` | `sablectl` | `truecolor` or `24bit` draws the wait animation in 24-bit colour; any other value uses the 256-colour palette. |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
-| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. |
+| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login`, `sablectl harness install`, `sablectl harness build` | Docker endpoint, as for the Docker client. It must be a local `unix://` socket or a Windows named pipe on the same machine (`npipe:////./pipe/<name>`). On a remote engine (`tcp://`, `ssh://`, a named pipe on another machine such as `npipe:////server/pipe/<name>`, or any other host), `sablecourtd` with the Docker backend, `sablectl harness login` and `sablectl harness install` refuse to start. The check reads only the host string, so a local socket that forwards to a remote engine is not detected. `sablectl harness build` does not make this check: it passes the variable to `docker` (see below), so an image build can run on a remote engine, with no bind mount and no login volume. |
 | `SABLECOURT_NOTIFY_WEBHOOK_URL` | `sablecourtd` | Chat alert webhook, used when the `notify_webhook_url` secret is not set (parked). |
 
 Some names are read only to copy them into the environment of a program the daemon or `sablectl` starts. Writable Git commands in `internal/runtime/coding/git.go` get the whole environment without the `GIT_*` variables. The table lists only names copied one by one; a child process started without an explicit environment inherits the whole one, and that is not listed.
