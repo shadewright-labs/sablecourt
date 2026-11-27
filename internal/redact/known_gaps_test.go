@@ -157,7 +157,6 @@ func knownGapRows() []gapRow {
 		{class: "truncated PEM", name: "pem openssh truncated no end line", input: "before\n" + pemBlock("OPENSSH PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1"}},
 		{class: "truncated PEM", name: "pem pkcs8 truncated no end line", input: "before\n" + pemBlock("PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1"}},
 		{class: "truncated PEM", name: "pem mismatched end line", input: joinParts("before\n", "-----BEGIN ", "RSA PRIVATE KEY-----\n", pemBody, "\n", "-----END ", "EC PRIVATE KEY-----\n", "trailingSecretBody"), leaks: []string{"fixtureBodyLine1", "trailingSecretBody"}, example: "a BEGIN PRIVATE KEY block closed by an END line of another label"},
-		{class: "truncated PEM", name: "M7 truncated pem header in grep command preserves following lines", input: "grep '" + joinParts("-----BEGIN ", "PRIVATE KEY-----") + "' *.pem\nfile1.pem\n", leaks: []string{"BEGIN PRIVATE KEY"}},
 		{class: "other: split tokens", name: "provider ghp split by invalid utf8 byte", input: "val=" + ghpSplit, leaks: []string{"0123456789", "abcdefghij", "klmnopqrst"}, example: "a GitHub token with an invalid UTF-8 byte inside"},
 		{class: "other: split tokens", name: "provider ghp split inside prefix by invalid utf8 byte", input: "val=" + ghpSplitPrefix, leaks: []string{"0123456789", "abcdefghij", "klmnopqrst"}},
 		{class: "other: split tokens", name: "M6 provider ghp split by ANSI CSI", input: "val=" + ghpSplitANSI, leaks: []string{"0123456789", "abcdefghij", "klmnopqrst"}},

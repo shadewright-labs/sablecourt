@@ -46,7 +46,7 @@ The tests in `internal/redact` hold a corpus of synthetic secrets and ordinary t
 | token key names | 3 | `auth_token: <value>`, `https://x.invalid/?token=<value>&next=/home` |
 | URL userinfo | 17 | `postgres://app:<password>@example.com:5432/x`, `redis://:<password>@cache.internal:6379/0`, `postgres://app:p@<rest of password>@example.com/x` |
 | Basic auth | 7 | `Authorization: Basic <base64>`, `Proxy-Authorization: Basic <base64>`, `map[Authorization:[Basic <base64>]]` |
-| truncated PEM | 10 | `a BEGIN RSA PRIVATE KEY header and body with no END line`, `a BEGIN PRIVATE KEY block closed by an END line of another label`, `BEGIN PRIVATE KEY header with the body glued to it, no END line` |
+| truncated PEM | 9 | `a BEGIN RSA PRIVATE KEY header and body with no END line`, `a BEGIN PRIVATE KEY block closed by an END line of another label`, `BEGIN PRIVATE KEY header with the body glued to it, no END line` |
 | JWT | 11 | `session=<header>.<payload>.<signature>`, `tok=<header>.<payload>`, `enc=<five dot-separated segments>` |
 | cookies | 11 | `Cookie: session=<value>`, `Set-Cookie: sid=<value>; Path=/; HttpOnly`, `curl -H 'Cookie: a=b' https://x.invalid` |
 | nested YAML | 34 | `secret:\n  value: <value>`, `database:\n  password:\n    value: <value>`, `{"text":"secret:\n  value: <value>\n"}` |

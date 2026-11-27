@@ -406,6 +406,10 @@ func TestCorpusMustKeep(t *testing.T) {
 			input: "password:\n  type: string\n  minLength: 8\n",
 		},
 		{
+			name:  "M7 pem header in grep command with no key body",
+			input: "grep '" + joinParts("-----BEGIN ", "PRIVATE KEY-----") + "' *.pem\nfile1.pem\n",
+		},
+		{
 			name:  "M7 pre-redacted plain REDACTED marker",
 			input: "Token: [REDACTED]",
 		},

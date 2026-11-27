@@ -93,18 +93,10 @@ func FuzzStringNoLeak(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, kind uint8, prefix, suffix string) {
-		// Sanitize prefix/suffix so they cannot accidentally embed the needle or
-		// close/merge the template boundary in a way that destroys the format itself.
-		if strings.Contains(prefix, needle) || strings.Contains(suffix, needle) {
+		cleanPrefix, cleanSuffix, ok := sanitizeNoLeakParts(prefix, suffix, needle)
+		if !ok {
 			return
 		}
-		cleanPrefix := strings.ReplaceAll(prefix, "\"", "")
-		cleanSuffix := strings.ReplaceAll(suffix, "\"", "")
-		cleanPrefix = strings.ReplaceAll(cleanPrefix, "'", "")
-		cleanSuffix = strings.ReplaceAll(cleanSuffix, "'", "")
-		cleanPrefix = strings.ReplaceAll(cleanPrefix, "\\", "")
-		cleanSuffix = strings.ReplaceAll(cleanSuffix, "\\", "")
-		cleanPrefix = strings.ReplaceAll(cleanPrefix, "-----BEGIN ", "")
 
 		tmpl := templates[int(kind)%len(templates)]
 		// The boundary line stops a prefix that ends in a key or header from
@@ -119,4 +111,45 @@ func FuzzStringNoLeak(f *testing.F) {
 			t.Fatalf("String is not idempotent:\ninput: %q\nonce:  %q\ntwice: %q", input, once, twice)
 		}
 	})
+}
+
+// sanitizeNoLeakParts strips the characters that could close or merge the
+// template boundary from prefix and suffix. It reports false when the needle
+// is present in either cleaned value, checked after the stripping because
+// removing characters can join the pieces of a needle.
+func sanitizeNoLeakParts(prefix, suffix, needle string) (string, string, bool) {
+	clean := func(s string) string {
+		for _, drop := range []string{"\"", "'", "\\"} {
+			s = strings.ReplaceAll(s, drop, "")
+		}
+		return s
+	}
+	cleanPrefix := strings.ReplaceAll(clean(prefix), "-----BEGIN ", "")
+	cleanSuffix := clean(suffix)
+	if strings.Contains(cleanPrefix, needle) || strings.Contains(cleanSuffix, needle) {
+		return "", "", false
+	}
+	return cleanPrefix, cleanSuffix, true
+}
+
+// TestSanitizeNoLeakPartsRejectsJoinedNeedle covers a needle that exists only
+// after the stripping: a quote, a backslash or a BEGIN marker inside it.
+func TestSanitizeNoLeakPartsRejectsJoinedNeedle(t *testing.T) {
+	const needle = "FUZZSECRET9876543210"
+	for _, tc := range []struct {
+		name           string
+		prefix, suffix string
+		wantOK         bool
+	}{
+		{"plain", "log line", "status=ok", true},
+		{"raw needle in prefix", "x" + needle, "", false},
+		{"quote inside needle in prefix", `FUZZSECRET98"76543210`, "", false},
+		{"backslash inside needle in suffix", "", `FUZZ\SECRET9876543210`, false},
+		{"apostrophe inside needle in suffix", "", "FUZZ'SECRET9876543210", false},
+		{"begin marker inside needle in prefix", "FUZZSECRET98-----BEGIN 76543210", "", false},
+	} {
+		if _, _, ok := sanitizeNoLeakParts(tc.prefix, tc.suffix, needle); ok != tc.wantOK {
+			t.Errorf("%s: ok=%v, want %v", tc.name, ok, tc.wantOK)
+		}
+	}
 }

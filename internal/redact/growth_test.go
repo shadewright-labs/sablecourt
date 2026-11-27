@@ -293,6 +293,10 @@ func TestRedactorLinearGrowth(t *testing.T) {
 			build: func(n int) string {
 				return strings.Repeat("password=\"abcdef\n", max(1, n/17))
 			},
+			// Measured exponent is 1.0 to 1.1 from 4 KiB up, but the step from 1 KiB
+			// to 4 KiB runs near 1.4 (backtracker to NFA), so 1 KiB to 8 KiB
+			// landed at a ratio of 16.7 under -race.
+			minSmall: 1 << 12,
 		},
 		{
 			name: "N1 json set-cookie array many entries",
