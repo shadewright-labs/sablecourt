@@ -62,17 +62,8 @@ func (s *PostgresStore) ListConclaves(ctx context.Context) ([]domain.ConclaveSes
 }
 
 func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE conclaves SET state = $1, ward_reason = $2, updated_at = $3 WHERE id = $4
-	`, string(state), wardReason, nowRFC3339(), id)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return store.ErrNotFound
-	}
-	return nil
+	_, err := store.UpdateConclaveState(ctx, s.db, nil, id, state, wardReason, time.Now().UTC(), s.appendAuditTx)
+	return err
 }
 
 func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {

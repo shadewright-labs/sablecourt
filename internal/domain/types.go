@@ -61,6 +61,8 @@ const (
 	ApprovalApproved ApprovalStatus = "approved"
 	ApprovalDenied   ApprovalStatus = "denied"
 	ApprovalExpired  ApprovalStatus = "expired"
+	// ApprovalConsumed marks an approval that authorized its one execution.
+	ApprovalConsumed ApprovalStatus = "consumed"
 )
 
 type TypeMeta struct {

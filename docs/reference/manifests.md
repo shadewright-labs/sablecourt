@@ -46,7 +46,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.runtime.readOnlyRootfs` | bool | no | Run the container with a read-only root filesystem. |
 | `spec.coding.harness` | string | conditional | `claude`, `codex` or `agy`, required for a `coding-agent`; the other classes must not set `spec.coding` at all. |
 | `spec.coding.repoPath` | string | conditional | Repository the coding harness works in, required for a `coding-agent` and not checked for existence at load. |
-| `spec.coding.sandbox` | string | no | Not checked at load; at launch the coding adapter accepts only `seatbelt`, and only on macOS. |
+| `spec.coding.sandbox` | string | no | Not checked at load; at launch the coding adapter accepts only `seatbelt`, and only on macOS. This is the host path, which is unsupported for 0.1.0 ([ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)). |
 | `spec.agentCard.description` | string | no | Description stored with the workload record and shown on the agent card. |
 | `spec.agentCard.skills` | list of strings | no | Tags shown on the agent card. |
 | `spec.roleCard` | string | no | Role text put into the seat's prompt by the context pack and the council. |

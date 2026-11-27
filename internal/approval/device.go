@@ -113,6 +113,9 @@ func (pm *PairingManager) CompletePairing(ctx context.Context, code, name, platf
 // "sablecourt-approve:<approvalID>:<payloadSHA256>", enabling cryptographic out-of-band
 // approvals on headless Kubernetes and iOS Secure Enclave.
 func (q *Queue) ApproveWithSignature(ctx context.Context, approvalID, expectedSHA256, deviceID, sigBase64 string) (domain.Approval, error) {
+	if expectedSHA256 == "" {
+		return domain.Approval{}, ErrDigestRequired
+	}
 	dev, err := q.store.GetDevice(ctx, deviceID)
 	if err != nil {
 		return domain.Approval{}, err
@@ -131,9 +134,6 @@ func (q *Queue) ApproveWithSignature(ctx context.Context, approvalID, expectedSH
 	if !now.Before(apr.ExpiresAt) {
 		_ = q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalExpired, "system", `{"reason":"expired"}`)
 		return domain.Approval{}, ErrApprovalExpired
-	}
-	if expectedSHA256 == "" {
-		expectedSHA256 = apr.PayloadSHA256
 	}
 	if expectedSHA256 != apr.PayloadSHA256 {
 		return domain.Approval{}, ErrDigestMismatch

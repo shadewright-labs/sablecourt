@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -817,6 +818,89 @@ func TestRetryTaskRefusesUnknownTask(t *testing.T) {
 	path, notice, errMsg := redirectTarget(t, postForm(t, mux, "/ui/tasks/task_missing/retry", url.Values{"handoff": {"1"}}))
 	if path != "/tasks/task_missing" || notice != "" || errMsg == "" {
 		t.Fatalf("%s notice=%q err=%q", path, notice, errMsg)
+	}
+}
+
+func TestRetryTaskWritesAuditRow(t *testing.T) {
+	for _, handoff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("handoff %v", handoff), func(t *testing.T) {
+			ctx := context.Background()
+			st := newUITestStore(t)
+			now := time.Now().UTC()
+			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "coder", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.CreateTask(ctx, domain.Task{ID: "task_failed", IdempotencyKey: "task_failed", WorkloadName: "coder", State: domain.TaskStateFailed, InputJSON: `{"prompt":"p"}`, CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			bundle := &config.Bundle{Workloads: map[string]domain.Workload{"coder": {
+				Metadata: domain.ObjectMeta{Name: "coder", Zone: domain.ZoneRuntime},
+				Spec:     domain.WorkloadSpec{Class: domain.ClassLongLivedAgent},
+			}}}
+			mux := newFormMux(t, Options{Store: st, Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})})
+			form := url.Values{}
+			if handoff {
+				form.Set("handoff", "1")
+			}
+			path, notice, errMsg := redirectTarget(t, postForm(t, mux, "/ui/tasks/task_failed/retry", form))
+			if errMsg != "" || notice == "" {
+				t.Fatalf("%s notice=%q err=%q", path, notice, errMsg)
+			}
+			newID := strings.TrimPrefix(path, "/tasks/")
+			audit, _ := st.ListAudit(ctx, 20)
+			want := fmt.Sprintf(`{"retried_from":"task_failed","handoff":%v}`, handoff)
+			for _, a := range audit {
+				if a.Action == "task.retry" && a.TaskID == newID && a.Category == "task" && a.WorkloadName == "coder" && a.Outcome == "submitted" && a.DetailJSON == want {
+					return
+				}
+			}
+			t.Fatalf("task.retry audit row missing for %s: %+v", newID, audit)
+		})
+	}
+}
+
+func TestRetryTaskReplayWritesOneAuditRow(t *testing.T) {
+	ctx := context.Background()
+	st := newUITestStore(t)
+	now := time.Now().UTC()
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "coder", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "task_failed", IdempotencyKey: "task_failed", WorkloadName: "coder", State: domain.TaskStateFailed, InputJSON: `{"prompt":"p"}`, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := &config.Bundle{Workloads: map[string]domain.Workload{"coder": {
+		Metadata: domain.ObjectMeta{Name: "coder", Zone: domain.ZoneRuntime},
+		Spec:     domain.WorkloadSpec{Class: domain.ClassLongLivedAgent},
+	}}}
+	mux := newFormMux(t, Options{Store: st, Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})})
+	var ids []string
+	for _, handoff := range []string{"", "1"} {
+		form := url.Values{}
+		if handoff != "" {
+			form.Set("handoff", handoff)
+		}
+		path, notice, errMsg := redirectTarget(t, postForm(t, mux, "/ui/tasks/task_failed/retry", form))
+		if errMsg != "" || notice == "" {
+			t.Fatalf("%s notice=%q err=%q", path, notice, errMsg)
+		}
+		ids = append(ids, strings.TrimPrefix(path, "/tasks/"))
+	}
+	if ids[0] != ids[1] {
+		t.Fatalf("replay created another task: %v", ids)
+	}
+	audit, _ := st.ListAudit(ctx, 50)
+	count := 0
+	for _, a := range audit {
+		if a.Action == "task.retry" {
+			count++
+			if a.TaskID != ids[0] || a.DetailJSON != `{"retried_from":"task_failed","handoff":false}` {
+				t.Fatalf("audit row = %+v", a)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("task.retry rows = %d, want 1: %+v", count, audit)
 	}
 }
 

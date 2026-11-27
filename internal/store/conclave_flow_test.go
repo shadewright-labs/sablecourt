@@ -2,9 +2,11 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -513,5 +516,286 @@ func TestClaimConclaveTask(t *testing.T) {
 	}
 	if err := store.ClaimConclaveTask(ctx, r.st, late.ID, "missing", now); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("claim in a missing room = %v", err)
+	}
+}
+
+func TestConclaveAuditAndCloseStores(t *testing.T) {
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var st store.Store
+			var err error
+			var sqlitePath string
+			if backend == "sqlite" {
+				sqlitePath = filepath.Join(t.TempDir(), "state.db")
+				st, err = sqlite.Open(sqlitePath)
+			} else {
+				dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("SABLECOURT_TEST_POSTGRES_DSN is unset")
+				}
+				st, err = postgres.Open(isolatedPostgresDSN(t, dsn))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Migrate(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.UpsertWorkload(t.Context(), domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneSandbox}); err != nil {
+				t.Fatal(err)
+			}
+			t.Run("plain_close_preserves_terminal_state", func(t *testing.T) {
+				testPlainClosePreservesTerminalState(t, st)
+			})
+			t.Run("ward_trips_audited_once_across_all_paths", func(t *testing.T) {
+				testWardTripsAuditedOnce(t, st)
+			})
+			if backend == "sqlite" {
+				t.Run("plain_close_audit_failure_rolls_back", func(t *testing.T) {
+					ctx := t.Context()
+					if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "close-atomic", State: domain.ConclaveStateActive, CreatedAt: time.Now().UTC()}); err != nil {
+						t.Fatal(err)
+					}
+					db, err := sql.Open("sqlite", sqlitePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
+					if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_plain_close_audit BEFORE INSERT ON audit_log
+						WHEN NEW.action = 'conclave.close' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+						t.Fatal(err)
+					}
+					if err := st.UpdateConclaveState(ctx, "close-atomic", domain.ConclaveStateCompleted, ""); err == nil {
+						t.Fatal("UpdateConclaveState succeeded when audit insert failed")
+					}
+					if got := roomState(t, st, "close-atomic"); got.State != domain.ConclaveStateActive {
+						t.Fatalf("failed audit left room %+v", got)
+					}
+					if _, err := db.ExecContext(ctx, "DROP TRIGGER fail_plain_close_audit"); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func countRoomAudits(t *testing.T, st store.Store, action, roomID string) []domain.AuditRecord {
+	t.Helper()
+	rows, err := st.ListAudit(t.Context(), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoom := fmt.Sprintf(`"conclave_id":%q`, roomID)
+	var out []domain.AuditRecord
+	for _, rec := range rows {
+		if rec.Action == action && strings.Contains(rec.DetailJSON, wantRoom) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+func testPlainClosePreservesTerminalState(t *testing.T, st store.Store) {
+	ctx := t.Context()
+	now := time.Now().UTC()
+	for i, tc := range []struct {
+		name   string
+		first  domain.ConclaveState
+		second domain.ConclaveState
+	}{
+		{"completed_then_cancelled", domain.ConclaveStateCompleted, domain.ConclaveStateCancelled},
+		{"completed_then_completed", domain.ConclaveStateCompleted, domain.ConclaveStateCompleted},
+		{"cancelled_then_completed", domain.ConclaveStateCancelled, domain.ConclaveStateCompleted},
+		{"cancelled_then_cancelled", domain.ConclaveStateCancelled, domain.ConclaveStateCancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := fmt.Sprintf("close-%d", i)
+			if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: id, State: domain.ConclaveStateActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.UpdateConclaveState(ctx, id, tc.first, "first_reason"); err != nil {
+				t.Fatalf("first close: %v", err)
+			}
+			afterFirst := roomState(t, st, id)
+			if afterFirst.State != tc.first || afterFirst.WardReason != "first_reason" {
+				t.Fatalf("after first close = %+v", afterFirst)
+			}
+			// Second close with another terminal state must be a no-op that writes nothing.
+			if err := st.UpdateConclaveState(ctx, id, tc.second, "second_reason"); err != nil {
+				t.Fatalf("second close: %v", err)
+			}
+			afterSecond := roomState(t, st, id)
+			if afterSecond.State != tc.first || afterSecond.WardReason != "first_reason" || !afterSecond.UpdatedAt.Equal(afterFirst.UpdatedAt) {
+				t.Fatalf("second close overwrote terminal room: got %+v, want %+v", afterSecond, afterFirst)
+			}
+			// Reopening a closed room must fail without changing state.
+			if err := st.UpdateConclaveState(ctx, id, domain.ConclaveStateActive, ""); !errors.Is(err, store.ErrConclaveClosed) {
+				t.Fatalf("reopening closed room = %v, want ErrConclaveClosed", err)
+			}
+			closes := countRoomAudits(t, st, "conclave.close", id)
+			if len(closes) != 1 || closes[0].Outcome != string(tc.first) {
+				t.Fatalf("conclave.close audits for %s = %+v, want 1 row with outcome %s", id, closes, tc.first)
+			}
+			if _, err := st.VerifyAuditChain(ctx); err != nil {
+				t.Fatalf("VerifyAuditChain: %v", err)
+			}
+		})
+	}
+}
+
+func testWardTripsAuditedOnce(t *testing.T, st store.Store) {
+	ctx := t.Context()
+	now := time.Now().UTC()
+	baseLimits := store.ConclaveLimits{MaxMessages: 10, MaxPingPong: 10, MaxRuns: 6, MaxAge: store.ConclaveWallTime, Now: func() time.Time { return now }}
+	mkRoom := func(id string, age time.Duration) {
+		t.Helper()
+		created := now.Add(-age)
+		if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: id, State: domain.ConclaveStateActive, CreatedAt: created, UpdatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	submitTurn := func(room string, task domain.Task, limits store.ConclaveLimits) error {
+		_, err := store.SubmitConclaveTurn(ctx, room, task.IdempotencyKey, limits, func(ctx context.Context) (domain.Task, error) {
+			return task, st.CreateTask(ctx, task)
+		})
+		return err
+	}
+
+	t.Run("post", func(t *testing.T) {
+		mkRoom("ward-post", 0)
+		lim := baseLimits
+		lim.MaxMessages = 1
+		if _, reason, _, err := store.AppendConclavePost(ctx, st, domain.ConclaveMessage{
+			ConclaveID: "ward-post", FromRole: "a", ToRole: "all", Kind: "proposal", Body: "hi", CreatedAt: now,
+		}, lim, false, false); err != nil || reason != "max_messages_reached(1)" {
+			t.Fatalf("post trip = %q, %v", reason, err)
+		}
+		if _, _, _, err := store.AppendConclavePost(ctx, st, domain.ConclaveMessage{
+			ConclaveID: "ward-post", FromRole: "a", ToRole: "all", Kind: "proposal", Body: "extra", CreatedAt: now,
+		}, lim, false, false); !errors.Is(err, store.ErrConclavePaused) {
+			t.Fatalf("second post = %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-post"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"max_messages_reached(1)"`) {
+			t.Fatalf("post ward audits = %+v", got)
+		}
+	})
+
+	t.Run("report", func(t *testing.T) {
+		mkRoom("ward-report", 0)
+		lim := baseLimits
+		lim.BudgetMissing = true
+		if _, _, err := store.AppendConclaveReport(ctx, st, domain.ConclaveMessage{
+			ConclaveID: "ward-report", FromRole: "verifier", ToRole: "operator", Kind: "report", Body: "checked", CreatedAt: now,
+		}, lim, nil); !errors.Is(err, store.ErrWardTripped) {
+			t.Fatalf("report trip = %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-report"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"budget_evidence_unavailable"`) {
+			t.Fatalf("report ward audits = %+v", got)
+		}
+	})
+
+	t.Run("turn_max_runs", func(t *testing.T) {
+		mkRoom("ward-runs", 0)
+		lim := baseLimits
+		lim.MaxRuns = 1
+		firstTurn := turnTask(t, "ward-runs", "a", 0)
+		if err := submitTurn("ward-runs", firstTurn, lim); err != nil {
+			t.Fatal(err)
+		}
+		if err := submitTurn("ward-runs", turnTask(t, "ward-runs", "b", 0), lim); !errors.Is(err, store.ErrConclaveRunLimit) {
+			t.Fatalf("max_runs trip = %v", err)
+		}
+		if _, _, _, err := store.AppendConclavePost(ctx, st, domain.ConclaveMessage{
+			ConclaveID: "ward-runs", FromRole: "a", ToRole: "all", Kind: "proposal", Body: "paid reply", TaskID: firstTurn.ID, CreatedAt: now,
+		}, lim, false, false); err != nil {
+			t.Fatalf("admitted reply after max_runs: %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-runs"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"max_runs"`) {
+			t.Fatalf("max_runs ward audits = %+v", got)
+		}
+	})
+
+	t.Run("turn_deadline", func(t *testing.T) {
+		mkRoom("ward-turn-deadline", time.Hour)
+		if err := submitTurn("ward-turn-deadline", turnTask(t, "ward-turn-deadline", "a", 0), baseLimits); !errors.Is(err, store.ErrConclavePaused) {
+			t.Fatalf("turn deadline trip = %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-turn-deadline"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"wall_time_reached"`) {
+			t.Fatalf("turn deadline ward audits = %+v", got)
+		}
+	})
+
+	// A plain room pauses and audits a turn Ward the same way a council does (ADR-0008).
+	t.Run("turn_plain_room_wards", func(t *testing.T) {
+		noBudget := baseLimits
+		noBudget.BudgetMissing = true
+		oneMessage := baseLimits
+		oneMessage.MaxMessages = 1
+		for _, tc := range []struct {
+			room, ward string
+			limits     store.ConclaveLimits
+		}{
+			{"ward-turn-budget", "budget_evidence_unavailable", noBudget},
+			{"ward-turn-messages", "max_messages_reached(1)", oneMessage},
+		} {
+			mkRoom(tc.room, 0)
+			if _, _, _, err := store.AppendConclavePost(ctx, st, domain.ConclaveMessage{
+				ConclaveID: tc.room, FromRole: "a", ToRole: "all", Kind: "proposal", Body: "hi", CreatedAt: now,
+			}, baseLimits, false, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, role := range []string{"b", "c"} {
+				if err := submitTurn(tc.room, turnTask(t, tc.room, role, 0), tc.limits); !errors.Is(err, store.ErrConclavePaused) {
+					t.Fatalf("%s turn %s = %v", tc.room, role, err)
+				}
+			}
+			if c := roomState(t, st, tc.room); c.State != domain.ConclaveStateInputRequired || c.WardReason != tc.ward {
+				t.Fatalf("%s after the turn Ward = %+v", tc.room, c)
+			}
+			if got := countRoomAudits(t, st, "conclave.ward", tc.room); len(got) != 1 || !strings.Contains(got[0].DetailJSON, fmt.Sprintf(`"ward":%q`, tc.ward)) {
+				t.Fatalf("%s ward audits = %+v", tc.room, got)
+			}
+		}
+	})
+
+	t.Run("claim_deadline", func(t *testing.T) {
+		mkRoom("ward-claim-deadline", 0)
+		claimA := turnTask(t, "ward-claim-deadline", "a", 0)
+		claimB := turnTask(t, "ward-claim-deadline", "b", 0)
+		if err := submitTurn("ward-claim-deadline", claimA, baseLimits); err != nil {
+			t.Fatal(err)
+		}
+		if err := submitTurn("ward-claim-deadline", claimB, baseLimits); err != nil {
+			t.Fatal(err)
+		}
+		later := func() time.Time { return now.Add(time.Hour) }
+		if err := store.ClaimConclaveTask(ctx, st, claimA.ID, "ward-claim-deadline", later); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("late claim A = %v", err)
+		}
+		if err := store.ClaimConclaveTask(ctx, st, claimB.ID, "ward-claim-deadline", later); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("late claim B = %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-claim-deadline"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"wall_time_reached"`) {
+			t.Fatalf("claim deadline ward audits = %+v", got)
+		}
+	})
+
+	t.Run("update_state_pause", func(t *testing.T) {
+		mkRoom("ward-update-state", 0)
+		if err := st.UpdateConclaveState(ctx, "ward-update-state", domain.ConclaveStateInputRequired, "manual_ward"); err != nil {
+			t.Fatalf("first pause: %v", err)
+		}
+		if err := st.UpdateConclaveState(ctx, "ward-update-state", domain.ConclaveStateInputRequired, "manual_ward"); err != nil {
+			t.Fatalf("duplicate pause: %v", err)
+		}
+		if got := countRoomAudits(t, st, "conclave.ward", "ward-update-state"); len(got) != 1 || !strings.Contains(got[0].DetailJSON, `"ward":"manual_ward"`) {
+			t.Fatalf("update state ward audits = %+v", got)
+		}
+	})
+
+	if _, err := st.VerifyAuditChain(ctx); err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
 	}
 }

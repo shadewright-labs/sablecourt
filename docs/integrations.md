@@ -8,7 +8,7 @@ Sablecourt's Data and Action Gate (`internal/gate/mcp/upstream.go`) proxies remo
 
 - Credentials remain inside `sablecourtd`'s `SecretStore` and never enter the workload container or process environment.
 - Only tools listed in `allowedTools` are registered on the workload's MCP server under `<serverName>.<toolName>`.
-- Every tool call passes through the deterministic Policy Engine (`mcp:<serverName>.<toolName>`), Approval Queue (when policy effect is `approve`), and linear-time secret redactor (`internal/redact`) before returning to the agent.
+- Every tool call passes through the deterministic Policy Engine (`mcp:<serverName>.<toolName>`) and, when policy effect is `approve`, the Approval Queue, which returns an approval-required reply without running the tool. When the tool runs, its result and any error go through the linear-time pattern redactor (`internal/redact`, best effort for known secret shapes, not a boundary) before returning to the agent; the approval-required reply and approval queue errors are not redacted.
 
 ### Example `Workload` manifest
 

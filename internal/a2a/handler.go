@@ -3,6 +3,8 @@ package a2a
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -60,6 +62,21 @@ func BrokerHandler(opts Options) http.Handler {
 		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(gotToken), []byte(strings.TrimSpace(expectedToken))) != 1 {
 			w.WriteHeader(http.StatusUnauthorized)
 			writeRPCError(w, nil, -32001, "unauthorized")
+			return
+		}
+		// The observer secret is read-only: a deployment that reuses its value
+		// for A2A must not turn the observer into a task submitter.
+		observer, err := opts.Secrets.Get(r.Context(), "observer_bearer_token")
+		if err != nil && !errors.Is(err, secret.ErrSecretNotFound) {
+			log.Printf("a2a: observer secret lookup failed: %v", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRPCError(w, nil, -32000, "A2A authorization unavailable")
+			return
+		}
+		if err == nil &&
+			strings.TrimSpace(observer) != "" && subtle.ConstantTimeCompare([]byte(gotToken), []byte(strings.TrimSpace(observer))) == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			writeRPCError(w, nil, -32001, "observer credential cannot use A2A")
 			return
 		}
 

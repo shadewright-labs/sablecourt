@@ -355,6 +355,8 @@ func TestWardPauseWriteRollsBackReply(t *testing.T) {
 			WHEN NEW.from_role = 'system' BEGIN SELECT RAISE(ABORT, 'ward unavailable'); END`},
 		{"state update", `CREATE TRIGGER fail_ward BEFORE UPDATE OF state ON conclaves
 			WHEN NEW.state = 'input-required' BEGIN SELECT RAISE(ABORT, 'ward unavailable'); END`},
+		{"audit write", `CREATE TRIGGER fail_ward BEFORE INSERT ON audit_log
+			WHEN NEW.action = 'conclave.ward' BEGIN SELECT RAISE(ABORT, 'ward audit unavailable'); END`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -557,6 +559,19 @@ func TestCouncilRetryReservesAttempt(t *testing.T) {
 	}
 	if tasks, err := st.ListTasks(ctx); err != nil || len(tasks) != 6 {
 		t.Errorf("reserved %d tasks, %v", len(tasks), err)
+	}
+	audits, err := st.ListAudit(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wards int
+	for _, rec := range audits {
+		if rec.Action == "conclave.ward" && strings.Contains(rec.DetailJSON, `"ward":"max_runs"`) {
+			wards++
+		}
+	}
+	if wards != 1 {
+		t.Errorf("retry max_runs ward audits = %d, want 1: %+v", wards, audits)
 	}
 }
 

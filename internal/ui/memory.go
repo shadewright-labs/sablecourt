@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
+	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -110,10 +111,24 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_ = r.ParseForm()
 	withHandoff := r.FormValue("handoff") == "1" || r.URL.Query().Get("handoff") == "1"
-	retried, err := d.reconciler.RetryTaskWithHandoff(r.Context(), id, withHandoff, "operator_ui_retry")
+	var created bool
+	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "operator_ui_retry")
 	if err != nil {
 		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
+	}
+	// Same row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd, written
+	// only when this call created the task, not on an idempotent replay.
+	if created {
+		_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
+			Category:     "task",
+			TaskID:       retried.ID,
+			WorkloadName: retried.WorkloadName,
+			Action:       "task.retry",
+			Outcome:      "submitted",
+			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
+			CreatedAt:    time.Now().UTC(),
+		})
 	}
 	msg := "Retried from " + id
 	if withHandoff {

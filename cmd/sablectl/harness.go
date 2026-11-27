@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 	"github.com/spf13/cobra"
 )
 
@@ -16,8 +17,9 @@ func buildHarnessCmdWithCompiler(docker harnessimages.Docker, compiler harnessim
 	harness := &cobra.Command{Use: "harness", Short: "Build local council harness images and log in to them"}
 	build := &cobra.Command{
 		Use:   "build <role>",
-		Short: "Build a pinned harness image and its proxy locally",
-		Long: "Build a pinned harness image and its proxy locally from the embedded Dockerfile.\n" +
+		Short: "Build a pinned harness image and its proxy",
+		Long: "Build a pinned harness image and its proxy from the embedded Dockerfile.\n" +
+			"The proxy is compiled on this machine; the Docker engine that the docker command selects (DOCKER_HOST or DOCKER_CONTEXT) builds both images.\n" +
 			"The codex image includes the Codex CLI. The claude and agy images carry no vendor tool:\n" +
 			"sablectl harness login installs the pinned tool into its own volume, as for a published image.",
 		ValidArgs: []string{"claude", "codex", "agy"},
@@ -33,11 +35,14 @@ func buildHarnessCmdWithCompiler(docker harnessimages.Docker, compiler harnessim
 			if selectedCompiler == nil {
 				selectedCompiler = harnessimages.LocalProxyCompiler{Source: source}
 			}
-			if err := harnessimages.Build(cmd.Context(), docker, selectedCompiler, args[0]); err != nil {
+			art := startWait(cmd, waitart.Build, "Building the "+args[0]+" harness: image and council proxy")
+			err := harnessimages.Build(cmd.Context(), docker, selectedCompiler, args[0])
+			art.Stop()
+			if err != nil {
 				return err
 			}
 			d, _ := harnessimages.Lookup(args[0])
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Built %s and %s locally\n", d.Image, harnessimages.ProxyImage()); err != nil {
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Built %s and %s with the configured Docker engine\n", d.Image, harnessimages.ProxyImage()); err != nil {
 				return err
 			}
 			if d.Tool != nil {

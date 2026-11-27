@@ -379,12 +379,7 @@ func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.Concl
 	return msg, relic, nil
 }
 
-func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession, taskID, reason string) {
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
-		Category: "conclave", TaskID: taskID, Action: "conclave.ward", Outcome: "paused",
-		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"ward":%q}`, session.ID, reason),
-		CreatedAt:  b.now(),
-	})
+func (b *Broker) recordWard(ctx context.Context, session domain.ConclaveSession, _ string, reason string) {
 	if b.notifier != nil {
 		_ = b.notifier.Send(ctx, notify.Event{
 			Type: "conclave.ward_paused", Title: "Conclave Ward tripped: " + redact.String(session.Title),
@@ -558,13 +553,6 @@ func (b *Broker) Close(ctx context.Context, conclaveID string, state domain.Conc
 	} else if err := b.store.UpdateConclaveState(ctx, conclaveID, state, ""); err != nil {
 		return err
 	}
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
-		Category:   "conclave",
-		Action:     "conclave.close",
-		Outcome:    string(state),
-		DetailJSON: fmt.Sprintf(`{"conclave_id":%q}`, conclaveID),
-		CreatedAt:  b.now(),
-	})
 	return collectErr
 }
 

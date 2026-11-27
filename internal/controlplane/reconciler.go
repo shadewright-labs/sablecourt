@@ -406,6 +406,14 @@ func NewReconciler(opts Options) *Reconciler {
 	}
 }
 
+type createdKey struct{}
+
+// WithCreatedFlag returns a context whose submissions set *created to true
+// when they insert a new task. An idempotent replay leaves it false.
+func WithCreatedFlag(ctx context.Context, created *bool) context.Context {
+	return context.WithValue(ctx, createdKey{}, created)
+}
+
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
 	return r.submitTask(ctx, workloadName, idempotencyKey, inputJSON, "", nil)
 }
@@ -481,6 +489,9 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 			}
 		}
 		return domain.Task{}, err
+	}
+	if created, ok := ctx.Value(createdKey{}).(*bool); ok && created != nil {
+		*created = true
 	}
 	if inputJSON != "" && inputJSON != "{}" {
 		_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
@@ -1102,7 +1113,7 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 						return true, err
 					}
 					decided = true
-				case domain.ApprovalApproved, domain.ApprovalDenied, domain.ApprovalExpired:
+				case domain.ApprovalApproved, domain.ApprovalConsumed, domain.ApprovalDenied, domain.ApprovalExpired:
 					decided = true
 				default:
 					return true, nil

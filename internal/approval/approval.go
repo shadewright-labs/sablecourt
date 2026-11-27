@@ -18,6 +18,7 @@ var (
 	ErrApprovalExpired = errors.New("approval expired")
 	ErrDigestMismatch  = errors.New("approval payload digest mismatch")
 	ErrNotConfirmed    = errors.New("out-of-band confirmation denied or cancelled")
+	ErrDigestRequired  = errors.New("expected payload digest is required")
 )
 
 type ConfirmationRequest struct {
@@ -115,6 +116,9 @@ func (q *Queue) Approve(ctx context.Context, approvalID, expectedSHA256, decided
 	if q.approver == nil {
 		return domain.Approval{}, errors.New("no out-of-band approver configured")
 	}
+	if expectedSHA256 == "" {
+		return domain.Approval{}, ErrDigestRequired
+	}
 	apr, err := q.store.GetApproval(ctx, approvalID)
 	if err != nil {
 		return domain.Approval{}, err
@@ -127,7 +131,7 @@ func (q *Queue) Approve(ctx context.Context, approvalID, expectedSHA256, decided
 		_ = q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalExpired, "system", `{"reason":"expired"}`)
 		return domain.Approval{}, ErrApprovalExpired
 	}
-	if expectedSHA256 != "" && expectedSHA256 != apr.PayloadSHA256 {
+	if expectedSHA256 != apr.PayloadSHA256 {
 		return domain.Approval{}, ErrDigestMismatch
 	}
 

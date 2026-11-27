@@ -69,7 +69,7 @@ func TestActionHandlerRefusals(t *testing.T) {
 		{"action outside catalog", http.MethodPost, "/git.force_push", token, "", `{}`, http.StatusNotFound, "closed catalog"},
 		{"unknown request field", http.MethodPost, "/git.open_pr", token, "", `{"payload":{},"extra":1}`, http.StatusBadRequest, "invalid action request"},
 		{"body not JSON", http.MethodPost, "/git.open_pr", token, "", `not json`, http.StatusBadRequest, "invalid action request"},
-		{"unknown approval id", http.MethodPost, "/git.open_pr", token, "", `{"approvalId":"apr_missing","payload":{}}`, http.StatusForbidden, "approval not found"},
+		{"unknown approval id", http.MethodPost, "/git.open_pr", token, "", `{"approvalId":"apr_missing","payload":{}}`, http.StatusForbidden, "approval_not_found"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestActionHandlerApprovalChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := queue.Approve(ctx, other.ID, "", "op"); err != nil {
+	if _, err := queue.Approve(ctx, other.ID, other.PayloadSHA256, "op"); err != nil {
 		t.Fatal(err)
 	}
 	body = `{"approvalId":"` + other.ID + `","payload":{"branch":"sablecourt/task-1"}}`
@@ -156,7 +156,7 @@ func TestActionHandlerApprovalChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := queue.Approve(ctx, foreign.ID, "", "op"); err != nil {
+	if _, err := queue.Approve(ctx, foreign.ID, foreign.PayloadSHA256, "op"); err != nil {
 		t.Fatal(err)
 	}
 	body = `{"approvalId":"` + foreign.ID + `","payload":{"branch":"sablecourt/task-1"}}`

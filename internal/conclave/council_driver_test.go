@@ -1070,3 +1070,86 @@ func TestCouncilDriverCallsRetryableCleanupCouncil(t *testing.T) {
 		t.Fatalf("ListReconcileCouncils after successful cleanup = %v, err=%v; want room removed", ids, err)
 	}
 }
+
+func TestCouncilDriverCloseAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wantState domain.ConclaveState
+		closeFn   func(t *testing.T, f *driverFixture)
+	}{
+		{
+			name:      "scheduler unanimous close",
+			wantState: domain.ConclaveStateCompleted,
+			closeFn: func(t *testing.T, f *driverFixture) {
+				f.pass(t)
+				f.launch(t, 3)
+				for _, a := range f.snapshot(t, 3).Attempts {
+					f.answer(t, a.TaskID, CouncilNothingToAdd)
+				}
+				f.pass(t)
+			},
+		},
+		{
+			name:      "scheduler deadline cancel",
+			wantState: domain.ConclaveStateCancelled,
+			closeFn: func(t *testing.T, f *driverFixture) {
+				s := f.snapshot(t, 0)
+				f.clock = s.Deadline
+				f.pass(t)
+			},
+		},
+		{
+			name:      "owner close",
+			wantState: domain.ConclaveStateCancelled,
+			closeFn: func(t *testing.T, f *driverFixture) {
+				if err := f.Broker.Close(t.Context(), "room", domain.ConclaveStateCancelled); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			f := driverRoom(t, false, 6, 6)
+			tc.closeFn(t, f)
+
+			checkAudit := func(stage string) {
+				t.Helper()
+				audits, err := f.ListAudit(ctx, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var closes []domain.AuditRecord
+				for _, rec := range audits {
+					if rec.Action == "conclave.close" {
+						closes = append(closes, rec)
+					}
+				}
+				if len(closes) != 1 {
+					t.Fatalf("%s: conclave.close audit rows = %d, want 1: %+v", stage, len(closes), closes)
+				}
+				if closes[0].Category != "conclave" || closes[0].Outcome != string(tc.wantState) || !strings.Contains(closes[0].DetailJSON, `"conclave_id":"room"`) {
+					t.Fatalf("%s: conclave.close audit = %+v", stage, closes[0])
+				}
+			}
+			checkAudit("initial close")
+
+			other := domain.ConclaveStateCompleted
+			if tc.wantState == domain.ConclaveStateCompleted {
+				other = domain.ConclaveStateCancelled
+			}
+			// Closing again through the broker keeps the original terminal state and adds no audit row.
+			if err := f.Broker.Close(ctx, "room", other); err != nil {
+				t.Fatalf("second close: %v", err)
+			}
+			s, err := f.CouncilSnapshot(ctx, "room")
+			if err != nil || s.Session.State != tc.wantState {
+				t.Fatalf("room state after replay = %s, err = %v, want %s", s.Session.State, err, tc.wantState)
+			}
+			checkAudit("after replay")
+			if _, err := f.VerifyAuditChain(ctx); err != nil {
+				t.Fatalf("VerifyAuditChain: %v", err)
+			}
+		})
+	}
+}

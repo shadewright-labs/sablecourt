@@ -140,6 +140,7 @@ func TestApprovalTaskProgress(t *testing.T) {
 		want     domain.TaskState
 	}{
 		{"approved", domain.ApprovalApproved, scruntime.StateRunning, domain.TaskStateWorking},
+		{"consumed", domain.ApprovalConsumed, scruntime.StateRunning, domain.TaskStateWorking},
 		{"denied", domain.ApprovalDenied, scruntime.StateRunning, domain.TaskStateWorking},
 		{"expired", domain.ApprovalExpired, scruntime.StateRunning, domain.TaskStateWorking},
 		{"exited_completed", domain.ApprovalPending, scruntime.StateCompleted, domain.TaskStateCompleted},
@@ -157,7 +158,14 @@ func TestApprovalTaskProgress(t *testing.T) {
 			}
 			reconcile(t, r)
 			requireState(t, st, task.ID, domain.TaskStateInputRequired)
-			if tc.decision != domain.ApprovalPending {
+			if tc.decision == domain.ApprovalConsumed {
+				if err := st.DecideApproval(ctx, "approval", "digest", domain.ApprovalApproved, "operator", "{}"); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.ConsumeApproval(ctx, "approval", task.ID, "action:test", "digest"); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.decision != domain.ApprovalPending {
 				if err := st.DecideApproval(ctx, "approval", "digest", tc.decision, "operator", "{}"); err != nil {
 					t.Fatal(err)
 				}

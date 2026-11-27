@@ -1,15 +1,16 @@
 # Sablecourt v0.1 design
 
-Status: draft for v0.1 implementation (23 November 2026). This document turns the accepted architecture decisions in [ADR-0001](adr/0001-local-first-control-plane-with-k8s-adapters.md) through [ADR-0007](adr/0007-strict-boundary-with-nightloom.md) into concrete interfaces, schemas, upstream library choices, and package boundaries.
+This document lists the v0.1 interfaces, schemas, upstream libraries and package boundaries as the code has them. The architecture decisions behind them are the ADRs in [adr/](adr/README.md).
 
 ## Binaries and deployment shape
 
-Sablecourt v0.1 ships as two Go binaries built from one module:
+Sablecourt v0.1 builds three Go binaries from one module:
 
-- `sablecourtd`: local-first control plane daemon. It runs the reconciler loop, owns the SQLite (WAL) store, hosts the Model Gate and Data/Action Gate, manages the runtime approval queue, and serves the HTTP API and embedded Web UI on `127.0.0.1` plus a Unix domain socket for local CLI calls.
+- `sablecourtd`: the control plane daemon. It runs the reconciler loop, hosts the Model Gate and Data/Action Gate, manages the approval queue, and serves the HTTP API and embedded Web UI. It stores state in SQLite (WAL mode), or in PostgreSQL in either mode when `--postgres-dsn` or `SABLECOURT_POSTGRES_DSN` is set. It listens on `127.0.0.1:7432` by default (`--listen`), and on a Unix domain socket only when `--socket` is given.
 - `sablectl`: command-line client for submitting tasks, inspecting workloads and audit records, reloading Git-tracked manifests, and driving the approval queue.
+- `sablecourt-agent`: a small agent program that runs in a container image (`make agent-image`).
 
-The daemon never executes untrusted workload code inside its own process. Every infrastructure dependency (store, container runtime, secret store, out-of-band approver, and telemetry exporter) sits behind a Go interface so a future Kubernetes deployment can swap in Postgres/CRDs, `client-go`, or `kubernetes-sigs/agent-sandbox` without rewriting domain logic.
+Workload code does not run inside the daemon process: a coding agent is a child process of the daemon, and a container workload runs in the container engine. The store (`internal/store.Store`), the runtime (`internal/runtime.Adapter`), the secret store (`internal/secret.SecretStore`) and the out-of-band approver (`internal/approval.Approver`) are Go interfaces. SQLite and PostgreSQL implement the store, and the Docker, Kubernetes, coding and controller packages implement the runtime.
 
 ## Upstream Go library stack
 
@@ -20,16 +21,17 @@ Sablecourt avoids reimplementing standard protocols or low-level drivers in v0.1
 | Manifest parsing | `sigs.k8s.io/yaml` | Parses Kubernetes-style `apiVersion`/`kind`/`metadata`/`spec` YAML cleanly and maps directly to future CRDs. |
 | Embedded SQLite | `modernc.org/sqlite` | Pure Go SQLite driver with WAL support and zero CGO, keeping `go test -race ./...` and cross-compilation simple. |
 | MCP server and client | `github.com/modelcontextprotocol/go-sdk` | Official Go SDK with Streamable HTTP transport and typed tool schemas for the Data/Action Gate. |
-| A2A task envelopes | `github.com/a2aproject/a2a-go` | Official Go types for Agent Cards, stateful Task envelopes, and typed Artifacts. |
-| Container runtime | `github.com/moby/moby/client` | Moby Go SDK; one Docker Engine API client works across Docker Desktop, OrbStack, Colima, Podman sockets, and Linux Docker. |
-| OS credential storage | `github.com/zalando/go-keyring` | Reads raw upstream keys from macOS Keychain or Linux Secret Service, paired with a `0600` file fallback for headless Linux and CI. |
-| Observability | `go.opentelemetry.io/otel` + `log/slog` | Standard traces and metrics alongside structured JSON logs. |
-| CLI framework | `github.com/spf13/cobra` | Subcommand routing, flag parsing, and shell completions for `sablectl` and `sablecourtd`. |
+| A2A | none (`internal/a2a`) | `github.com/a2aproject/a2a-go` is not a dependency. `internal/a2a` is a hand-written JSON-RPC handler. |
+| Container runtime | `github.com/moby/moby/client` | Moby Go SDK. The adapter looks for the Docker, Podman, OrbStack, Colima and Rancher Desktop sockets. |
+| OS credential storage | `github.com/zalando/go-keyring` | Reads upstream keys from the OS keychain. The daemon adds a `0600` file store when `--secret-file` is set, and reads the keychain first. |
+| Observability | `log/slog` and `go.opentelemetry.io/otel` | Structured JSON logs with `log/slog`. `internal/telemetry` defines an OpenTelemetry tracer, which no code calls today. `GET /metrics` serves Prometheus-format text. |
+| Kubernetes runtime | `k8s.io/client-go` | The Citadel-mode adapter in `internal/runtime/k8s`. |
+| CLI framework | `github.com/spf13/cobra` | Subcommands and flags for `sablectl` and `sablecourtd`. |
 | Web UI | Go stdlib `html/template` + `embed.FS` | Server-rendered operational dashboard embedded in `sablecourtd` with no Node toolchain. |
 
 ## Git-tracked manifest schema
 
-Declared intent lives in Git-tracked YAML files under `apiVersion: sablecourt.io/v1alpha1`. `sablecourtd` loads manifests read-only and rejects unknown fields (`DisallowUnknownFields`). Three resource kinds cover v0.1:
+Declared intent lives in YAML files under `apiVersion: sablecourt.io/v1alpha1`. `sablecourtd` reads them, decodes each document with `yaml.UnmarshalStrict` so an unknown field is an error, and does not write them. There are six kinds: `Workload`, `Policy`, `Budget`, `Workflow`, `Schedule` and `Conclave`. The first three are shown here, and all six are in the [manifest reference](reference/manifests.md).
 
 ### Workload
 
@@ -48,7 +50,7 @@ spec:
   coding: # used only when class == coding-agent
     harness: claude # claude | codex
     repoPath: /path/to/repo
-    sandbox: seatbelt # seatbelt | bubblewrap | docker
+    sandbox: seatbelt # only seatbelt is accepted today; bubblewrap and docker are not implemented for coding runs
   agentCard:
     description: Triages incoming repository issues and proposes bounded fixes.
     skills:
@@ -56,20 +58,20 @@ spec:
   grants:
     modelGate:
       allowed: true
-      providers: [anthropic, openai, gemini]
+      providers: [anthropic, openai, gemini] # also local
       budgetRef: triage-daily
     mcpTools:
-      - github.get_issue
-      - github.list_files
+      - memory.get
+      - sablecourt.list_workloads
     actions:
       - git.open_pr
     delegateTo:
       - go-coder
 ```
 
-Deterministic controllers set `grants.modelGate.allowed: false`. Any attempt by a deterministic controller to call Model Gate is denied at authentication time and logged to the audit store.
+Deterministic controllers set `grants.modelGate.allowed: false`, and the loader refuses a controller with `allowed: true`. The Model Gate answers a controller's call with 403 and writes a `model_gate` audit row with the reason `no_model_gate_grant`.
 
-Workloads with `metadata.zone: sandbox` are forbidden from holding production `actions` or `delegateTo` grants. Moving a workload from `sandbox` to `runtime` happens only by editing its manifest on a branch, passing CI checks, and merging via pull request.
+The loader refuses a workload with `metadata.zone: sandbox` that holds any `actions` or `delegateTo` grant. The daemon does not change a workload's zone. Moving it from `sandbox` to `runtime` is an edit of its manifest, and `sablectl promote` only asks the daemon to create the branch `sablecourt/promote-<name>`.
 
 ### Policy
 
@@ -82,7 +84,7 @@ spec:
   defaultEffect: deny
   rules:
     - workload: repo-triage-agent
-      capability: mcp:github.get_issue
+      capability: mcp:memory.get
       effect: allow
     - workload: repo-triage-agent
       capability: action:git.open_pr
@@ -92,7 +94,7 @@ spec:
       effect: deny
 ```
 
-Policy evaluation is pure, deterministic Go code with no LLM involvement. Outcomes are strictly `allow`, `approve`, or `deny`. Any evaluation error, unrecognized capability, stale heartbeat, or tripped circuit breaker fails closed to `deny`.
+Policy evaluation is Go code in `internal/policy` that calls no model. The outcome is `allow`, `approve` or `deny`. The engine returns `deny` for an empty workload or capability, for the prefixes `policy:`, `secret:` and `rbac:`, for an `action:` or `delegate:` capability of a sandbox workload, for a capability the workload holds no grant for (a capability with any prefix other than `mcp:`, `action:` or `delegate:` has no grant), for an `action:` capability whose circuit breaker is open, for a rule with an effect other than the three, and when no rule matches. A matching `deny` rule wins over `approve`, and `approve` wins over `allow`. Heartbeat staleness is not an input of the policy engine.
 
 ### Budget
 
@@ -116,11 +118,11 @@ The control plane runs a single reconciler loop over durable facts:
 
 1. OBSERVE: read live facts from runtime adapters (container state, exit code, detached coding session status, heartbeat timestamps) and pending approvals.
 2. UPDATE: persist observed facts to SQLite with monotonic timestamps. If a heartbeat exceeds its staleness window, mark the task observation as stale.
-3. DERIVE / ACT: compute the next legal transition from stored facts and policy, then issue idempotent adapter calls (`Start`, `Suspend`, `Resume`, `Stop`, `CollectArtifacts`).
+3. DERIVE / ACT: compute the next legal transition from stored facts and approval state, then issue adapter calls (`Start`, `Stop`, `CollectArtifacts`). `Suspend` and `Resume` are called only by the operator commands that suspend and resume a task.
 
 Task states match the A2A lifecycle from `a2a-go`: `submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, and `cancelled`.
 
-Workloads have no direct network route to one another. When workload A needs help from workload B, A submits a child task proposal to the control plane. The control plane checks A's `delegateTo` grant, carves a sub-budget from A's remaining ceiling, creates a child task row linked by `parent_task_id` and a deterministic idempotency key, and dispatches B through the same loop.
+Workloads have no direct network route to one another. When workload A needs help from workload B, A submits a child task proposal to the control plane. The control plane function `ProposeChildTask` checks A's `delegateTo` grant through the policy engine, stores the caller-supplied sub-budget ceiling on the child task row without checking it against A's remaining ceiling, links the row to A by `parent_task_id`, and leaves B to start through the same loop. The idempotency key is the caller's, or a random one built from the parent ID, the target and a random task ID. No gate tool, action or HTTP route calls `ProposeChildTask` today, so a workload cannot trigger it yet.
 
 ## SQLite schema (WAL mode)
 
@@ -133,7 +135,7 @@ Core tables in v0.1:
 - `task_events`: append-only state transitions and observed runtime facts.
 - `leases`: active short-lived gate tokens (stored as SHA-256 hash, never plaintext), bound to `(task_id, workload_name, expires_at, revoked_at)`.
 - `budget_ledger`: immutable usage rows (`task_id`, `workload_name`, `provider`, `model`, `input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`, `cost_microusd`, `created_at`) aggregated inside transactions before granting new requests.
-- `approvals`: `id`, `task_id`, `workload_name`, `capability`, `payload_canonical_json`, `payload_sha256`, `status` (`pending`, `approved`, `denied`, `expired`), `decided_by`, `proof_json`, `expires_at`.
+- `approvals`: `id`, `task_id`, `workload_name`, `capability`, `payload_canonical_json`, `payload_sha256`, `status` (`pending`, `approved`, `denied`, `expired`, `consumed`; an approved row becomes `consumed` at its one use), `decided_by`, `proof_json`, `expires_at`.
 - `checkpoints`: opaque JSON or blob references persisted by long-lived AI agents before suspend and restored on resume.
 - `audit_log`: append-only structured records covering policy evaluations, gate denials, budget trips, approvals, and redaction hits.
 
@@ -145,7 +147,7 @@ Workloads never receive upstream API keys, database passwords, or Git tokens in 
 
 Model Gate is a single HTTP/SSE reverse proxy listening on the internal container bridge and localhost. In v0.1 it supports three wire formats so existing SDKs and agents can point their base URL at Sablecourt with zero custom client code:
 
-1. OpenAI-compatible: `/openai/v1/chat/completions` and `/openai/v1/responses` (backs OpenAI cloud as well as local Ollama and LM Studio endpoints).
+1. OpenAI-compatible: `/openai/v1/chat/completions` and `/openai/v1/responses` for OpenAI cloud, and `/local/v1/chat/completions` and `/local/v1/responses` for local OpenAI-compatible endpoints such as Ollama and LM Studio. A request on one of the two families falls back to the other (`openai` to `local` or `local` to `openai`) only on an upstream error or a 429, 502, 503 or 504, and only when the workload holds a grant for both providers.
 2. Anthropic: `/anthropic/v1/messages`.
 3. Google Gemini: `/gemini/v1beta/models/*:generateContent` and `:streamGenerateContent`.
 
@@ -153,7 +155,7 @@ For every request, Model Gate executes a strict pipeline:
 
 1. Authenticate the `sc_task_...` bearer token against `leases` and verify `grants.modelGate.allowed == true` and provider allowlist membership.
 2. Run a pre-flight budget check against `budget_ledger` for both task and daily caps; reject with `429` if exhausted.
-3. Strip the task token, attach the real upstream credential fetched from `SecretStore`, and forward the request.
+3. Strip the caller's `Authorization`, `x-api-key` and `x-goog-api-key` headers, add the active provider's credential from `SecretStore` when there is one, and forward the request. The cloud providers need a stored key; `local` does not, and when a gateway URL is configured no provider does.
 4. Stream SSE chunks through without buffering the whole response while parsing provider usage metadata from the final usage events (or non-streaming JSON body).
 5. Record token counts and computed micro-USD cost atomically into `budget_ledger` and emit an OTel span plus an `audit_log` entry.
 
@@ -164,7 +166,7 @@ Data and Action Gate combines two surfaces behind one policy and redaction bound
 1. An MCP Streamable HTTP endpoint built on `github.com/modelcontextprotocol/go-sdk`. On `tools/list`, the gate filters the catalog to only the tools in the caller's `grants.mcpTools`. On `tools/call`, it evaluates `Policy`, executes allowed read tools, or pauses the task on `approve`.
 2. A closed typed action catalog for mutating operations (starting with GitOps actions: `git.create_branch`, `git.open_pr`, and `sandbox.propose_promotion`). Every mutating action validates strict typed JSON inputs, checks policy and circuit breakers, and runs with the gate's scoped credentials rather than workload credentials.
 
-Every tool response and external payload passes through `internal/redact` (a linear-time deterministic redactor modeled on Shadewright's `internal/redact`, avoiding backtracking regexes) before returning text to a workload.
+Every tool response and external payload passes through `internal/redact` (a linear-time deterministic redactor modeled on Shadewright's `internal/redact`, avoiding backtracking regexes) before returning text to a workload. Per [ADR-0015](adr/0015-redaction-is-defence-in-depth.md), its pattern rules are best effort and defence in depth, not a security boundary; exact-match redaction replaces each secret the daemon holds in memory at those boundaries, Model Gate responses included ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). The Model Gate forwards request bodies as sent.
 
 ## Runtime adapters and isolation
 
@@ -192,11 +194,11 @@ Used for long-lived AI agents, sandbox workloads, and deterministic controllers.
 
 ### Coding agent runtime (`internal/runtime/coding`)
 
-Used for local `claude` (Claude Code) and `codex` (Codex) runs:
+Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter also launches the supported council containers; its non-container host path is unsupported for 0.1.0. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) runs coding tasks in harness containers only, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves them there; until it lands, the list below is what the code does today, on macOS only.
 
 - Creates a dedicated Git worktree per task on a deterministic branch name (`sablecourt/<task-id>`).
 - Launches the CLI inside a detached session host so restarting `sablecourtd` does not terminate active coding runs.
-- Wraps execution in an OS sandbox (macOS Seatbelt profile restricting writes outside the worktree and temp dir, or Linux Bubblewrap) with a stripped environment allowlist.
+- Wraps execution in the macOS Seatbelt profile (restricting writes outside the worktree and temp dir) with a stripped environment allowlist. No Linux Bubblewrap exists, and [ADR-0003](adr/0003-hybrid-workload-isolation.md) on this point is superseded by the amendment above.
 - Sets a read-only starter marker (`SABLECOURT_MANAGED=1`, `SABLECOURT_TASK_ID=<id>`) so Nightloom can tag Sablecourt sessions cleanly without coupling the two codebases (ADR-0007).
 
 ### Deterministic controller runtime (`internal/runtime/controller`)
@@ -230,14 +232,14 @@ sablecourt/
     approval/           # Approver interface, digest pinning, macOS OOB bridge
     config/             # sigs.k8s.io/yaml loader and strict schema validation
     controlplane/       # OBSERVE -> UPDATE -> DERIVE/ACT loop and hub-and-spoke dispatcher
-    domain/             # core types, A2A envelope helpers, budget and policy models
+    domain/             # core types, budget and policy models
     gate/
       mcp/              # Data/Action Gate (modelcontextprotocol/go-sdk + typed actions)
       model/            # Model Gate (OpenAI, Anthropic, Gemini HTTP/SSE proxy)
     policy/             # deterministic allow/approve/deny engine and circuit breakers
     redact/             # linear-time deterministic boundary redactor
     runtime/
-      coding/           # Git worktree + OS sandbox + detached host for claude and codex
+      coding/           # Git worktree + Seatbelt + detached host for claude and codex (host path, unsupported for 0.1.0)
       controller/       # zero-LLM deterministic controller runner
       docker/           # Moby Go SDK container runtime on internal gate-only network
     secret/             # SecretStore interface (zalando/go-keyring + 0600 file fallback)
@@ -252,4 +254,4 @@ sablecourt/
 1. M1 (Core scaffold and store): `go.mod`, manifest loader (`sigs.k8s.io/yaml`), SQLite WAL store + migrations, `sablecourtd` and `sablectl` skeleton, `go test -race ./...` green.
 2. M2 (Model Gate and budgets): OpenAI, Anthropic, and Gemini HTTP/SSE proxy, task token leases, atomic `budget_ledger` enforcement, deterministic controller zero-LLM denial tests.
 3. M3 (Data/Action Gate and approvals): MCP Streamable HTTP server (`modelcontextprotocol/go-sdk`), linear-time redactor, typed GitOps PR action, runtime approval queue with pinned SHA-256 digest and macOS out-of-band `Approver`.
-4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + OS sandbox coding adapter (`claude` and `codex`), hub-and-spoke child delegation, and embedded `html/template` Web UI.
+4. M4 (Three workload adapters and Web UI): Docker internal-network adapter (long-lived agent + deterministic controller), Git worktree + Seatbelt coding adapter (`claude` and `codex`; superseded for 0.1.0 by harness containers, issue 181), hub-and-spoke child delegation, and embedded `html/template` Web UI.
