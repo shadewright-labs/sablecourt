@@ -8,7 +8,7 @@ Status: partly built. Device pairing is switched off (issue #5); see [Known gaps
 
 | Change | Path |
 | --- | --- |
-| Manifests, policies, code, promotion of a workload to the runtime zone | Git branch, pull request, checks, human merge ([ADR-0005](../adr/0005-dual-path-human-in-the-loop.md)). No workload may change its own policy. |
+| Manifests, policies, code, promotion of a workload to the runtime zone | Git branch, pull request, checks, human merge ([ADR-0005](../adr/0005-dual-path-human-in-the-loop.md)). The policy engine denies any capability that starts with `policy:`, `secret:` or `rbac:`. |
 | A single bounded action whose policy effect is `approve` | The runtime approval queue, described here. |
 
 ## The life of an approval
@@ -29,7 +29,7 @@ Denying needs only an operator credential: `sablectl approval deny <id> --reason
 
 ## What a session may and may not do
 
-An operator session or token can list approvals, deny them, and ask for confirmation. It cannot approve by itself: the approval is stored only after the dialog proof. A same-user local process that posts to the approve route only makes the dialog appear. The workload holds a task lease, which does not reach `/api/v1/approvals`.
+An operator session or token can list approvals, deny them, and ask for confirmation. It cannot approve by itself: the approve route stores an approval only after the dialog proof, or after a valid signature from an enrolled device (see Devices; none can be enrolled now). A same-user local process that posts to the approve route without a signature only makes the dialog appear. The workload holds a task lease, which does not reach `/api/v1/approvals`.
 
 ## Devices
 
