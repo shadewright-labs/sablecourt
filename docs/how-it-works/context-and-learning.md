@@ -106,6 +106,20 @@ spec:
       budgetRef: daily
 ---
 apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: go-reviewer
+  zone: runtime
+spec:
+  class: coding-agent
+  runtime:
+    type: worktree-cli
+  coding:
+    harness: codex
+    repoPath: .
+    sandbox: seatbelt
+---
+apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
   name: fix-and-verify
@@ -119,13 +133,14 @@ spec:
       tier: coding
       prompt: Fix the bug described in the task input and run the tests.
     - name: check
-      workload: go-coder
+      workload: go-reviewer
       role: verifier
       tier: critic
       maxRetries: 2
       prompt: Check the change for regressions and missing tests.
 ```
 
+- The verifier runs on its own workload. The manifest loader refuses a `role: verifier` step whose workload holds `actions`, `delegateTo` or a Model Gate grant, or is also used by a step before it that is not a verifier, and a verifier on a model workload when no earlier step runs a model. Here `go-reviewer` runs the `codex` harness because the default `critic` route is `cli:codex` with `gpt-6.2-astra`, a model family other than the `coding` route's.
 - The verifier gets a prompt that tells it not to trust the author, with the text of the author's artifacts (each cut at 4096 bytes). It must run on a `coding-agent` workload. Its checkout is read-only and pinned to the author's commit, recorded as a `verifier_checkout_pinned` event. If the workload is not a coding agent, the runtime cannot pin a commit, or the author recorded no commit, the launch fails with "runtime cannot guarantee the author's checkout for this step".
 - The verdict is the last line of the single `final-message` artifact (plain text, at most 64 KiB), exactly `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. A message that repeats the prompt does not count.
 - `PASS` moves the workflow to the next step. With no valid verdict, the workflow halts with reason `verdict_missing` and an audit row `workflow.verify`. `CHANGES_REQUESTED` writes a `workflow.verify` audit row and runs the author step again with the redacted findings as its handoff while `retry_count` is below `maxRetries`; at the limit no further step starts. The `maxRetries` that counts is the one on the verifier step, or the author step's own when the verifier step sets none.
@@ -137,7 +152,7 @@ spec:
 
 ## Model tiers
 
-A step may name a tier, `fast`, `coding` or `critic`, as shorthand for a provider and model. A provider or model set on the step itself replaces the route of the tier. The loader checks the tier name and route against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:claude` with `claude-opus-5-5`. A route must suit the workload: a deterministic controller cannot use a tier, and a `coding-agent` workload needs a `cli:` provider of its own harness and a model that harness accepts. Other classes get no further check.
+A step may name a tier, `fast`, `coding` or `critic`, as shorthand for a provider and model. A provider or model set on the step itself replaces the route of the tier. The loader checks the tier name and route against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:codex` with `gpt-6.2-astra`; [configuration](../reference/configuration.md#model-tiers-and-families) lists their model families. A route must suit the workload: a deterministic controller cannot use a tier, and a `coding-agent` workload needs a `cli:` provider of its own harness and a model that harness accepts. Other classes get no further check.
 
 ## In depth
 

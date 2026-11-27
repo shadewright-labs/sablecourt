@@ -824,7 +824,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := contextpack.SaveModelTiers(r.Context(), st, routes); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			status := http.StatusInternalServerError
+			if contextpack.IsRouteRefusal(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, contextpack.GetModelTiers(r.Context(), st))

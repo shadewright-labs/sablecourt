@@ -124,7 +124,7 @@ Source: `internal/domain/types.go` (`WorkflowSpec`, `WorkflowStep`), `internal/c
 | `spec.steps[].model` | string | no | Model for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |
 | `spec.steps[].prompt` | string | no | The step's task prompt. |
 
-Source for the built-in tier routes: `internal/contextpack/tiers.go`. With no override saved, `fast` is `cli:agy` with `gemini-3.8-flash-high`, `coding` is `cli:claude` with `claude-sonnet-5-5`, and `critic` is `cli:claude` with `claude-opus-5-5`. `GET` and `POST /api/v1/providers/tiers` read and change them.
+Source for the built-in tier routes: `internal/contextpack/tiers.go`. With no override saved, `fast` is `cli:agy` with `gemini-3.8-flash-high`, `coding` is `cli:claude` with `claude-sonnet-5-5`, and `critic` is `cli:codex` with `gpt-6.2-astra`, a model family other than the `coding` route's (see [configuration](configuration.md#model-tiers-and-families)). `GET` and `POST /api/v1/providers/tiers` read and change them.
 
 ## Schedule
 
