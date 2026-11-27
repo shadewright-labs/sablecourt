@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -160,10 +159,17 @@ func TestSixHardSecurityInvariants(t *testing.T) {
 	})
 }
 
+// selfTestGrowthBound sits between the linear prediction (8x for an 8x size
+// step) and the quadratic one (64x), close to their geometric mean.
+const selfTestGrowthBound = 22
+
 func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		run        func(int)
+		smallSize  int
+		largeSize  int
+		rounds     int
 		wantLinear bool
 	}{
 		{
@@ -171,6 +177,9 @@ func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
 			run: func(size int) {
 				redact.Text(strings.Repeat("x", size))
 			},
+			smallSize:  1 << 13,
+			largeSize:  1 << 16,
+			rounds:     5,
 			wantLinear: true,
 		},
 		{
@@ -185,12 +194,16 @@ func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
 					}
 				}
 			},
+			smallSize:  1 << 12,
+			largeSize:  1 << 15,
+			rounds:     4,
 			wantLinear: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ratio := growthRatio(tc.run, 1024, 4096, 5)
-			gotLinear := ratio <= 10
+			ratio := growthRatio(tc.run, tc.smallSize, tc.largeSize, tc.rounds)
+			t.Logf("growth ratio %.2f (bound %d)", ratio, selfTestGrowthBound)
+			gotLinear := ratio <= selfTestGrowthBound
 			if gotLinear != tc.wantLinear {
 				t.Fatalf("growth ratio %.2f classified linear=%t, want %t", ratio, gotLinear, tc.wantLinear)
 			}
@@ -198,20 +211,22 @@ func TestLinearGrowthBoundRejectsQuadraticPattern(t *testing.T) {
 	}
 }
 
+// growthRatio returns the ratio of the fastest run at largeSize to the fastest
+// run at smallSize. Runs are interleaved after one warm-up pair so that a slow
+// phase of the machine hits both sizes, and the minimum drops scheduler noise.
 func growthRatio(run func(int), smallSize, largeSize, rounds int) float64 {
-	measure := func(size int) time.Duration {
-		samples := make([]time.Duration, rounds)
-		for i := range samples {
-			start := time.Now()
-			run(size)
-			samples[i] = time.Since(start)
-		}
-		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-		return samples[len(samples)/2]
+	run(smallSize)
+	run(largeSize)
+	small, large := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+	for range rounds {
+		start := time.Now()
+		run(smallSize)
+		small = min(small, time.Since(start))
+		start = time.Now()
+		run(largeSize)
+		large = min(large, time.Since(start))
 	}
-	small := measure(smallSize)
-	large := measure(largeSize)
-	if small == 0 {
+	if small <= 0 {
 		return math.Inf(1)
 	}
 	return float64(large) / float64(small)
