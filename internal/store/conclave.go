@@ -647,10 +647,7 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 		return refuseTurn(ctx, tx, room, conclaveDeadline, now, ErrConclavePaused, audit)
 	}
 	if limits.BudgetMissing {
-		if room.policy != nil {
-			return refuseTurn(ctx, tx, room, "budget_evidence_unavailable", now, ErrConclavePaused, audit)
-		}
-		return ErrConclavePaused
+		return refuseTurn(ctx, tx, room, "budget_evidence_unavailable", now, ErrConclavePaused, audit)
 	}
 	decree, count, err := conclaveMessageCount(ctx, tx, turn.id)
 	if err != nil {
@@ -664,10 +661,7 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 		return err
 	}
 	if reason != "" {
-		if room.policy != nil {
-			return refuseTurn(ctx, tx, room, reason, now, ErrConclavePaused, audit)
-		}
-		return ErrConclavePaused
+		return refuseTurn(ctx, tx, room, reason, now, ErrConclavePaused, audit)
 	}
 
 	runs, err := conclaveRunCount(ctx, tx, room)

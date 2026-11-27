@@ -727,6 +727,39 @@ func testWardTripsAuditedOnce(t *testing.T, st store.Store) {
 		}
 	})
 
+	// A plain room pauses and audits a turn Ward the same way a council does (ADR-0008).
+	t.Run("turn_plain_room_wards", func(t *testing.T) {
+		noBudget := baseLimits
+		noBudget.BudgetMissing = true
+		oneMessage := baseLimits
+		oneMessage.MaxMessages = 1
+		for _, tc := range []struct {
+			room, ward string
+			limits     store.ConclaveLimits
+		}{
+			{"ward-turn-budget", "budget_evidence_unavailable", noBudget},
+			{"ward-turn-messages", "max_messages_reached(1)", oneMessage},
+		} {
+			mkRoom(tc.room, 0)
+			if _, _, _, err := store.AppendConclavePost(ctx, st, domain.ConclaveMessage{
+				ConclaveID: tc.room, FromRole: "a", ToRole: "all", Kind: "proposal", Body: "hi", CreatedAt: now,
+			}, baseLimits, false, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, role := range []string{"b", "c"} {
+				if err := submitTurn(tc.room, turnTask(t, tc.room, role, 0), tc.limits); !errors.Is(err, store.ErrConclavePaused) {
+					t.Fatalf("%s turn %s = %v", tc.room, role, err)
+				}
+			}
+			if c := roomState(t, st, tc.room); c.State != domain.ConclaveStateInputRequired || c.WardReason != tc.ward {
+				t.Fatalf("%s after the turn Ward = %+v", tc.room, c)
+			}
+			if got := countRoomAudits(t, st, "conclave.ward", tc.room); len(got) != 1 || !strings.Contains(got[0].DetailJSON, fmt.Sprintf(`"ward":%q`, tc.ward)) {
+				t.Fatalf("%s ward audits = %+v", tc.room, got)
+			}
+		}
+	})
+
 	t.Run("claim_deadline", func(t *testing.T) {
 		mkRoom("ward-claim-deadline", 0)
 		claimA := turnTask(t, "ward-claim-deadline", "a", 0)
