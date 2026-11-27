@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/modelfamily"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
@@ -225,6 +226,82 @@ func TestVerdictAndFailureHandoffAndTiers(t *testing.T) {
 	prov, mod := ResolveTier(ctx, st, "critic")
 	if prov != "cli:agy" || mod != "claude-opus-5-5-high" {
 		t.Fatalf("expected cli:agy/claude-opus-5-5-high, got %s/%s", prov, mod)
+	}
+}
+
+// The shipped critic route runs a model family other than the coding route's,
+// so a default install can run a model verifier after a default author.
+func TestDefaultCriticFamilyDiffersFromCoding(t *testing.T) {
+	families := map[string]modelfamily.Family{}
+	for _, r := range DefaultModelTiers {
+		f, err := modelfamily.Classify(r.Model, r.Family)
+		if err != nil {
+			t.Fatalf("default %s route %s/%s: %v", r.Tier, r.Provider, r.Model, err)
+		}
+		families[r.Tier] = f
+	}
+	if families["critic"] == families["coding"] {
+		t.Fatalf("default critic family %q equals the coding family", families["critic"])
+	}
+}
+
+func TestSaveModelTiersFamily(t *testing.T) {
+	cases := []struct {
+		name       string
+		route      TierRoute
+		wantErr    string
+		wantFamily string
+	}{
+		{"no family", TierRoute{Tier: "critic", Provider: "cli:codex", Model: "gpt-6.2-astra"}, "", ""},
+		{"agreeing family", TierRoute{Tier: "critic", Provider: "cli:codex", Model: "gpt-6.2-astra", Family: "OpenAI"}, "", "openai"},
+		{"family for an unknown model", TierRoute{Tier: "fast", Provider: "local", Model: "llama-3.3-70b", Family: "meta"}, "", "meta"},
+		{"unknown model without family is stored", TierRoute{Tier: "fast", Provider: "local", Model: "llama-3.3-70b"}, "", ""},
+		{"family disagrees with the prefix", TierRoute{Tier: "critic", Provider: "cli:agy", Model: "claude-opus-5-5-high", Family: "google"}, "model_family_override_conflict", ""},
+		{"invalid family", TierRoute{Tier: "fast", Provider: "local", Model: "llama-3", Family: "my family"}, "model_family_override_invalid", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newTestStore(t)
+			err := SaveModelTiers(ctx, st, []TierRoute{tc.route})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("SaveModelTiers = %v, want %q", err, tc.wantErr)
+				}
+				for _, r := range GetModelTiers(ctx, st) {
+					if r.Tier == tc.route.Tier && r.Model == tc.route.Model {
+						t.Fatalf("refused route was stored: %+v", r)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SaveModelTiers: %v", err)
+			}
+			for _, r := range GetModelTiers(ctx, st) {
+				if r.Tier == tc.route.Tier {
+					if r.Model != tc.route.Model || r.Family != tc.wantFamily {
+						t.Fatalf("stored %+v, want model %q family %q", r, tc.route.Model, tc.wantFamily)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A refused route stops the whole save: no earlier route of the batch is written.
+func TestSaveModelTiersAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	err := SaveModelTiers(ctx, st, []TierRoute{
+		{Tier: "fast", Provider: "local", Model: "llama-3", Family: "meta"},
+		{Tier: "critic", Provider: "cli:codex", Model: "gpt-6.2-astra", Family: "anthropic"},
+	})
+	if err == nil {
+		t.Fatal("SaveModelTiers accepted a disagreeing family")
+	}
+	if p, m := ResolveTier(ctx, st, "fast"); p == "local" || m == "llama-3" {
+		t.Fatalf("fast route written before the refusal: %s/%s", p, m)
 	}
 }
 

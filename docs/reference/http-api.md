@@ -108,7 +108,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |
 | `GET /api/v1/providers/tiers` | The `fast`, `coding` and `critic` model routes. |
-| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model"}`. |
+| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model","family"}` (`family` optional); a malformed or disagreeing family returns 400 and saves nothing. |
 | `GET /api/v1/learnings` | Up to 100 learnings from Court Memory that match `?repo=` and `?path=` (a comma-separated list). |
 | `POST /api/v1/learnings` | Disabled: refuses every call ([ADR-0012](../adr/0012-learning-evidence-and-expiry.md)). |
 | `POST /api/v1/notify/test` | Send a test alert, with a redacted title and text, to the configured chat webhook (secret `notify_webhook_url`, or `SABLECOURT_NOTIFY_WEBHOOK_URL`). With no webhook configured nothing is sent and the reply is still 200 `{"status":"sent"}`; a failed send is 502. |

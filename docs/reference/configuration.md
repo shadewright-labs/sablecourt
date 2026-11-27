@@ -134,6 +134,32 @@ The `claude` and `agy` images carry no vendor tool; `sablectl harness install <r
 
 Image tags are `sablecourt-harness-<role>:<version>-<rev>` and `sablecourt-harness-proxy:<rev>` for the proxy image.
 
+## Model tiers and families
+
+Source: `internal/contextpack/tiers.go` and `internal/modelfamily/family.go`. A workflow step that names a tier and no `provider` or `model` resolves to one of these routes. `GET` and `POST /api/v1/providers/tiers` and the `/providers` page read and change them, and a saved route replaces the default for its tier.
+
+| Tier | Default provider | Default model | Family |
+| --- | --- | --- | --- |
+| `fast` | `cli:agy` | `gemini-3.8-flash-high` | `google` |
+| `coding` | `cli:claude` | `claude-sonnet-5-5` | `anthropic` |
+| `critic` | `cli:codex` | `gpt-6.2-astra` | `openai` |
+
+The default `critic` route runs a family other than the default `coding` route's, so a verifier step on the `critic` tier can check an author on the `coding` tier. A `coding-agent` workload runs one harness, so a verifier workload that uses the default `critic` route sets `coding.harness: codex`.
+
+The daemon assigns a family from the model name, never from the harness, because `agy` runs both Gemini and Claude models:
+
+| Model name | Family |
+| --- | --- |
+| starts with `claude-`, or is exactly `opus`, `sonnet` or `haiku` | `anthropic` |
+| starts with `gpt-`, `chatgpt-` or `codex-`, or is `o1`, `o3` or `o4` alone or followed by `-` and more | `openai` |
+| starts with `gemini-` | `google` |
+| `anthropic/claude-...` | `anthropic` |
+| `openai/gpt-...`, `openai/chatgpt-...`, or `openai/o` and one digit, alone or followed by `-` and more | `openai` |
+| `google/gemini-...` or `models/gemini-...` | `google` |
+| anything else, including any other path | unknown |
+
+Matching ignores case and surrounding spaces. Something must follow a prefix that ends in `-`, so `o10`, `o1x` and `claude-` stay unknown, and so does a name with a space, a character outside ASCII or a second `/`. A saved route may carry a `family` field for a model no rule matches, such as a local model or a gateway's model name. It must be one of `anthropic`, `openai`, `google`, `meta`, `mistral`, `deepseek`, `qwen`, `xai`, `cohere`, `microsoft` or `amazon`; `unknown` and any other label are refused. The built-in rules always win for the names they match, so `POST /api/v1/providers/tiers` refuses the whole request with 400, writing none of its routes, when a route's `family` disagrees with its model's built-in family (`model_family_override_conflict`) or is malformed (`model_family_override_invalid`). The `/providers` page shows and posts the family of each route. A model with no family stays unknown. Under the amendment of 2026-11-27 to [ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), an unknown family, or a family already in the run's chain, refuses a verifier step at dispatch; that dispatch check is not wired into the daemon yet ([issue 206](https://github.com/shadewright-labs/sablecourt/issues/206)).
+
 ## In depth
 
 - [Install and start](../how-to/install-and-start.md), [log in harnesses](../how-to/log-in-harnesses.md) and [harness containers](../how-it-works/harness-containers.md).

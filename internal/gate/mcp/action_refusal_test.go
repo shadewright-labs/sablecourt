@@ -103,7 +103,7 @@ func TestActionHandlerFailsClosedWithoutPolicyOrBundle(t *testing.T) {
 	gate, st, _, token := setupMCPGateTest(t)
 	bundle := gate.snapshot().bundle
 
-	gate.Reload(bundle, nil)
+	mustReload(t, gate, bundle, nil)
 	rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.open_pr", token, `{"payload":{}}`)
 	if rec.Code != http.StatusForbidden || errorText(t, rec) != "policy failed closed" {
 		t.Fatalf("nil policy: %d %s", rec.Code, rec.Body.String())
@@ -113,7 +113,7 @@ func TestActionHandlerFailsClosedWithoutPolicyOrBundle(t *testing.T) {
 		t.Fatal("no audit record for the missing policy engine")
 	}
 
-	gate.Reload(nil, policy.NewEngine(nil, nil))
+	mustReload(t, gate, nil, policy.NewEngine(nil, nil))
 	rec = postAction(t, gate.ActionHandler(), http.MethodPost, "/git.open_pr", token, `{"payload":{}}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(errorText(t, rec), "no workload bundle") {
 		t.Fatalf("nil bundle: %d %s", rec.Code, rec.Body.String())
@@ -188,7 +188,7 @@ func TestActionHandlerBreakerAndRedaction(t *testing.T) {
 	pol.Spec.Rules = append(pol.Spec.Rules, domain.PolicyRule{Workload: "triage-agent", Capability: "action:git.push", Effect: domain.EffectAllow})
 	breaker := policy.NewCircuitBreaker(2, time.Hour)
 	gate.breaker = breaker
-	gate.Reload(bundle, policy.NewEngine([]domain.Policy{pol}, breaker))
+	mustReload(t, gate, bundle, policy.NewEngine([]domain.Policy{pol}, breaker))
 
 	secretValue := "ghp_" + strings.Repeat("a1B2", 9)
 	fail := true
