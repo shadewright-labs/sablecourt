@@ -77,6 +77,15 @@ func (s *SQLiteStore) closeCouncil(ctx context.Context, id string, terminal doma
 	if err != nil {
 		return zero, err
 	}
+	if err := s.appendAuditTx(ctx, tx, domain.AuditRecord{
+		Category:   "conclave",
+		Action:     "conclave.close",
+		Outcome:    string(terminal),
+		DetailJSON: fmt.Sprintf(`{"conclave_id":%q}`, id),
+		CreatedAt:  r.CreatedAt,
+	}); err != nil {
+		return zero, err
+	}
 	if err := tx.Commit(); err != nil {
 		return zero, err
 	}

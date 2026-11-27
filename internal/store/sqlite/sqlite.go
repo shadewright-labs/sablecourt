@@ -189,7 +189,7 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 			return errors.New("council task requires a reserved attempt")
 		}
 		return err
-	})
+	}, s.appendAuditTx)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
@@ -276,7 +276,7 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 }
 
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
-	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, readCouncilPolicy, to, reason)
+	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, readCouncilPolicy, to, reason, s.appendAuditTx)
 	if err != nil {
 		return err
 	}
