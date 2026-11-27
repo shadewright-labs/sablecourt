@@ -114,14 +114,6 @@ func TestMutatingCommandsSendExactRequest(t *testing.T) {
 			wantOut:  []string{"approved apr/1"},
 		},
 		{
-			name:     "approve without digest sends empty digest",
-			args:     []string{"approval", "approve", "apr1"},
-			route:    "POST /api/v1/approvals/apr1/approve",
-			respBody: `{}`,
-			wantBody: `{"expectedSha256":""}`,
-			wantOut:  []string{"approved apr1"},
-		},
-		{
 			name:     "deny sends reason",
 			args:     []string{"approval", "deny", "apr1", "--reason", "too risky"},
 			route:    "POST /api/v1/approvals/apr1/deny",
@@ -399,6 +391,7 @@ func TestArgumentValidationSendsNoRequest(t *testing.T) {
 		{"memory delete missing key", []string{"memory", "delete", "ns"}, "accepts 2 arg(s)"},
 		{"relic get missing name", []string{"conclave", "relic", "get", "c1"}, "accepts 2 arg(s)"},
 		{"unknown digest flag spelling", []string{"approval", "approve", "a1", "--sha", "x"}, "unknown flag"},
+		{"approve without digest", []string{"approval", "approve", "a1"}, `required flag(s) "digest" not set`},
 		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1", "--digest", "d"}, "invalid daemon API URL"},
 		{"api url with user info", []string{"--api", "http://user:pass@example.com", "approval", "deny", "a1"}, "invalid daemon API URL"},
 	}
