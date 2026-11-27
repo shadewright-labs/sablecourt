@@ -4,7 +4,7 @@ A workload is something Sablecourt may launch. Its class decides which runtime a
 
 Status: partly built. The Kubernetes adapter is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md); suspend and resume are incomplete (tracking issue #14, see [tasks](tasks.md#known-gaps)).
 
-[![Inside the host, the daemon holds the MCP Gate, Model Gate and runtime adapters; a coding run sits in a macOS-only host sandbox, a long-lived agent and a controller run in containers on an internal network, the controller is refused at the Model Gate, and a Kubernetes adapter is parked.](../diagrams/runtime-isolation.svg)](../diagrams/runtime-isolation.svg "Open full size")
+[![Inside the host, the daemon holds the MCP Gate, Model Gate and runtime adapters; a coding run executes in a harness container on a per-launch internal network reaching the MCP Gate via its proxy, a long-lived agent and a controller run in containers on an internal network, the controller is refused at the Model Gate, and a Kubernetes adapter is parked.](../diagrams/runtime-isolation.svg)](../diagrams/runtime-isolation.svg "Open full size")
 
 ## Classes and zones
 

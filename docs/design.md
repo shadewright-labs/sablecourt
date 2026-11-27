@@ -192,7 +192,7 @@ Used for long-lived AI agents, sandbox workloads, and deterministic controllers.
 
 ### Coding agent runtime (`internal/runtime/coding`)
 
-Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter is the host path, which is unsupported for 0.1.0. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) runs coding tasks in harness containers only, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves them there; until it lands, the list below is what the code does today, on macOS only.
+Used for local `claude` (Claude Code) and `codex` (Codex) runs. Status: this adapter also launches the supported council containers; its non-container host path is unsupported for 0.1.0. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) runs coding tasks in harness containers only, and [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves them there; until it lands, the list below is what the code does today, on macOS only.
 
 - Creates a dedicated Git worktree per task on a deterministic branch name (`sablecourt/<task-id>`).
 - Launches the CLI inside a detached session host so restarting `sablecourtd` does not terminate active coding runs.
