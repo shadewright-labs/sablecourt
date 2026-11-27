@@ -12,6 +12,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -481,6 +482,27 @@ func TestCouncilLeaseRevokedOnTerminalObservationAndCappedAtDeadline(t *testing.
 		}
 		if lease.ExpiresAt.After(deadline) {
 			t.Fatalf("renewed lease expires at %v, after council deadline %v", lease.ExpiresAt, deadline)
+		}
+	})
+
+	t.Run("renewal extends the exact-match expiry of the task token", func(t *testing.T) {
+		ctx := t.Context()
+		r, st, task, adapter, _ := setupCouncilTask(t, 3*time.Hour)
+		// A value registered for the task that expires at once stands in for a
+		// token minted earlier than the renewal.
+		probe := "sc_task_probe_" + strings.Repeat("a", 40)
+		redact.RegisterOwnedUntil(task.ID, r.now().Add(time.Second), probe)
+		adapter.nextState = scruntime.StateRunning
+		if _, err := r.observeTask(ctx, task); err != nil {
+			t.Fatalf("observeTask running: %v", err)
+		}
+		lease, err := st.GetActiveLeaseByTokenHash(ctx, model.HashToken(adapter.lastSpec.TaskToken), r.now())
+		if err != nil {
+			t.Fatalf("expected active lease after renewal: %v", err)
+		}
+		got, ok := redact.DefaultRegistry().OwnedExpiry(task.ID)
+		if !ok || got.Before(lease.ExpiresAt) {
+			t.Fatalf("registry expiry %v is before the renewed lease expiry %v", got, lease.ExpiresAt)
 		}
 	})
 }

@@ -18,6 +18,7 @@ import (
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -463,5 +464,32 @@ func TestWardNotificationCancellation(t *testing.T) {
 	cancel()
 	if observed.Err() != context.Canceled {
 		t.Fatal("notification outlived the ward request")
+	}
+}
+
+func TestPutRelicRedactsRegisteredSecretInNameAndContentType(t *testing.T) {
+	ctx := context.Background()
+	st := brokerTestStore(t)
+	if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "room", State: domain.ConclaveStateActive}); err != nil {
+		t.Fatal(err)
+	}
+	held := "relic_meta_" + strings.Repeat("k9", 12)
+	redact.Register(held)
+	b := NewBroker(Options{Store: st})
+	relic, err := b.PutRelic(ctx, "room", "coder", "report-"+held, "text/"+held, "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(relic.Name, held) || strings.Contains(relic.ContentType, held) {
+		t.Fatalf("relic metadata kept a registered held: %q %q", relic.Name, relic.ContentType)
+	}
+	stored, err := st.ListConclaveRelics(ctx, "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range stored {
+		if strings.Contains(r.Name, held) || strings.Contains(r.ContentType, held) {
+			t.Fatalf("stored relic metadata kept a registered held: %q %q", r.Name, r.ContentType)
+		}
 	}
 }

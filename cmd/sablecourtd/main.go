@@ -1528,6 +1528,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		// A message stored before its text became a daemon-held secret is
+		// still redacted on the way out.
+		for i := range msgs {
+			msgs[i].Content = redact.DefaultRegistry().RedactExact(msgs[i].Content)
+		}
 		writeJSON(w, http.StatusOK, msgs)
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {

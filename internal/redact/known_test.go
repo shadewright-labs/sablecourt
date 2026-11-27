@@ -360,3 +360,44 @@ func TestRegistryBoundedUnderTokenChurn(t *testing.T) {
 		t.Fatalf("registry holds %d values after churn, want at most %d", n, limit)
 	}
 }
+
+// A heartbeat renews a task lease past its minted expiry. The token must stay
+// registered while the renewed lease is live, so ExtendOwned moves the expiry
+// of every value registered for that owner.
+func TestRegistryExtendOwnedKeepsRenewedLeaseRegistered(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	reg := NewRegistry()
+	reg.now = func() time.Time { return now }
+
+	token := synthSecret("sc_", "lease_", "renewed_0001")
+	other := synthSecret("sc_", "lease_", "other_0002")
+	reg.RegisterOwnedUntil("task-1", now.Add(time.Hour), token)
+	reg.RegisterOwnedUntil("task-2", now.Add(time.Hour), other)
+
+	// Renewals every few minutes keep task-1 alive for three hours.
+	for range 36 {
+		now = now.Add(5 * time.Minute)
+		reg.ExtendOwned("task-1", now.Add(time.Hour))
+	}
+	reg.Register(synthSecret("trigger", "_prune_", "0003"))
+	if got := reg.RedactString("x " + token); strings.Contains(got, token) {
+		t.Fatalf("renewed lease token was pruned while live: %q", got)
+	}
+	if got := reg.RedactString("x " + other); !strings.Contains(got, other) {
+		t.Fatalf("task-2 token should be pruned after its retention: %q", got)
+	}
+}
+
+// RedactExact must not touch text that holds no registered value, even when
+// pattern rules would rewrite it.
+func TestRegistryRedactExactLeavesOtherTextAlone(t *testing.T) {
+	reg := NewRegistry()
+	held := synthSecret("exact", "_only_", "value_0042")
+	reg.Register(held)
+	in := `{"body":"password=hunter2-value\"}","x":"` + held + `"}`
+	got := reg.RedactExact(in)
+	want := strings.Replace(in, held, KnownSecretMarker, 1)
+	if got != want {
+		t.Fatalf("RedactExact = %q, want %q", got, want)
+	}
+}

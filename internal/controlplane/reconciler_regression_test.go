@@ -15,6 +15,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -818,5 +819,26 @@ func TestCancelStopKeepsDeadlineAndAllowsSubmit(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("cancel did not finish")
+	}
+}
+
+// The launch input reaches the workload as SABLECOURT_INPUT_JSON. A value the
+// daemon holds must not travel inside it, whatever field it was submitted in.
+func TestLaunchInputRedactsRegisteredSecrets(t *testing.T) {
+	r, _, _, task := regressionFixture(t)
+	secret := "launch_input_" + strings.Repeat("z4", 12)
+	redact.Register(secret)
+	task.InputJSON = `{"prompt":"deploy with ` + secret + `","extra":"` + secret + `"}`
+	wl := r.bundle.Workloads["worker"]
+	wl.Spec.Class = domain.ClassLongLivedAgent
+	a := &fakeAdapter{}
+	if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(a.lastSpec.InputJSON, secret) {
+		t.Fatalf("launch input carries a registered secret: %s", a.lastSpec.InputJSON)
+	}
+	if !json.Valid([]byte(a.lastSpec.InputJSON)) {
+		t.Fatalf("launch input is no longer JSON: %s", a.lastSpec.InputJSON)
 	}
 }

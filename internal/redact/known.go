@@ -56,6 +56,18 @@ func RegisterUntil(expiresAt time.Time, values ...string) {
 	defaultRegistry.RegisterUntil(expiresAt, values...)
 }
 
+// RegisterOwnedUntil is RegisterUntil with an owner key (a task ID), so a later
+// ExtendOwned can move the expiry when the owner's lease is renewed.
+func RegisterOwnedUntil(owner string, expiresAt time.Time, values ...string) {
+	defaultRegistry.RegisterOwnedUntil(owner, expiresAt, values...)
+}
+
+// ExtendOwned moves the expiry of every expiring value registered for owner to
+// expiresAt when that is later than the current one.
+func ExtendOwned(owner string, expiresAt time.Time) {
+	defaultRegistry.ExtendOwned(owner, expiresAt)
+}
+
 // RegisterBytes adds binary secret material (raw, hex, and base64 encodings)
 // to the default registry.
 func RegisterBytes(values ...[]byte) {
@@ -80,6 +92,7 @@ type Registry struct {
 // until means the value never expires.
 type registryEntry struct {
 	until    time.Time
+	owner    string
 	patterns []string
 }
 
@@ -132,7 +145,54 @@ func (r *Registry) RegisterUntil(expiresAt time.Time, values ...string) {
 	r.register(expiresAt, values)
 }
 
+// RegisterOwnedUntil records values like RegisterUntil and tags them with owner.
+func (r *Registry) RegisterOwnedUntil(owner string, expiresAt time.Time, values ...string) {
+	if expiresAt.IsZero() {
+		return
+	}
+	r.registerOwned(owner, expiresAt, values)
+}
+
+// ExtendOwned moves the expiry of every expiring value registered for owner to
+// expiresAt when that is later than the current one. Values registered without
+// an expiry are left alone.
+func (r *Registry) ExtendOwned(owner string, expiresAt time.Time) {
+	if r == nil || owner == "" || expiresAt.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for v, e := range r.entries {
+		if e.owner == owner && !e.until.IsZero() && expiresAt.After(e.until) {
+			e.until = expiresAt
+			r.entries[v] = e
+		}
+	}
+}
+
+// OwnedExpiry reports the earliest expiry among the expiring values registered
+// for owner. It exposes no value.
+func (r *Registry) OwnedExpiry(owner string) (time.Time, bool) {
+	if r == nil || owner == "" {
+		return time.Time{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var earliest time.Time
+	found := false
+	for _, e := range r.entries {
+		if e.owner == owner && !e.until.IsZero() && (!found || e.until.Before(earliest)) {
+			earliest, found = e.until, true
+		}
+	}
+	return earliest, found
+}
+
 func (r *Registry) register(until time.Time, values []string) {
+	r.registerOwned("", until, values)
+}
+
+func (r *Registry) registerOwned(owner string, until time.Time, values []string) {
 	if r == nil || len(values) == 0 {
 		return
 	}
@@ -162,7 +222,7 @@ func (r *Registry) register(until time.Time, values []string) {
 			}
 			continue
 		}
-		r.entries[v] = registryEntry{until: until, patterns: derivePatterns(v)}
+		r.entries[v] = registryEntry{until: until, owner: owner, patterns: derivePatterns(v)}
 		changed = true
 	}
 	if changed {
@@ -252,6 +312,19 @@ func (r *Registry) RedactText(input string) Result {
 // RedactString redacts exact registered secrets first, then applies pattern rules.
 func (r *Registry) RedactString(input string) string {
 	return r.RedactText(input).Text
+}
+
+// RedactExact replaces only exact registered secrets and leaves every other byte
+// of input unchanged. Use it where pattern rules would rewrite structured text.
+func (r *Registry) RedactExact(input string) string {
+	if r == nil || input == "" {
+		return input
+	}
+	if m := r.matcher.Load(); m != nil {
+		out, _ := m.redactString(input)
+		return out
+	}
+	return input
 }
 
 // ContainsSensitive reports whether input matches any registered secret or pattern rule.

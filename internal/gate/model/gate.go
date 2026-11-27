@@ -146,7 +146,7 @@ func MintTaskTokenUntil(ctx context.Context, st store.Store, taskID, workloadNam
 		return "", fmt.Errorf("generate task token: %w", err)
 	}
 	token := TokenPrefix + hex.EncodeToString(raw[:])
-	redact.RegisterUntil(expiresAt, token)
+	redact.RegisterOwnedUntil(taskID, expiresAt, token)
 	lease := domain.Lease{
 		TokenSHA256:  HashToken(token),
 		TaskID:       taskID,

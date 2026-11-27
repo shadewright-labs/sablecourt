@@ -498,13 +498,14 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 }
 
 func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body string) (domain.ConclaveRelic, error) {
-	name = strings.TrimSpace(name)
+	name = redact.String(strings.TrimSpace(name))
 	if name == "" {
 		return domain.ConclaveRelic{}, errors.New("relic name is required")
 	}
 	if contentType == "" {
 		contentType = "text/plain"
 	}
+	contentType = redact.String(contentType)
 	redacted := redact.String(body)
 	sum := sha256.Sum256([]byte(redacted))
 	return domain.ConclaveRelic{

@@ -27,6 +27,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
@@ -1100,5 +1101,26 @@ func TestAPIApproveRefusesMalformedBody(t *testing.T) {
 	}
 	if got, _ := env.st.GetApproval(context.Background(), apr.ID); got.Status != domain.ApprovalPending {
 		t.Fatalf("malformed approval body decided the approval: %q", got.Status)
+	}
+}
+
+// A message stored before a value became a daemon-held secret must still be
+// redacted when the workload reads its task messages.
+func TestGateTaskMessagesRedactsRegisteredSecrets(t *testing.T) {
+	ctx := context.Background()
+	st := daemonTestStore(t)
+	addMessageTestLease(t, st)
+	secret := "stored_message_" + strings.Repeat("m3", 12)
+	if err := st.AppendTaskMessage(ctx, domain.TaskMessage{TaskID: "task", Role: "user", Content: "use " + secret, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	redact.Register(secret)
+	h := newHandler(st, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gate/task/messages", nil)
+	req.Header.Set("Authorization", "Bearer test-task-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
 	}
 }

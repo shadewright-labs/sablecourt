@@ -272,7 +272,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		dec.DisallowUnknownFields()
 		var req actionRequest
 		if err := dec.Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + redact.String(err.Error())})
 			return
 		}
 

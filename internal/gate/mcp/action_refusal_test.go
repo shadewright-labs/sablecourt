@@ -13,6 +13,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 func postAction(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -233,5 +234,20 @@ func TestActionHandlerBreakerAndRedaction(t *testing.T) {
 		if strings.Contains(r.DetailJSON, secretValue) {
 			t.Fatalf("audit record leaked the credential: %s", r.DetailJSON)
 		}
+	}
+}
+
+// The decoder error names an unknown request field. A workload must not be able
+// to turn that into an echo path for a daemon-held secret it can guess.
+func TestActionRefusalRedactsRegisteredSecretInFieldName(t *testing.T) {
+	gate, _, _, token := setupMCPGateTest(t)
+	secret := "refusal_field_" + strings.Repeat("q7", 12)
+	redact.Register(secret)
+	rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.open_pr", token, `{"payload":{},"`+secret+`":1}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("refusal echoed a registered secret: %s", rec.Body.String())
 	}
 }
