@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -141,12 +142,66 @@ func (gh *GitHubPROpener) doGitHubGET(ctx context.Context, endpoint, token strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, fmt.Errorf("github API returned HTTP %d", resp.StatusCode)
+		var body struct {
+			Message string `json:"message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body)
+		return resp.StatusCode, &githubAPIError{Code: resp.StatusCode, Message: strings.TrimSpace(body.Message)}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 		return resp.StatusCode, err
 	}
 	return resp.StatusCode, nil
+}
+
+// githubAPIError is a non-2xx answer of the GitHub API with its message.
+type githubAPIError struct {
+	Code    int
+	Message string
+}
+
+func (e *githubAPIError) Error() string {
+	return fmt.Sprintf("github API returned HTTP %d", e.Code)
+}
+
+const (
+	// githubPerPage is the largest page GitHub serves for check runs and
+	// commit statuses.
+	githubPerPage = 100
+	// githubMaxPages bounds the pages read for one list; a longer list is
+	// refused rather than read in part.
+	githubMaxPages = 10
+)
+
+// getAllPages reads every page of a GitHub list endpoint that reports
+// total_count. It fails closed: a missing total_count, a page error, a list
+// longer than githubMaxPages pages, or fewer items than total_count is an
+// error, never a shorter list.
+func getAllPages[T any](ctx context.Context, gh *GitHubPROpener, endpoint, token string, cli *http.Client, items func(page *T) (total *int, n int)) error {
+	read := 0
+	for page := 1; ; page++ {
+		if page > githubMaxPages {
+			return fmt.Errorf("more than %d items; refusing a partial list", githubPerPage*githubMaxPages)
+		}
+		var p T
+		if _, err := gh.doGitHubGET(ctx, fmt.Sprintf("%s?per_page=%d&page=%d", endpoint, githubPerPage, page), token, cli, &p); err != nil {
+			return err
+		}
+		total, n := items(&p)
+		if total == nil || *total < 0 {
+			return errors.New("response carries no total_count")
+		}
+		read += n
+		if read >= *total {
+			if read > *total {
+				return fmt.Errorf("read %d items, total_count is %d", read, *total)
+			}
+			return nil
+		}
+		if n == 0 {
+			return fmt.Errorf("read %d of %d items", read, *total)
+		}
+	}
 }
 
 func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRCheckReport, error) {
@@ -178,40 +233,46 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 		return PRCheckReport{}, errors.New("pull request head SHA is invalid")
 	}
 
-	var checkRuns struct {
-		CheckRuns []struct {
+	// Every page of check runs and of commit statuses is read; any error or
+	// short list refuses the whole report instead of leaving checks out.
+	type checkRunsPage struct {
+		TotalCount *int `json:"total_count"`
+		CheckRuns  []struct {
 			Name        string    `json:"name"`
 			Status      string    `json:"status"`
 			Conclusion  string    `json:"conclusion"`
 			CompletedAt time.Time `json:"completed_at"`
 		} `json:"check_runs"`
 	}
+	var checks []CheckRunState
 	runsURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", apiBase, owner, repo, url.PathEscape(headSHA))
-	if _, err := gh.doGitHubGET(ctx, runsURL, token, cli, &checkRuns); err != nil {
+	if err := getAllPages(ctx, gh, runsURL, token, cli, func(p *checkRunsPage) (*int, int) {
+		for _, r := range p.CheckRuns {
+			checks = append(checks, CheckRunState{
+				Name:        redact.String(strings.TrimSpace(r.Name)),
+				Status:      strings.ToLower(strings.TrimSpace(r.Status)),
+				Conclusion:  strings.ToLower(strings.TrimSpace(r.Conclusion)),
+				CompletedAt: r.CompletedAt.UTC(),
+			})
+		}
+		return p.TotalCount, len(p.CheckRuns)
+	}); err != nil {
 		return PRCheckReport{}, fmt.Errorf("fetch check runs: %w", err)
 	}
 
-	var checks []CheckRunState
-	for _, r := range checkRuns.CheckRuns {
-		checks = append(checks, CheckRunState{
-			Name:        redact.String(strings.TrimSpace(r.Name)),
-			Status:      strings.ToLower(strings.TrimSpace(r.Status)),
-			Conclusion:  strings.ToLower(strings.TrimSpace(r.Conclusion)),
-			CompletedAt: r.CompletedAt.UTC(),
-		})
-	}
-
-	// Also read legacy commit statuses if present (best-effort on 404).
-	var commitStatus struct {
-		Statuses []struct {
+	// Commit statuses: a commit without any answers 200 with an empty list,
+	// so a 404 (which GitHub also returns without read access) is an error.
+	type statusPage struct {
+		TotalCount *int `json:"total_count"`
+		Statuses   []struct {
 			Context   string    `json:"context"`
 			State     string    `json:"state"`
 			UpdatedAt time.Time `json:"updated_at"`
 		} `json:"statuses"`
 	}
 	statusURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status", apiBase, owner, repo, url.PathEscape(headSHA))
-	if code, err := gh.doGitHubGET(ctx, statusURL, token, cli, &commitStatus); err == nil {
-		for _, s := range commitStatus.Statuses {
+	if err := getAllPages(ctx, gh, statusURL, token, cli, func(p *statusPage) (*int, int) {
+		for _, s := range p.Statuses {
 			st, concl := normalizeCommitStatus(s.State)
 			cs := CheckRunState{
 				Name:       redact.String(strings.TrimSpace(s.Context)),
@@ -223,11 +284,14 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 			}
 			checks = append(checks, cs)
 		}
-	} else if code != http.StatusNotFound {
+		return p.TotalCount, len(p.Statuses)
+	}); err != nil {
 		return PRCheckReport{}, fmt.Errorf("fetch commit status: %w", err)
 	}
 
-	// Read branch protection required status checks when accessible.
+	// Required status checks of the base branch. GitHub answers 404 with
+	// one of noRequiredChecksMessages when the branch has none; any other
+	// error, a 403 or a 404 without access among them, refuses the report.
 	var required []string
 	if strings.TrimSpace(pr.Base.Ref) != "" {
 		var prot struct {
@@ -237,7 +301,7 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 			} `json:"checks"`
 		}
 		protURL := fmt.Sprintf("%s/repos/%s/%s/branches/%s/protection/required_status_checks", apiBase, owner, repo, url.PathEscape(pr.Base.Ref))
-		if code, err := gh.doGitHubGET(ctx, protURL, token, cli, &prot); err == nil {
+		if _, err := gh.doGitHubGET(ctx, protURL, token, cli, &prot); err == nil {
 			seen := make(map[string]bool)
 			for _, c := range prot.Contexts {
 				c = strings.TrimSpace(c)
@@ -253,7 +317,7 @@ func (gh *GitHubPROpener) CheckPR(ctx context.Context, in PRChecksInput) (PRChec
 					required = append(required, name)
 				}
 			}
-		} else if code != http.StatusNotFound && code != http.StatusForbidden {
+		} else if !isNoRequiredChecks(err) {
 			return PRCheckReport{}, fmt.Errorf("fetch required status checks: %w", err)
 		}
 	}
@@ -330,6 +394,23 @@ func (gh *GitHubPROpener) MergePR(ctx context.Context, req MergePRRequest) (Merg
 	}, nil
 }
 
+// noRequiredChecksMessages are the 404 messages with which GitHub says a
+// branch has no required status checks.
+var noRequiredChecksMessages = []string{"Branch not protected", "Required status checks not enabled"}
+
+func isNoRequiredChecks(err error) bool {
+	var apiErr *githubAPIError
+	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
+		return false
+	}
+	for _, m := range noRequiredChecksMessages {
+		if apiErr.Message == m {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeCommitStatus(state string) (status, conclusion string) {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "success":
@@ -371,7 +452,10 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 		return
 	}
 
-	var hasFailing, hasPending, hasMissing bool
+	// hasNoTime: an evaluated check passed without a completion time. The
+	// age of the approval cannot be compared with it, so it is missing
+	// evidence even when another check has a time.
+	var hasFailing, hasPending, hasMissing, hasNoTime bool
 	if len(report.RequiredChecks) > 0 {
 		reqSet := make(map[string]bool, len(report.RequiredChecks))
 		for _, name := range report.RequiredChecks {
@@ -394,10 +478,13 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 				continue
 			}
 			for _, c := range matched {
-				if c.Status != "completed" {
+				switch {
+				case c.Status != "completed":
 					hasPending = true
-				} else if c.Conclusion != "success" {
+				case c.Conclusion != "success":
 					hasFailing = true
+				case c.CompletedAt.IsZero():
+					hasNoTime = true
 				}
 			}
 		}
@@ -408,10 +495,13 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 			return
 		}
 		for _, c := range report.Checks {
-			if c.Status != "completed" {
+			switch {
+			case c.Status != "completed":
 				hasPending = true
-			} else if c.Conclusion != "success" {
+			case c.Conclusion != "success":
 				hasFailing = true
+			case c.CompletedAt.IsZero():
+				hasNoTime = true
 			}
 		}
 	}
@@ -428,6 +518,10 @@ func evaluatePRChecks(report *PRCheckReport, now time.Time) {
 	case hasMissing:
 		report.AllRequiredPass = false
 		report.Summary = "missing_required"
+		return
+	case hasNoTime:
+		report.AllRequiredPass = false
+		report.Summary = "missing_result_time"
 		return
 	}
 
@@ -636,6 +730,9 @@ func checkMergeReady(ctx context.Context, g *Gate, checker PRChecker, wl domain.
 	}
 	if report.HeadSHA != in.CommitSHA {
 		return PRCheckReport{}, newActionError(http.StatusConflict, "commit_mismatch", "pull request head commit does not match the approved commit_sha")
+	}
+	if report.Summary == "missing_result_time" {
+		return PRCheckReport{}, newActionError(http.StatusConflict, "checks_missing_result_time", "cannot merge pull request: a passing check carries no completion time")
 	}
 	if !report.AllRequiredPass || report.Summary != "passing" {
 		return PRCheckReport{}, newActionError(http.StatusConflict, "checks_"+report.Summary, fmt.Sprintf("cannot merge pull request: required checks are %s", report.Summary))

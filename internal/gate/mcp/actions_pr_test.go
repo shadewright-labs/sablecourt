@@ -28,6 +28,7 @@ type fakePRBackend struct {
 	checkErr      error
 	mergeErr      error
 	mergeCalls    int
+	checkCalls    int
 	lastMerge     MergePRRequest
 }
 
@@ -40,6 +41,7 @@ func (f *fakePRBackend) OpenPR(_ context.Context, in OpenPRInput) (string, error
 }
 
 func (f *fakePRBackend) CheckPR(_ context.Context, _ PRChecksInput) (PRCheckReport, error) {
+	f.checkCalls++
 	if f.checkErr != nil {
 		return PRCheckReport{}, f.checkErr
 	}
@@ -580,12 +582,13 @@ func TestGitHubPROpenerCheckAndMergeHTTPClient(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/app/commits/"+sha+"/check-runs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 1,
 				"check_runs": []map[string]string{
 					{"name": "ci-ok", "status": "completed", "conclusion": "success", "completed_at": "2026-11-27T13:00:00Z"},
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/app/commits/"+sha+"/status":
-			_ = json.NewEncoder(w).Encode(map[string]any{"statuses": []any{}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 0, "statuses": []any{}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/app/branches/main/protection/required_status_checks":
 			_ = json.NewEncoder(w).Encode(map[string]any{"contexts": []string{"ci-ok"}})
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/org/app/pulls/7/merge":

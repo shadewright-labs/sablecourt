@@ -113,7 +113,7 @@ func TestGitPushApprovedFlowAndCommitPinning(t *testing.T) {
 			Class:   domain.ClassCodingAgent,
 			Runtime: domain.RuntimeConfig{Type: "worktree-cli"},
 			Coding:  &domain.CodingConfig{Harness: "claude", RepoPath: repoDir},
-			Grants:  domain.GrantSet{Actions: []string{"git.push"}},
+			Grants:  domain.GrantSet{Actions: []string{"git.push"}, Repos: []string{bareDir}},
 		},
 	}
 	// Even with policy allow, git.push catalog requires out-of-band approval.
@@ -218,7 +218,7 @@ func TestGitPushRefusesCommitChangeAfterApproval(t *testing.T) {
 			Class:   domain.ClassCodingAgent,
 			Runtime: domain.RuntimeConfig{Type: "worktree-cli"},
 			Coding:  &domain.CodingConfig{Harness: "claude", RepoPath: repoDir},
-			Grants:  domain.GrantSet{Actions: []string{"git.push"}},
+			Grants:  domain.GrantSet{Actions: []string{"git.push"}, Repos: []string{bareDir}},
 		},
 	}
 	gate, _, queue, token := setupGitPushGate(t, repoDir, wl, domain.EffectApprove, nil)
@@ -257,7 +257,7 @@ func TestGitPushRefusesCommitChangeAfterApproval(t *testing.T) {
 
 func TestGitPushRefusalPaths(t *testing.T) {
 	branch := "sablecourt/task-push-1"
-	repoDir, _, commitSHA := initGitRepoWithBareRemote(t, branch)
+	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 	runGit(t, repoDir, "branch", "sablecourt/other-task")
 
 	coderWL := domain.Workload{
@@ -266,7 +266,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			Class:   domain.ClassCodingAgent,
 			Runtime: domain.RuntimeConfig{Type: "worktree-cli"},
 			Coding:  &domain.CodingConfig{Harness: "claude", RepoPath: repoDir},
-			Grants:  domain.GrantSet{Actions: []string{"git.push"}},
+			Grants:  domain.GrantSet{Actions: []string{"git.push"}, Repos: []string{bareDir}},
 		},
 	}
 	ungrantedRepoWL := domain.Workload{

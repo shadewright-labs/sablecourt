@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -31,9 +33,14 @@ type PushBranchInput struct {
 	Repo      string `json:"repo,omitempty"`
 }
 
+// PushBranchRequest is a push the gate has checked. URL is the push URL of
+// Remote as git resolved it when the request was checked (pushurl and
+// pushInsteadOf applied); the push goes to that URL, not to the remote name,
+// so a later change of the repository's configuration cannot redirect it.
 type PushBranchRequest struct {
 	RepoDir string
 	Remote  string
+	URL     string
 	Branch  string
 	Commit  string
 }
@@ -50,8 +57,8 @@ type BranchPusher interface {
 	PushBranch(ctx context.Context, req PushBranchRequest) (PushBranchResult, error)
 }
 
-// GitBranchPusher pushes a verified commit to a configured git remote without
-// exposing upstream credentials to workloads or process arguments.
+// GitBranchPusher pushes a verified commit object to a checked push URL
+// without exposing upstream credentials to workloads or process arguments.
 type GitBranchPusher struct {
 	Secrets secret.SecretStore
 }
@@ -78,40 +85,63 @@ func (p *GitBranchPusher) PushBranch(ctx context.Context, req PushBranchRequest)
 		return PushBranchResult{}, newActionError(http.StatusConflict, "commit_mismatch", "branch HEAD does not match the approved commit_sha")
 	}
 
-	remoteURL, err := getRemoteURL(ctx, req.RepoDir, req.Remote)
+	pushURL := strings.TrimSpace(req.URL)
+	if pushURL == "" || strings.HasPrefix(pushURL, "-") || strings.ContainsAny(pushURL, "\r\n") {
+		return PushBranchResult{}, newActionError(http.StatusForbidden, "unknown_target", "no checked push URL")
+	}
+	var token string
+	if p != nil && p.Secrets != nil {
+		if tok, err := p.Secrets.Get(ctx, "github_token"); err == nil {
+			token = strings.TrimSpace(tok)
+		}
+	}
+	pushURL, authEnv := githubPushAuth(pushURL, token)
+
+	objectsDir, err := gitObjectsDir(ctx, req.RepoDir)
 	if err != nil {
-		return PushBranchResult{}, newActionError(http.StatusForbidden, "unknown_target", "unknown remote target")
+		return PushBranchResult{}, err
+	}
+	// The push runs from an empty bare repository of the gate's own that
+	// borrows the task repository's objects. It has no refs, so the commit_sha
+	// in the refspec can only be read as that object, and no configuration of
+	// the task repository (remotes, pushurl, insteadOf, hooks) applies to it.
+	pushDir, err := os.MkdirTemp("", "sablecourt-push-")
+	if err != nil {
+		return PushBranchResult{}, err
+	}
+	defer func() { _ = os.RemoveAll(pushDir) }()
+	env := []string{
+		"PATH=/Library/Developer/CommandLineTools/usr/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	initCmd := exec.CommandContext(ctx, "git", "init", "--quiet", "--bare", "--template=", "--", pushDir)
+	initCmd.Env = env
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		return PushBranchResult{}, fmt.Errorf("prepare push repository: %w (%s)", err, redact.String(strings.TrimSpace(string(out))))
+	}
+	if err := os.MkdirAll(filepath.Join(pushDir, "objects", "info"), 0o700); err != nil {
+		return PushBranchResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(pushDir, "objects", "info", "alternates"), []byte(objectsDir+"\n"), 0o600); err != nil {
+		return PushBranchResult{}, err
 	}
 
 	refspec := req.Commit + ":refs/heads/" + req.Branch
 	cmd := exec.CommandContext(ctx, "git",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "protocol.ext.allow=never",
-		"-C", req.RepoDir,
-		"push", "--no-verify", "--", req.Remote, refspec,
+		"-c", "http.followRedirects=false",
+		"-C", pushDir,
+		"push", "--no-verify", "--", pushURL, refspec,
 	)
-
-	env := []string{
-		"PATH=/Library/Developer/CommandLineTools/usr/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
-		"GIT_TERMINAL_PROMPT=0",
-	}
-	var rawSecrets []string
-	if isGitHubHTTPSURL(remoteURL) && p != nil && p.Secrets != nil {
-		token, err := p.Secrets.Get(ctx, "github_token")
-		if err == nil && strings.TrimSpace(token) != "" {
-			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-			rawSecrets = append(rawSecrets, token, basic)
-			env = append(env,
-				"GIT_CONFIG_COUNT=1",
-				"GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
-				"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic,
-			)
-		}
-	}
-	cmd.Env = env
+	cmd.Env = append(slices.Clone(env), authEnv...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		var rawSecrets []string
+		if token != "" {
+			rawSecrets = append(rawSecrets, token, base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+		}
 		clean := sanitizeSecrets(strings.TrimSpace(string(out)), rawSecrets)
 		return PushBranchResult{}, fmt.Errorf("git push failed: %w (%s)", err, redact.String(clean))
 	}
@@ -152,7 +182,7 @@ func resolvePushRequest(ctx context.Context, g *Gate, defaultRepoRoot string, wl
 	if in.Branch != expectedBranch {
 		return PushBranchRequest{}, newActionError(http.StatusForbidden, "wrong_branch", fmt.Sprintf("branch %q is not this task's branch", in.Branch))
 	}
-	repoDir, err := resolveGrantedRepoDir(ctx, defaultRepoRoot, wl, remote, in.Repo)
+	repoDir, pushURL, err := resolveGrantedRepoDir(ctx, defaultRepoRoot, g.snapshotFromContext(ctx).allowedRepo, wl, remote, in.Repo)
 	if err != nil {
 		return PushBranchRequest{}, err
 	}
@@ -166,16 +196,25 @@ func resolvePushRequest(ctx context.Context, g *Gate, defaultRepoRoot string, wl
 	return PushBranchRequest{
 		RepoDir: repoDir,
 		Remote:  remote,
+		URL:     pushURL,
 		Branch:  in.Branch,
 		Commit:  in.CommitSHA,
 	}, nil
 }
 
-func resolveGrantedRepoDir(ctx context.Context, defaultRepoRoot string, wl domain.Workload, remote, requestedRepo string) (string, error) {
+// resolveGrantedRepoDir returns the repository and the URL a push to remote
+// goes to, refusing unless both are granted. The URL is the remote's push URL
+// as git resolves it (pushurl and pushInsteadOf applied) and must be a single
+// URL. It is a granted target when an entry of grants.repos names it (the
+// same URL, the same absolute local path, or owner/repo of a GitHub URL with
+// its scheme and host checked), or, for origin, when it is the GitHub
+// repository pinned at start. A path grant names the local repository, not
+// where it pushes to.
+func resolveGrantedRepoDir(ctx context.Context, defaultRepoRoot, pinnedRepo string, wl domain.Workload, remote, requestedRepo string) (string, string, error) {
 	hasCodingRepo := wl.Spec.Coding != nil && strings.TrimSpace(wl.Spec.Coding.RepoPath) != ""
 	hasRepoGrants := len(wl.Spec.Grants.Repos) > 0
 	if !hasCodingRepo && !hasRepoGrants {
-		return "", newActionError(http.StatusForbidden, "unknown_target", "workload has no granted repository")
+		return "", "", newActionError(http.StatusForbidden, "unknown_target", "workload has no granted repository")
 	}
 
 	repoDir := strings.TrimSpace(defaultRepoRoot)
@@ -183,33 +222,30 @@ func resolveGrantedRepoDir(ctx context.Context, defaultRepoRoot string, wl domai
 		repoDir = strings.TrimSpace(wl.Spec.Coding.RepoPath)
 	}
 	if repoDir == "" {
-		return "", newActionError(http.StatusForbidden, "unknown_target", "repository root not configured for git.push")
+		return "", "", newActionError(http.StatusForbidden, "unknown_target", "repository root not configured for git.push")
 	}
 
-	remoteURL, err := getRemoteURL(ctx, repoDir, remote)
+	pushURL, err := getPushURL(ctx, repoDir, remote)
 	if err != nil {
-		return "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("unknown remote %q in granted repository", remote))
+		return "", "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("unknown remote %q in granted repository: %v", remote, err))
 	}
-	remoteSlug := parseRepoSlug(remoteURL)
 
-	if hasRepoGrants && !matchesAnyRepoGrant(wl.Spec.Grants.Repos, repoDir, remoteURL, remoteSlug) {
-		return "", newActionError(http.StatusForbidden, "unknown_target", "target repository is not in workload grants.repos")
+	if hasRepoGrants && !matchesAnyRepoGrant(wl.Spec.Grants.Repos, repoDir, pushURL) {
+		return "", "", newActionError(http.StatusForbidden, "unknown_target", "target repository is not in workload grants.repos")
 	}
-	// The granted repository's own remote is origin. Any other remote must be
-	// named by URL or owner/repo in grants.repos; a path grant names the local
-	// repository, not where it pushes to.
-	if remote != "origin" && !matchesAnyRemoteGrant(wl.Spec.Grants.Repos, remoteURL, remoteSlug) {
-		return "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("remote %q is not a granted push target", remote))
+	pinnedTarget := remote == "origin" && pinnedRepo != "" && githubSlug(pushURL) != "" && strings.EqualFold(githubSlug(pushURL), pinnedRepo)
+	if !pinnedTarget && !matchesAnyRemoteGrant(wl.Spec.Grants.Repos, pushURL) {
+		return "", "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("the push URL of remote %q is not a granted push target", remote))
 	}
 	if requestedRepo != "" {
-		if !matchesRepoTarget(requestedRepo, repoDir, remoteURL, remoteSlug) {
-			return "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("repository %q does not match granted repository", requestedRepo))
+		if !matchesRepoTarget(requestedRepo, repoDir, pushURL) {
+			return "", "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("repository %q does not match granted repository", requestedRepo))
 		}
-		if hasRepoGrants && !matchesAnyRepoGrant(wl.Spec.Grants.Repos, requestedRepo, requestedRepo, parseRepoSlug(requestedRepo)) {
-			return "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("repository %q is not granted", requestedRepo))
+		if hasRepoGrants && !slices.ContainsFunc(wl.Spec.Grants.Repos, func(g string) bool { return sameRepoName(g, requestedRepo) }) {
+			return "", "", newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("repository %q is not granted", requestedRepo))
 		}
 	}
-	return repoDir, nil
+	return repoDir, pushURL, nil
 }
 
 func expectedTaskBranch(ctx context.Context, st store.Store, taskID string) string {
@@ -269,18 +305,68 @@ func validateSafeRemote(remote string) error {
 	return nil
 }
 
-func getRemoteURL(ctx context.Context, repoDir, remote string) (string, error) {
+// getPushURL returns the single URL git would push to for remote, with
+// pushurl and pushInsteadOf applied. A remote with several push URLs is
+// refused.
+func getPushURL(ctx context.Context, repoDir, remote string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "protocol.ext.allow=never",
 		"-C", repoDir,
-		"remote", "get-url", "--", remote,
+		"remote", "get-url", "--push", "--all", "--", remote,
 	)
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", errors.New("remote not found")
 	}
-	return strings.TrimSpace(string(out)), nil
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 1 || strings.TrimSpace(lines[0]) == "" {
+		return "", errors.New("remote must have exactly one push URL")
+	}
+	return strings.TrimSpace(lines[0]), nil
+}
+
+// gitObjectsDir returns the absolute object directory of the repository,
+// shared by all its worktrees.
+func gitObjectsDir(ctx context.Context, repoDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git",
+		"-c", "core.hooksPath=/dev/null",
+		"-C", repoDir,
+		"rev-parse", "--path-format=absolute", "--git-common-dir",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("read the repository's git directory")
+	}
+	dir := filepath.Join(strings.TrimSpace(string(out)), "objects")
+	if !filepath.IsAbs(dir) || strings.ContainsAny(dir, "\r\n") {
+		return "", errors.New("repository object directory is not an absolute path")
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return "", errors.New("repository object directory not found")
+	}
+	return dir, nil
+}
+
+// githubPushAuth returns the URL to push to and the git configuration that
+// carries the token. Only an https URL of a github.com repository gets the
+// token, and only for that repository: the URL is rewritten to its canonical
+// form and the header is scoped to exactly it.
+func githubPushAuth(pushURL, token string) (string, []string) {
+	if token == "" || !isGitHubHTTPSURL(pushURL) {
+		return pushURL, nil
+	}
+	owner, repo, ok := parseGitHubRemote(pushURL)
+	if !ok {
+		return pushURL, nil
+	}
+	canonical := "https://github.com/" + owner + "/" + repo + ".git"
+	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	return canonical, []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http." + canonical + ".extraHeader",
+		"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + basic,
+	}
 }
 
 func resolveBranchCommit(ctx context.Context, repoDir, branch string) (string, error) {
@@ -302,24 +388,68 @@ func resolveBranchCommit(ctx context.Context, repoDir, branch string) (string, e
 	return sha, nil
 }
 
-func parseRepoSlug(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
+// githubSlug returns the lower-case owner/repo of a GitHub remote URL, with
+// its scheme and host checked, or "" for any other URL.
+func githubSlug(raw string) string {
+	owner, repo, ok := parseGitHubRemote(strings.TrimSpace(raw))
+	if !ok {
 		return ""
 	}
-	// SSH form: git@github.com:owner/repo.git
-	if idx := strings.Index(s, ":"); idx > 0 && !strings.Contains(s[:idx], "/") && strings.Contains(s[:idx], "@") {
-		path := strings.TrimPrefix(s[idx+1:], "/")
-		return normalizeOwnerRepo(path)
-	}
+	return strings.ToLower(owner + "/" + repo)
+}
+
+// isPlainOwnerRepo reports whether s is written as owner/repo, not as a URL.
+func isPlainOwnerRepo(s string) bool {
+	return !strings.ContainsAny(s, ":@") && !strings.HasPrefix(s, "/") && normalizeOwnerRepo(s) != ""
+}
+
+// isRemoteURL reports whether git reads s as a URL (scheme://, or the
+// scp-like host:path form) rather than as a local path.
+func isRemoteURL(s string) bool {
 	if strings.Contains(s, "://") {
+		return true
+	}
+	colon := strings.Index(s, ":")
+	return colon > 0 && !strings.Contains(s[:colon], "/")
+}
+
+// localPath returns the absolute local path s names (a path or a file://
+// URL), or "".
+func localPath(s string) string {
+	if strings.HasPrefix(s, "file://") {
 		u, err := url.Parse(s)
-		if err != nil {
+		if err != nil || u.Host != "" {
 			return ""
 		}
-		return normalizeOwnerRepo(strings.TrimPrefix(u.Path, "/"))
+		s = u.Path
+	} else if isRemoteURL(s) {
+		return ""
 	}
-	return normalizeOwnerRepo(s)
+	if !filepath.IsAbs(s) {
+		return ""
+	}
+	return s
+}
+
+// sameRepoTarget reports whether a grant (or requested repository) names the
+// push URL target: owner/repo of a GitHub URL, a GitHub URL of the same
+// repository, the same non-local URL, or the same absolute local path.
+func sameRepoTarget(name, target string) bool {
+	name, target = strings.TrimSpace(name), strings.TrimSpace(target)
+	if name == "" || target == "" {
+		return false
+	}
+	if slug := githubSlug(target); slug != "" {
+		if isPlainOwnerRepo(name) {
+			return normalizeOwnerRepo(name) == slug
+		}
+		return githubSlug(name) == slug
+	}
+	if isRemoteURL(target) {
+		return name == target
+	}
+	a, b := localPath(name), localPath(target)
+	return a != "" && b != "" && sameCanonicalPath(a, b)
 }
 
 func normalizeOwnerRepo(path string) string {
@@ -372,42 +502,38 @@ func sameCanonicalPath(a, b string) bool {
 	return errA == nil && errB == nil && realA == realB
 }
 
-func matchesRepoTarget(candidate, repoDir, remoteURL, remoteSlug string) bool {
+// sameRepoName reports whether two repository names (owner/repo, URL or
+// absolute path) name the same repository.
+func sameRepoName(a, b string) bool {
+	if isPlainOwnerRepo(a) && isPlainOwnerRepo(b) {
+		return normalizeOwnerRepo(a) == normalizeOwnerRepo(b)
+	}
+	return sameRepoTarget(a, b) || sameRepoTarget(b, a)
+}
+
+func matchesRepoTarget(candidate, repoDir, pushURL string) bool {
 	cand := strings.TrimSpace(candidate)
 	if cand == "" {
 		return false
 	}
-	if candSlug := normalizeOwnerRepo(cand); candSlug != "" && remoteSlug != "" && candSlug == remoteSlug {
+	if sameRepoTarget(cand, pushURL) {
 		return true
 	}
-	if cand == remoteURL {
-		return true
-	}
-	if sameCanonicalPath(cand, repoDir) || sameCanonicalPath(cand, remoteURL) {
-		return true
-	}
-	return false
+	return localPath(cand) != "" && sameCanonicalPath(cand, repoDir)
 }
 
-func matchesAnyRepoGrant(grants []string, repoDir, remoteURL, remoteSlug string) bool {
+func matchesAnyRepoGrant(grants []string, repoDir, pushURL string) bool {
 	for _, grant := range grants {
-		if matchesRepoTarget(grant, repoDir, remoteURL, remoteSlug) {
+		if matchesRepoTarget(grant, repoDir, pushURL) {
 			return true
 		}
 	}
 	return false
 }
 
-func matchesAnyRemoteGrant(grants []string, remoteURL, remoteSlug string) bool {
+func matchesAnyRemoteGrant(grants []string, pushURL string) bool {
 	for _, grant := range grants {
-		g := strings.TrimSpace(grant)
-		if g == "" {
-			continue
-		}
-		if g == remoteURL {
-			return true
-		}
-		if slug := normalizeOwnerRepo(g); slug != "" && remoteSlug != "" && slug == remoteSlug {
+		if sameRepoTarget(grant, pushURL) {
 			return true
 		}
 	}

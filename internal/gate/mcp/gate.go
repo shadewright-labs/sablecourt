@@ -41,8 +41,10 @@ type ActionFunc func(ctx context.Context, workload domain.Workload, taskID strin
 //
 // requiresApproval makes the catalog ask for an out-of-band approval even when
 // policy allows the capability. precheck, when set, checks live state for the
-// decoded value before an approval is requested or spent; run checks it again,
-// because state can change while the approval waits.
+// decoded value before an approval is requested (and before run on an allowed
+// request); it does not run on a request that presents an approval. run checks
+// the live state again after the approval is spent, because state can change
+// while the approval waits.
 type actionDef struct {
 	decode           func(raw json.RawMessage) (any, error)
 	precheck         func(ctx context.Context, workload domain.Workload, taskID string, value any) error
@@ -475,11 +477,21 @@ func (g *Gate) ActionHandler() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
 			return
 		}
-		// Live state is checked before an approval is requested or spent, so
-		// the operator is never asked to approve an action that would be
-		// refused now (for git.merge_pr: before its checks have passed).
-		if def.precheck != nil && (decision.Effect == domain.EffectApprove || decision.Effect == domain.EffectAllow) {
+		// Live state is checked before an approval is requested, so the
+		// operator is never asked to approve an action that would be refused
+		// now (for git.merge_pr: before its checks have passed). A request that
+		// presents an approval skips this step: the approval is spent first,
+		// and the action's run step checks the live state again right before
+		// its side effect, so drift after the approval still spends it, and an
+		// approval that does not authorize the request reads nothing.
+		precheckNow := (decision.Effect == domain.EffectApprove && req.ApprovalID == "") || decision.Effect == domain.EffectAllow
+		if def.precheck != nil && precheckNow {
 			if err := def.precheck(ctx, ac.Workload, ac.Lease.TaskID, value); err != nil {
+				// On an allowed request a target refused at the check counts on
+				// the breaker, like one refused when the action runs.
+				if decision.Effect == domain.EffectAllow && g.breaker != nil {
+					g.breaker.RecordFailure(capability)
+				}
 				if errors.Is(err, errToolRefused) {
 					status, reason := refusalOf(err)
 					auditAction("denied", map[string]any{"reason": reason, "error": redact.String(err.Error())})

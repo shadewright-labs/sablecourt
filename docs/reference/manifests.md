@@ -56,7 +56,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
-| `spec.grants.repos` | list of strings | no | Granted repositories (`owner/repo` or canonical path) for GitOps actions such as `git.push` and `git.merge_pr`. |
+| `spec.grants.repos` | list of strings | no | Granted repositories (`owner/repo`, URL or absolute path) for GitOps actions such as `git.push` and `git.merge_pr`. `owner/repo` matches only a GitHub URL. A `git.push` target must be listed here unless it is `origin` at the repository pinned at start. |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
 
 ### Upstream MCP server (parked)
