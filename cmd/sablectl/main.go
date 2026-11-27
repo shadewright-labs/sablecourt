@@ -72,7 +72,7 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 
 	validateCmd := &cobra.Command{
 		Use:   "validate <path>",
-		Short: "Validate Git-tracked Sablecourt YAML manifests",
+		Short: "Validate Sablecourt YAML manifests",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bundle, err := config.LoadPath(args[0])
@@ -373,7 +373,7 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 
 	applyCmd := &cobra.Command{
 		Use:   "apply",
-		Short: "Reload Git-tracked manifests in a running sablecourtd instance",
+		Short: "Reload manifests in a running sablecourtd instance",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, base := httpClient(10 * time.Second)
 			body, err := fetchPOST(cli, base+"/api/v1/reload", map[string]string{})

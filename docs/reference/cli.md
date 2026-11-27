@@ -1,10 +1,10 @@
 # CLI reference
 
-The command-line programs: `sablectl` talks to a running daemon over its HTTP API, `sablecourtd` is the daemon, and `sablecourt-agent` is the agent loop that runs inside a Workload.
+The command-line programs: `sablectl` is the client: most commands call a running daemon over its HTTP API (or its Unix socket with `--socket`), and a few, such as `init` and `validate`, run locally; `sablecourtd` is the daemon, and `sablecourt-agent` is the agent loop that runs inside a Workload.
 
 Status: built.
 
-The `sablectl` and `sablecourtd` sections are generated from the command trees in `cmd/sablectl` and `cmd/sablecourtd` by `make docs`, and `go test ./...` fails when they are stale. They list every visible command with its short help and the flags it defines, with type and default. A flag is listed once, on the command that defines it; persistent flags of `sablectl` apply to every command below it. Hidden commands (cobra's `__complete` and `__completeNoDesc`), deprecated flags and the `-h`, `--help` flag that every command has are left out. Run `sablectl <command> --help` for the same text.
+The `sablectl` and `sablecourtd` sections are generated from the command trees in `cmd/sablectl` and `cmd/sablecourtd` by `make docs`, and `go test ./...` fails when they are stale. They list every visible command with its short help and the flags it defines, with type and default. A flag is listed once, on the command that defines it; persistent flags of `sablectl` apply to every command below it. Hidden and deprecated commands (cobra's `__complete` and `__completeNoDesc` among them), hidden and deprecated flags and the `--help` flag that every command has are left out. `sablectl <command> --help` prints cobra's own help for the command.
 
 ## Operator token
 
@@ -29,7 +29,7 @@ Groups the commands below; it does nothing on its own.
 
 ### `sablectl apply`
 
-Reload Git-tracked manifests in a running sablecourtd instance
+Reload manifests in a running sablecourtd instance
 
 No flags of its own.
 
@@ -281,7 +281,7 @@ No flags of its own.
 
 ### `sablectl harness build <role>`
 
-Build a pinned harness image and its proxy locally
+Build a pinned harness image and its proxy
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -526,7 +526,7 @@ No flags of its own.
 
 ### `sablectl validate <path>`
 
-Validate Git-tracked Sablecourt YAML manifests
+Validate Sablecourt YAML manifests
 
 No flags of its own.
 
@@ -594,7 +594,7 @@ Sablecourt local-first and enterprise Kubernetes control plane daemon
 | `--k8s-runtime-class` | string | empty | Optional Kubernetes RuntimeClassName (e.g. gvisor, kata) |
 | `--kubeconfig` | string | empty | Optional kubeconfig path when --runtime=k8s |
 | `--listen` | string | `127.0.0.1:7432` | HTTP listen address |
-| `--manifests` | string | empty | Path to Git-tracked YAML manifests file or directory |
+| `--manifests` | string | empty | Path to a YAML manifest file or a directory of YAML manifests |
 | `--manifests-git-branch` | string | `main` | Branch for --manifests-git-repo |
 | `--manifests-git-interval` | duration | `1m0s` | Poll interval for --manifests-git-repo |
 | `--manifests-git-repo` | string | empty | Optional Git repository URL to sync manifests from automatically |

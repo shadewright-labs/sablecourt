@@ -8,7 +8,7 @@ Status: partly built. Device pairing is switched off (issue #5) and an approval 
 
 | Change | Path |
 | --- | --- |
-| Manifests, policies, code, promotion of a workload to the runtime zone | Git branch, pull request, checks, human merge ([ADR-0005](../adr/0005-dual-path-human-in-the-loop.md)). No workload may change its own policy. |
+| Manifests, policies, code, promotion of a workload to the runtime zone | Git branch, pull request, checks, human merge ([ADR-0005](../adr/0005-dual-path-human-in-the-loop.md)). The policy engine denies any capability that starts with `policy:`, `secret:` or `rbac:`. |
 | A single bounded action whose policy effect is `approve` | The runtime approval queue, described here. |
 
 ## The life of an approval
@@ -17,7 +17,7 @@ Status: partly built. Device pairing is switched off (issue #5) and an approval 
 
 [![An approval exchange between workload, MCP Gate, Approval Queue and person, ending with the repeated call that runs the action.](../diagrams/approval-sequence.svg)](../diagrams/approval-sequence.svg "Open full size")
 
-1. The gate canonicalizes the payload: it decodes the JSON and encodes it again with Go's encoder, so object keys are sorted and there is no extra whitespace. The SHA-256 of those bytes is the digest. The approval stores the canonical JSON, the digest, the task, the workload, the capability and an expiry 15 minutes ahead. The queue appends an `approval` audit row (`pending`) and sends a notification when a notifier is configured.
+1. The gate canonicalizes the payload: it decodes the JSON and encodes it again with Go's encoder, so object keys are sorted and there is no extra whitespace. The SHA-256 of those bytes is the digest. The approval stores the canonical JSON, the digest, the task, the workload, the capability and an expiry 15 minutes ahead. After the approval is stored, the queue tries to append an `approval` audit row (`pending`), and the daemon tries to send a notification when a notifier is configured. A failure of either does not fail the request.
 2. The task moves from `working` to `input-required`. The reconciler returns it to `working` when every approval of that task is decided and none is pending, whether approved, denied or expired. It marks a pending approval past its expiry as `expired` on its next pass.
 3. The operator approves with `sablectl approval approve <id>`, the web UI, or `POST /api/v1/approvals/{id}/approve`. The queue refuses a non-pending or expired approval, and a supplied `expectedSha256` that differs from the stored digest. It then asks the approver to confirm.
 4. On macOS the approver runs `/usr/bin/osascript` with the message as an argument, with no shell. The dialog shows workload, capability, task, the first 16 characters of the digest and the first 220 characters of the canonical payload, with buttons Deny (default) and Approve. It waits up to 60 seconds. A cancel, a timeout, a failure or a different operating system confirms nothing. The proof records the method, the time and the digest, and a changed digest is refused.
@@ -27,7 +27,7 @@ Denying needs only an operator credential: `sablectl approval deny <id> --reason
 
 ## What a session may and may not do
 
-An operator session or token can list approvals, deny them, and ask for confirmation. It cannot approve by itself: the approval is stored only after the dialog proof. A same-user local process that posts to the approve route only makes the dialog appear. The workload holds a task lease, which does not reach `/api/v1/approvals`.
+An operator session or token can list approvals, deny them, and ask for confirmation. It cannot approve by itself: the approve route stores an approval only after the dialog proof, or after a valid signature from an enrolled device (see Devices; none can be enrolled now). A same-user local process that posts to the approve route without a signature only makes the dialog appear. The workload holds a task lease, which does not reach `/api/v1/approvals`.
 
 ## Devices
 

@@ -128,7 +128,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().StringVar(&modelGatewayURL, "model-gateway-url", "", "Optional upstream AI gateway URL (e.g. agentgateway or Agent Router)")
 	rootCmd.Flags().StringVar(&dbPath, "db", "sablecourt.db", "SQLite database path")
 	rootCmd.Flags().StringVar(&postgresDSN, "postgres-dsn", "", "Optional Postgres DSN (or set SABLECOURT_POSTGRES_DSN) instead of SQLite")
-	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to Git-tracked YAML manifests file or directory")
+	rootCmd.Flags().StringVar(&manifestsPath, "manifests", "", "Path to a YAML manifest file or a directory of YAML manifests")
 	rootCmd.Flags().StringVar(&manifestsGitRepo, "manifests-git-repo", "", "Optional Git repository URL to sync manifests from automatically")
 	rootCmd.Flags().StringVar(&manifestsGitBranch, "manifests-git-branch", "main", "Branch for --manifests-git-repo")
 	rootCmd.Flags().DurationVar(&manifestsGitInterval, "manifests-git-interval", 60*time.Second, "Poll interval for --manifests-git-repo")

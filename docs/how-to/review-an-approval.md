@@ -5,7 +5,7 @@ Look at a pending approval, check what it pins, and approve or deny it. Approvin
 ## Before you start
 
 - The daemon runs and you can sign in (`sablectl` reads the operator token; the web UI uses the login page).
-- The daemon host is macOS. On Linux there is no approver, so approving fails and you can only deny.
+- The daemon host is macOS. On another system the approver refuses every confirmation, so approving fails and you can only deny.
 - A task is in state `input-required` because a workload called an action whose policy effect is `approve`.
 
 ## Steps
@@ -47,7 +47,7 @@ The web UI does the same from the dashboard: each pending approval has Approve a
 ## Check it worked
 
 - `sablectl approval list` no longer shows the approval.
-- `sablectl task inspect <task-id>` shows the task back in `working` (event `approval_decided`) within a few seconds, and then the workload repeats its call.
+- `sablectl task inspect <task-id>` shows the task back in `working` (event `approval_decided`) after the reconciler's next pass over it, and then the workload repeats its call.
 - `sablectl audit tail` shows an `approval` row with outcome `approved` or `denied`.
 
 ## If it fails

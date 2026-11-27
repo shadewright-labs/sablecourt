@@ -1,8 +1,8 @@
 # Tools and actions
 
-The MCP Gate (also called the Data and Action Gate) serves the tools a workload is granted and runs a small closed set of typed actions, after the policy engine has said yes. It is the only way a workload reads Court Memory or changes anything outside its own checkout.
+The MCP Gate (also called the Data and Action Gate) serves the tools a workload is granted and runs a small closed set of typed actions, after the policy engine has said yes. A workload reads Court Memory on demand through its tools and asks for a change outside its own checkout through its actions; the daemon also puts a context packet into the task input.
 
-Status: built. The upstream MCP bridge is built and parked by [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md). Several faults are known and tracked in issue #9 (see [Known gaps](#known-gaps)).
+Status: built. Several faults are known and tracked in issue #9 (see [Known gaps](#known-gaps)).
 
 ## Two routes
 
@@ -33,11 +33,11 @@ Each action that fails records a failure for its capability; three in a row open
 
 ## Redaction
 
-`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. It does not run on tool arguments or on Model Gate bodies.
+`internal/redact` replaces private keys, Sablecourt tokens, Anthropic, OpenAI, GitHub, Google and AWS keys, bearer headers and secret-looking `key: value` pairs, in linear time. The gate applies it to every tool and action result and to error messages, Court Memory writes redact their value, and the coding adapter redacts task input. The gate hands tool arguments to the handler unchanged, so redaction of an argument is up to the handler: the memory tools redact the values they store or put in an audit row, and the Conclave tools redact message and Relic bodies. It does not run on Model Gate request or response bodies.
 
 ## Audit rows
 
-The gate appends a row, category `data_action_gate`, for each denial, error and allowed call, for an unknown action and for an approval mismatch; the memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. A tool call that returns `approval_required` writes nothing in the gate itself.
+Once the lease and the request envelope are accepted, the gate appends a row, category `data_action_gate`, for a policy denial, a handler error or refusal, an allowed call, an unknown action and an approval mismatch. Requests that fail the lease check or the envelope check (401, 403, 400, 413, 503) write no gate row, and neither does a failure to queue an approval. The memory tools add rows in category `memory`, including refusals of reserved namespaces. Creating an approval writes a row in category `approval`. A tool call that returns `approval_required` writes nothing in the gate itself.
 
 ## Known gaps
 
@@ -51,7 +51,7 @@ What the code does today, where it falls short of the design.
 
 ## Not built yet
 
-- Parked by ADR-0011: upstream MCP servers (`grants.mcpServers`) are bridged with an injected secret and a 4 MiB response cap, but are not part of the current scope.
+- Upstream MCP servers (`grants.mcpServers`) are built, but ADR-0011 puts them outside the current scope. At start-up and on reload the daemon registers, for each server with a name and a URL, each non-blank tool of `allowedTools` as `<name>.<tool>`. Registration is daemon-wide: a workload sees a tool only when its own `mcpTools` grant holds the full name, and the policy engine decides each call. The bridge adds the server's secret on the way out and reads at most 4 MiB of a response.
 
 ## In depth
 

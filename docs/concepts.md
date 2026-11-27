@@ -4,7 +4,7 @@ The nouns Sablecourt uses, where each one lives (a manifest, the store, a runtim
 
 [![Manifests and operator calls enter sablecourtd; the control plane launches workloads through runtimes with a task lease, workloads call the in-process gates with that lease, and both the control plane and gates record to the store and its SHA-256 audit chain.](diagrams/concepts-map.svg)](diagrams/concepts-map.svg "Open full size")
 
-The daemon (`sablecourtd`) reads manifests, keeps tasks in the store and launches workloads through a runtime. A workload reaches models, tools and approvals through a gate, with a lease the daemon minted for that task. The one exception is council inference, which runs on each harness's own subscription login (see below). The gates run inside the daemon process. The gates, the reconciler, the Conclave broker and the approval queue append most decisions to the audit chain, but not all: an ordinary dispatch of a task is recorded as a task event only. The whole picture is the [system context diagram](how-it-works/index.md).
+The daemon (`sablecourtd`) reads manifests, keeps tasks in the store and launches workloads through a runtime. A container workload reaches models, tools and approvals through a gate, with a lease the daemon minted for that task. A coding agent that runs on the host gets the lease and the Data Gate address in its environment, but nothing forces its model traffic through the Model Gate: its sandbox profile allows outbound network, and the harness calls its provider itself. Council inference runs on each harness's own subscription login (see below). The gates run inside the daemon process. The gates, the reconciler, the Conclave broker and the approval queue append most decisions to the audit chain, but not all: an ordinary dispatch of a task is recorded as a task event only. The whole picture is the [system context diagram](how-it-works/index.md).
 
 ## Manifests
 
@@ -14,7 +14,7 @@ Declared intent is written as YAML manifests with `apiVersion: sablecourt.io/v1a
 
 ## Workload, class and zone
 
-Status: built, except the Kubernetes runtime (built, parked by ADR-0011).
+Status: built. The Kubernetes runtime is used only with `--runtime k8s` or `--mode citadel`.
 
 [![Matrix of the three workload classes and the sandbox zone showing each adapter, Model Gate access (never for deterministic controllers, not injected by the coding adapter), MCP tool access, and runtime-only action and delegation grants.](diagrams/workload-class-zone.svg)](diagrams/workload-class-zone.svg "Open full size")
 
@@ -22,7 +22,7 @@ A workload is a unit that Sablecourt may launch. Its `class` is one of three:
 
 - `coding-agent`: a coding CLI harness (`claude`, `codex` or `agy`) in a Git worktree. It needs a `coding` block with the harness and `repoPath`.
 - `long-lived-agent`: a stateful agent in a container.
-- `deterministic-controller`: a non-model program in a container. The loader refuses a model grant on it.
+- `deterministic-controller`: a non-model program in a container. The loader refuses a workload of this class whose `modelGate.allowed` is true.
 
 Its `runtime.type` is `docker` (which needs an image) or `worktree-cli`. The coding adapter passes the MCP Gate address and task lease in the environment, not the Model Gate address; the Docker adapter passes both when a Model Gate grant is declared, and the controller adapter refuses a launch with any Model Gate grant or address. Its `zone` is `runtime` or `sandbox`. A sandbox workload cannot hold `actions` or `delegateTo` grants, and the policy engine denies it any `action:` or `delegate:` capability. It also cannot message a runtime-zone Vassal. Moving a workload from sandbox to runtime is a change to its manifest that goes through Git review; `sablectl promote` asks the daemon to create the Git branch `sablecourt/promote-<name>` and does not change the zone. The names `claude`, `codex` and `agy` are reserved for the built-in council panel. See [workloads and runtimes](how-it-works/workloads-and-runtimes.md).
 
@@ -32,7 +32,7 @@ Status: built.
 
 [![One tool or action call: fixed checks for forbidden prefixes, sandbox zone, workload grant and circuit breaker, then policy rules leading to the handler, the Approval Queue or a denial.](diagrams/policy-decision.svg)](diagrams/policy-decision.svg "Open full size")
 
-A grant on a workload names what it may ask for: the Model Gate (`modelGate.allowed`, `providers`, and a `budgetRef` that is required when the grant is allowed), MCP tools, typed actions and delegation targets. A policy decides each request against those grants. A `Policy` has rules of `workload`, `capability` and `effect` (`allow`, `approve` or `deny`), and its `defaultEffect` must be `deny`. Evaluation is deterministic: a capability the workload has no grant for is denied, an explicit `deny` wins over `approve`, `approve` wins over `allow`, and no matching rule means deny. Capabilities starting with `policy:`, `secret:` or `rbac:` are always denied, and a tripped circuit breaker on a mutating action denies the call. Model output never changes any of this (invariant 1). See [tools and actions](how-it-works/tools-and-actions.md).
+A grant on a workload names what it may ask for: the Model Gate (`modelGate.allowed`, `providers`, and a `budgetRef` that is required when the grant is allowed), MCP tools, typed actions and delegation targets. A policy decides each MCP tool call, typed action and delegation request against those grants; the Model Gate checks the grant and the budget itself and does not evaluate policy rules. A `Policy` has rules of `workload`, `capability` and `effect` (`allow`, `approve` or `deny`), and its `defaultEffect` must be `deny`. Evaluation is deterministic: a capability the workload has no grant for is denied, an explicit `deny` wins over `approve`, `approve` wins over `allow`, and no matching rule means deny. Capabilities starting with `policy:`, `secret:` or `rbac:` are always denied, and a tripped circuit breaker on a mutating action denies the call. Model output never changes any of this (invariant 1). See [tools and actions](how-it-works/tools-and-actions.md).
 
 ## Task, state and reconciler
 
@@ -48,7 +48,7 @@ Status: built.
 
 [![Lifecycle of a task lease: the reconciler mints a one-hour token and stores its SHA-256 hash, the workload presents it to the Model Gate and MCP Gate, heartbeats renew it while running, and revocation or expiry causes gates to deny calls with 401.](diagrams/lease-lifecycle.svg)](diagrams/lease-lifecycle.svg "Open full size")
 
-A lease is the identity a workload holds: a bearer token `sc_task_` plus 64 hex characters, bound to one task and workload. The store keeps only its SHA-256 hash. It lasts one hour (shorter near a council deadline), is renewed for one hour on each running heartbeat (capped at any council deadline), and is revoked when the task ends or is suspended. The runtime hands the token to the workload in an environment variable or on standard input; both the Model Gate and the MCP Gate hash the bearer token and check for an active lease in the store, refusing missing, expired or revoked tokens with 401. The workload never holds a provider key, a Git credential or the operator token (invariant 2); the one exception is in ADR-0011, below. See [tasks](how-it-works/tasks.md) and [model gate](how-it-works/model-gate.md).
+A lease is the identity a workload holds: a bearer token `sc_task_` plus 64 hex characters, bound to one task and workload. The store keeps only its SHA-256 hash. It lasts one hour (shorter near a council deadline), is renewed to one hour past each fresh observation of the running workload (capped at any council deadline), and is revoked when the task ends or is suspended. The runtime hands the token to the workload in an environment variable or on standard input; both the Model Gate and the MCP Gate hash the bearer token and check for an active lease in the store, refusing missing, expired or revoked tokens with 401. The workload never holds a provider key, a Git credential or the operator token (invariant 2); the one exception is in ADR-0011, below. See [tasks](how-it-works/tasks.md) and [model gate](how-it-works/model-gate.md).
 
 ## Gates and approvals
 
@@ -64,15 +64,15 @@ Status: built (faults in #8).
 
 [![Model Gate budget flow: estimate and reserve tokens and cost in the store for 15 minutes, deny with 429 or 403 if exhausted or invalid, otherwise forward to the provider and settle on 2xx or release on non-2xx.](diagrams/budget-flow.svg)](diagrams/budget-flow.svg "Open full size")
 
-A `Budget` has per-task limits (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`) and a daily `maxCostUSD`, and at least one limit must be positive. `maxInputTokens` counts uncached input, cache write and cache read tokens together; cost includes provider cache write and cache read rates, falling back to the input rate when no separate cache rate is configured. The Model Gate reserves an estimate of tokens and cost from the request for 15 minutes before forwarding it, refusing the call with 429 when a limit is reached or exceeded. It settles with the usage the provider reports, or with the reserved estimate when a successful response reports none. It releases the reservation when the upstream status is not 2xx or the call fails. A task proposed as a child carries its own ceiling of the three per-task limits, which the Model Gate checks as well, and a child without a valid ceiling is denied with 403. The daily limit is counted per workload. Inference that a subscription harness runs on its own login is outside this accounting (ADR-0011). See [model gate](how-it-works/model-gate.md).
+A `Budget` has per-task limits (`maxInputTokens`, `maxOutputTokens`, `maxCostUSD`) and a daily `maxCostUSD`, and at least one limit must be positive. `maxInputTokens` counts uncached input, cache write and cache read tokens together; cost includes provider cache write and cache read rates, falling back to the input rate when no separate cache rate is configured. The Model Gate reserves an estimate of tokens and cost from the request for 15 minutes before forwarding it, refusing the call with 429 when a limit is reached or exceeded. It settles a 2xx response with the usage the provider reports, and at no less than the reserved estimate when the usage is missing, unreadable, all zero or only partial. It releases the reservation when the upstream status is not 2xx or the call fails; if recording a 2xx settlement fails, the reservation stays until its 15 minutes pass. A task proposed as a child carries its own ceiling of the three per-task limits, which the Model Gate checks as well, and a child without a valid ceiling is denied with 403. The daily limit is counted per workload. Inference that a subscription harness runs on its own login is outside this accounting (ADR-0011). See [model gate](how-it-works/model-gate.md).
 
 ## Conclave and the terms around it
 
-Status: built. Voice and live Takeover are parked.
+Status: built.
 
 [![States of a Conclave: active moves to input-required when a Ward trips, a Decree resumes it, and close or stop ends the room in completed or cancelled.](diagrams/conclave-states.svg)](diagrams/conclave-states.svg "Open full size")
 
-A Conclave is a room where several workloads, called Vassals, work on one topic. Each Vassal has a `role`, a `workload`, an `activation` and a `canMessage` list. An `always-on` Vassal is launched once when the room opens; an `on-mention` Vassal is launched when another member addresses it. Wards are limits: `maxRuns`, `maxMessages` and `maxPingPong` (the last two default to twice the number of Vassals when unset, `maxRuns` to 6 and never above 6), plus the budget in `spec.budgetRef`. A tripped Ward moves the room to `input-required`. The operator steers with a Decree, and Vassals and the operator share named, redacted Relics. A room is `active`, `input-required`, `completed` or `cancelled`. See [Conclaves](how-it-works/conclaves.md).
+A Conclave is a room where several workloads, called Vassals, work on one topic. Each Vassal has a `role`, a `workload`, an `activation` and a `canMessage` list. An `always-on` Vassal is launched once when the room opens; an `on-mention` Vassal is launched when another member addresses it or addresses `all`. Wards are limits: `maxRuns`, `maxMessages` and `maxPingPong` (the last two default to twice the number of Vassals when unset, `maxRuns` to 6 and never above 6), plus the budget in `spec.budgetRef`. A room opened from a template also has a 15-minute wall time. A tripped Ward moves the room to `input-required`, and a Decree cannot resume a room paused at that deadline. The operator steers with a Decree, and Vassals and the operator share named, redacted Relics. A room is `active`, `input-required`, `completed` or `cancelled`. See [Conclaves](how-it-works/conclaves.md).
 
 ## Council and harness
 
@@ -80,7 +80,7 @@ Status: partly built (#28, #36, #80 open).
 
 [![States of one council turn: reserved moves to running when the harness starts, to recorded on a clean exit with a final message, or to failed with retries back to reserved while starts remain.](diagrams/council-turn-states.svg)](diagrams/council-turn-states.svg "Open full size")
 
-A council is a Conclave of the harnesses `claude`, `codex` and `agy` (all three by default, a subset with `--with`) that answer one question in bounded rounds (two by default, `--rounds`). `sablectl council` opens it through the daemon. A harness is the coding CLI itself. In Sanctum a council turn runs in its own container when a Docker engine is configured, on a login the user made once inside that harness's container. See [council](how-it-works/council.md) and [harness containers](how-it-works/harness-containers.md).
+A council is a Conclave of the three harnesses `claude`, `codex` and `agy` (`--with` must name all three, once each) that answer one question in bounded rounds (two by default, `--rounds`). `sablectl council` opens it through the daemon. A harness is the coding CLI itself. In Sanctum a council turn runs in its own container when a Docker engine is configured, on a login the user made once inside that harness's container. See [council](how-it-works/council.md) and [harness containers](how-it-works/harness-containers.md).
 
 ## Court Memory, context packet and learning
 
