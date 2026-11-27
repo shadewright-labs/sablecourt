@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 type nopWriteCloser struct {
@@ -342,6 +344,62 @@ func TestStreamRedactorPreservesCredentialRulesAcrossWrites(t *testing.T) {
 				got := stream.write([]byte(tc.input[:i]), false) + stream.write([]byte(tc.input[i:]), false) + stream.write(nil, true)
 				if got != tc.want {
 					t.Fatalf("split at byte %d: got %q, want %q", i, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestHubRedactsExactKnownSecretsAcrossChunksAndCRLF(t *testing.T) {
+	reg := redact.NewRegistry()
+	secret := strings.Join([]string{"hub", "_opaque_", "exact_778899"}, "")
+	reg.Register(secret)
+
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		forbid []string
+	}{
+		{
+			name:   "raw split across chunks",
+			chunks: []string{"pre " + secret[:7], secret[7:] + " post\n"},
+			forbid: []string{secret, secret[:7], secret[7:]},
+		},
+		{
+			name:   "split by CRLF across chunks",
+			chunks: []string{"pre " + secret[:9] + "\r\n", secret[9:] + " post\n"},
+			forbid: []string{secret, secret[:9], secret[9:]},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := NewHubWithRegistry(reg)
+			hub.Register("task-exact", nil)
+			_, ch, _, unsub, err := hub.Subscribe("task-exact")
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			defer unsub()
+			for _, c := range tc.chunks {
+				hub.WriteOutput("task-exact", []byte(c))
+			}
+			hub.Close("task-exact")
+			var live strings.Builder
+			for s := range ch {
+				live.WriteString(s)
+			}
+			hist, _, _, unsub2, err := hub.Subscribe("task-exact")
+			if err != nil {
+				t.Fatalf("Subscribe after close: %v", err)
+			}
+			unsub2()
+			for _, got := range []string{live.String(), hist} {
+				if !strings.Contains(got, redact.KnownSecretMarker) {
+					t.Fatalf("expected marker in %q", got)
+				}
+				for _, f := range tc.forbid {
+					if len(f) >= redact.MinSecretLength && strings.Contains(got, f) {
+						t.Fatalf("leaked %q in %q", f, got)
+					}
 				}
 			}
 		})

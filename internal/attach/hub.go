@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 const defaultRingSize = 64 * 1024
@@ -32,12 +34,29 @@ type session struct {
 type Hub struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
+	registry *redact.Registry
 }
 
 func NewHub() *Hub {
+	return NewHubWithRegistry(redact.DefaultRegistry())
+}
+
+// NewHubWithRegistry returns a Hub whose live output redaction consults reg.
+func NewHubWithRegistry(reg *redact.Registry) *Hub {
+	if reg == nil {
+		reg = redact.DefaultRegistry()
+	}
 	return &Hub{
 		sessions: make(map[string]*session),
+		registry: reg,
 	}
+}
+
+func (h *Hub) secretRegistry() *redact.Registry {
+	if h != nil && h.registry != nil {
+		return h.registry
+	}
+	return redact.DefaultRegistry()
 }
 
 // Register creates or replaces a live attach session for taskID.
@@ -48,8 +67,10 @@ func (h *Hub) Register(taskID string, stdin io.WriteCloser) {
 	if old, ok := h.sessions[taskID]; ok {
 		old.closeLocked()
 	}
+	reg := h.secretRegistry()
 	h.sessions[taskID] = &session{
 		maxRing: defaultRingSize,
+		output:  newStreamRedactor(reg),
 		stdin:   stdin,
 		subs:    make(map[int]chan string),
 	}

@@ -18,15 +18,30 @@ const (
 )
 
 type streamRedactor struct {
+	known     *redact.Stream
 	text      textRedactor
 	inPEM     bool
 	pemFooter []byte
 	pemTail   []byte
 }
 
-// Filter PEM blocks before parsing text credentials, since the block may span
-// lines or begin inside an assignment value.
+func newStreamRedactor(reg *redact.Registry) streamRedactor {
+	if reg == nil {
+		reg = redact.DefaultRegistry()
+	}
+	return streamRedactor{
+		known: reg.NewStream(),
+		text:  textRedactor{registry: reg},
+	}
+}
+
+// Filter exact known secrets and PEM blocks before parsing text credentials,
+// since a secret or block may span chunks or lines.
 func (r *streamRedactor) write(raw []byte, eof bool) string {
+	if r.known == nil {
+		r.known = redact.NewStream()
+	}
+	raw = r.known.Write(raw, eof)
 	var out strings.Builder
 	if len(r.pemTail) != 0 {
 		raw = append(r.pemTail, raw...)
@@ -172,6 +187,7 @@ var (
 )
 
 type textRedactor struct {
+	registry   *redact.Registry
 	fragment   []byte
 	kind       credentialKind
 	value      []byte
@@ -261,7 +277,11 @@ func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 			value = ""
 		}
 	default:
-		value = redact.String(value)
+		if r.registry != nil {
+			value = r.registry.RedactString(value)
+		} else {
+			value = redact.String(value)
+		}
 		if eof && value == string(r.value) {
 			value = ""
 		}
