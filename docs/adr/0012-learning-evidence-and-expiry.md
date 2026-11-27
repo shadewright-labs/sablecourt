@@ -11,6 +11,10 @@ Issue #41 extends the scoped learnings in ADR-0010. The context assembler derive
 
 Give learnings dedicated storage. Store an ID, immutable redacted statement and scope, source task, council, or incident ID, evidence reference, authenticated author, and optional predecessor. Track `proposed`, `accepted`, or `retired` status, accepting operator, creation, last-confirmed and expiry times, review reason, injection count, and linked outcomes. Keep acceptance and status history so a past packet can be traced to the version it received.
 
+[![A learning is proposed, accepted for 90 days or retired, with a contradiction or expiry returning it to proposed.](../diagrams/learning-states.svg)](../diagrams/learning-states.svg "Open full size")
+
+Figure: the states of a learning and its 90-day clock; the store enforces them but no route or command calls them yet.
+
 An agent, verifier, Shadewright integration, or operator may propose a learning. Derive the author from the authenticated caller. A proposal without verifiable source or evidence stays proposed. Only an authenticated operator may accept the exact version or retire it. A correction creates a linked proposal. Acceptance of a replacement retires the predecessor in the same transaction. No state or scope grants execution authority. Operator authentication from #2 must be in place before acceptance is enabled. [ADR-0011](0011-sanctum-scope-trust-and-cli-harnesses.md).
 
 Acceptance starts a 90-day clock. Link subsequent outcomes to the specific learning. When the operator confirms that linked evidence supports it, restart the 90-day clock from that confirmation. A recorded contradiction backed by evidence, or expiry, returns it to `proposed` with its history and review reason. Withhold it as soon as either condition applies, even if a background job has yet to update the state. An injection, generic pass status, or inconclusive outcome leaves the clock alone.

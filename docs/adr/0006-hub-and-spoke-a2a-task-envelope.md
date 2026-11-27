@@ -11,6 +11,10 @@ Allowing arbitrary peer-to-peer calls between agents in v0.1 complicates budget 
 
 Enforce a strict hub-and-spoke topology in v0.1: workloads communicate only with the Sablecourt Control Plane and its capability gates, with zero direct workload-to-workload network connectivity.
 
+[![The API gives workloads no route to each other, and a child task goes through the control plane, shown as planned.](../diagrams/hub-and-spoke.svg)](../diagrams/hub-and-spoke.svg "Open full size")
+
+Figure: the API has no workload-to-workload route and a child task goes through the control plane; the child task proposal, its policy check and the child start are dashed because no gate tool or route calls the proposal yet. Network-level isolation between containers is not drawn.
+
 Represent every unit of work using an A2A-compatible task envelope:
 
 - Capability metadata aligned with Agent Cards (workload ID, class, declared skills, input/output schemas, allowed gates).

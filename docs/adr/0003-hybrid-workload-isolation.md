@@ -15,6 +15,12 @@ Adopt a hybrid isolation model for v0.1 matched to each workload class:
 - Local coding CLI agents (Claude Code, Codex) run inside dedicated Git worktrees combined with OS-level sandboxing (macOS Seatbelt or Linux Bubblewrap) or optional container execution, stripped environment variables, and detached session hosts so a control plane restart drops no active run.
 - Sandbox-zone workloads receive zero production capability grants; graduating a workload definition or generated workflow from Sandbox to Runtime requires Git review, passing tests, and merge.
 
+## Diagram
+
+[![Containers on an internal network, a host sandbox for coding runs drawn dashed as unsupported, and a parked Kubernetes adapter.](../diagrams/runtime-isolation.svg)](../diagrams/runtime-isolation.svg "Open full size")
+
+Figure: isolation by workload class as amended by ADR-0011 on 2026-11-27, which makes the host sandbox for coding runs unsupported for 0.1.0, so it is drawn dashed.
+
 ## Alternatives considered
 
 - Plain host processes with Git worktrees only. Rejected because any runaway shell command inside an AI agent or sandbox can read host files, SSH keys, or local caches.

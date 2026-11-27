@@ -14,6 +14,12 @@ Keep Nightloom and Sablecourt as strictly separate products with disjoint respon
 - Nightloom remains the local, read-only watchman for manually launched interactive sessions and unmanaged host processes (preserving its Rules 1 and 4: no launching agents, `127.0.0.1`-only listener, no stored provider credentials).
 - Sablecourt manages and observes only workloads explicitly declared and launched under its own control plane. It does not scan the host process table for unrelated terminal sessions or read ad-hoc provider transcripts outside its managed workspaces.
 
+## Diagram
+
+[![Nightloom watches unmanaged sessions and reaches Sablecourt through read-only routes, while Sablecourt never scans the host process table.](../diagrams/nightloom-boundary.svg)](../diagrams/nightloom-boundary.svg "Open full size")
+
+Figure: the boundary between the two products, with the read-only observer routes as the link drawn.
+
 ## Alternatives considered
 
 - Extending Nightloom into an active multi-agent orchestrator. Rejected because active dispatch, capability proxies, and stored upstream credentials violate Nightloom's core rules and expand its audit surface.

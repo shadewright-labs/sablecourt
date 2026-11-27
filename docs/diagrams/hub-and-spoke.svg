@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 400" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Hub and spoke dispatch</title>
+  <desc id="d">Two workloads sit in a workloads zone and the control plane sits in sablecourtd. Workload A reaches the control plane and its capability gates with gate calls, which are built. Sablecourt offers no route between workload A and workload B in its API, drawn as a red refused line with the words no API route. When A needs work from B, it proposes a child task to the control plane. The control plane asks a policy check whether A may delegate to B, which passes only an allow, then records the child sub-budget ceiling on the child task and starts the child workload B through the same loop and links it to A. The proposal, the policy check and the start of the child are planned, drawn dashed, because no gate tool or route calls the proposal yet. A legend marks built, planned and refused lines.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="400" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="250" height="316" rx="14"/>
+  <text class="lanet" x="44" y="54">WORKLOADS</text>
+  <rect class="lane" x="514" y="24" width="582" height="316" rx="14"/>
+  <text class="lanet" x="534" y="54">SABLECOURTD</text>
+  <rect class="box" x="44" y="96" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="122">Workload A</text>
+  <text class="s" x="60" y="143">asks for help from B</text>
+  <rect class="box" x="44" y="256" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="282">Workload B</text>
+  <text class="s" x="60" y="303">the target workload</text>
+  <rect class="key" x="534" y="96" width="220" height="72" rx="12"/>
+  <text class="h" x="550" y="122">Control plane</text>
+  <text class="s" x="550" y="143">capability gates, dispatch</text>
+  <text class="s" x="550" y="160">links the child to A</text>
+  <rect class="plan" x="866" y="96" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="122">Policy check</text>
+  <text class="s" x="882" y="143">A may delegate to B</text>
+  <text class="s" x="882" y="160">only an allow passes</text>
+  <path class="f" d="M254 116H528" marker-end="url(#a)"/>
+  <text class="lbl" x="391" y="108" text-anchor="middle">gate calls</text>
+  <path class="r" d="M254 144H528" marker-end="url(#m)"/>
+  <text class="lbl" x="391" y="162" text-anchor="middle">proposes child task</text>
+  <path class="r" d="M754 132H860" marker-end="url(#m)"/>
+  <text class="lbl" x="807" y="124" text-anchor="middle">asks</text>
+  <path class="r" d="M644 168V288H260" marker-end="url(#m)"/>
+  <text class="lbl" x="452" y="280" text-anchor="middle">starts the child</text>
+  <path class="deny" d="M149 160V250" marker-start="url(#x)" marker-end="url(#x)"/>
+  <text class="no" x="161" y="200" text-anchor="start">no API route</text>
+  <text class="lbl" x="161" y="218" text-anchor="start">between workloads</text>
+  <path class="f" d="M24 372H64" marker-end="url(#a)"/>
+  <text class="lbl" x="74" y="376" text-anchor="start">built</text>
+  <path class="r" d="M200 372H240" marker-end="url(#m)"/>
+  <text class="lbl" x="250" y="376" text-anchor="start">planned, no caller yet</text>
+  <path class="deny" d="M470 372H510" marker-end="url(#x)"/>
+  <text class="lbl" x="520" y="376" text-anchor="start">refused</text>
+</svg>

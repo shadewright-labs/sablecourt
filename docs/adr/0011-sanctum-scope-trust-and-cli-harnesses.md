@@ -19,6 +19,12 @@ Acceptance of this ADR would authorize a narrow exception to invariant 2 and the
 
 Limit reads to the selected checkout, required runtime files, redacted task input, and that harness's own login. Restrict writes to private scratch and an explicitly assigned writer worktree.
 
+## Diagram
+
+[![A harness container with its own login volume, checkout and scratch, whose only route out is the proxy container.](../diagrams/harness-container.svg)](../diagrams/harness-container.svg "Open full size")
+
+Figure: the harness container as amended through 2026-11-25; the read-only tool volume of 2026-11-26 is not drawn, and host mode, unsupported since the 2026-11-27 amendment, is not shown.
+
 ## Alternatives considered
 
 A Unix socket alone needs a browser bridge and still admits a same-user client. A second operator transport adds authentication plumbing without solving read isolation. A host-wide read mount with a deny list leaves credentials exposed when the list misses a location. A fixed token path outside the configured state directory would need separate ownership and lifecycle checks.

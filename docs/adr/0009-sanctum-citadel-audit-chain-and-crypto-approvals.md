@@ -15,6 +15,12 @@ Sablecourt runs both on a single developer's laptop (macOS/Ubuntu with SQLite an
 | ECDSA P-256 device pairing (`0006_devices.sql`) | Operators pair CLI or iOS Secure Enclave devices (`sablectl pair`). Approvals bind the signature to `"sablecourt-approve:" + approvalID + ":" + payloadSHA256`, preventing replay across approvals or payload substitution. |
 | Scoped integration tokens | Read-only Nightloom observation uses `observer_bearer_token` (restricted to `/api/v1/observer/*` and `/scry`). Shadewright incident escalation uses `shadewright_bearer_token` (restricted to `/api/v1/integrations/shadewright/*`). |
 
+## Diagram
+
+[![Each audit row stores the previous row hash and its own SHA-256, and a verify call walks the chain.](../diagrams/audit-chain.svg)](../diagrams/audit-chain.svg "Open full size")
+
+Figure: the audit hash chain and its verification; the dashed box is the signed audit heads proposed in ADR-0014, not built.
+
 ## Consequences
 
 - Both workstation and enterprise Kubernetes deployments run the exact same Go binary and policy engine.

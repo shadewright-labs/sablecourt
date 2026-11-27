@@ -15,6 +15,12 @@ Single-agent tasks cannot coordinate specialist roles (for example, a `@coder` i
 | Operator `Decree` and shared `Relics` | Operators steer running or paused Conclaves by issuing a `Decree` (text or local Whisper voice-to-text), which resets ping-pong counters and resumes execution. Vassals and operators exchange named, linear-time redacted artifacts (`Relics`) persisted in SQLite/PostgreSQL. |
 | Live process attach (`internal/attach`) | `Scry` provides read-only SSE streaming over a 64 KiB redacted ring buffer across `coding-agent`, Docker/Podman, and Kubernetes Pods. `Takeover` grants exclusive `stdin` control to one operator at a time (`409 Conflict` if already held) and logs attach/detach events to `audit_log`. |
 
+## Diagram
+
+[![Conclave states, where a tripped Ward moves a room to input-required and a Decree resumes it.](../diagrams/conclave-states.svg)](../diagrams/conclave-states.svg "Open full size")
+
+Figure: the states of a Conclave on main, where a tripped Ward pauses the room and a Decree resumes it.
+
 ## Consequences
 
 - Multi-agent coordination stays bounded by deterministic message, ping-pong, and cost limits.

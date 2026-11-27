@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 608" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Approval exchange</title>
-  <desc id="d">Sequence of an approval among a workload, the MCP Gate, the Approval Queue and a person. The workload calls an action. The gate asks the queue for an approval with the payload digest pinned and answers the workload 202 with an approval id. The person approves with the digest, the queue shows a native dialog, and the person clicks Approve. The workload repeats the call with the approval id and the gate returns the action result.</desc>
+  <desc id="d">Sequence of an approval among a workload, the MCP Gate, the Approval Queue and a person. The workload calls an action. The gate asks the queue for an approval with the payload digest pinned and answers the workload 202 with an approval id. The person approves with the digest, the queue shows a native dialog, and the person clicks Approve. The workload repeats the call with the approval id. The gate spends the approval once, only if it is approved and matches the same task, capability and payload digest and has not expired, checking expiry at that moment, and then returns the action result. The approval is bound to the digest of the exact value, so a changed payload needs a new approval.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -30,7 +30,7 @@
       .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
     </style>
   </defs>
-  <rect width="1120" height="608" rx="18" fill="#08060e"/>
+  <rect width="1120" height="640" rx="18" fill="#08060e"/>
   <rect class="box" x="60" y="24" width="180" height="56" rx="10"/>
   <text class="h" x="150" y="58" text-anchor="middle">Workload</text>
   <rect class="box" x="320" y="24" width="180" height="56" rx="10"/>
@@ -39,10 +39,10 @@
   <text class="h" x="670" y="58" text-anchor="middle">Approval Queue</text>
   <rect class="box" x="840" y="24" width="180" height="56" rx="10"/>
   <text class="h" x="930" y="58" text-anchor="middle">Person</text>
-  <path class="life" d="M150 80V580"/>
-  <path class="life" d="M410 80V580"/>
-  <path class="life" d="M670 80V580"/>
-  <path class="life" d="M930 80V580"/>
+  <path class="life" d="M150 80V612"/>
+  <path class="life" d="M410 80V612"/>
+  <path class="life" d="M670 80V612"/>
+  <path class="life" d="M930 80V612"/>
   <path class="f" d="M150 132H404" marker-end="url(#a)"/>
   <text class="lbl" x="277" y="124" text-anchor="middle">action call</text>
   <path class="f" d="M410 192H664" marker-end="url(#a)"/>
@@ -57,6 +57,9 @@
   <text class="lbl" x="800" y="424" text-anchor="middle">clicks Approve</text>
   <path class="f" d="M156 492H404" marker-end="url(#a)"/>
   <text class="lbl" x="280" y="484" text-anchor="middle">repeat with approval id</text>
-  <path class="r" d="M404 552H156" marker-end="url(#m)"/>
-  <text class="lbl" x="280" y="544" text-anchor="middle">action result</text>
+  <rect class="box" x="270" y="508" width="280" height="52" rx="8"/>
+  <text class="s" x="410" y="529" text-anchor="middle">spend once: same task, capability</text>
+  <text class="s" x="410" y="547" text-anchor="middle">and digest, expiry checked now</text>
+  <path class="r" d="M404 592H156" marker-end="url(#m)"/>
+  <text class="lbl" x="280" y="584" text-anchor="middle">action result</text>
 </svg>

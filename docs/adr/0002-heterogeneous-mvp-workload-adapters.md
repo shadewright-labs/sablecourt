@@ -17,6 +17,12 @@ Implement three minimal workload adapters in the first vertical slice of MVP:
 
 Every adapter implements the same workload lifecycle contract (`start`, `observe`, `suspend`, `resume`, `stop`, `collect artifacts`) driven by the control plane's `OBSERVE -> UPDATE -> DERIVE/ACT` loop.
 
+## Diagram
+
+[![The three workload classes with the adapter each runs under and the Model Gate access each gets.](../diagrams/workload-class-zone.svg)](../diagrams/workload-class-zone.svg "Open full size")
+
+Figure: the three workload classes, the adapter each runs under and whether it may reach the Model Gate, as built.
+
 ## Alternatives considered
 
 - Coding-agents-only MVP (similar to OpenAI Symphony or `agent-orchestrator`). Rejected because it risks baking Git-branch and terminal assumptions into the core scheduler.

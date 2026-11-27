@@ -21,6 +21,12 @@ The default ceilings are two rounds, six starts including retries, and 15 minute
 
 The daemon writes an attributed digest Relic from recorded conclusions, objections, and evidence references in round and role order. It preserves disagreements and marks missing turns. The CLI prints the digest without launching a chair.
 
+## Diagram
+
+[![A round ends the council when all three seats add nothing, at the round cap or when starts run out.](../diagrams/council-finish.svg)](../diagrams/council-finish.svg "Open full size")
+
+Figure: how a council ends after a round; a stop by the user and the wall-time deadline also end it and are not drawn.
+
 ## Alternatives considered
 
 A sequential default anchors later answers, and mention-driven dispatch cannot guarantee review turns. Proceeding with two available or successful CLIs changes the promised panel. Choosing between piped input and `git diff HEAD` adds input rules and rejects design questions at a terminal on a clean tree. A 24 KiB peer allowance with an 8 KiB per-turn cap adds a truncation rule. Eight starts, a 10-minute deadline, a four-minute per-run timer, and a chair add scheduling and synthesis machinery. New message and ping-pong defaults add limits to a mode that already counts starts. Treating explicit zero as a default hides a configuration error. Restricting unanimous stops to review rounds can spend three more starts after everyone has finished. A writable worktree per turn adds branch cleanup and loses uncommitted changes.
