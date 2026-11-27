@@ -576,26 +576,26 @@ func (s *PostgresStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domai
 	if _, err := tx.ExecContext(ctx, "LOCK TABLE audit_log IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 		return err
 	}
-	prevHash := "genesis"
-	var last string
-	err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	prevHash, nextSeq, err := store.AuditChainNext(ctx, tx)
+	if err != nil {
 		return err
 	}
-	if last != "" {
-		prevHash = last
-	}
+	rec.Seq, rec.HashVersion = nextSeq, domain.AuditHashV2
 	rec.DetailJSON = defaultJSON(rec.DetailJSON, "{}")
 	createdStr := formatTime(rec.CreatedAt)
-	rowHash := domain.ComputeAuditRowHash(prevHash, rec, createdStr)
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO audit_log (category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome, rec.DetailJSON, prevHash, rowHash, createdStr); err != nil {
+	// The row ID is part of the hash, so the row is inserted first and its
+	// hash written in the same transaction once the ID is known.
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO audit_log (seq, hash_version, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10)
+		RETURNING id
+	`, rec.Seq, rec.HashVersion, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome,
+		rec.DetailJSON, prevHash, createdStr).Scan(&rec.ID); err != nil {
 		return err
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `UPDATE audit_log SET row_hash = $1 WHERE id = $2`,
+		domain.ComputeAuditRowHash(prevHash, rec, createdStr), rec.ID)
+	return err
 }
 
 func (s *PostgresStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error) {
@@ -603,7 +603,7 @@ func (s *PostgresStore) ListAudit(ctx context.Context, limit int) ([]domain.Audi
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
+		SELECT id, seq, hash_version, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
 		FROM audit_log ORDER BY id DESC LIMIT $1
 	`, limit)
 	if err != nil {
@@ -615,7 +615,7 @@ func (s *PostgresStore) ListAudit(ctx context.Context, limit int) ([]domain.Audi
 	for rows.Next() {
 		var rec domain.AuditRecord
 		var created string
-		if err := rows.Scan(&rec.ID, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Seq, &rec.HashVersion, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
 			return nil, err
 		}
 		rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -624,38 +624,31 @@ func (s *PostgresStore) ListAudit(ctx context.Context, limit int) ([]domain.Audi
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) VerifyAuditChain(ctx context.Context) (int, error) {
+func (s *PostgresStore) VerifyAuditChain(ctx context.Context, anchor *domain.AuditAnchor) (domain.AuditChainHead, error) {
+	v := domain.NewAuditChainVerifier(anchor)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
+		SELECT id, seq, hash_version, category, task_id, workload_name, action, outcome, detail_json, prev_hash, row_hash, created_at
 		FROM audit_log ORDER BY id ASC
 	`)
 	if err != nil {
-		return 0, err
+		return domain.AuditChainHead{}, err
 	}
 	defer rows.Close()
 
-	expectedPrev := "genesis"
-	verified := 0
 	for rows.Next() {
 		var rec domain.AuditRecord
 		var created string
-		if err := rows.Scan(&rec.ID, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
-			return verified, err
+		if err := rows.Scan(&rec.ID, &rec.Seq, &rec.HashVersion, &rec.Category, &rec.TaskID, &rec.WorkloadName, &rec.Action, &rec.Outcome, &rec.DetailJSON, &rec.PrevHash, &rec.RowHash, &created); err != nil {
+			return domain.AuditChainHead{Rows: v.Rows()}, err
 		}
-		if rec.RowHash == "" {
-			continue
+		if err := v.Add(rec, created); err != nil {
+			return domain.AuditChainHead{Rows: v.Rows()}, err
 		}
-		if rec.PrevHash != expectedPrev {
-			return verified, fmt.Errorf("audit chain broken at row %d: prev_hash=%q expected=%q", rec.ID, rec.PrevHash, expectedPrev)
-		}
-		want := domain.ComputeAuditRowHash(rec.PrevHash, rec, created)
-		if rec.RowHash != want {
-			return verified, fmt.Errorf("audit row %d tampered: row_hash=%q computed=%q", rec.ID, rec.RowHash, want)
-		}
-		expectedPrev = rec.RowHash
-		verified++
 	}
-	return verified, rows.Err()
+	if err := rows.Err(); err != nil {
+		return domain.AuditChainHead{Rows: v.Rows()}, err
+	}
+	return v.Finish()
 }
 
 func (s *PostgresStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error {

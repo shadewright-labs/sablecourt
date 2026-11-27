@@ -12,9 +12,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -649,8 +651,8 @@ func (apiFailStore) ListConclaves(context.Context) ([]domain.ConclaveSession, er
 func (apiFailStore) TotalBudgetTotals(context.Context) (domain.BudgetTotals, error) {
 	return domain.BudgetTotals{}, errAPIStore
 }
-func (apiFailStore) VerifyAuditChain(context.Context) (int, error) {
-	return 7, errors.New("row 8 hash mismatch")
+func (apiFailStore) VerifyAuditChain(context.Context, *domain.AuditAnchor) (domain.AuditChainHead, error) {
+	return domain.AuditChainHead{Rows: 7}, errors.New("row 8 hash mismatch")
 }
 
 func TestAPIReadRoutesReportStoreErrors(t *testing.T) {
@@ -698,8 +700,38 @@ func TestAPIReadRoutes(t *testing.T) {
 	})
 	t.Run("audit verify", func(t *testing.T) {
 		rec := apiCall(env.h, http.MethodGet, "/api/v1/audit/verify", "")
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"valid":true`) {
+		var v struct {
+			Valid        bool `json:"valid"`
+			VerifiedRows int  `json:"verifiedRows"`
+			Anchored     bool `json:"anchored"`
+			Head         struct {
+				Seq  int64  `json:"seq"`
+				Hash string `json:"hash"`
+			} `json:"head"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &v) != nil || !v.Valid || v.Anchored || v.Head.Seq < 2 || len(v.Head.Hash) != 64 {
 			t.Fatalf("verify %d %s", rec.Code, rec.Body.String())
+		}
+		anchor := fmt.Sprintf("%d:%s", v.Head.Seq, v.Head.Hash)
+		other := fmt.Sprintf("%d:%s", v.Head.Seq, strings.Repeat("0", 64))
+		past := fmt.Sprintf("%d:%s", v.Head.Seq+1, v.Head.Hash)
+		for _, tc := range []struct {
+			name, anchor string
+			code         int
+			want         string
+		}{
+			{"anchor at head", anchor, http.StatusOK, `"anchored":true`},
+			{"anchor with another hash", other, http.StatusConflict, "anchor says"},
+			{"anchor past the head", past, http.StatusConflict, "before anchor"},
+			{"malformed anchor", "head", http.StatusBadRequest, "want SEQ:HASH"},
+			{"anchor at sequence 0", "0:" + v.Head.Hash, http.StatusBadRequest, "positive integer"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := apiCall(env.h, http.MethodGet, "/api/v1/audit/verify?anchor="+url.QueryEscape(tc.anchor), "")
+				if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.want) {
+					t.Fatalf("verify %d %s", rec.Code, rec.Body.String())
+				}
+			})
 		}
 	})
 	t.Run("audit export oldest first", func(t *testing.T) {

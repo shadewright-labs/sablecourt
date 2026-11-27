@@ -851,7 +851,7 @@ func TestCouncilDispatchWards(t *testing.T) {
 			if len(wards) != 1 || wards[0].Outcome != "paused" || !strings.Contains(wards[0].DetailJSON, fmt.Sprintf(`"ward":%q`, snap.Session.WardReason)) {
 				t.Fatalf("conclave.ward audits = %+v, want 1 row for %q", wards, snap.Session.WardReason)
 			}
-			if _, err := s.VerifyAuditChain(ctx); err != nil {
+			if _, err := s.VerifyAuditChain(ctx, nil); err != nil {
 				t.Fatalf("VerifyAuditChain: %v", err)
 			}
 		})

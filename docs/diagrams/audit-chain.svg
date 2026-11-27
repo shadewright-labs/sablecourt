@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 396" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Audit hash chain</title>
-  <desc id="d">Structure and verification of the audit hash chain. Row 1 hashes the anchor word genesis plus its row fields with SHA-256. Each later row stores the previous row hash and its own SHA-256 up to Row N at the head, where deletion of the last rows is not detected. A dashed planned box marks signed audit heads as proposed in ADR-0014 and not built. To verify, sablectl audit verify calls GET /api/v1/audit/verify on sablecourtd, and the store walks audit_log in id order, skipping older rows without a hash and recomputing each chain hash. If all hashed rows match, the daemon returns 200 with the verified count; on a hash mismatch or a read error it answers 409. A legend marks planned and mismatch styles.</desc>
+  <desc id="d">Structure and verification of the audit hash chain. Row 1 hashes the anchor word genesis plus its row fields with SHA-256. Each later row stores its sequence number, the previous row hash and its own SHA-256 over length-prefixed fields that include the row ID, up to Row N at the head; deletion of the last rows is detected only against a head the operator recorded earlier and passes back as an anchor. A dashed planned box marks signed audit heads as proposed in ADR-0014 and not built. To verify, sablectl audit verify calls GET /api/v1/audit/verify on sablecourtd, and the store walks audit_log in id order, refusing any row without a hash and recomputing each chain hash. If every row matches, the daemon returns 200 with the verified count and the chain head; on a missing hash, a hash or sequence mismatch, an unmet anchor or a read error it answers 409. A legend marks planned and mismatch styles.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -49,7 +49,7 @@
   <rect class="key" x="652" y="36" width="200" height="72" rx="12"/>
   <text class="h" x="668" y="62">Row N (head)</text>
   <text class="s" x="668" y="83">prev: row N-1 hash</text>
-  <text class="s" x="668" y="100">tail deletion unseen</text>
+  <text class="s" x="668" y="100">tail seen via anchor</text>
 
   <rect class="plan" x="932" y="36" width="164" height="72" rx="10"/>
   <text class="h" x="948" y="62">Signed head</text>
@@ -64,16 +64,16 @@
   <rect class="box" x="308" y="184" width="284" height="72" rx="10"/>
   <text class="h" x="324" y="210">Store walks audit_log</text>
   <text class="s" x="324" y="231">recomputes SHA-256 in id order</text>
-  <text class="s" x="324" y="248">skips older rows without a hash</text>
+  <text class="s" x="324" y="248">refuses rows without a hash</text>
 
   <rect class="box" x="684" y="184" width="212" height="72" rx="10"/>
   <text class="h" x="700" y="210">Valid (200)</text>
-  <text class="s" x="700" y="231">verified row count</text>
+  <text class="s" x="700" y="231">row count and head</text>
   <text class="s" x="700" y="248">returned to caller</text>
 
   <rect class="bad" x="308" y="304" width="284" height="64" rx="10"/>
   <text class="no" x="324" y="330">Verify failed (409)</text>
-  <text class="s" x="324" y="351">hash mismatch or read error</text>
+  <text class="s" x="324" y="351">mismatch, no hash, or read error</text>
 
   <path class="f" d="M140 72H174" marker-end="url(#a)"/>
   <path class="f" d="M376 72H410" marker-end="url(#a)"/>

@@ -50,7 +50,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | 4. Isolated launch | The matching runtime adapter starts the workload. Local `coding-agent` runs write a read-only `.sablecourt-session.json` marker so Nightloom recognizes the session as Sablecourt-managed. |
 | 5. Capability mediation | Model requests hit `/gate/model/{provider}/...` with `Authorization: Bearer sc_task_...` (checked against leases, grants, and budgets). Tool and action requests hit `/gate/mcp` or `/gate/action/{name}` and pass through deterministic policy (`allow`, `approve`, `deny`) and the Approval Queue. |
 | 6. Observation and steering | Operators watch live redacted output via `Scry`, claim exclusive `stdin` via `Takeover`, or steer multi-agent rooms via `Decree` (text or voice). |
-| 7. Tamper-evident audit | Every state transition, policy decision, approval, and model call is appended to `audit_log` chained with `SHA-256(prev_hash \|\| record \|\| created_at)`. `sablectl audit verify` recomputes the chain from `genesis`. |
+| 7. Tamper-evident audit | Every state transition, policy decision, approval, and model call is appended to `audit_log` chained with a SHA-256 over length-prefixed fields that include the row ID, its sequence and `prev_hash`. `sablectl audit verify` recomputes the chain from `genesis`, refuses rows without a hash, and prints the head to keep as an anchor ([ADR-0009 amendment](adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md#amendment-2026-11-27-proposed)). |
 
 
 ## Agentic context, learnings, and verification pipeline (ADR-0010)

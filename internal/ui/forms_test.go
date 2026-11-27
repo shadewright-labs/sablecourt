@@ -66,11 +66,11 @@ func (s failingStore) TotalBudgetTotals(ctx context.Context) (domain.BudgetTotal
 	return s.Store.TotalBudgetTotals(ctx)
 }
 
-func (s failingStore) VerifyAuditChain(ctx context.Context) (int, error) {
+func (s failingStore) VerifyAuditChain(ctx context.Context, anchor *domain.AuditAnchor) (domain.AuditChainHead, error) {
 	if s.fail == "chain" {
-		return 3, errors.New("row 4 hash mismatch")
+		return domain.AuditChainHead{Rows: 3}, errors.New("row 4 hash mismatch")
 	}
-	return s.Store.VerifyAuditChain(ctx)
+	return s.Store.VerifyAuditChain(ctx, anchor)
 }
 
 func (s failingStore) PutMemory(ctx context.Context, e domain.MemoryEntry) error {
@@ -488,6 +488,10 @@ func TestAuditPageFiltersAndChainState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	head, err := st.VerifyAuditChain(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := newFormMux(t, Options{Store: st})
 	for _, tc := range []struct {
 		query   string
@@ -515,11 +519,14 @@ func TestAuditPageFiltersAndChainState(t *testing.T) {
 			if !strings.Contains(body, "SHA-256 chain verified (3 rows)") {
 				t.Error("chain not shown as verified")
 			}
+			if !strings.Contains(body, "head 3:"+head.Hash) {
+				t.Error("chain head not shown")
+			}
 		})
 	}
 	t.Run("broken chain", func(t *testing.T) {
 		body := getPage(t, newFormMux(t, Options{Store: failingStore{Store: st, fail: "chain"}}), "/audit").Body.String()
-		if !strings.Contains(body, "SHA-256 chain broken: row 4 hash mismatch") || strings.Contains(body, "chain verified") {
+		if !strings.Contains(body, "SHA-256 chain broken: row 4 hash mismatch") || strings.Contains(body, "chain verified") || strings.Contains(body, "Record this head") {
 			t.Fatalf("broken chain not shown")
 		}
 	})

@@ -34,16 +34,16 @@ func TestAuditHashChainDetectsTampering(t *testing.T) {
 		}
 	}
 
-	n, err := st.VerifyAuditChain(ctx)
-	if err != nil || n != 3 {
-		t.Fatalf("expected 3 verified rows, got n=%d err=%v", n, err)
+	n, err := st.VerifyAuditChain(ctx, nil)
+	if err != nil || n.Rows != 3 {
+		t.Fatalf("expected 3 verified rows, got n=%d err=%v", n.Rows, err)
 	}
 
 	// Tamper with row 2 directly in SQLite and confirm VerifyAuditChain catches it.
 	if _, err := st.db.ExecContext(ctx, `UPDATE audit_log SET outcome = 'deny' WHERE id = 2`); err != nil {
 		t.Fatalf("tamper row 2: %v", err)
 	}
-	_, err = st.VerifyAuditChain(ctx)
+	_, err = st.VerifyAuditChain(ctx, nil)
 	if err == nil || !strings.Contains(err.Error(), "tampered") {
 		t.Fatalf("expected tamper detection error, got %v", err)
 	}

@@ -394,6 +394,9 @@ func TestArgumentValidationSendsNoRequest(t *testing.T) {
 		{"approve without digest", []string{"approval", "approve", "a1"}, `required flag(s) "digest" not set`},
 		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1", "--digest", "d"}, "invalid daemon API URL"},
 		{"api url with user info", []string{"--api", "http://user:pass@example.com", "approval", "deny", "a1"}, "invalid daemon API URL"},
+		{"audit anchor without hash", []string{"audit", "verify", "--anchor", "12"}, "want SEQ:HASH"},
+		{"audit anchor at sequence 0", []string{"audit", "verify", "--anchor", "0:" + strings.Repeat("ab", 32)}, "positive integer"},
+		{"audit anchor with short hash", []string{"audit", "verify", "--anchor", "3:abc"}, "64 lowercase hex"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -510,6 +513,12 @@ func TestListCommandsRenderDaemonRecords(t *testing.T) {
 			[]string{"policy", "coder", "git:push", "denied", "pending", "ok", "-"}},
 		{"no audit", []string{"audit", "tail"}, "GET /api/v1/audit", "", `[]`, []string{"No audit events recorded."}},
 		{"audit verify", []string{"audit", "verify"}, "GET /api/v1/audit/verify", "", `{"valid":true,"verifiedRows":42}`, []string{"audit hash chain valid (42 rows verified)"}},
+		{"audit verify prints head", []string{"audit", "verify"}, "GET /api/v1/audit/verify", "",
+			`{"valid":true,"verifiedRows":12,"legacyRows":2,"anchored":false,"head":{"seq":12,"id":14,"hash":"` + sha + `"}}`,
+			[]string{"12 rows verified, 2 written with the version 1 hash)", "head: 12:" + sha}},
+		{"audit verify anchored", []string{"audit", "verify", "--anchor", "12:" + sha}, "GET /api/v1/audit/verify", "anchor=12%3A" + sha,
+			`{"valid":true,"verifiedRows":12,"legacyRows":0,"anchored":true,"head":{"seq":12,"id":12,"hash":"` + sha + `"}}`,
+			[]string{"(12 rows verified, anchor matched)", "head: 12:" + sha}},
 		{"providers", []string{"provider", "list"}, "GET /api/v1/providers", "",
 			`[{"id":"openai","displayName":"OpenAI","kind":"api","connected":true,"models":[{"id":"m1"},{"id":"m2"}],"detail":"` + strings.Repeat("d", 60) + `"},{"id":"local","displayName":"Local","kind":"ollama","connected":false}]`,
 			[]string{"OpenAI", "connected", "2", "...", "Local", "not connected"}},
