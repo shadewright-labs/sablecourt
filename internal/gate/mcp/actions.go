@@ -368,7 +368,8 @@ func readGitHubOrigin(ctx context.Context, repoRoot string) (owner, repo string,
 }
 
 // parseGitHubRemote reads owner and repository from a github.com remote URL in
-// HTTPS, SSH URL or scp-like form.
+// HTTPS, SSH URL or scp-like form, or from GitHub's SSH over port 443
+// (ssh://git@ssh.github.com:443/OWNER/REPO.git).
 func parseGitHubRemote(remote string) (owner, repo string, ok bool) {
 	var path string
 	switch {
@@ -379,7 +380,10 @@ func parseGitHubRemote(remote string) (owner, repo string, ok bool) {
 		if err != nil || u.RawQuery != "" || u.Fragment != "" {
 			return "", "", false
 		}
-		if (u.Scheme != "https" && u.Scheme != "ssh") || !strings.EqualFold(u.Hostname(), "github.com") {
+		// GitHub's SSH over the HTTPS port uses its own host, accepted only
+		// with ssh on port 443.
+		sshOver443 := u.Scheme == "ssh" && strings.EqualFold(u.Hostname(), "ssh.github.com") && u.Port() == "443"
+		if !sshOver443 && ((u.Scheme != "https" && u.Scheme != "ssh") || !strings.EqualFold(u.Hostname(), "github.com")) {
 			return "", "", false
 		}
 		if u.Port() != "" && u.Scheme == "https" {
