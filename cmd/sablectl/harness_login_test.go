@@ -14,6 +14,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 )
 
 type fakeSession struct {
@@ -122,7 +123,7 @@ func TestHarnessLogin(t *testing.T) {
 			t.Cleanup(func() { newLoginRuntime = old })
 			stubFetch(t, tc.name == "tool download fails")
 			var out, errOut bytes.Buffer
-			err := runHarnessLogin(t.Context(), tc.role, strings.NewReader("code123\n"), &out, &errOut)
+			err := runHarnessLogin(t.Context(), tc.role, strings.NewReader("code123\n"), &out, &errOut, waitart.Config{})
 			if got.Image != def.Image || got.Volume != def.Volume {
 				t.Fatalf("runtime configured for %+v", got)
 			}
@@ -193,7 +194,7 @@ func TestHarnessInstall(t *testing.T) {
 			stubFetch(t, tc.fail)
 			def, _ := harnessimages.Lookup(tc.role)
 			var errOut bytes.Buffer
-			err := installHarnessTool(t.Context(), def, tc.fake, &errOut)
+			err := installHarnessTool(t.Context(), def, tc.fake, &errOut, waitart.Config{})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v", err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
+	"github.com/shadewright-labs/sablecourt/internal/waitart"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +34,10 @@ func buildHarnessCmdWithCompiler(docker harnessimages.Docker, compiler harnessim
 			if selectedCompiler == nil {
 				selectedCompiler = harnessimages.LocalProxyCompiler{Source: source}
 			}
-			if err := harnessimages.Build(cmd.Context(), docker, selectedCompiler, args[0]); err != nil {
+			art := startWait(cmd, waitart.Build, "Building the "+args[0]+" harness: image and council proxy")
+			err := harnessimages.Build(cmd.Context(), docker, selectedCompiler, args[0])
+			art.Stop()
+			if err != nil {
 				return err
 			}
 			d, _ := harnessimages.Lookup(args[0])
