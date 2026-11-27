@@ -100,6 +100,9 @@ type CodingConfig struct {
 	Harness  string `json:"harness"`
 	RepoPath string `json:"repoPath"`
 	Sandbox  string `json:"sandbox"`
+	// Commands is the allowed set a workflow command step may run in a task's
+	// worktree. Only this operator configuration names a command's argv.
+	Commands []CodingCommand `json:"commands,omitempty"`
 }
 
 type AgentCard struct {
@@ -192,6 +195,9 @@ type WorkflowStep struct {
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model,omitempty"`
 	Prompt     string `json:"prompt,omitempty"`
+	// Command names an entry of the step workload's coding.commands. The step
+	// runs that command against the previous step's commit instead of a harness.
+	Command string `json:"command,omitempty"`
 }
 
 type Schedule struct {

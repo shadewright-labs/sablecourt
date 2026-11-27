@@ -905,6 +905,9 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		if !isLogCloseFailureFact(events[len(events)-1].FactJSON) {
 			err = r.maybeAutoRemediate(ctx, task, reason)
 		}
+		if err == nil {
+			err = r.haltCommandStep(ctx, task, nil)
+		}
 	}
 	if err != nil {
 		return err
@@ -1208,12 +1211,17 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	claimed := false
 	startFailed := false
 	launchFacts := `{}`
+	var refusal *scruntime.CommandRefusal
 	defer func() {
 		if launchErr != nil && claimed {
 			cleanupCtx := context.WithoutCancel(ctx)
 			reason := "launch_failed"
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
 				reason = "author_checkout_unavailable"
+			}
+			if refusal != nil || errors.As(launchErr, &refusal) {
+				reason, launchFacts = "command_refused", commandRefusalFacts(refusal)
+				launchErr = errors.Join(launchErr, r.haltCommandStep(cleanupCtx, task, refusal))
 			}
 			cleanupErr := r.failTask(cleanupCtx, task, reason, launchFacts)
 			if startFailed && cleanupErr != nil {
@@ -1257,6 +1265,10 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		if err != nil {
 			return err
 		}
+	}
+	command, err := r.workflowCommand(ctx, task, wl)
+	if err != nil {
+		return err
 	}
 	starter, supportsPin := adapter.(pinnedStarter)
 	if commit != "" && !supportsPin {
@@ -1318,6 +1330,13 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			}
 		}
 	}
+	if command != nil {
+		// Commands run only in harness containers: no host fallback (issue 134).
+		if !spec.CouncilContainer {
+			return &scruntime.CommandRefusal{Command: command.Name, Reason: scruntime.CommandNoContainerRuntime}
+		}
+		spec.Command = command
+	}
 	// Host coding agents reach the gate over loopback. A council container has no host loopback.
 	if wl.Spec.Class == domain.ClassCodingAgent && !spec.CouncilContainer && r.hostDataGateURL != "" {
 		spec.DataGateURL = r.hostDataGateURL
@@ -1343,6 +1362,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	startFailed = startErr != nil
 	if startFailed {
 		launchFacts = launchFailureFacts(startErr)
+		_ = errors.As(startErr, &refusal)
 	} else {
 		if handle.LogPath == "" && handle.WorkDir != "" && strings.HasPrefix(handle.AdapterName, "coding:") {
 			handle.LogPath = handle.WorkDir + ".log"
@@ -1490,6 +1510,17 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if step.Workload != completedTask.WorkloadName {
 		return nil
 	}
+	// After a command step, the next step follows the task the command checked.
+	author, authorIdx := completedTask, meta.StepIndex
+	if step.Command != "" {
+		if !commandPassed(completedTask) {
+			return r.haltCommandStep(ctx, completedTask, nil)
+		}
+		author, authorIdx, meta.MaxRetries, meta.RetryCount, err = r.commandStepAuthor(ctx, member, meta.AuthorTaskID, meta.AuthorStepIndex)
+		if err != nil {
+			return err
+		}
+	}
 
 	if step.Role == "verifier" || meta.Role == "verifier" {
 		digest, err := r.verifierDigest(ctx, completedTask.ID, member.AuthorCommit)
@@ -1583,7 +1614,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	prov, mod := nextStep.Provider, nextStep.Model
 	prompt := nextStep.Prompt
 	if nextStep.Role == "verifier" {
-		prompt = contextpack.BuildVerifierPrompt(completedTask, nextStep.Prompt) +
+		prompt = contextpack.BuildVerifierPrompt(author, nextStep.Prompt) +
 			"Write your findings before the final verdict line.\n"
 	}
 	payload := map[string]any{
@@ -1597,8 +1628,8 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		payload["role"] = nextStep.Role
 	}
 	if nextStep.Role == "verifier" {
-		payload["author_task_id"] = completedTask.ID
-		payload["author_step_index"] = meta.StepIndex
+		payload["author_task_id"] = author.ID
+		payload["author_step_index"] = authorIdx
 		maxR := nextStep.MaxRetries
 		if maxR == 0 {
 			maxR = meta.MaxRetries
@@ -1620,10 +1651,13 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if mod != "" {
 		payload["model"] = mod
 	}
+	if nextStep.Command != "" {
+		payload = commandStepPayload(meta.Workflow, nextStep, nextIdx, meta.Input, author, authorIdx)
+	}
 	raw, _ := json.Marshal(payload)
 	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
-	if nextStep.Role == "verifier" {
-		next.AuthorCommit = authorCommit(completedTask.ArtifactsJSON)
+	if nextStep.Role == "verifier" || nextStep.Command != "" {
+		next.AuthorCommit = authorCommit(author.ArtifactsJSON)
 	}
 	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
 	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)

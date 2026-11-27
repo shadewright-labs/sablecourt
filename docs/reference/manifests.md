@@ -47,6 +47,12 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.coding.harness` | string | conditional | `claude`, `codex` or `agy`, required for a `coding-agent`; the other classes must not set `spec.coding` at all. |
 | `spec.coding.repoPath` | string | conditional | Repository the coding harness works in, required for a `coding-agent` and not checked for existence at load. |
 | `spec.coding.sandbox` | string | no | Not checked at load. Ignored when the task runs in a harness container, which is the default; `sablectl init` and the web UI write `container`. Only in forced host mode (`--unsafe-host-harnesses`, outside invariants 2 and 3) does the adapter read it, and then it accepts only `seatbelt`, on macOS. |
+| `spec.coding.commands` | list of objects | no | The allowed set of commands a workflow command step may run against this workload's repository (see [command steps](../how-it-works/command-steps.md)). Names must be unique. |
+| `spec.coding.commands[].name` | string | conditional | Name a workflow step uses in `command`: lowercase letters, digits and `-`, 1 to 63 characters, starting with a letter or digit. |
+| `spec.coding.commands[].argv` | list of strings | conditional | The program and its arguments, run as given in the workload's harness image with no shell unless the argv names one. 1 to 64 entries of valid UTF-8 without NUL, each at most 4096 bytes; the first must not be empty or start with `-`. Task input never supplies or changes it. |
+| `spec.coding.commands[].timeoutSeconds` | integer | no | Time limit of one run, from container setup to exit, 1 to 3600; 0 or unset means 600. A run over the limit fails the step with outcome `timeout`. |
+| `spec.coding.commands[].maxOutputBytes` | integer | no | Most bytes of redacted output kept, 1 to 1048576; 0 or unset means 65536. Output over the cap fails the step with outcome `output_over_cap`, and only its last `maxOutputBytes` bytes are kept. |
+| `spec.coding.commands[].failureReason` | string | no | Text recorded on the workflow run when the command fails, at most 512 bytes on one line; for example the name of the workflow to use instead. |
 | `spec.agentCard.description` | string | no | Description stored with the workload record and shown on the agent card. |
 | `spec.agentCard.skills` | list of strings | no | Tags shown on the agent card. |
 | `spec.roleCard` | string | no | Role text put into the seat's prompt by the context pack and the council. |
@@ -124,6 +130,7 @@ Source: `internal/domain/types.go` (`WorkflowSpec`, `WorkflowStep`), `internal/c
 | `spec.steps[].provider` | string | no | Provider for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |
 | `spec.steps[].model` | string | no | Model for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |
 | `spec.steps[].prompt` | string | no | The step's task prompt. |
+| `spec.steps[].command` | string | no | Makes this a command step: the name of an entry in the step workload's `spec.coding.commands`. The workload must be a `coding-agent`, the step cannot be the first or follow a `verifier` step, and it must leave `role`, `tier`, `provider`, `model`, `prompt` and `maxRetries` unset. It runs the command on the commit of the step before it and fails the run when the command fails. |
 
 Source for the built-in tier routes: `internal/contextpack/tiers.go`. With no override saved, `fast` is `cli:agy` with `gemini-3.8-flash-high`, `coding` is `cli:claude` with `claude-sonnet-5-5`, and `critic` is `cli:claude` with `claude-opus-5-5`. `GET` and `POST /api/v1/providers/tiers` read and change them.
 

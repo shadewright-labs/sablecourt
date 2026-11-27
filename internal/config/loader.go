@@ -267,6 +267,12 @@ func validateBundle(bundle *Bundle) error {
 			if !ok {
 				return fmt.Errorf("workflow %q step %q: workload %q not found", name, step.Name, step.Workload)
 			}
+			if step.Command != "" {
+				if err := validateCommandStep(wf.Spec.Steps, i, wl); err != nil {
+					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
+				}
+				continue
+			}
 			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
 				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
 			}
@@ -394,6 +400,9 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		}
 		if strings.TrimSpace(w.Spec.Coding.RepoPath) == "" {
 			return fmt.Errorf("workload %q: coding.repoPath is required", name)
+		}
+		if err := validateCommands(w.Spec.Coding.Commands); err != nil {
+			return fmt.Errorf("workload %q: %w", name, err)
 		}
 	case domain.ClassLongLivedAgent:
 		if w.Spec.Coding != nil {

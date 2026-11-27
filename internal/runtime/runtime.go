@@ -24,7 +24,58 @@ type LaunchSpec struct {
 	CouncilContainer bool
 	CouncilDeadline  time.Time // Set only for council seats.
 	CreateAttempt    string
+	// Command, when set, runs this operator-declared command in a harness
+	// container instead of the workload's harness. The control plane resolves
+	// it from the manifest; task input never supplies it.
+	Command *CommandSpec
 }
+
+// CommandSpec is one entry of a coding workload's allowed command set.
+type CommandSpec struct {
+	Name           string
+	Argv           []string
+	Timeout        time.Duration
+	MaxOutputBytes int
+}
+
+// Reasons a command step is refused before its command runs.
+const (
+	CommandNotAllowed         = "command_not_allowed"
+	CommandNoContainerRuntime = "no_container_runtime"
+	CommandContainerRefused   = "container_spec_refused"
+)
+
+// Outcomes of a command that ran.
+const (
+	CommandPassed        = "passed"
+	CommandFailed        = "failed"
+	CommandTimedOut      = "timeout"
+	CommandOutputOverCap = "output_over_cap"
+)
+
+// CommandRefusal is the error of a command step refused before its command
+// ran. Its text names only the command and a fixed reason.
+type CommandRefusal struct {
+	Command string
+	Reason  string
+}
+
+func (e *CommandRefusal) Error() string {
+	return fmt.Sprintf("command %q refused: %s", e.Command, e.Reason)
+}
+
+// CommandResult is the durable record of a command step, stored redacted and
+// capped as the task's command-result artifact.
+type CommandResult struct {
+	Command         string `json:"command"`
+	Outcome         string `json:"outcome"`
+	ExitCode        int    `json:"exit_code"`
+	Output          string `json:"output"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+}
+
+// CommandResultArtifact names the artifact that carries a CommandResult.
+const CommandResultArtifact = "command-result"
 
 type Handle struct {
 	AdapterName      string
@@ -160,8 +211,11 @@ type CouncilLaunch struct {
 	ProxyURL          string
 	DataGateURL       string
 	CreateAttempt     string
-	OnCreated         func(context.Context, CouncilIdentity) error
-	OnStarted         func(context.Context, CouncilIdentity) error
+	// Command replaces the harness CLI with this argv. Such a container gets
+	// no login volume, no tool volume, no task lease and no prompt.
+	Command   []string
+	OnCreated func(context.Context, CouncilIdentity) error
+	OnStarted func(context.Context, CouncilIdentity) error
 }
 
 // CouncilResult identifies the exact container for evidence and cleanup retries.
@@ -171,6 +225,9 @@ type CouncilResult struct {
 	FinishedAt                   time.Time
 	ExitCode                     int
 	Stdout, Stderr               string
+	// OutputOverflow is set when a stream passed the runner's output limit
+	// and was replaced by a marker.
+	OutputOverflow bool
 }
 
 // CouncilInspection reports verified Docker container state for recovery and polling.

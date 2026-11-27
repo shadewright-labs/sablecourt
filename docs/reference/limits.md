@@ -141,6 +141,20 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Context pack pre-check timeout | `internal/contextpack.precheckTimeout` | 10 s |
 | Context pack pre-check output kept | `internal/contextpack.maxPrecheckBytes` | 16 KiB |
 
+## Command steps
+
+See [command steps](../how-it-works/command-steps.md).
+
+| Limit | Constant | Value |
+| --- | --- | --- |
+| Time limit of a command when `timeoutSeconds` is unset, container setup included | `internal/domain.DefaultCommandTimeout` | 10 min |
+| Highest `timeoutSeconds` | `internal/domain.MaxCommandTimeout` | 1 h |
+| Redacted output kept when `maxOutputBytes` is unset; more fails the step | `internal/domain.DefaultCommandOutputBytes` | 64 KiB |
+| Highest `maxOutputBytes` | `internal/domain.MaxCommandOutputBytes` | 1 MiB |
+| Entries in a command's `argv` | `internal/domain.MaxCommandArgs` | 64 |
+| Bytes in one `argv` entry | `internal/domain.MaxCommandArgBytes` | 4 KiB |
+| Bytes in a command's `failureReason` | `internal/domain.MaxCommandFailureReason` | 512 B |
+
 ## sablectl
 
 | Limit | Constant | Value |

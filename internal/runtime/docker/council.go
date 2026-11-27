@@ -32,7 +32,7 @@ func (a *Adapter) RunCouncil(ctx context.Context, s rt.CouncilLaunch, record rt.
 // RunCouncilLogin gives the caller the raw login terminal for the lifetime of
 // the session. The callback must honor cancellation. Terminal bytes stay live.
 func (a *Adapter) RunCouncilLogin(ctx context.Context, s rt.CouncilLaunch, session func(context.Context, io.Reader, io.Writer) error, record rt.CouncilRecorder) (rt.CouncilResult, error) {
-	if session == nil || s.Prompt != "" || s.TaskToken != "" || s.Checkout != (rt.CouncilCheckout{}) || s.Model != "" {
+	if session == nil || s.Prompt != "" || s.TaskToken != "" || s.Checkout != (rt.CouncilCheckout{}) || s.Model != "" || s.Command != nil {
 		return rt.CouncilResult{}, errors.New("invalid council login session")
 	}
 	return a.runCouncil(ctx, s, session, record)
@@ -48,8 +48,9 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	ctx, cancel := context.WithTimeout(parent, s.Limits.WallTime)
 	defer cancel()
 	login := session != nil
+	command := s.Command != nil
 	var prompt string
-	if !login {
+	if !login && !command {
 		prompt, err = preparePrompt(s)
 		if err != nil {
 			return result, err
@@ -98,10 +99,13 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		}
 	}
 	// Revalidate once the container pins the named volume so an autocreated or replaced volume cannot start.
-	if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
-		return result, err
+	// A command container mounts neither volume.
+	if !command {
+		if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
+			return result, err
+		}
 	}
-	if tool := a.CouncilHarnesses[s.Harness].Tool; tool != nil {
+	if tool := a.CouncilHarnesses[s.Harness].Tool; tool != nil && !command {
 		if err := inspectCouncilToolVolume(ctx, engine, s.Harness, tool.Volume); err != nil {
 			return result, err
 		}
@@ -136,7 +140,10 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		}
 		err = session(ctx, stream.Reader, stream.Conn)
 	} else {
-		_, err = io.WriteString(stream.Conn, s.TaskToken+"\x00"+prompt+"\x00")
+		// A command reads EOF on stdin: it never receives the task lease.
+		if !command {
+			_, err = io.WriteString(stream.Conn, s.TaskToken+"\x00"+prompt+"\x00")
+		}
 		if err == nil {
 			err = halfClose.CloseWrite()
 		}
@@ -160,6 +167,7 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	result.Stdout = stdout.visible(prompt, s.TaskToken)
 	result.Stderr = stderr.visible(prompt, s.TaskToken)
+	result.OutputOverflow = result.Stdout == outputLimitMarker || result.Stderr == outputLimitMarker
 	return result, record(ctx, result)
 }
 

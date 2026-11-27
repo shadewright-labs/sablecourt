@@ -118,6 +118,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, errors.New("StartAtCommit cannot be combined with checkoutMode")
 	}
 	readOnly = readOnly || input.isReadOnly()
+	if spec.Command != nil {
+		if err := a.validateCommandLaunch(spec, input, commit, readOnly); err != nil {
+			return scruntime.Handle{}, err
+		}
+	}
 	limit := a.WallTime
 	if limit == 0 {
 		limit = defaultWallTime
@@ -222,7 +227,12 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			prev := rollback
 			rollback = func(rbCtx context.Context) error { return errors.Join(prev(rbCtx), os.RemoveAll(gitDir)) }
 		}
-		return a.startCouncilContainer(ctx, spec, input, dir, taskBase, gitDir, state, readOnly, commitJournal)
+		handle, err := a.startCouncilContainer(ctx, spec, input, dir, taskBase, gitDir, state, readOnly, commitJournal)
+		if err != nil && spec.Command != nil {
+			// No host fallback: a command whose container cannot be built or started does not run.
+			err = errors.Join(&scruntime.CommandRefusal{Command: spec.Command.Name, Reason: scruntime.CommandContainerRefused}, err)
+		}
+		return handle, err
 	}
 
 	if input.checkoutMode == "" && input.context != "" {

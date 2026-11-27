@@ -109,6 +109,7 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 		harness  string
 		tool     bool
 		writable bool
+		command  []string
 	}{
 		{name: "standalone task", kind: rt.CouncilTask, harness: "claude", writable: true},
 		{name: "standalone task with tool volume", kind: rt.CouncilTask, harness: "claude", tool: true, writable: true},
@@ -118,6 +119,9 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 		{name: "council reviewer seat", kind: rt.CouncilReview, harness: "claude"},
 		{name: "council writer seat", kind: rt.CouncilWriter, harness: "claude", writable: true},
 		{name: "council writer seat with tool volume", kind: rt.CouncilWriter, harness: "claude", tool: true, writable: true},
+		// A command step (issue 134): the same guards, no login or tool volume.
+		{name: "command step", kind: rt.CouncilReview, harness: "claude", command: []string{"/bin/sh", "-c", "make check"}},
+		{name: "command step with tool volume", kind: rt.CouncilReview, harness: "codex", tool: true, command: []string{"make", "check"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCouncilEngine()
@@ -150,6 +154,9 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 				Prompt:   prompt, TaskToken: lease,
 				Network: netNm, NetworkID: f.net.ID, ProxyURL: proxy, DataGateURL: gate,
 			}
+			if tc.command != nil {
+				s.Prompt, s.Command = "", tc.command
+			}
 			o, err := a.harnessContainerSpec(t.Context(), f, s, false)
 			if err != nil {
 				t.Fatalf("harnessContainerSpec: %v", err)
@@ -172,8 +179,10 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 				}
 				want = append(want, mount.Mount{Type: mount.TypeBind, Source: gitSrc, Target: councilGitDir, ReadOnly: !tc.writable, BindOptions: &mount.BindOptions{NonRecursive: true}})
 			}
-			want = append(want, mount.Mount{Type: mount.TypeVolume, Source: f.vol.Name, Target: harnessimages.StateDir})
-			if tc.tool {
+			if tc.command == nil {
+				want = append(want, mount.Mount{Type: mount.TypeVolume, Source: f.vol.Name, Target: harnessimages.StateDir})
+			}
+			if tc.tool && tc.command == nil {
 				want = append(want, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 			}
 			if len(h.Mounts) != len(want) || len(h.Binds) != 0 || len(h.VolumesFrom) != 0 || len(c.Volumes) != 0 {
@@ -215,7 +224,15 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 					t.Fatalf("variable %q is not on the harness allowlist", key)
 				}
 			}
-			for _, need := range []string{"HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "SABLECOURT_DATA_GATE_URL=" + gate, "HOME=" + harnessimages.StateDir, "TMPDIR=/scratch"} {
+			home := "HOME=" + harnessimages.StateDir
+			if tc.command != nil {
+				// No login volume to call home: the command's home is the tmpfs scratch.
+				home = "HOME=/scratch"
+				if !slices.Equal(c.Cmd, tc.command) || len(c.Entrypoint) == 0 || c.Entrypoint[0] != "/usr/bin/timeout" {
+					t.Fatalf("command container runs %v %v, want the timeout wrapper around %v", c.Entrypoint, c.Cmd, tc.command)
+				}
+			}
+			for _, need := range []string{"HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "SABLECOURT_DATA_GATE_URL=" + gate, home, "TMPDIR=/scratch"} {
 				if !slices.Contains(c.Env, need) {
 					t.Fatalf("env %v lacks %q", c.Env, need)
 				}

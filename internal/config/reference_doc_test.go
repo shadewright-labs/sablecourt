@@ -246,7 +246,7 @@ func documentedFields(t *testing.T, page string) map[string]map[string]docRow {
 var supportDocs = []string{
 	`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Budget","metadata":{"name":"sup-budget"},"spec":{"perTask":{"maxCostUSD":1}}}`,
 	`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workload","metadata":{"name":"sup-runtime","zone":"runtime"},"spec":{"class":"long-lived-agent","runtime":{"type":"docker","image":"example/agent:1"}}}`,
-	`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workload","metadata":{"name":"sup-coder","zone":"runtime"},"spec":{"class":"coding-agent","runtime":{"type":"worktree-cli"},"coding":{"harness":"claude","repoPath":"/srv/repo","sandbox":"seatbelt"}}}`,
+	`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workload","metadata":{"name":"sup-coder","zone":"runtime"},"spec":{"class":"coding-agent","runtime":{"type":"worktree-cli"},"coding":{"harness":"claude","repoPath":"/srv/repo","sandbox":"seatbelt","commands":[{"name":"test","argv":["make","test"]}]}}}`,
 }
 
 var exampleDocs = map[string][]string{
@@ -266,7 +266,8 @@ var exampleDocs = map[string][]string{
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workload","metadata":{"name":"subject","zone":"sandbox"},"spec":{
 			"class":"coding-agent",
 			"runtime":{"type":"worktree-cli"},
-			"coding":{"harness":"codex","repoPath":"/srv/repo","sandbox":"seatbelt"}}}`,
+			"coding":{"harness":"codex","repoPath":"/srv/repo","sandbox":"seatbelt",
+				"commands":[{"name":"test","argv":["make","test"],"timeoutSeconds":600,"maxOutputBytes":65536,"failureReason":"r"}]}}}`,
 	},
 	"Policy": {
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Policy","metadata":{"name":"subject"},"spec":{"defaultEffect":"deny","rules":[{"workload":"*","capability":"mcp:memory.get","effect":"allow"}]}}`,
@@ -284,7 +285,8 @@ var exampleDocs = map[string][]string{
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workflow","metadata":{"name":"subject","zone":"runtime"},"spec":{"description":"d","steps":[
 			{"name":"author","workload":"sup-runtime","role":"author","provider":"openai","model":"gpt-x","prompt":"p","maxRetries":1}]}}`,
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Workflow","metadata":{"name":"subject"},"spec":{"steps":[
-			{"name":"code","workload":"sup-coder","tier":"coding"}]}}`,
+			{"name":"code","workload":"sup-coder","tier":"coding"},
+			{"name":"check","workload":"sup-coder","command":"test"}]}}`,
 	},
 	"Schedule": {
 		`{"apiVersion":"sablecourt.io/v1alpha1","kind":"Schedule","metadata":{"name":"subject"},"spec":{"cron":"@hourly","targetKind":"workload","targetName":"sup-runtime","input":"{}","enabled":true}}`,
@@ -297,35 +299,32 @@ var exampleDocs = map[string][]string{
 }
 
 // deletePath removes the field at path from doc. A "[]" segment means the
-// first element of a list. It reports whether the field was present.
+// first element of a list that has the rest of the path, so a field set only
+// on a later step (a command step cannot be the first) is found. It reports
+// whether the field was present.
 func deletePath(doc map[string]any, path string) bool {
-	parts := strings.Split(path, ".")
-	cur := doc
-	for i, p := range parts {
-		name, isList := strings.CutSuffix(p, "[]")
-		if i == len(parts)-1 {
-			if _, ok := cur[name]; !ok {
-				return false
-			}
-			delete(cur, name)
+	name, rest, nested := strings.Cut(path, ".")
+	field, isList := strings.CutSuffix(name, "[]")
+	next, ok := doc[field]
+	if !ok {
+		return false
+	}
+	if !nested {
+		delete(doc, field)
+		return true
+	}
+	if !isList {
+		m, ok := next.(map[string]any)
+		return ok && deletePath(m, rest)
+	}
+	list, ok := next.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range list {
+		if m, ok := item.(map[string]any); ok && deletePath(m, rest) {
 			return true
 		}
-		next, ok := cur[name]
-		if !ok {
-			return false
-		}
-		if isList {
-			list, ok := next.([]any)
-			if !ok || len(list) == 0 {
-				return false
-			}
-			next = list[0]
-		}
-		m, ok := next.(map[string]any)
-		if !ok {
-			return false
-		}
-		cur = m
 	}
 	return false
 }

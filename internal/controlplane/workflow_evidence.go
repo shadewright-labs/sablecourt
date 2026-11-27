@@ -103,6 +103,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 		bundle := r.bundle
 		r.mu.Unlock()
 		role := meta.Role
+		command := r.isCommandStep(meta.Workflow, meta.StepIndex, task.WorkloadName)
 		if bundle != nil {
 			steps := bundle.Workflows[meta.Workflow].Spec.Steps
 			if meta.StepIndex >= 0 && meta.StepIndex < len(steps) && steps[meta.StepIndex].Workload == task.WorkloadName && steps[meta.StepIndex].Role != "" {
@@ -113,7 +114,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 		}
 		remediation := strings.HasPrefix(task.IdempotencyKey, "wf:"+meta.Workflow+":remediate:") ||
 			((role == "author" || wl.Spec.Class == domain.ClassCodingAgent) && meta.RetryCount > 0)
-		if role == "verifier" || remediation {
+		if role == "verifier" || remediation || command {
 			member, err := r.workflowStep(ctx, task.ID)
 			if err != nil {
 				return "", false, err
@@ -121,7 +122,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 			if member == nil || member.Workflow != meta.Workflow || member.Index != meta.StepIndex || member.AuthorCommit == "" || wl.Spec.Class != domain.ClassCodingAgent {
 				return "", false, errAuthorCheckoutUnavailable
 			}
-			return member.AuthorCommit, role == "verifier", nil
+			return member.AuthorCommit, role == "verifier" || command, nil
 		}
 	}
 	return "", false, nil

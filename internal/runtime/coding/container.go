@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -283,6 +284,16 @@ func (a *Adapter) startCouncilContainer(
 	if err != nil {
 		return scruntime.Handle{}, err
 	}
+	// A command container's proxy allows no provider host, and the command's
+	// own time limit replaces the harness wall time.
+	proxyHarness, model, prompt := cfg.Harness, input.model, input.prompt
+	var argv []string
+	if spec.Command != nil {
+		proxyHarness, model, prompt = councilproxy.CommandHarness, "", ""
+		argv = slices.Clone(spec.Command.Argv)
+		limits.WallTime = spec.Command.Timeout
+		state.Command = &commandRecord{Name: spec.Command.Name, MaxOutputBytes: spec.Command.MaxOutputBytes}
+	}
 	proxyImageID, err := a.resolveProxyImageID(ctx)
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("resolve council proxy image: %w", err)
@@ -307,7 +318,7 @@ func (a *Adapter) startCouncilContainer(
 	setupCtx, cancelSetup := context.WithDeadline(ctx, deadline)
 	defer cancelSetup()
 	session, err := a.CouncilProxy.ProvisionCouncilProxy(setupCtx, proxyImageID, councilproxy.Config{
-		Harness: cfg.Harness, DaemonListen: a.DaemonListen, LeaseSHA256: leaseSHA256Hex(spec.TaskToken),
+		Harness: proxyHarness, DaemonListen: a.DaemonListen, LeaseSHA256: leaseSHA256Hex(spec.TaskToken),
 		GateHandler: a.CouncilGateHandler, SocketRoot: a.CouncilSocketRoot,
 		RecordResources: func(proxy, network string) error {
 			handle.ProxyName, handle.NetworkName = proxy, network
@@ -364,10 +375,11 @@ func (a *Adapter) startCouncilContainer(
 		TaskID:        spec.TaskID,
 		Workload:      spec.Workload.Metadata.Name,
 		Harness:       cfg.Harness,
-		Model:         input.model,
+		Model:         model,
 		Checkout:      scruntime.CouncilCheckout{Path: dir, Kind: kind, GitDir: gitDir},
 		Limits:        limits,
-		Prompt:        input.prompt,
+		Prompt:        prompt,
+		Command:       argv,
 		TaskToken:     spec.TaskToken,
 		Network:       endpoint.Network,
 		NetworkID:     endpoint.NetworkID,
@@ -414,9 +426,14 @@ func (a *Adapter) startCouncilContainer(
 		if res.ContainerID != "" {
 			cur.Container.ContainerID = res.ContainerID
 		}
-		cur.Result = buildContainerProcessResult(res)
-		if err := writeContainerLog(taskBase, res); err != nil {
-			return err
+		if cur.Command != nil {
+			// The capped result is the only copy of a command's output; no session log.
+			cur.Result = buildCommandProcessResult(res, *cur.Command)
+		} else {
+			cur.Result = buildContainerProcessResult(res)
+			if err := writeContainerLog(taskBase, res); err != nil {
+				return err
+			}
 		}
 		if err := writeWorktreeState(taskBase, cur); err != nil {
 			return err
@@ -526,10 +543,14 @@ func (a *Adapter) recordContainerFailure(taskBase, taskID string, proc *containe
 		cur.Container.ContainerID = res.ContainerID
 	}
 	msg := "coding container failed"
-	if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctxErr, context.DeadlineExceeded) {
+	timedOut := errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctxErr, context.DeadlineExceeded)
+	if timedOut {
 		msg = "coding task exceeded its wall time limit"
+		if cur.Command != nil {
+			msg = fmt.Sprintf("command %q exceeded its time limit", cur.Command.Name)
+		}
 	}
-	cur.Result = &processResult{ExitCode: -1, Message: msg}
+	cur.Result = &processResult{ExitCode: -1, Message: msg, TimedOut: timedOut}
 	_ = writeWorktreeState(taskBase, cur)
 }
 
