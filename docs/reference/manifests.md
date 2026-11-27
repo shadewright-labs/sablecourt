@@ -56,6 +56,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
+| `spec.grants.repos` | list of strings | no | Granted repositories (`owner/repo` or canonical path) for GitOps actions such as `git.push` and `git.merge_pr`. |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
 
 ### Upstream MCP server (parked)
@@ -77,8 +78,8 @@ Source: `internal/gate/mcp/actions.go`, `internal/gate/mcp/memory.go`, `internal
 
 | Grant list | Names the daemon registers |
 | --- | --- |
-| `mcpTools` | `sablecourt.list_workloads`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
-| `actions` | `git.create_branch`, `git.open_pr`, `sandbox.propose_promotion`. |
+| `mcpTools` | `sablecourt.list_workloads`, `git.pr_checks`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
+| `actions` | `git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`, `sandbox.propose_promotion`. |
 
 ## Policy
 

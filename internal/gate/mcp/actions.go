@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -231,10 +232,48 @@ func (b *RepoBinding) Recheck(ctx context.Context) error {
 	return err
 }
 
+// GitOpsOptions configures the built-in GitOps actions and tools on the gate.
+// PRChecker and PRMerger default to PROpener when it implements them, and
+// BranchPusher defaults to a GitBranchPusher with Secrets.
+type GitOpsOptions struct {
+	RepoRoot     string
+	PROpener     PROpener
+	PRChecker    PRChecker
+	PRMerger     PRMerger
+	BranchPusher BranchPusher
+	Secrets      secret.SecretStore
+}
+
 // RegisterBuiltinGitOps registers the closed catalog of GitOps typed actions
-// and a read-only MCP tool, and pins the repository git.open_pr may target.
-// The pin is final; the returned binding only checks the origin against it.
+// and the read-only MCP tools, and pins the repository git.open_pr and
+// git.merge_pr may target. The pin is final; the returned binding only checks
+// the origin against it.
 func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) *RepoBinding {
+	opts := GitOpsOptions{RepoRoot: repoRoot, PROpener: prOpener}
+	if gh, ok := prOpener.(*GitHubPROpener); ok && gh != nil {
+		opts.Secrets = gh.Secrets
+	}
+	return RegisterBuiltinGitOpsWithOptions(g, opts)
+}
+
+// RegisterBuiltinGitOpsWithOptions is RegisterBuiltinGitOps with every
+// backend named.
+func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding {
+	repoRoot := opts.RepoRoot
+	prOpener := opts.PROpener
+	prChecker := opts.PRChecker
+	if prChecker == nil {
+		prChecker, _ = prOpener.(PRChecker)
+	}
+	prMerger := opts.PRMerger
+	if prMerger == nil {
+		prMerger, _ = prOpener.(PRMerger)
+	}
+	pusher := opts.BranchPusher
+	if pusher == nil {
+		pusher = &GitBranchPusher{Secrets: opts.Secrets}
+	}
+
 	g.RegisterTool(ToolDef{
 		Name:        "sablecourt.list_workloads",
 		Description: "List declared workloads in the current Sablecourt bundle",
@@ -273,18 +312,124 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) *RepoBin
 		}
 		return nil
 	}
-	RegisterTypedAction(g, "git.open_pr", validateOpenPRTarget, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
-		if err := checkOpenPRTarget(ctx, repoRoot, g.snapshotFromContext(ctx).allowedRepo, in.Owner, in.Repo); err != nil {
-			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
-		}
-		if prOpener == nil {
-			return nil, errors.New("PR opener not configured")
-		}
-		prURL, err := prOpener.OpenPR(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"pr_url": prURL, "head": in.Head, "base": in.Base}, nil
+	registerTypedActionDef(g, "git.open_pr", typedAction[OpenPRInput]{
+		validate: validateOpenPRTarget,
+		precheck: func(_ context.Context, wl domain.Workload, _ string, in OpenPRInput) error {
+			return checkOwnerRepoGrant(wl, in.Owner, in.Repo)
+		},
+		run: func(ctx context.Context, wl domain.Workload, taskID string, in OpenPRInput) (any, error) {
+			if err := checkOpenPRTarget(ctx, repoRoot, g.snapshotFromContext(ctx).allowedRepo, in.Owner, in.Repo); err != nil {
+				return nil, fmt.Errorf("%w: %v", errToolRefused, err)
+			}
+			if err := checkOwnerRepoGrant(wl, in.Owner, in.Repo); err != nil {
+				return nil, err
+			}
+			if prOpener == nil {
+				return nil, errors.New("PR opener not configured")
+			}
+			prURL, err := prOpener.OpenPR(ctx, in)
+			if err != nil {
+				return nil, err
+			}
+			res := map[string]string{"pr_url": prURL, "head": in.Head, "base": in.Base}
+			if num, ok := parsePRNumber(prURL); ok {
+				res["pr_number"] = strconv.Itoa(num)
+				if err := recordOpenedPR(ctx, g, OpenedPRRecord{
+					Owner:    in.Owner,
+					Repo:     in.Repo,
+					Number:   num,
+					URL:      prURL,
+					Head:     in.Head,
+					Base:     in.Base,
+					TaskID:   taskID,
+					Workload: wl.Metadata.Name,
+					OpenedAt: g.now(),
+				}); err != nil {
+					return nil, fmt.Errorf("record opened pull request: %w", err)
+				}
+			}
+			return res, nil
+		},
+	})
+
+	// git.push always needs an out-of-band approval. The approved value names
+	// the commit; the precheck and the run step both compare it with the live
+	// head of the task branch, and the pusher compares once more just before
+	// it pushes.
+	registerTypedActionDef(g, "git.push", typedAction[PushBranchInput]{
+		validate:         validatePushInput,
+		requiresApproval: true,
+		precheck: func(ctx context.Context, wl domain.Workload, taskID string, in PushBranchInput) error {
+			_, err := resolvePushRequest(ctx, g, repoRoot, wl, taskID, in)
+			return err
+		},
+		run: func(ctx context.Context, wl domain.Workload, taskID string, in PushBranchInput) (any, error) {
+			req, err := resolvePushRequest(ctx, g, repoRoot, wl, taskID, in)
+			if err != nil {
+				return nil, err
+			}
+			return pusher.PushBranch(ctx, req)
+		},
+	})
+
+	g.RegisterTool(ToolDef{
+		Name:        "git.pr_checks",
+		Description: "Read check state for a pull request Sablecourt opened and store timestamped evidence",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"pr_number":{"type":"integer"}},"required":["owner","repo","pr_number"]}`),
+		Handler: func(ctx context.Context, wl domain.Workload, taskID string, args json.RawMessage) (string, error) {
+			in, err := decodeTyped[PRChecksInput](args)
+			if err != nil {
+				return "", err
+			}
+			if err := validatePRChecks(in); err != nil {
+				return "", err
+			}
+			report, err := executePRChecks(ctx, g, prChecker, wl, taskID, in)
+			if err != nil {
+				return "", err
+			}
+			out, err := json.Marshal(report)
+			return string(out), err
+		},
+	})
+	RegisterTypedAction(g, "git.pr_checks", validatePRChecks, func(ctx context.Context, wl domain.Workload, taskID string, in PRChecksInput) (any, error) {
+		return executePRChecks(ctx, g, prChecker, wl, taskID, in)
+	})
+
+	// git.merge_pr always needs an out-of-band approval, and the precheck asks
+	// for it only once the required checks have passed at the approved commit.
+	// The run step reads the checks again, refuses when the head moved, and
+	// refuses when a check result is newer than the approval.
+	registerTypedActionDef(g, "git.merge_pr", typedAction[MergePRInput]{
+		validate:         validateMergePRInput,
+		requiresApproval: true,
+		precheck: func(ctx context.Context, wl domain.Workload, taskID string, in MergePRInput) error {
+			_, err := checkMergeReady(ctx, g, prChecker, wl, taskID, in)
+			return err
+		},
+		run: func(ctx context.Context, wl domain.Workload, taskID string, in MergePRInput) (any, error) {
+			report, err := checkMergeReady(ctx, g, prChecker, wl, taskID, in)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkApprovalAfterChecks(ctx, g, report); err != nil {
+				return nil, err
+			}
+			if prMerger == nil {
+				return nil, errors.New("PR merger not configured")
+			}
+			method := in.MergeMethod
+			if method == "" {
+				method = "squash"
+			}
+			return prMerger.MergePR(ctx, MergePRRequest{
+				Owner:       in.Owner,
+				Repo:        in.Repo,
+				PRNumber:    in.PRNumber,
+				CommitSHA:   in.CommitSHA,
+				MergeMethod: method,
+			})
+		},
 	})
 
 	RegisterTypedAction(g, "sandbox.propose_promotion", validatePromotion, func(ctx context.Context, _ domain.Workload, _ string, in PromoteSandboxInput) (any, error) {

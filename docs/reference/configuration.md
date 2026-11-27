@@ -45,7 +45,7 @@ Source: `internal/secret`. The daemon reads a secret from the OS keyring (servic
 | `observer_bearer_token` | Observer routes | `GET /api/v1/observer/*` and the Scry stream for that credential. |
 | `github_webhook_secret` | `POST /api/v1/hooks/github` | Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks GitHub integrations. |
 | `a2a_bearer_token` | `POST /a2a` | Parked. |
-| `github_token` | `git.open_pr` action, `sablectl auth github` | Parked. |
+| `github_token` | `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`, `sablectl auth github` | GitHub HTTPS pushes and pull request API calls. |
 | `notify_webhook_url` | Chat alerts | Parked. Also read from `SABLECOURT_NOTIFY_WEBHOOK_URL`. |
 | `secretName` of an upstream MCP server | Upstream MCP calls | Parked. The name comes from the manifest. |
 

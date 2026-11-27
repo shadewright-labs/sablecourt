@@ -1,6 +1,7 @@
 package mcpgate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/approval"
@@ -37,6 +38,24 @@ func TestCanonicalEncodingOfTypedActionsIsFixed(t *testing.T) {
 			PromoteSandboxInput{Workload: "exp-sandbox", Branch: "sablecourt/promote", Reason: "ready"},
 			`{"workload":"exp-sandbox","branch":"sablecourt/promote","reason":"ready"}`,
 			"8106b8cf55ff86eada948b977dcb81e8d5d52e5e5f4095aa34e57c0134cccfa6",
+		},
+		{
+			"git.push",
+			PushBranchInput{Branch: "sablecourt/task-1", CommitSHA: strings.Repeat("ab", 20)},
+			`{"branch":"sablecourt/task-1","commit_sha":"abababababababababababababababababababab"}`,
+			"10f95b3c6811fb6b2497361ddd2c4118fe7020397cd579fc142620d8576b644f",
+		},
+		{
+			"git.merge_pr",
+			MergePRInput{Owner: "acme", Repo: "widgets", PRNumber: 7, CommitSHA: strings.Repeat("ab", 20), MergeMethod: "squash"},
+			`{"owner":"acme","repo":"widgets","pr_number":7,"commit_sha":"abababababababababababababababababababab","merge_method":"squash"}`,
+			"a37c93a677d6343314460f3410559a66268b4d0fa895fbf703051343be81c0ec",
+		},
+		{
+			"git.pr_checks",
+			PRChecksInput{Owner: "acme", Repo: "widgets", PRNumber: 7},
+			`{"owner":"acme","repo":"widgets","pr_number":7}`,
+			"f99e4881186adaf08ecbd3d6ea654155d274d45c155c2e076c381459d4a5504b",
 		},
 	} {
 		canonical, digest, err := approval.CanonicalizeAndHash(tc.value)

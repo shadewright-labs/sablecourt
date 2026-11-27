@@ -112,6 +112,7 @@ type GrantSet struct {
 	MCPTools   []string            `json:"mcpTools,omitempty"`
 	MCPServers []UpstreamMCPServer `json:"mcpServers,omitempty"`
 	Actions    []string            `json:"actions,omitempty"`
+	Repos      []string            `json:"repos,omitempty"`
 	DelegateTo []string            `json:"delegateTo,omitempty"`
 }
 
