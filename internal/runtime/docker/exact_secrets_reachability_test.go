@@ -86,6 +86,7 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 
 	stateDir := filepath.Join(t.TempDir(), "daemon-state")
 	t.Setenv("SABLECOURT_STATE_DIR", stateDir)
+	t.Setenv("DOCKER_HOST", "")
 	opToken, err := operatortoken.LoadOrCreate(stateDir)
 	if err != nil {
 		t.Fatalf("operatortoken.LoadOrCreate: %v", err)
@@ -158,7 +159,7 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 		eng := newCouncilEngine()
 		eng.net = network.Network{Name: DefaultNetworkName, ID: "net-id", Internal: true, Driver: "bridge"}
 		eng.imageID = "sha256:" + strings.Repeat("a", 64)
-		adapter := NewAdapter(eng, DefaultNetworkName)
+		adapter := testAdapter(eng, DefaultNetworkName)
 		ownTok := synthDockerSecret("sc_", "task_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 		_, err := adapter.Start(ctx, rt.LaunchSpec{
 			TaskID:         "task-cont-reach",
@@ -184,7 +185,8 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 
 	t.Run("council_member_container", func(t *testing.T) {
 		eng := newCouncilEngine()
-		adapter := NewAdapter(eng, DefaultNetworkName)
+		adapter := testAdapter(eng, DefaultNetworkName)
+		root := withWorktreeRoot(t, adapter)
 		adapter.CouncilHarnesses = map[string]CouncilHarness{
 			"claude": {
 				Image:       "sablecourt-harness-claude:local",
@@ -193,7 +195,7 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 				DataGateURL: "http://proxy-1:3128/gate/mcp",
 			},
 		}
-		checkoutDir := t.TempDir()
+		checkoutDir := mkdirAll(t, filepath.Join(root, "council-reach-1"))
 		ownTok := synthDockerSecret("sc_", "task_", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 		spec := rt.CouncilLaunch{
 			TaskID:    "council-reach-1",
@@ -209,9 +211,9 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 				WallTime:    time.Minute,
 			},
 		}
-		opts, err := adapter.councilOptions(ctx, eng, spec, false)
+		opts, err := adapter.harnessContainerSpec(ctx, eng, spec, false)
 		if err != nil {
-			t.Fatalf("councilOptions: %v", err)
+			t.Fatalf("harnessContainerSpec: %v", err)
 		}
 		assertCreateOptsClean(t, "council container", opts, false, ownTok)
 		if opts.HostConfig == nil || !opts.HostConfig.ReadonlyRootfs || opts.HostConfig.NetworkMode != container.NetworkMode("net-id") {

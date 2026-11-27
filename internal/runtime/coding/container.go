@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
@@ -83,9 +86,18 @@ func (a *Adapter) validateCouncilContainerLaunch(spec scruntime.LaunchSpec, inpu
 		return errors.New("council container requires a scoped task lease")
 	}
 	switch input.checkoutMode {
-	case checkoutModeLive, checkoutModeRef, checkoutModeWriter:
+	case "", checkoutModeLive, checkoutModeRef, checkoutModeWriter:
 	default:
+		return errors.New("harness container requires a known checkout mode")
+	}
+	// The reconciler sets CouncilDeadline only for a council round, so the
+	// deadline, not the input, says whether this launch is a seat. A seat needs
+	// a council checkout; any other task gets only its own worktree.
+	if input.checkoutMode == "" && !spec.CouncilDeadline.IsZero() {
 		return errors.New("council container requires an explicit council checkout mode")
+	}
+	if input.checkoutMode != "" && spec.CouncilDeadline.IsZero() {
+		return errors.New("council checkout mode requires a council seat")
 	}
 	if _, err := a.councilLimits(spec.CouncilDeadline); err != nil {
 		return err
@@ -125,6 +137,12 @@ func (a *Adapter) councilLimits(deadline time.Time) (scruntime.CouncilLimits, er
 
 func councilCheckoutKind(mode string, readOnly bool) (scruntime.CouncilCheckoutKind, error) {
 	switch mode {
+	case "":
+		// A standalone task: its own worktree, or a pinned read-only checkout for a verifier.
+		if readOnly {
+			return scruntime.CouncilReview, nil
+		}
+		return scruntime.CouncilTask, nil
 	case checkoutModeLive:
 		return scruntime.CouncilLive, nil
 	case checkoutModeRef:
@@ -137,6 +155,93 @@ func councilCheckoutKind(mode string, readOnly bool) (scruntime.CouncilCheckoutK
 	default:
 		return "", errors.New("unsupported council checkout mode")
 	}
+}
+
+// harnessGitDirPath is the per-launch Git metadata directory of a task. The
+// path is reserved with the task's other files before any checkout exists.
+func harnessGitDirPath(taskBase string) string { return taskBase + ".git" }
+
+// prepareHarnessGitDir gives a harness container Git metadata it can resolve.
+// A linked worktree's .git file points at its registration in the shared
+// repository, and the container never mounts that registration or the shared
+// object store: other branches' refs and objects would be readable and, for a
+// writable seat, rewritable. The launch gets its own directory instead, built
+// the same way as a live checkout's (objects reachable from HEAD, HEAD, the
+// checkout's index and info/exclude). The workload may change it; the daemon
+// never runs Git against it, finishes from the host registration and the
+// checkout files, and removes the directory when the task finishes. A live
+// checkout is a primary worktree whose .git is mounted with it, so it needs
+// none.
+//
+// The container user (10001) is not the daemon user on native Linux Docker,
+// so the directory is made readable by every user (directories 0755, files
+// 0644) once its parent is checked to be a directory the daemon user owns
+// that grants nothing to group or others: the container runtime reaches the
+// bind source as root, and no other host user can reach it through that
+// parent. It is not made writable; see the uid 10001 limit on the harness
+// containers page.
+func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *worktreeState) (string, error) {
+	if state.Mode == checkoutModeLive {
+		return "", nil
+	}
+	gitDir := harnessGitDirPath(taskBase)
+	if err := checkPrivateParent(filepath.Dir(gitDir)); err != nil {
+		return "", err
+	}
+	checkout := state.checkoutGit(dir)
+	head, err := checkout.commitID(ctx, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if err := createLiveGitDir(ctx, checkout, gitDir, head); err != nil {
+		return "", fmt.Errorf("create harness Git metadata: %w", err)
+	}
+	if err := openToHarnessUser(gitDir); err != nil {
+		return "", errors.Join(fmt.Errorf("open harness Git metadata to the container user: %w", err), os.RemoveAll(gitDir))
+	}
+	return gitDir, nil
+}
+
+// checkPrivateParent refuses a directory that is a symlink, is owned by
+// another user or grants any permission to group or others.
+func checkPrivateParent(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok || int64(st.Uid) != int64(os.Geteuid()) || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("harness Git metadata parent %s must be a directory owned by the daemon user with mode 0700", filepath.Base(dir))
+	}
+	return nil
+}
+
+// openToHarnessUser adds read permission for every user to each file, and
+// read and search permission to each directory, below dir. It refuses a
+// symlink or any other kind of file, which the daemon never writes there.
+func openToHarnessUser(dir string) (err error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	return fs.WalkDir(root.FS(), ".", func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := root.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.IsDir():
+			return root.Chmod(path, info.Mode().Perm()|0o055)
+		case info.Mode().IsRegular():
+			return root.Chmod(path, info.Mode().Perm()|0o044)
+		default:
+			return fmt.Errorf("unexpected file type %v in harness Git metadata", info.Mode().Type())
+		}
+	})
 }
 
 func (a *Adapter) resolveProxyImageID(ctx context.Context) (string, error) {
@@ -164,6 +269,7 @@ func (a *Adapter) startCouncilContainer(
 	input launchInput,
 	dir string,
 	taskBase string,
+	gitDir string,
 	state *worktreeState,
 	readOnly bool,
 	commitJournal func() error,
@@ -259,7 +365,7 @@ func (a *Adapter) startCouncilContainer(
 		Workload:      spec.Workload.Metadata.Name,
 		Harness:       cfg.Harness,
 		Model:         input.model,
-		Checkout:      scruntime.CouncilCheckout{Path: dir, Kind: kind},
+		Checkout:      scruntime.CouncilCheckout{Path: dir, Kind: kind, GitDir: gitDir},
 		Limits:        limits,
 		Prompt:        input.prompt,
 		TaskToken:     spec.TaskToken,

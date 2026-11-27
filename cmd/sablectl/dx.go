@@ -54,6 +54,9 @@ func buildDXCommands(httpClient func(time.Duration) (*http.Client, string), json
 						fmt.Fprintf(out, "  %s audit SHA-256 chain: BROKEN\n", errMark)
 					}
 				}
+				if body, err := fetchGET(cli, base+"/api/v1/runtime/coding"); err == nil {
+					printCodingRuntime(out, body, okMark, warnMark, errMark)
+				}
 				if body, err := fetchGET(cli, base+"/api/v1/providers"); err == nil {
 					var provs []providers.ProviderStatus
 					_ = json.Unmarshal(body, &provs)
@@ -157,7 +160,7 @@ spec:
   coding:
     harness: %s
     repoPath: %s
-    sandbox: seatbelt
+    sandbox: container
   agentCard:
     description: Edits code in an isolated Git worktree for %s.
     skills: [coding, tests]
@@ -347,5 +350,35 @@ func printColorDiff(w io.Writer, diff string) {
 		default:
 			fmt.Fprintln(w, line)
 		}
+	}
+}
+
+// printCodingRuntime shows how the daemon runs coding tasks. Forced host mode
+// is shown as an error line because those runs are outside invariants 2 and 3.
+func printCodingRuntime(out io.Writer, body []byte, okMark, warnMark, errMark string) {
+	var st struct {
+		Mode          string `json:"mode"`
+		HostModeOptIn bool   `json:"hostModeOptIn"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		fmt.Fprintf(out, "  %s coding tasks: unreadable runtime status\n", warnMark)
+		return
+	}
+	switch st.Mode {
+	case "container":
+		fmt.Fprintf(out, "  %s coding tasks: harness containers\n", okMark)
+		if st.HostModeOptIn {
+			fmt.Fprintf(out, "  %s host mode opt-in is set (--unsafe-host-harnesses) but unused while a container runtime is configured\n", warnMark)
+		}
+	case "host-unsafe":
+		fmt.Fprintf(out, "  %s coding tasks: UNSAFE host mode (--unsafe-host-harnesses), outside invariants 2 and 3\n", errMark)
+	case "unavailable":
+		if st.HostModeOptIn {
+			fmt.Fprintf(out, "  %s coding tasks: unavailable (no container runtime configured; --unsafe-host-harnesses is set but host mode could not start: no working host sandbox, or Citadel mode)\n", warnMark)
+		} else {
+			fmt.Fprintf(out, "  %s coding tasks: unavailable (no container runtime configured; host mode is off)\n", warnMark)
+		}
+	default:
+		fmt.Fprintf(out, "  %s coding tasks: unknown runtime mode\n", warnMark)
 	}
 }

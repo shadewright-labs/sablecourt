@@ -66,7 +66,7 @@ func TestToolDirMatchesImage(t *testing.T) {
 	for _, role := range []string{"claude", "agy"} {
 		d, _ := harnessimages.Lookup(role)
 		tool := CouncilTool{Volume: d.Tool.Volume, Binary: d.Tool.Binary, Version: d.Tool.Version, SHA256: d.Tool.SHA256, InstallCommand: harnessimages.InstallCommand(role)}
-		a := NewAdapter(nil, "")
+		a := testAdapter(nil, "")
 		a.CouncilHarnesses = map[string]CouncilHarness{role: {Image: d.Image, LoginVolume: d.Volume, Tool: &tool}}
 		if err := a.validateCouncilTool(role, a.CouncilHarnesses[role]); err != nil {
 			t.Fatalf("%s pin rejected by the runtime: %v", role, err)

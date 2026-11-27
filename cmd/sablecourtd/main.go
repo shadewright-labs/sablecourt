@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,7 +45,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
@@ -92,6 +95,7 @@ func newRootCmd() *cobra.Command {
 		allowedHosts         []string
 		incidentTemplate     string
 		branchRetention      time.Duration
+		unsafeHostHarnesses  bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -120,6 +124,7 @@ func newRootCmd() *cobra.Command {
 				allowedHosts:         allowedHosts,
 				incidentTemplate:     incidentTemplate,
 				branchRetention:      branchRetention,
+				unsafeHostHarnesses:  unsafeHostHarnesses,
 			})
 		},
 	}
@@ -138,13 +143,14 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
 	rootCmd.Flags().StringVar(&incidentTemplate, "incident-conclave-template", "", "Default Conclave template for new Shadewright incidents")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
-	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
+	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to host.docker.internal:<port> when --listen is 127.0.0.1, otherwise --listen; required for a wildcard listener)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
 	rootCmd.Flags().StringVar(&runtimeBackend, "runtime", "docker", "Container runtime backend: docker or k8s")
 	rootCmd.Flags().StringVar(&k8sNamespace, "k8s-namespace", "default", "Kubernetes namespace when --runtime=k8s")
 	rootCmd.Flags().StringVar(&k8sRuntimeClass, "k8s-runtime-class", "", "Optional Kubernetes RuntimeClassName (e.g. gvisor, kata)")
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
+	rootCmd.Flags().BoolVar(&unsafeHostHarnesses, unsafeHostHarnessesFlag, false, "UNSAFE: run coding harnesses on the host when no container runtime is configured; such runs are outside invariants 2 and 3")
 	rootCmd.Flags().Bool("operator-auth-required", true, "Require operator authentication")
 	_ = rootCmd.Flags().MarkDeprecated("operator-auth-required", "operator authentication is always required")
 	return rootCmd
@@ -172,6 +178,7 @@ type daemonConfig struct {
 	allowedHosts         []string
 	incidentTemplate     string
 	branchRetention      time.Duration
+	unsafeHostHarnesses  bool
 	openStore            func() (store.Store, error)
 	logger               *slog.Logger
 }
@@ -199,30 +206,116 @@ func wireK8sRuntime(ctx context.Context, cfg daemonConfig, adapters map[domain.W
 	return nil
 }
 
+// worktreeRootPath is the directory that holds every checkout the daemon
+// makes: worktrees beside the database.
+func worktreeRootPath(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "worktrees")
+}
+
+// sameDatabaseFile checks that the file SQLite opened for the main database
+// is the file the daemon created, by identity.
+func sameDatabaseFile(ctx context.Context, sq *sqlite.SQLiteStore, created fs.FileInfo) error {
+	file, err := sq.MainFile(ctx)
+	if err != nil {
+		return fmt.Errorf("read the database file: %w", err)
+	}
+	opened, err := os.Stat(file)
+	if err != nil || !os.SameFile(opened, created) {
+		return errors.New("the database opened is not the file the daemon created")
+	}
+	return nil
+}
+
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
-	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
+	adapter := coding.NewAdapter(worktreeRootPath(dbPath))
 	adapter.BranchRetention = retention
 	adapter.AttachHub = hub
 	return adapter
 }
 
-func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, hub *attach.Hub, dbPath string, retention time.Duration, checkSandbox func() error, logger *slog.Logger) {
+// unsafeHostHarnessesFlag is the only way to turn host mode on. Its name says
+// it is unsafe: a host run is outside invariants 2 and 3 (ADR-0011 amendment
+// of 2026-11-27).
+const unsafeHostHarnessesFlag = "unsafe-host-harnesses"
+
+// registerCodingAdapter registers the coding adapter outside Citadel. By
+// default it is recovery only: it observes, stops and cleans up a host worker
+// started before an upgrade, and refuses every new launch (ErrHostModeOff).
+// Host launches are allowed only with --unsafe-host-harnesses and a working
+// host sandbox. wireCouncilContainers later gives the same adapter a
+// container runner, which then runs every coding task.
+func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, hub *attach.Hub, dbPath string, retention time.Duration, unsafeHost bool, checkSandbox func() error, logger *slog.Logger) {
 	if isCitadel {
+		return
+	}
+	adapter := newCodingAdapter(hub, dbPath, retention)
+	adapter.Logger = logger
+	adapters[domain.ClassCodingAgent] = adapter
+	if !unsafeHost {
 		return
 	}
 	if checkSandbox == nil {
 		if logger != nil {
-			logger.Warn("host coding adapter disabled: sandbox availability check unavailable")
+			logger.Warn("host mode stays off: sandbox availability check unavailable")
 		}
 		return
 	}
 	if err := checkSandbox(); err != nil {
 		if logger != nil {
-			logger.Warn("host coding adapter disabled: no working sandbox on this platform", "error", err)
+			logger.Warn("host mode stays off: no working sandbox on this platform", "error", err)
 		}
 		return
 	}
-	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
+	adapter.HostModeUnsafe = true
+	if logger != nil {
+		logger.Warn("UNSAFE: host mode is on (--" + unsafeHostHarnessesFlag + "); host launches are allowed only when no container runtime is configured, and such runs are outside invariants 2 and 3")
+	}
+}
+
+// daemonPrivatePaths lists the daemon's own files and directories: the state
+// directory, the database and its directory, the worktree root and the secret file. dbPath and
+// secretFile must come from hostpath.ResolveFile, so the list names the files
+// the daemon opens.
+func daemonPrivatePaths(stateDir, dbPath, secretFile string) []string {
+	out := []string{stateDir}
+	if dbPath != "" {
+		// The directory too: SQLite keeps its write-ahead files beside the database.
+		out = append(out, dbPath, filepath.Dir(dbPath), worktreeRootPath(dbPath))
+	}
+	if secretFile != "" {
+		out = append(out, secretFile)
+	}
+	return out
+}
+
+// codingRuntimeStatus is what GET /api/v1/runtime/coding reports and
+// sablectl doctor prints.
+type codingRuntimeStatus struct {
+	// Mode is container, host-unsafe or unavailable.
+	Mode string `json:"mode"`
+	// HostModeOptIn reports whether --unsafe-host-harnesses was passed.
+	HostModeOptIn bool `json:"hostModeOptIn"`
+}
+
+// unavailableReason says why coding tasks cannot start, for refusals.
+func (st codingRuntimeStatus) unavailableReason() string {
+	if st.HostModeOptIn {
+		return "no container runtime is configured, and --" + unsafeHostHarnessesFlag + " is set but host mode could not start: no working host sandbox, or Citadel mode (see sablectl doctor)"
+	}
+	return "no container runtime is configured and host mode is off (see sablectl doctor)"
+}
+
+func codingRuntime(adapters map[domain.WorkloadClass]scruntime.Adapter, optIn bool) codingRuntimeStatus {
+	st := codingRuntimeStatus{Mode: "unavailable", HostModeOptIn: optIn}
+	ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
+	switch {
+	case !ok || ca == nil:
+	case ca.SupportsCouncilContainers():
+		st.Mode = "container"
+	case ca.HostModeUnsafe:
+		st.Mode = "host-unsafe"
+	}
+	return st
 }
 
 func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string) {
@@ -290,6 +383,42 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
 	}
+	// Resolve once: the store, the secret store and the checkout guard all use
+	// these exact paths. A secret file that does not exist yet is created now,
+	// at the resolved path, so nothing can later place a symlink there.
+	// The SQLite driver reads anything after "?" as options, so such a path
+	// would open a different file from the one resolved here.
+	if strings.ContainsRune(dbPath, '?') {
+		return errors.New("database path must not contain '?'")
+	}
+	if dbPath, err = hostpath.ResolveFile(dbPath); err != nil {
+		return fmt.Errorf("resolve database path: %w", err)
+	}
+	if secretFile, err = hostpath.ResolveFile(secretFile); err != nil {
+		return fmt.Errorf("resolve secret file path: %w", err)
+	}
+	privateDirs := daemonPrivatePaths(dir, dbPath, secretFile)
+	// The worktree root is opened once. Checkouts the daemon makes are
+	// mounted only when reached through this handle, so none of the daemon's
+	// own files may lie under it.
+	var worktrees *mountguard.Root
+	if !isCitadel {
+		if worktrees, err = mountguard.OpenRoot(worktreeRootPath(dbPath)); err != nil {
+			return err
+		}
+		defer worktrees.Close() //nolint:errcheck // directory handle; closing it finalizes no write
+		if err := worktrees.RefuseInside(dbPath, secretFile, dir); err != nil {
+			return fmt.Errorf("daemon files under the worktree root: %w", err)
+		}
+	}
+	// The secret file is created only after the refusal above, so a refused
+	// start leaves no file inside the worktree root.
+	if secretFile != "" {
+		if _, err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
+			return fmt.Errorf("create secret file: %w", err)
+		}
+	}
+	mounts := &mountguard.Guard{Root: worktrees, Protected: privateDirs}
 	operatorToken, stateLock, err := initDaemonState(dir)
 	if err != nil {
 		return err
@@ -335,7 +464,24 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Info("using postgres store")
 		}
 	} else {
-		st, err = sqlite.Open(dbPath)
+		// SQLite takes an empty file as an empty database, and creating it
+		// here puts it exactly at the resolved path.
+		var created fs.FileInfo
+		if dbPath != "" {
+			created, err = hostpath.CreateFile(dbPath, nil)
+		}
+		if err == nil {
+			var sq *sqlite.SQLiteStore
+			if sq, err = sqlite.Open(dbPath); err == nil {
+				st = sq
+				if created != nil {
+					if err = sameDatabaseFile(ctx, sq, created); err != nil {
+						_ = sq.Close()
+						st = nil
+					}
+				}
+			}
+		}
 	}
 	if err != nil {
 		return err
@@ -358,13 +504,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
+	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, cfg.unsafeHostHarnesses, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
 	var councilDocker *docker.Adapter
 	if cfg.runtimeBackend != "k8s" {
 		if da, err := docker.NewFromEnv(); err == nil {
 			da.SetAttachHub(ctx, attachHub)
+			// No harness checkout may equal or contain these daemon paths.
+			da.Mounts = mounts
 			adapters[domain.ClassLongLivedAgent] = da
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
 			if da.CouncilRuntimeConfigured() {
@@ -376,6 +524,10 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		} else {
 			return fmt.Errorf("configure Docker runtime: %w", err)
 		}
+	}
+	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca != nil && worktrees != nil {
+		// Crash cleanup deletes through the same handle the mount rule uses.
+		ca.Root = worktrees
 	}
 
 	var (
@@ -481,7 +633,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	registerUpstreamMCP(bundle)
 
 	if isCitadel {
-		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		logger.Info("citadel mode active: coding agents and council seats disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
@@ -568,25 +720,16 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	privateDirs := []string{dir}
-	if dbPath != "" {
-		if absDB, err := filepath.Abs(dbPath); err == nil {
-			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
-		}
-	}
-	if secretFile != "" {
-		if absSecret, err := filepath.Abs(secretFile); err == nil {
-			privateDirs = append(privateDirs, absSecret)
-		}
-	}
-
 	hc :=
 		handlerConfig{
 			incidentTemplate:    cfg.incidentTemplate,
 			operatorToken:       operatorToken,
 			councilsDisabled:    isCitadel,
-			councilPrivateDirs:  privateDirs,
+			councilMounts:       mounts,
 			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters, councilSandbox(councilDocker != nil)),
+			codingRuntime: func() codingRuntimeStatus {
+				return codingRuntime(adapters, cfg.unsafeHostHarnesses)
+			},
 		}
 	if councilDocker != nil {
 		hc.preflightCouncilHarness = councilDocker.CheckCouncilHarness
@@ -797,7 +940,7 @@ type handlerConfig struct {
 	incidentTemplate    string
 	operatorToken       string
 	councilsDisabled    bool
-	councilPrivateDirs  []string
+	councilMounts       *mountguard.Guard
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 	// routeSink, when set, is told every route pattern the handler registers.
@@ -806,6 +949,8 @@ type handlerConfig struct {
 	// preflightCouncilHarness is set in container mode. It replaces the host
 	// executable and sandbox checks with image, volume and login checks.
 	preflightCouncilHarness func(context.Context, string) error
+	// codingRuntime reports how coding tasks run; nil reports unavailable.
+	codingRuntime func() codingRuntimeStatus
 	// onCouncilCheckout is a test hook that runs once the checkout is verified.
 	onCouncilCheckout func(expire context.CancelFunc)
 }
@@ -834,6 +979,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		Reconciler: reconciler,
 		Secrets:    secrets,
 	}))
+	mux.HandleFunc("GET /api/v1/runtime/coding", func(w http.ResponseWriter, r *http.Request) {
+		st := codingRuntimeStatus{Mode: "unavailable"}
+		if cfg.codingRuntime != nil {
+			st = cfg.codingRuntime()
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
 	mux.HandleFunc("GET /api/v1/providers", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
 			writeJSON(w, http.StatusOK, []any{})

@@ -23,6 +23,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 const stubContainerCLI = `#!/bin/bash
@@ -47,6 +48,8 @@ unauth=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${SABLECOURT_DATA
 [[ "$unauth" == "401" ]]
 
 workspace_ro() { awk '$5 == "/workspace" && $6 ~ /^ro(,|$)/ {found=1} END{exit !found}' /proc/self/mountinfo; }
+# Git must resolve the checkout's metadata inside the container.
+git -C /workspace status --porcelain >/dev/null || exit 50
 
 prompt="${!#}"
 case "$prompt" in
@@ -70,9 +73,22 @@ case "$prompt" in
     if touch /workspace/write-attempt 2>/dev/null; then exit 44; fi
     printf 'reviewer verdict\n'
     ;;
+  *MODE_TASK*)
+    grep -q "committed-v2" /workspace/committed.txt
+    if workspace_ro; then exit 49; fi
+    printf 'standalone change\n' > /workspace/standalone.txt
+    [[ $(git -C /workspace symbolic-ref HEAD) == refs/heads/sablecourt/* ]] || exit 51
+    git -C /workspace add standalone.txt || exit 52
+    git -C /workspace -c user.name=t -c user.email=t commit -q -m 'container commit' || exit 53
+    # The shared registration named by the .git file is not mounted.
+    reg=$(sed -n 's/^gitdir: //p' /workspace/.git)
+    [[ -n $reg && ! -e $reg ]] || exit 54
+    printf 'standalone done\n'
+    ;;
   *MODE_WRITER*)
     grep -q "committed-v1" /workspace/committed.txt
     printf 'implemented in container\n' > /workspace/feature.txt
+    git -C /workspace add feature.txt || exit 55
     printf 'writer done\n'
     ;;
   *)
@@ -143,7 +159,13 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	if err != nil {
 		t.Skipf("Docker client unavailable: %v", err)
 	}
-	cli := da.Client.(*client.Client)
+	t.Cleanup(func() { _ = da.Close() })
+	// The stub image is built with a client of its own on the engine the
+	// adapter checked; the adapter does not expose its client.
+	cli, err := client.New(client.WithHost(da.DaemonHost()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = cli.Close() })
 	pingCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	err = da.Ping(pingCtx)
@@ -209,6 +231,7 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	wtRoot := filepath.Join(t.TempDir(), "worktrees")
 	adapter := NewAdapter(wtRoot)
 	adapter.CouncilRunner = da
+	wireMountGuard(t, adapter, da)
 	adapter.CouncilProxy = da
 	adapter.CouncilProxyImage = proxyImageID
 	adapter.DaemonListen = listen
@@ -230,11 +253,14 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 		token := "sc_task_" + rand.Text()
 		spec := scruntime.LaunchSpec{
 			TaskID:           taskID,
-			Workload:         domain.Workload{Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox}, Spec: domain.WorkloadSpec{Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: role, RepoPath: repo, Sandbox: "seatbelt"}}},
+			Workload:         domain.Workload{Metadata: domain.ObjectMeta{Name: role, Zone: domain.ZoneSandbox}, Spec: domain.WorkloadSpec{Class: domain.ClassCodingAgent, Coding: &domain.CodingConfig{Harness: role, RepoPath: repo, Sandbox: "container"}}},
 			InputJSON:        string(raw),
 			TaskToken:        token,
 			CouncilContainer: true,
-			CouncilDeadline:  time.Now().Add(30 * time.Second),
+		}
+		if payload["checkoutMode"] != "" {
+			// Council seats carry the council deadline; a standalone task uses the wall-time limit.
+			spec.CouncilDeadline = time.Now().Add(30 * time.Second)
 		}
 		h, err := adapter.Start(t.Context(), spec)
 		// A failed start can still return a handle that owns resources.
@@ -326,6 +352,25 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 		}
 	})
 
+	// A standalone coding task (issues 181 and 132) runs in the same harness
+	// container, behind the same per-launch proxy, as the council seats above.
+	t.Run("standalone task", func(t *testing.T) {
+		arts := runTurn(t, "task_docker_task_"+strings.ToLower(rand.Text()[:6]), "claude", map[string]string{
+			"prompt": "MODE_TASK edit",
+		})
+		if got := artifactByName(arts, "final-message"); got != "standalone done" {
+			t.Fatalf("final-message = %q, want %q", got, "standalone done")
+		}
+		diff := artifactByName(arts, "git-diff")
+		if !strings.Contains(diff, "standalone.txt") || !strings.Contains(diff, "standalone change") {
+			t.Fatalf("standalone git-diff missing container edit: %q", diff)
+		}
+		commit := artifactByName(arts, "git-commit")
+		if got := testGit(t, repo, "show", commit+":standalone.txt"); strings.TrimSpace(got) != "standalone change" {
+			t.Fatalf("host git show standalone.txt = %q", got)
+		}
+	})
+
 	t.Run("writer", func(t *testing.T) {
 		// Reviewer turn on pinned base commit (read-only).
 		revArts := runTurn(t, "task_docker_rev_"+strings.ToLower(rand.Text()[:6]), "agy", map[string]string{
@@ -384,7 +429,7 @@ func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = da.Client.(*client.Client).Close() })
+	t.Cleanup(func() { _ = da.Close() })
 	def, err := harnessimages.Lookup("codex")
 	if err != nil {
 		t.Fatal(err)
@@ -399,6 +444,7 @@ func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
 	testWrite(t, repo, "challenge.txt", challenge, 0644)
 	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
 	a.CouncilRunner = da
+	wireMountGuard(t, a, da)
 	a.CouncilProxy = da
 	a.CouncilProxyImage = harnessimages.ProxyImage()
 	a.DaemonListen = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 7432).String()
@@ -454,4 +500,16 @@ func integrationSocketRoot(t *testing.T) string {
 		}
 	})
 	return dir
+}
+
+// wireMountGuard gives the Docker adapter the coding adapter's worktree root
+// handle, as the daemon does at startup.
+func wireMountGuard(t *testing.T, a *Adapter, da *docker.Adapter) {
+	t.Helper()
+	root, err := a.worktreeHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	da.Mounts = &mountguard.Guard{Root: root}
 }

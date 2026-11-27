@@ -19,7 +19,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | `internal/policy` | Deterministic `allow` / `approve` / `deny` evaluator (fail-closed default `deny`) and failure `CircuitBreaker` |
 | `internal/redact` | Linear-time RE2 pattern redactor that masks some known secret shapes before storage or broadcast; best effort, defence in depth ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md)) |
 | `internal/gate/model` | HTTP/SSE proxy for OpenAI, Anthropic, Gemini, local endpoints, and upstream `agentgateway`; enforces `sc_task_` leases, budgets, SSRF protection, and `openai <-> local` fallback |
-| `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.open_pr`), and proxied upstream MCP servers |
+| `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`), and proxied upstream MCP servers |
 | `internal/approval` | Pinned SHA-256 approval queue, macOS native `osascript` out-of-band prompt, and ECDSA P-256 device signature verification |
 | `internal/conclave` | Multi-agent room broker enforcing `canMessage` graphs, one-time-on-open `always-on` and `on-mention` activation, `Wards` (`maxMessages`, `maxPingPong`), `spec.budgetRef`, operator `Decrees`, and shared `Relics` |
 | `internal/attach` | 64 KiB redacted ring buffer (`Scry` SSE streaming) and exclusive operator `stdin` lock (`Takeover`) |

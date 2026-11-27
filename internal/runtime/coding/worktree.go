@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
@@ -78,7 +79,7 @@ func (a *Adapter) prepareWorktree(ctx context.Context, repo, taskID string) (str
 		return "", nil, err
 	}
 	dir = filepath.Join(dir, sanitizeSegment(taskID))
-	for _, path := range []string{dir, dir + stateSuffix, dir + ".log", dir + excludeConfigSuffix} {
+	for _, path := range []string{dir, dir + stateSuffix, dir + ".log", harnessGitDirPath(dir), dir + excludeConfigSuffix} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			if err == nil {
 				err = os.ErrExist
@@ -335,7 +336,7 @@ func (a *Adapter) worktreeState(handle scruntime.Handle) (*worktreeState, error)
 		return nil, err
 	}
 	// A restart can find the checkout before the proxy resource journal exists.
-	if state.Container == nil && state.Worker == nil && state.Mode != "" && state.TaskID == handle.ExternalID &&
+	if state.Container == nil && state.Worker == nil && state.TaskID == handle.ExternalID &&
 		handle.WorkDir == "" && handle.ContainerName == "sablecourt-council-"+state.TaskID && handle.CreateAttempt != "" && handle.ContainerID == "" {
 		a.bindConfigLock(state)
 		return state, nil
@@ -535,6 +536,17 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 			finishErr = errors.Join(fmt.Errorf("coding worktree cleanup incomplete: %w", finishErr), writeWorktreeState(dir, state))
 		}
 	}()
+	// A standalone task in a harness container: remove the container, proxy
+	// and network before the worktree is snapshotted, as a council seat does.
+	if state.Container != nil {
+		var session councilproxy.LaunchSession
+		if proc := a.containerProc(dir); proc != nil {
+			session = proc.session
+		}
+		if err := a.cleanupContainerResources(ctx, state.Container, session); err != nil {
+			return err
+		}
+	}
 	if state.FinishedAt.IsZero() {
 		if err := state.validateCheckout(ctx, dir, true); err != nil {
 			return err
@@ -584,6 +596,10 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 	if err := removeWorktree(ctx, dir, state, true); err != nil {
 		return err
 	}
+	// The harness container's own Git metadata; the host never reads it.
+	if err := os.RemoveAll(harnessGitDirPath(dir)); err != nil {
+		return err
+	}
 	if err := removeFile(dir + ".log"); err != nil {
 		return err
 	}
@@ -593,6 +609,8 @@ func (a *Adapter) finishWorktree(ctx context.Context, dir string, state *worktre
 		}
 	}
 	a.running.Delete(dir)
+	// Kept until here so a retried cleanup still has the proxy session.
+	a.containers.Delete(dir)
 	if state.CleanupError != "" {
 		state.CleanupError = ""
 		return writeWorktreeState(dir, state)

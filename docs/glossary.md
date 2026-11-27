@@ -3,7 +3,7 @@
 Short definitions, with the spelling used in code, manifests and commands. Longer explanations are in [concepts](concepts.md). Terms from the court vocabulary are glossed in plain words.
 
 Action
-:   One entry of the closed catalog of typed changes the MCP Gate can run: `git.create_branch`, `git.open_pr` and `sandbox.propose_promotion`. There is no free-form command. See [tools and actions](how-it-works/tools-and-actions.md).
+:   One entry of the closed catalog of typed changes the MCP Gate can run: `git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr` and `sandbox.propose_promotion`. There is no free-form command. See [tools and actions](how-it-works/tools-and-actions.md).
 
 Approval
 :   A pending request to run an action whose policy effect is `approve`. Its payload is pinned by a SHA-256 digest and its status is `pending`, `approved`, `denied`, `expired` or `consumed` (used once, never usable again). See [approvals](how-it-works/approvals.md).

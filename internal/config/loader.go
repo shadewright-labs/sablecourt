@@ -416,6 +416,11 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 	if w.Spec.Runtime.Type == "docker" && strings.TrimSpace(w.Spec.Runtime.Image) == "" {
 		return fmt.Errorf("workload %q: runtime.image is required for docker runtime", name)
 	}
+	for i, repo := range w.Spec.Grants.Repos {
+		if strings.TrimSpace(repo) == "" || repo != strings.TrimSpace(repo) || strings.ContainsAny(repo, " \t\r\n\x00") {
+			return fmt.Errorf("workload %q: grants.repos[%d] is invalid", name, i)
+		}
+	}
 
 	if w.Metadata.Zone == domain.ZoneSandbox {
 		if len(w.Spec.Grants.Actions) > 0 || len(w.Spec.Grants.DelegateTo) > 0 {

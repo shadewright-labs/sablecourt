@@ -303,7 +303,7 @@ printf 'REACHABILITY_OK\n'
 			if err := os.WriteFile(liveHarness, []byte(probeScript), 0o700); err != nil {
 				t.Fatalf("write live harness: %v", err)
 			}
-			adapter := NewAdapter(worktreeRoot)
+			adapter := newHostModeAdapter(worktreeRoot)
 			adapter.HarnessPaths = map[string]string{"claude": liveHarness}
 			spec := scruntime.LaunchSpec{
 				TaskID:    "reach-live-host",

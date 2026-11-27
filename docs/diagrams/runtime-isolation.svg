@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 528" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Runtime isolation by class</title>
-  <desc id="d">Inside the host, the daemon holds the MCP Gate, the Model Gate and the runtime adapters. A coding run sits in a host sandbox that is available on macOS only and unsupported for 0.1.0 (issue 181 moves it into a harness container) and reaches the MCP Gate with its lease. A long-lived agent and a deterministic controller run in containers on an internal network. The agent reaches the Model Gate with its lease; the controller is refused there and never receives model access. A Kubernetes adapter is parked and drawn dashed, with a dashed line from the runtime adapters.</desc>
+  <desc id="d">Inside the host, the daemon holds the MCP Gate, the Model Gate and the runtime adapters. A coding run, either a standalone coding task or a council turn, sits in a harness container: it reads its checkout and its login volume, writes its own worktree and scratch, reaches only its provider's hosts through a per-launch proxy, and reaches the MCP Gate with its lease through that proxy. Host mode is off by default. A long-lived agent and a deterministic controller run in containers on an internal network. The agent reaches the Model Gate with its lease; the controller is refused there and never receives model access. A Kubernetes adapter is parked and drawn dashed, with a dashed line from the runtime adapters.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -47,13 +47,14 @@
   <text class="s" x="620" y="167">one adapter per workload class</text>
 
   <rect class="frame" x="48" y="232" width="250" height="232" rx="12"/>
-  <text class="idt" x="68" y="448">HOST SANDBOX, UNSUPPORTED</text>
+  <text class="idt" x="68" y="448">HARNESS CONTAINER</text>
   <rect class="box" x="68" y="280" width="210" height="64" rx="10"/>
   <text class="h" x="84" y="306">Coding run</text>
-  <text class="s" x="84" y="327">harness CLI in a worktree</text>
-  <text class="cap" x="68" y="378">reads: checkout and scratch</text>
-  <text class="cap" x="68" y="396">writes: scratch and checkout</text>
-  <text class="cap" x="68" y="414">network: outbound only</text>
+  <text class="s" x="84" y="327">task or council turn</text>
+  <text class="cap" x="68" y="370">reads: checkout, login volume</text>
+  <text class="cap" x="68" y="388">writes: own worktree, scratch</text>
+  <text class="cap" x="68" y="406">network: proxy to provider</text>
+  <text class="cap" x="68" y="424">host mode: off by default</text>
 
   <rect class="lane" x="330" y="232" width="400" height="232" rx="14"/>
   <text class="lanet" x="350" y="450">INTERNAL NETWORK</text>
@@ -73,7 +74,7 @@
   <text class="s" x="818" y="337">Jobs and Deployments</text>
 
   <path class="f" d="M177 280V186" marker-end="url(#a)"/>
-  <text class="lbl" x="187" y="222">lease</text>
+  <text class="lbl" x="187" y="222">lease via proxy</text>
   <path class="f" d="M420 290V186" marker-end="url(#a)"/>
   <text class="lbl" x="430" y="222">lease</text>
   <path class="deny" d="M546 290V186" marker-end="url(#x)"/>
