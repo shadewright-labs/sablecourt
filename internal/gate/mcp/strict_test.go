@@ -87,3 +87,34 @@ func TestValidateRefName(t *testing.T) {
 		}
 	}
 }
+
+// TestHexRuneBounds pins the values hexRune can return: four hex digits never
+// exceed 0xFFFF, a surrogate value is returned as is for the caller to judge,
+// and anything that is not exactly four hex digits is refused.
+func TestHexRuneBounds(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		at     int
+		want   rune
+		wantOK bool
+	}{
+		{"largest valid", "ffff", 0, 0xFFFF, true},
+		{"largest valid upper case", "FFFF", 0, 0xFFFF, true},
+		{"zero", "0000", 0, 0, true},
+		{"high surrogate start", "d800", 0, 0xD800, true},
+		{"low surrogate end", "dfff", 0, 0xDFFF, true},
+		{"offset", "xx\\u00e9", 4, 0xE9, true},
+		{"one digit too many is cut at four", "10000", 0, 0x1000, true},
+		{"sign", "+fff", 0, 0, false},
+		{"not hex", "zzzz", 0, 0, false},
+		{"short", "fff", 0, 0, false},
+		{"past the end", "ffff", 1, 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := hexRune([]byte(tc.raw), tc.at)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("%s: hexRune(%q, %d) = %U, %v; want %U, %v", tc.name, tc.raw, tc.at, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}

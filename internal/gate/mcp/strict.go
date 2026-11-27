@@ -237,12 +237,13 @@ func checkStringsKept(raw []byte) error {
 	return nil
 }
 
-// hexRune reads the four hex digits at raw[at:at+4].
+// hexRune reads the four hex digits at raw[at:at+4]. Four digits fit in 16
+// bits, so parsing with that bit size keeps the conversion to rune lossless.
 func hexRune(raw []byte, at int) (rune, bool) {
 	if at+4 > len(raw) {
 		return 0, false
 	}
-	n, err := strconv.ParseUint(string(raw[at:at+4]), 16, 32)
+	n, err := strconv.ParseUint(string(raw[at:at+4]), 16, 16)
 	if err != nil {
 		return 0, false
 	}
