@@ -128,3 +128,27 @@ func TestReloadNeverRepinsAndRecordsEachDriftOnce(t *testing.T) {
 		t.Fatalf("want a third drift row after drifting again, got %v", rows)
 	}
 }
+
+// Two different remotes that are both unusable are two changes: each gets
+// its own drift row, although both fail with the same error. The raw remote
+// is never written to the audit log.
+func TestRecheckRecordsEachUnusableOrigin(t *testing.T) {
+	tg := setupTypedGate(t, typedGateOptions{effect: domain.EffectAllow})
+	tg.setOrigin(t, "https://gitlab.example/acme/widgets.git")
+	_ = tg.binding.Recheck(context.Background())
+	_ = tg.binding.Recheck(context.Background())
+	if rows := driftRows(t, tg); len(rows) != 1 {
+		t.Fatalf("want one drift row for the first unusable origin, got %v", rows)
+	}
+	tg.setOrigin(t, "https://gitea.example/acme/widgets.git")
+	_ = tg.binding.Recheck(context.Background())
+	rows := driftRows(t, tg)
+	if len(rows) != 2 {
+		t.Fatalf("want a second drift row for another unusable origin, got %v", rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r, ".example") {
+			t.Fatalf("drift row holds the raw remote: %s", r)
+		}
+	}
+}

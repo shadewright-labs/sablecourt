@@ -3,6 +3,8 @@ package mcpgate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,9 +135,12 @@ type RepoBinding struct {
 	pinErr error
 
 	mu sync.Mutex
-	// drift is the origin a reload last found differing from the pin (or the
-	// read error), "" while the origin matches. A drift audit row is written
-	// only when this changes, not on every reload.
+	// drift identifies the origin a reload last found differing from the pin:
+	// the parsed owner/repo, or for an origin that cannot be used the read
+	// error plus a SHA-256 of the raw remote, so two different unusable
+	// remotes count as two changes. It is "" while the origin matches. A drift
+	// audit row is written only when this changes, not on every reload. The
+	// raw remote may hold credentials and is never logged or audited.
 	drift string
 }
 
@@ -173,10 +178,15 @@ func (b *RepoBinding) Recheck(ctx context.Context) error {
 	}
 	detail := map[string]string{"allowed_repo": b.pin}
 	var observed string
-	owner, repo, err := readGitHubOrigin(ctx, b.repoRoot)
+	var owner, repo string
+	raw, err := readOriginURL(ctx, b.repoRoot)
+	if err == nil {
+		owner, repo, err = parseOrigin(raw)
+	}
 	switch {
 	case err != nil:
-		observed = "unreadable: " + err.Error()
+		sum := sha256.Sum256([]byte(raw))
+		observed = "unreadable: " + err.Error() + " " + hex.EncodeToString(sum[:])
 		detail["reason"] = "repo_origin_unreadable"
 		detail["error"] = err.Error()
 		err = fmt.Errorf("origin of the repo root cannot be read at reload (%v); git.open_pr stays refused, pinned to %s", err, b.pin)
@@ -353,14 +363,29 @@ func checkOpenPRTarget(ctx context.Context, repoRoot, allowed, owner, repo strin
 
 // readGitHubOrigin reads owner and repository from the origin remote of repoRoot.
 func readGitHubOrigin(ctx context.Context, repoRoot string) (owner, repo string, err error) {
+	raw, err := readOriginURL(ctx, repoRoot)
+	if err != nil {
+		return "", "", err
+	}
+	return parseOrigin(raw)
+}
+
+// readOriginURL returns the raw origin remote URL of repoRoot. It may carry
+// credentials, so callers never log or audit it.
+func readOriginURL(ctx context.Context, repoRoot string) (string, error) {
 	if repoRoot == "" {
-		return "", "", errors.New("repo root not configured for git.open_pr")
+		return "", errors.New("repo root not configured for git.open_pr")
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
 	if err != nil {
-		return "", "", errors.New("repo root has no origin remote for git.open_pr")
+		return "", errors.New("repo root has no origin remote for git.open_pr")
 	}
-	owner, repo, ok := parseGitHubRemote(strings.TrimSpace(string(out)))
+	return strings.TrimSpace(string(out)), nil
+}
+
+// parseOrigin reads owner and repository from a raw origin remote URL.
+func parseOrigin(raw string) (owner, repo string, err error) {
+	owner, repo, ok := parseGitHubRemote(raw)
 	if !ok {
 		return "", "", errors.New("origin remote of the repo root is not a GitHub repository")
 	}
