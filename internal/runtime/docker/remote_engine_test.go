@@ -2,6 +2,8 @@ package docker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -134,10 +137,100 @@ func TestConstructorsRefuseRemoteEngine(t *testing.T) {
 				t.Fatalf("NewAdapter() on %s = %v, %v", host, a, err)
 			}
 		}
-		if a, err := NewAdapter(nil, ""); err != nil || a == nil {
-			t.Fatalf("NewAdapter(nil) = %v, %v", a, err)
-		}
 	})
+	// A client that does not report its host cannot be checked, so it is
+	// refused like a remote one; nil reports nothing either.
+	for name, cli := range map[string]EngineClient{"no DaemonHost": &fakeEngine{}, "nil": nil} {
+		t.Run("NewAdapter "+name, func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", "")
+			a, err := NewAdapter(cli, "")
+			if a != nil || !errors.Is(err, errNoDaemonHost) {
+				t.Fatalf("NewAdapter() = %v, %v, want %v", a, err, errNoDaemonHost)
+			}
+		})
+	}
+}
+
+// TestZeroValueAdapterRefusesEngineCalls checks that an Adapter no
+// constructor built, with the harness configuration a real one would have,
+// fails every engine call with an error instead of panicking or running.
+func TestZeroValueAdapterRefusesEngineCalls(t *testing.T) {
+	local, _ := probeFixture("claude")
+	cfg := local.CouncilHarnesses["claude"]
+	cfg.Tool = fixtureTool()
+	handle := rt.Handle{AdapterName: "docker", ExternalID: "ctr-123"}
+	launch := rt.CouncilLaunch{}
+	launch.Limits.WallTime = time.Minute
+	record := func(context.Context, rt.CouncilResult) error { return nil }
+	for name, call := range map[string]func(a *Adapter) error{
+		"Ping":                  func(a *Adapter) error { return a.Ping(t.Context()) },
+		"EnsureInternalNetwork": func(a *Adapter) error { return a.EnsureInternalNetwork(t.Context()) },
+		"EnsureImage":           func(a *Adapter) error { return a.EnsureImage(t.Context(), "fixture") },
+		"ResolveLocalImage": func(a *Adapter) error {
+			_, err := a.ResolveLocalImage(t.Context(), "fixture")
+			return err
+		},
+		"Start": func(a *Adapter) error {
+			spec := rt.LaunchSpec{TaskID: "task"}
+			spec.Workload.Spec.Runtime.Image = "fixture"
+			_, err := a.Start(t.Context(), spec)
+			return err
+		},
+		"Observe": func(a *Adapter) error {
+			_, err := a.Observe(t.Context(), handle)
+			return err
+		},
+		"Resume": func(a *Adapter) error { return a.Resume(t.Context(), handle, rt.CheckpointRef{}) },
+		"Stop":   func(a *Adapter) error { return a.Stop(t.Context(), handle) },
+		"HandleAlive": func(a *Adapter) error {
+			_, err := a.HandleAlive(t.Context(), handle)
+			return err
+		},
+		"HandleExited": func(a *Adapter) error {
+			_, err := a.HandleExited(t.Context(), handle)
+			return err
+		},
+		"CheckCouncilHarness":      func(a *Adapter) error { return a.CheckCouncilHarness(t.Context(), "claude") },
+		"EnsureCouncilLoginVolume": func(a *Adapter) error { return a.EnsureCouncilLoginVolume(t.Context(), "claude") },
+		"InstallCouncilTool": func(a *Adapter) error {
+			return a.InstallCouncilTool(t.Context(), "claude", strings.NewReader(fixtureToolBody))
+		},
+		"RunCouncil": func(a *Adapter) error {
+			_, err := a.RunCouncil(t.Context(), launch, record)
+			return err
+		},
+		"InspectCouncil": func(a *Adapter) error {
+			_, err := a.InspectCouncil(t.Context(), rt.CouncilIdentity{ContainerID: "ctr-123"})
+			return err
+		},
+		"CleanupCouncil": func(a *Adapter) error { return a.CleanupCouncil(t.Context(), rt.CouncilResult{ContainerID: "ctr-123"}) },
+		"ProvisionCouncilProxy": func(a *Adapter) error {
+			_, err := a.ProvisionCouncilProxy(t.Context(), "sha256:"+strings.Repeat("a", 64), councilproxy.Config{Harness: "claude", DaemonListen: net.JoinHostPort(net.IPv6loopback.String(), "7432")})
+			return err
+		},
+		"ConnectProxyEgress":    func(a *Adapter) error { return a.ConnectProxyEgress(t.Context(), "proxy") },
+		"StartProxy":            func(a *Adapter) error { return a.StartProxy(t.Context(), "proxy") },
+		"RemoveProxy":           func(a *Adapter) error { return a.RemoveProxy(t.Context(), "proxy") },
+		"RemoveInternalNetwork": func(a *Adapter) error { return a.RemoveInternalNetwork(t.Context(), "sablecourt-net") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &Adapter{CouncilHarnesses: map[string]CouncilHarness{"claude": cfg}, NetworkName: DefaultNetworkName}
+			err := func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("panicked: %v", r)
+					}
+				}()
+				return call(a)
+			}()
+			if !errors.Is(err, errNoEngine) {
+				t.Fatalf("err = %v, want %v", err, errNoEngine)
+			}
+		})
+	}
+	if (&Adapter{}).DaemonHost() != "" || (&Adapter{}).Close() != nil {
+		t.Fatal("a zero-value Adapter reports an engine host or fails to close")
+	}
 }
 
 // TestRemoteEngineReachesNothing covers the calls the second review found
@@ -251,11 +344,13 @@ var mobyClientPackages = map[string]bool{
 	"github.com/docker/docker/client": true,
 }
 
+const dockerPackage = "github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+
 // TestOnlyTheConstructorsMakeAnEngineClient keeps the remote engine refusal
-// where it cannot be skipped. In non-test code of the module, only NewFromEnv
-// may create a Moby client, and only NewFromEnv and NewAdapter may build a
-// Docker Adapter value; both refuse a remote engine. With no client or adapter
-// on a remote engine, no engine call can reach one.
+// where it cannot be skipped. Across every non-test Go file of the module,
+// only NewFromEnv may create a Moby client, and only NewFromEnv and
+// NewAdapter may build a Docker Adapter value; both refuse a remote engine.
+// With no client or adapter on a remote engine, no engine call can reach one.
 func TestOnlyTheConstructorsMakeAnEngineClient(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
@@ -264,7 +359,6 @@ func TestOnlyTheConstructorsMakeAnEngineClient(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root not found: %v", err)
 	}
-	const self = "github.com/shadewright-labs/sablecourt/internal/runtime/docker"
 	fset := token.NewFileSet()
 	checked := 0
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -286,39 +380,8 @@ func TestOnlyTheConstructorsMakeAnEngineClient(t *testing.T) {
 		}
 		checked++
 		inDocker := filepath.Dir(path) == filepath.Join(root, "internal", "runtime", "docker")
-		mobyNames, dockerNames := map[string]bool{}, map[string]bool{}
-		for _, imp := range f.Imports {
-			p, _ := strconv.Unquote(imp.Path.Value)
-			name := filepath.Base(p)
-			if imp.Name != nil {
-				name = imp.Name.Name
-			}
-			switch {
-			case mobyClientPackages[p]:
-				mobyNames[name] = true
-			case p == self:
-				dockerNames[name] = true
-			}
-		}
-		for _, decl := range f.Decls {
-			fn, _ := decl.(*ast.FuncDecl)
-			owner := ""
-			if fn != nil && fn.Recv == nil && inDocker {
-				owner = fn.Name.Name
-			}
-			ast.Inspect(decl, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.SelectorExpr:
-					if x, ok := n.X.(*ast.Ident); ok && mobyNames[x.Name] && strings.HasPrefix(n.Sel.Name, "New") && owner != "NewFromEnv" {
-						t.Errorf("%s: %s.%s creates a Docker engine client outside docker.NewFromEnv", fset.Position(n.Pos()), x.Name, n.Sel.Name)
-					}
-				case *ast.CompositeLit:
-					if isDockerAdapterType(n.Type, inDocker, dockerNames) && owner != "NewFromEnv" && owner != "NewAdapter" {
-						t.Errorf("%s: builds a docker.Adapter outside docker.NewFromEnv and docker.NewAdapter", fset.Position(n.Pos()))
-					}
-				}
-				return true
-			})
+		for _, finding := range engineGuardFindings(fset, f, inDocker) {
+			t.Error(finding)
 		}
 		return nil
 	})
@@ -330,13 +393,141 @@ func TestOnlyTheConstructorsMakeAnEngineClient(t *testing.T) {
 	}
 }
 
-func isDockerAdapterType(e ast.Expr, inDocker bool, dockerNames map[string]bool) bool {
-	switch e := e.(type) {
-	case *ast.Ident:
-		return inDocker && e.Name == "Adapter"
-	case *ast.SelectorExpr:
-		x, ok := e.X.(*ast.Ident)
-		return ok && dockerNames[x.Name] && e.Sel.Name == "Adapter"
+// TestEngineGuardFindings runs the guard on small sources, so a way around
+// it shows up here rather than in a later review.
+func TestEngineGuardFindings(t *testing.T) {
+	const head = "package p\n\nimport (\n"
+	for _, tc := range []struct {
+		name     string
+		src      string
+		inDocker bool
+		want     int
+	}{
+		{"client.New", head + "\"github.com/moby/moby/client\"\n)\n\nvar _, _ = client.New()\n", false, 1},
+		{"aliased client", head + "mc \"github.com/moby/moby/client\"\n)\n\nvar _, _ = mc.NewClientWithOpts()\n", false, 1},
+		{"legacy client", head + "dc \"github.com/docker/docker/client\"\n)\n\nfunc f() { dc.NewClientWithOpts() }\n", false, 1},
+		{"dot client", head + ". \"github.com/moby/moby/client\"\n)\n\nvar _, _ = New()\n", false, 1},
+		{"dot client in docker", head + ". \"github.com/moby/moby/client\"\n)\n\nfunc NewFromEnv() { New() }\n", true, 1},
+		{"client in NewFromEnv", head + "\"github.com/moby/moby/client\"\n)\n\nfunc NewFromEnv() { client.New() }\n", true, 0},
+		{"client in other func", head + "\"github.com/moby/moby/client\"\n)\n\nfunc other() { client.New() }\n", true, 1},
+		{"client options are fine", head + "\"github.com/moby/moby/client\"\n)\n\nvar _ = client.ContainerStartOptions{}\n", false, 0},
+		{"literal", head + "\"" + dockerPackage + "\"\n)\n\nvar _ = &docker.Adapter{}\n", false, 1},
+		{"aliased literal", head + "d \"" + dockerPackage + "\"\n)\n\nvar _ = d.Adapter{}\n", false, 1},
+		{"dot docker", head + ". \"" + dockerPackage + "\"\n)\n\nvar _ = Adapter{}\n", false, 1},
+		{"new", head + "\"" + dockerPackage + "\"\n)\n\nvar _ = new(docker.Adapter)\n", false, 1},
+		{"var", head + "\"" + dockerPackage + "\"\n)\n\nvar a docker.Adapter\n", false, 1},
+		{"array", head + "\"" + dockerPackage + "\"\n)\n\nvar a [1]docker.Adapter\n", false, 1},
+		{"field", head + "\"" + dockerPackage + "\"\n)\n\ntype s struct{ docker.Adapter }\n", false, 1},
+		{"alias", head + "\"" + dockerPackage + "\"\n)\n\ntype A = docker.Adapter\n", false, 1},
+		{"pointer is fine", head + "\"" + dockerPackage + "\"\n)\n\nvar a *docker.Adapter\n\nfunc f(b *docker.Adapter) []*docker.Adapter { return nil }\n", false, 0},
+		{"constructor call is fine", head + "\"" + dockerPackage + "\"\n)\n\nvar _, _ = docker.NewFromEnv()\n", false, 0},
+		{"literal in NewAdapter", "package docker\n\nfunc NewAdapter() *Adapter { return &Adapter{} }\n", true, 0},
+		{"literal in a method", "package docker\n\nfunc (a *Adapter) clone() *Adapter { return &Adapter{} }\n", true, 1},
+		{"var in docker", "package docker\n\nfunc f() { var a Adapter; _ = a }\n", true, 1},
+		{"other Adapter type", "package coding\n\nvar _ = &Adapter{}\n", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "src.go", tc.src, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := engineGuardFindings(fset, f, tc.inDocker); len(got) != tc.want {
+				t.Fatalf("findings = %q, want %d", got, tc.want)
+			}
+		})
 	}
-	return false
+}
+
+// engineGuardFindings lists the ways one file makes a Moby client or a
+// Docker Adapter value outside the constructors. A dot import of either
+// package is refused outright: it hides which package a name comes from.
+func engineGuardFindings(fset *token.FileSet, f *ast.File, inDocker bool) []string {
+	var out []string
+	report := func(n ast.Node, format string, args ...any) {
+		out = append(out, fset.Position(n.Pos()).String()+": "+fmt.Sprintf(format, args...))
+	}
+	mobyNames, dockerNames := map[string]bool{}, map[string]bool{}
+	for _, imp := range f.Imports {
+		p, _ := strconv.Unquote(imp.Path.Value)
+		if !mobyClientPackages[p] && p != dockerPackage {
+			continue
+		}
+		name := filepath.Base(p)
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		switch {
+		case name == ".":
+			report(imp, "dot import of %s hides engine client and adapter construction from this guard", p)
+		case mobyClientPackages[p]:
+			mobyNames[name] = true
+		default:
+			dockerNames[name] = true
+		}
+	}
+	isAdapter := func(e ast.Expr) bool {
+		switch e := e.(type) {
+		case *ast.Ident:
+			return inDocker && e.Name == "Adapter"
+		case *ast.SelectorExpr:
+			x, ok := e.X.(*ast.Ident)
+			return ok && dockerNames[x.Name] && e.Sel.Name == "Adapter"
+		}
+		return false
+	}
+	// holdsAdapter reports a type that holds an Adapter value, not a pointer.
+	var holdsAdapter func(e ast.Expr) bool
+	holdsAdapter = func(e ast.Expr) bool {
+		switch e := e.(type) {
+		case *ast.ParenExpr:
+			return holdsAdapter(e.X)
+		case *ast.ArrayType:
+			return holdsAdapter(e.Elt)
+		case *ast.MapType:
+			return holdsAdapter(e.Value)
+		case *ast.ChanType:
+			return holdsAdapter(e.Value)
+		}
+		return isAdapter(e)
+	}
+	for _, decl := range f.Decls {
+		fn, _ := decl.(*ast.FuncDecl)
+		owner := ""
+		if fn != nil && fn.Recv == nil && inDocker {
+			owner = fn.Name.Name
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.SelectorExpr:
+				if x, ok := n.X.(*ast.Ident); ok && mobyNames[x.Name] && strings.HasPrefix(n.Sel.Name, "New") && owner != "NewFromEnv" {
+					report(n, "%s.%s creates a Docker engine client outside docker.NewFromEnv", x.Name, n.Sel.Name)
+				}
+			case *ast.CompositeLit:
+				if n.Type != nil && holdsAdapter(n.Type) && owner != "NewFromEnv" && owner != "NewAdapter" {
+					report(n, "builds a docker.Adapter outside docker.NewFromEnv and docker.NewAdapter")
+				}
+			case *ast.CallExpr:
+				if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" && len(n.Args) == 1 && holdsAdapter(n.Args[0]) {
+					report(n, "new(docker.Adapter) builds an adapter outside the constructors")
+				}
+			case *ast.ValueSpec:
+				if n.Type != nil && holdsAdapter(n.Type) {
+					report(n, "declares a docker.Adapter value outside the constructors")
+				}
+			case *ast.TypeSpec:
+				if holdsAdapter(n.Type) {
+					report(n, "names the docker.Adapter type, which lets it be built outside the constructors")
+				}
+			case *ast.StructType:
+				for _, field := range n.Fields.List {
+					if holdsAdapter(field.Type) {
+						report(field, "holds a docker.Adapter value outside the constructors")
+					}
+				}
+			}
+			return true
+		})
+	}
+	return out
 }

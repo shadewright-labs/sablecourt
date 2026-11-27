@@ -127,7 +127,7 @@ func TestCouncilNativeDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli := a.Client.(*client.Client)
+	cli := a.cli.(*client.Client)
 	t.Cleanup(func() { _ = cli.Close() })
 	probe, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	_, err = cli.Ping(probe, client.PingOptions{})

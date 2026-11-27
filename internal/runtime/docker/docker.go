@@ -44,9 +44,12 @@ type EngineClient interface {
 
 type Adapter struct {
 	CouncilHarnesses map[string]CouncilHarness
-	Client           EngineClient
-	NetworkName      string
-	AttachHub        *attach.Hub
+	// cli is unexported so that only NewFromEnv and NewAdapter, which refuse
+	// a remote engine, can set it. Every engine call reads it through
+	// engineClient, so a zero-value Adapter fails instead of running.
+	cli         EngineClient
+	NetworkName string
+	AttachHub   *attach.Hub
 	// Mounts decides which host directories a harness container may bind
 	// mount: the worktree root handle and the daemon's own protected paths.
 	// Without it, no harness checkout is mounted.
@@ -74,17 +77,76 @@ func checkLocalEngine(host string) error {
 	return nil
 }
 
+// errNoDaemonHost refuses an engine client that does not say which host it
+// dials, so the remote engine check cannot be made.
+var errNoDaemonHost = errors.New("Docker engine client does not report its daemon host, so a remote engine cannot be ruled out")
+
 // localEngine checks DOCKER_HOST and the host the client itself dials. The
 // constructors call it, so an adapter, and with it every engine call, exists
-// only on a local engine.
+// only on a local engine. A client that does not report its host is refused.
+// The host is read once, here: a client whose reported host changes later is
+// not checked again.
 func localEngine(cli EngineClient) error {
 	if err := checkLocalEngine(os.Getenv("DOCKER_HOST")); err != nil {
 		return err
 	}
-	if c, ok := cli.(interface{ DaemonHost() string }); ok {
-		return checkLocalEngine(c.DaemonHost())
+	c, ok := cli.(interface{ DaemonHost() string })
+	if !ok {
+		return errNoDaemonHost
 	}
-	return nil
+	return checkLocalEngine(c.DaemonHost())
+}
+
+// errNoEngine is returned by every engine call on an adapter that was not
+// built by NewFromEnv or NewAdapter.
+var errNoEngine = errors.New("Docker engine client unavailable: the adapter was not built by docker.NewFromEnv or docker.NewAdapter")
+
+// engineClient returns the client the constructor checked, or, on a
+// zero-value Adapter, a client that refuses every call with errNoEngine.
+func (a *Adapter) engineClient() EngineClient {
+	if a == nil || a.cli == nil {
+		return noEngine{}
+	}
+	return a.cli
+}
+
+// lacks is the error of a call whose client misses an interface it needs:
+// errNoEngine on a zero-value Adapter, otherwise what the client cannot do.
+func (a *Adapter) lacks(what string) error {
+	if a == nil || a.cli == nil {
+		return errNoEngine
+	}
+	return errors.New(what)
+}
+
+// noEngine is the client of an adapter no constructor built. It implements
+// only EngineClient, so the wider interfaces the council calls assert on are
+// missing too, and those calls fail as well.
+type noEngine struct{}
+
+func (noEngine) NetworkInspect(context.Context, string, client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+	return client.NetworkInspectResult{}, errNoEngine
+}
+func (noEngine) NetworkCreate(context.Context, string, client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
+	return client.NetworkCreateResult{}, errNoEngine
+}
+func (noEngine) ImageInspect(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+	return client.ImageInspectResult{}, errNoEngine
+}
+func (noEngine) ContainerCreate(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	return client.ContainerCreateResult{}, errNoEngine
+}
+func (noEngine) ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error) {
+	return client.ContainerStartResult{}, errNoEngine
+}
+func (noEngine) ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+	return client.ContainerInspectResult{}, errNoEngine
+}
+func (noEngine) ContainerStop(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error) {
+	return client.ContainerStopResult{}, errNoEngine
+}
+func (noEngine) ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+	return client.ContainerRemoveResult{}, errNoEngine
 }
 
 func (a *Adapter) dockerSocket() string {
@@ -106,9 +168,7 @@ func (a *Adapter) dockerSockets() []string {
 			out = append(out, path)
 		}
 	}
-	if c, ok := a.Client.(interface{ DaemonHost() string }); ok {
-		add(c.DaemonHost())
-	}
+	add(a.DaemonHost())
 	add(os.Getenv("DOCKER_HOST"))
 	if sock := a.dockerSocket(); sock != "" {
 		out = append(out, sock)
@@ -128,6 +188,23 @@ func unixSocketPath(host string) string {
 		return ""
 	}
 	return u.Host
+}
+
+// DaemonHost returns the engine host the adapter's client dials, as the
+// constructor checked it, or "" on an adapter no constructor built.
+func (a *Adapter) DaemonHost() string {
+	if c, ok := a.engineClient().(interface{ DaemonHost() string }); ok {
+		return c.DaemonHost()
+	}
+	return ""
+}
+
+// Close releases the engine client, when it holds connections.
+func (a *Adapter) Close() error {
+	if c, ok := a.engineClient().(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
 // SetAttachHub ties log streams to the daemon lifetime across individual Start calls.
@@ -184,7 +261,8 @@ func discoverDockerSocket() string {
 }
 
 // NewAdapter wraps an engine client. It refuses a remote engine: a remote
-// DOCKER_HOST, or a client whose DaemonHost is not a local socket or pipe.
+// DOCKER_HOST, a client whose DaemonHost is not a local socket or pipe, or a
+// client that reports no DaemonHost at all.
 func NewAdapter(cli EngineClient, networkName string) (*Adapter, error) {
 	if err := localEngine(cli); err != nil {
 		return nil, err
@@ -193,7 +271,7 @@ func NewAdapter(cli EngineClient, networkName string) (*Adapter, error) {
 		networkName = DefaultNetworkName
 	}
 	return &Adapter{
-		Client:      cli,
+		cli:         cli,
 		NetworkName: networkName,
 	}, nil
 }
@@ -206,13 +284,13 @@ func (a *Adapter) CouncilRuntimeConfigured() bool {
 
 // Ping checks whether the configured Docker engine is reachable.
 func (a *Adapter) Ping(ctx context.Context) error {
-	if a == nil || a.Client == nil {
-		return errors.New("Docker client unavailable")
+	if a == nil || a.cli == nil {
+		return errNoEngine
 	}
 	type pinger interface {
 		Ping(context.Context, client.PingOptions) (client.PingResult, error)
 	}
-	p, ok := a.Client.(pinger)
+	p, ok := a.engineClient().(pinger)
 	if !ok {
 		return nil
 	}
@@ -236,7 +314,7 @@ func (a *Adapter) internalNetwork(ctx context.Context, create bool) (string, err
 
 func (a *Adapter) internalNetworkNamed(ctx context.Context, name string, create bool) (string, error) {
 	inspect := func() (string, error) {
-		r, err := a.Client.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+		r, err := a.engineClient().NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 		if err != nil {
 			return "", err
 		}
@@ -250,7 +328,7 @@ func (a *Adapter) internalNetworkNamed(ctx context.Context, name string, create 
 	if !create || !isMissing(err) {
 		return id, err
 	}
-	_, createErr := a.Client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
+	_, createErr := a.engineClient().NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge", Internal: true, Labels: map[string]string{"app.kubernetes.io/managed-by": "sablecourt"},
 	})
 	// A concurrent launcher may have created it. Validate the winner.
@@ -264,7 +342,7 @@ func (a *Adapter) internalNetworkNamed(ctx context.Context, name string, create 
 var imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func (a *Adapter) localImage(ctx context.Context, ref string) (client.ImageInspectResult, error) {
-	r, err := a.Client.ImageInspect(ctx, ref)
+	r, err := a.engineClient().ImageInspect(ctx, ref)
 	if err != nil {
 		return r, fmt.Errorf("inspect local image: %w", err)
 	}
@@ -339,7 +417,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		},
 	}
 
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.engineClient().ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-" + spec.TaskID,
 		Config: &container.Config{
 			Image:     image.ID,
@@ -365,7 +443,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}
 	var stdinCloser io.WriteCloser
 	if a.AttachHub != nil {
-		if att, ok := a.Client.(containerAttacher); ok {
+		if att, ok := a.engineClient().(containerAttacher); ok {
 			if hijacked, err := att.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
 				Stream: true,
 				Stdin:  true,
@@ -375,7 +453,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		}
 	}
 
-	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		if stdinCloser != nil {
 			_ = stdinCloser.Close()
 		}
@@ -383,7 +461,7 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}
 
 	if a.AttachHub != nil {
-		if ls, ok := a.Client.(logStreamer); ok {
+		if ls, ok := a.engineClient().(logStreamer); ok {
 			a.AttachHub.Register(spec.TaskID, stdinCloser)
 			if a.attachCtx != nil {
 				ctx = a.attachCtx
@@ -423,7 +501,7 @@ func (w hubOutput) Write(p []byte) (int, error) {
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
-	res, err := a.Client.ContainerInspect(ctx, handle.ExternalID, client.ContainerInspectOptions{})
+	res, err := a.engineClient().ContainerInspect(ctx, handle.ExternalID, client.ContainerInspectOptions{})
 	if err != nil {
 		return scruntime.Observation{}, fmt.Errorf("inspect container %s: %w", handle.ExternalID, err)
 	}
@@ -458,14 +536,14 @@ func (a *Adapter) Suspend(_ context.Context, handle scruntime.Handle) (scruntime
 }
 
 func (a *Adapter) Resume(ctx context.Context, handle scruntime.Handle, _ scruntime.CheckpointRef) error {
-	_, err := a.Client.ContainerStart(ctx, handle.ExternalID, client.ContainerStartOptions{})
+	_, err := a.engineClient().ContainerStart(ctx, handle.ExternalID, client.ContainerStartOptions{})
 	return err
 }
 
 func (a *Adapter) Stop(ctx context.Context, handle scruntime.Handle) error {
 	timeout := 10
-	_, err := a.Client.ContainerStop(ctx, handle.ExternalID, client.ContainerStopOptions{Timeout: &timeout})
-	_, removeErr := a.Client.ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
+	_, err := a.engineClient().ContainerStop(ctx, handle.ExternalID, client.ContainerStopOptions{Timeout: &timeout})
+	_, removeErr := a.engineClient().ContainerRemove(ctx, handle.ExternalID, client.ContainerRemoveOptions{Force: true})
 	if removeErr == nil || isMissing(removeErr) {
 		return nil
 	}

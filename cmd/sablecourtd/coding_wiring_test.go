@@ -148,6 +148,8 @@ type fakeWiringEngine struct {
 	docker.EngineClient
 }
 
+func (fakeWiringEngine) DaemonHost() string { return "unix:///var/run/docker.sock" }
+
 func TestWireCouncilContainers(t *testing.T) {
 	state := t.TempDir()
 	hub := attach.NewHub()

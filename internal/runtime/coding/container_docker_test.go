@@ -159,7 +159,13 @@ func TestCouncilContainerDockerMountModesAndDiff(t *testing.T) {
 	if err != nil {
 		t.Skipf("Docker client unavailable: %v", err)
 	}
-	cli := da.Client.(*client.Client)
+	t.Cleanup(func() { _ = da.Close() })
+	// The stub image is built with a client of its own on the engine the
+	// adapter checked; the adapter does not expose its client.
+	cli, err := client.New(client.WithHost(da.DaemonHost()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = cli.Close() })
 	pingCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	err = da.Ping(pingCtx)
@@ -423,7 +429,7 @@ func TestCouncilContainerAuthenticatedCodexTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = da.Client.(*client.Client).Close() })
+	t.Cleanup(func() { _ = da.Close() })
 	def, err := harnessimages.Lookup("codex")
 	if err != nil {
 		t.Fatal(err)

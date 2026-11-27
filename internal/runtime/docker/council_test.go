@@ -519,7 +519,7 @@ func TestCouncilInheritedConfig(t *testing.T) {
 	for _, config := range []string{`null`, `{"Volumes":{"/extra":{}}}`, `{"Env":["SABLECOURT_MODEL_GATE_URL=unexpected"]}`, `{"Env":["BASH_ENV=/workspace/startup"]}`, `{"Env":["API_KEY=private-fixture"]}`} {
 		t.Run(config, func(t *testing.T) {
 			a, f, s := fixtureRun(t)
-			a.Client = configuredImageEngine{f, config}
+			a.cli = configuredImageEngine{f, config}
 			_, err := a.RunCouncil(t.Context(), s, discardResult)
 			if err == nil || f.exists || len(f.calls) != 0 {
 				t.Fatal("unverified image config reached create")
@@ -553,7 +553,7 @@ func TestCouncilDeadlineClosesAttachment(t *testing.T) {
 			local, peer := net.Pipe()
 			defer peer.Close()
 			conn := &stalledConn{Conn: local}
-			a.Client = &stalledEngine{f, conn}
+			a.cli = &stalledEngine{f, conn}
 			s.Limits.WallTime = 200 * time.Millisecond
 			if mode == "output" {
 				go func() { _, _ = io.Copy(io.Discard, peer) }()
@@ -610,7 +610,7 @@ func TestCouncilRevalidatesLoginVolumeAfterCreate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, f, s := fixtureRun(t)
-			a.Client = &swappedVolumeEngine{councilEngine: f, afterCreate: tc.vol}
+			a.cli = &swappedVolumeEngine{councilEngine: f, afterCreate: tc.vol}
 			_, err := a.RunCouncil(t.Context(), s, discardResult)
 			if err == nil || f.exists || slices.Contains(f.calls, "start") || slices.Contains(f.calls, "attach") {
 				t.Fatalf("calls=%v present=%t err=%v", f.calls, f.exists, err)
@@ -641,7 +641,7 @@ func TestCouncilExitDrainsUnbufferedWaitOnCancel(t *testing.T) {
 	release := make(chan struct{})
 	sent := make(chan struct{})
 	engine := &unbufferedWaitEngine{councilEngine: f, release: release, sent: sent}
-	a.Client = engine
+	a.cli = engine
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	res := rt.CouncilResult{ContainerID: "container-id"}

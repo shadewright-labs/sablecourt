@@ -48,7 +48,7 @@ The controller adapter refuses to start a workload that is not a `deterministic-
 ## Not built yet
 
 - A machine without a container runtime cannot run coding tasks or councils in 0.1.0, except in forced host mode. In host mode a harness gets a scratch `HOME` and finds no login (issue 63). The separate harness state directories and the host-mode `codex` check of the 2026-11-25 amendment are dropped, not planned.
-- A remote Docker engine. The mount rule compares host file identities, so the Docker adapter is not built on a `tcp://` or `ssh://` engine and the commands that need it refuse to start.
+- A remote Docker engine. The mount rule compares host file identities, so the Docker adapter is not built on a `tcp://` or `ssh://` engine, or on a client that does not report its host, and the commands that need it refuse to start. Limits: the check reads only the host string, so a local socket that forwards to a remote engine is not detected; the host an injected client reports is not checked again after the adapter is built (a test seam only); and `sablectl harness build` is outside this refusal: it passes `DOCKER_HOST` and the other Docker variables to the `docker` CLI, so an image build can run on a remote engine; the build sends its context on standard input, sets no bind mount and uses no login volume.
 - Checkpointed suspend and resume for long-lived agents ([ADR-0002](../adr/0002-heterogeneous-mvp-workload-adapters.md)).
 - Linux host sandboxing. [ADR-0003](../adr/0003-hybrid-workload-isolation.md) names Bubblewrap and none exists; the ADR-0011 amendment of 2026-11-27 supersedes that line, so none is planned.
 

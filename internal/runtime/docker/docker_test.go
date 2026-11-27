@@ -18,14 +18,29 @@ import (
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
-// testAdapter builds an adapter on a fake engine. The fakes report no remote
-// host, so the constructor's refusal never fires here; remote_engine_test.go
-// covers it.
+// localHost is a client that reports a local engine and makes no calls.
+type localHost struct{ EngineClient }
+
+func (localHost) DaemonHost() string { return "unix:///var/run/docker.sock" }
+
+// testAdapter builds an adapter on a fake engine. A fake that reports its
+// host goes through NewAdapter as given. Most fakes report none, which
+// NewAdapter refuses, so the adapter is built on a local host and the fake
+// is swapped in afterwards through the unexported field (a test seam only
+// this package has). remote_engine_test.go covers the refusals.
 func testAdapter(cli EngineClient, networkName string) *Adapter {
-	a, err := NewAdapter(cli, networkName)
+	if _, ok := cli.(interface{ DaemonHost() string }); ok {
+		a, err := NewAdapter(cli, networkName)
+		if err != nil {
+			panic(err)
+		}
+		return a
+	}
+	a, err := NewAdapter(localHost{}, networkName)
 	if err != nil {
 		panic(err)
 	}
+	a.cli = cli
 	return a
 }
 
