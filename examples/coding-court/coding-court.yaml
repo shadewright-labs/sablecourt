@@ -1,5 +1,5 @@
 # Generic coding court for any Go repository: four role cards and three
-# workflows. The fifth card, the architect, is prose for a council question:
+# workflows. The architect is not a card: it is prose for a council question,
 # see architect-question.md. The set written for the Sablecourt repository
 # is in sablecourt/.
 #
@@ -7,8 +7,9 @@
 # the agent reads as its instructions. It names no model, no tier and no
 # verdict format, and it grants nothing: access comes from the workload's
 # grants and the daemon's own checks, with or without a card. The verdict
-# line a verifier ends with is the one the control plane parses (the final
-# line must be exactly VERDICT: PASS or VERDICT: CHANGES_REQUESTED).
+# line a verifier ends with is the contract of the control plane, which parses
+# it (finalVerifierVerdict in internal/controlplane/workflow_evidence.go: the
+# last line must be exactly VERDICT: PASS or VERDICT: CHANGES_REQUESTED).
 #
 # The tier belongs to the workflow step. The examples put the developers on
 # the claude harness, the reviewer on codex and the security reviewer on agy,
@@ -96,7 +97,7 @@ spec:
     repoPath: .
     sandbox: container
   agentCard:
-    description: Reads the author's diff and evidence without writing.
+    description: Reads the author's diff and evidence. The card allows no tracked-file edit, only a temporary proving test.
     skills:
       - code-review
   roleCard: |
@@ -124,7 +125,7 @@ spec:
     - Every request for changes needs file and line evidence. Without it, it is a remark.
     - List what you could not verify separately. Skip style and naming preferences.
     - Do not pass a change because the tests are green when they do not cover the changed behaviour.
-    - Never edit a file, commit, push or stash.
+    - Never edit a tracked file, commit, push or stash. A temporary proving test is the only write, and you delete it before you finish.
   grants:
     modelGate:
       allowed: false

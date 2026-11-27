@@ -10,9 +10,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 )
 
-// The packet holds at most MaxPacketBytes. The role card is required text and is
-// never trimmed. Optional text (learnings, decrees, relics, the pre-check) is
-// dropped whole, oldest first, to fit what the required part leaves.
+// The role card is required packet text (see assembler.go), so each inline card has
+// to leave room for the optional parts. This file checks a byte budget only: it never
+// assembles a packet and does not exercise trimming or eviction.
 //
 // Margin, from internal/contextpack/assembler.go:
 //   - the pre-check can fill MaxPrecheckBytes (16 KiB) on its own;
@@ -20,8 +20,8 @@ import (
 //     about 400 bytes each;
 //   - the packet header, intent and a failure handoff are reserved as 2 KiB.
 //
-// What is left for the card is 32 - 16 - 8 - 2 = 6 KiB. This is a byte budget
-// with stated reserves: the test does not assemble a packet. Author cards must also
+// What is left for the card is 32 - 16 - 8 - 2 = 6 KiB. The architect text is checked against the same limit as an
+// editorial limit: no workload injects it. Author cards must also
 // stay near the 1 KiB the ADR-0010 amendment asks for, so the limit is 1.25 KiB.
 const (
 	learningsReserve = 8 << 10
@@ -33,7 +33,7 @@ func cardLimit() int {
 	return contextpack.MaxPacketBytesForTest - contextpack.MaxPrecheckBytesForTest - learningsReserve - headerReserve
 }
 
-func TestExampleCodingCourtCardsFitContextPacket(t *testing.T) {
+func TestExampleCodingCourtCardsByteBudget(t *testing.T) {
 	root := filepath.Join("..", "..", "examples", "coding-court")
 	if got := cardLimit(); got != 6<<10 {
 		t.Fatalf("card limit %d, the reasoning in this test assumes 6 KiB", got)
