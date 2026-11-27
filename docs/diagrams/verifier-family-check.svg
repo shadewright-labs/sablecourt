@@ -10,11 +10,11 @@
       .lane{fill:#111422;stroke:#373040}
       .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
       .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
-      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6;stroke-dasharray:5 4}
       .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
       .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
       .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
-      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2;stroke-dasharray:5 4}
       .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
       .h{fill:#efe9dc;font-size:15px;font-weight:650}
       .s{fill:#bbb4c5;font-size:12.5px}
