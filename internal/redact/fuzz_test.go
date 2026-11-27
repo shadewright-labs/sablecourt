@@ -1,0 +1,126 @@
+package redact
+
+import (
+	"strings"
+	"testing"
+)
+
+func FuzzString(f *testing.F) {
+	seeds := []string{
+		"",
+		"ordinary log line without credentials",
+		"secret:\n  value: hunter2\nstatus: ok\n",
+		"secret:\n  prod:\n    value: \"quoted value\"\n",
+		"secret:\r\n\tvalue: |\r\n\t  line1\r\n\t  line2\r\n",
+		"secret:\n  secret: |#abcdefg hijklmn\n",
+		`{"text":"secret:\n  value: hunter2hunter2\n"}`,
+		`{"secret":{"value":"hunter2hunter2"},"token":["abc12345"]}`,
+		"secret: {value: hunter2hunter2} secret: [abcdefgh, ijklmnop]",
+		"postgres://app:" + "p@ssw0rd99" + "@example.com:5432/x",
+		"redis://:" + "pa/ss1234" + "@cache.internal:6379/0",
+		`{"u":"https:\/\/user:hunter2pw@example.com\/x"}`,
+		"Authorization: Basic " + joinParts("dXNlcjp", "maXh0dXJl"),
+		"Proxy-Authorization: Bearer " + joinParts("tok_", "0123456789!tail"),
+		`Authorization: Digest username="u", response="0123456789abcdef"`,
+		`{"Authorization":["Bearer abcdefghijkl"]}`,
+		"map[Authorization:[Bearer abcdefghijkl]]",
+		"Cookie: session=abcdef0123456789; theme=dark",
+		"Set-Cookie: sid=abcdef0123456789; Path=/; HttpOnly",
+		joinParts("eyJ", "hbGciOiJIUzI1NiJ9.", "eyJ", "zdWIiOiIxIn0.", "c2lnbmF0dXJlMTIzNA=="),
+		joinParts("eyJ", "hbGciOiJkaXIifQ.", "ENCKEY.", "IVIVIV.", "CIPHER.", "TAGTAG"),
+		pemBlock("RSA PRIVATE KEY", "MIIEfixture", "\n", true),
+		pemBlock("OPENSSH PRIVATE KEY", "MIIEfixture", "\n", false),
+		joinParts("ghp_", "0123456789", "\xff", "abcdefghij", "klmnopqrst"),
+		joinParts("ghp_", "0123456789", "\u200b\x1b[0m", "abcdefghij", "klmnopqrst"),
+		`{"api_key":"fixture with spaces","status":"ok"}`,
+		"a://:x@a://:x@",
+		"secret:\n a:1\n b:2\n c\n d\n",
+		"status=ok\xffcount=42",
+		"<password>hunter2hunter2</password>",
+		"curl -u admin:hunter2hunter2 https://api.invalid/v1",
+		"http://pass='abcdef'@example.com/x",
+		"password: \x00abcdef",
+		"postgres://app:hunter2,pw@example.com/x",
+		"postgres://app:hunter2;pw)123]456}789@example.com/x",
+		"https://[2001:db8::1]/u/bob@example.com",
+		"map[Set-Cookie:[sid=abc123; Path=/ refresh=xyz789; Secure]]",
+		`{"Set-Cookie":["a=b; Path=/","refresh=xyz789"]}`,
+		"curl -H 'Cookie: a=b' https://x.invalid",
+		"DB_PASSWORD=Xy9(kLm2nPq password=Zq9xK2)mV7pLw",
+		joinParts("-----BEGIN ", "PRIVATE KEY----- ") + "MIIEvQIBADANBgkqhkiG9w0BAQE",
+		`{"msg":"{\"k\":\"` + joinParts("-----BEGIN ", "PRIVATE KEY-----") + `\\nMIIEvQIBADANBgkqhkiG9w0BAQE\"}"}`,
+		"imagePullSecrets:\n- name: regcred\n",
+		"credentials: {region: eu, profile: x}",
+		"Authorization: skipping verification",
+		"Authorization: Bearer authentication failed",
+		`{"text":"secret:\u000a  value: hunter2hunter2\u000a"}`,
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		once := String(input)
+		maxLen := 6*len(input) + 64
+		if len(once) > maxLen {
+			t.Fatalf("redacted output grew too much: len(in)=%d len(out)=%d limit=%d", len(input), len(once), maxLen)
+		}
+		twice := String(once)
+		if twice != once {
+			t.Fatalf("String is not idempotent:\ninput: %q\nonce:  %q\ntwice: %q", input, once, twice)
+		}
+	})
+}
+
+func FuzzStringNoLeak(f *testing.F) {
+	f.Add(uint8(0), "prefix log line", "suffix log line")
+	f.Add(uint8(3), `{"a":1}`, "status=ok")
+	f.Add(uint8(7), "before\n", "\nafter")
+
+	const needle = "FUZZSECRET9876543210"
+	templates := []func(string) string{
+		func(s string) string { return "password=" + s },
+		func(s string) string { return "AWS_SECRET_ACCESS_KEY=" + s },
+		func(s string) string { return `{"SecretAccessKey":"` + s + `"}` },
+		func(s string) string { return "secret:\n  value: " + s + "\n" },
+		func(s string) string { return `{"text":"secret:\n  value: ` + s + `\n"}` },
+		func(s string) string { return `{"secret":{"value":"` + s + `"}}` },
+		func(s string) string { return "postgres://app:" + s + "@example.com/x" },
+		func(s string) string { return "Authorization: Bearer " + s },
+		func(s string) string { return `{"Authorization":["Token ` + s + `"]}` },
+		func(s string) string { return "Cookie: sid=" + s },
+		func(s string) string { return "<password>" + s + "</password>" },
+		func(s string) string { return "curl -u svc:" + s + " https://api.invalid" },
+		func(s string) string { return "ghp_" + s },
+		func(s string) string { return "postgres://app:" + s + ",pw@example.com/x" },
+		func(s string) string { return `{"Set-Cookie":["a=b; Path=/","refresh=` + s + `"]}` },
+		func(s string) string { return "DB_PASSWORD=Xy9(" + s },
+		func(s string) string { return "password=Zq9xK2)" + s },
+		func(s string) string { return joinParts("-----BEGIN ", "PRIVATE KEY----- ") + s },
+	}
+
+	f.Fuzz(func(t *testing.T, kind uint8, prefix, suffix string) {
+		// Sanitize prefix/suffix so they cannot accidentally embed the needle or
+		// close/merge the template boundary in a way that destroys the format itself.
+		if strings.Contains(prefix, needle) || strings.Contains(suffix, needle) {
+			return
+		}
+		cleanPrefix := strings.ReplaceAll(prefix, "\"", "")
+		cleanSuffix := strings.ReplaceAll(suffix, "\"", "")
+		cleanPrefix = strings.ReplaceAll(cleanPrefix, "'", "")
+		cleanSuffix = strings.ReplaceAll(cleanSuffix, "'", "")
+		cleanPrefix = strings.ReplaceAll(cleanPrefix, "\\", "")
+		cleanSuffix = strings.ReplaceAll(cleanSuffix, "\\", "")
+		cleanPrefix = strings.ReplaceAll(cleanPrefix, "-----BEGIN ", "")
+
+		tmpl := templates[int(kind)%len(templates)]
+		input := cleanPrefix + "\n" + tmpl(needle) + "\n" + cleanSuffix
+		once := String(input)
+		if strings.Contains(once, needle) {
+			t.Fatalf("leaked secret needle %q in template %d:\ninput: %q\noutput: %q", needle, int(kind)%len(templates), input, once)
+		}
+		if twice := String(once); twice != once {
+			t.Fatalf("String is not idempotent:\ninput: %q\nonce:  %q\ntwice: %q", input, once, twice)
+		}
+	})
+}

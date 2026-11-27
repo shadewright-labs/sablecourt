@@ -235,3 +235,20 @@ func TestActionHandlerBreakerAndRedaction(t *testing.T) {
 		}
 	}
 }
+
+// TestActionHandlerRedactsHandlerErrorsOnly pins the redaction boundary the
+// docs describe: errors returned by a handler are redacted, while the gate's
+// own request-decode errors echo the offending field name as it was sent.
+func TestActionHandlerRedactsHandlerErrorsOnly(t *testing.T) {
+	gate, _, _, token := setupMCPGateTest(t)
+	h := gate.ActionHandler()
+	secretValue := "sk-ant-" + strings.Repeat("a1B2", 6)
+
+	rec := postAction(t, h, http.MethodPost, "/git.open_pr", token, `{"`+secretValue+`":1}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("decode error: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(errorText(t, rec), secretValue) {
+		t.Fatalf("decode errors are documented as not redacted, got %q", errorText(t, rec))
+	}
+}

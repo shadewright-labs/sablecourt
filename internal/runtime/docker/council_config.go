@@ -178,6 +178,9 @@ func preparePrompt(s rt.CouncilLaunch) (string, error) {
 		len(s.Prompt) > 64<<10 || strings.TrimSpace(s.Prompt) == "" || strings.HasPrefix(strings.TrimSpace(s.Prompt), "-") || strings.ContainsRune(s.Prompt, 0) {
 		return "", errors.New("invalid council bootstrap input")
 	}
+	if privateKeyStart.MatchString(s.Prompt) {
+		return "", errors.New("unsafe council prompt")
+	}
 	prompt := redact.String(strings.ReplaceAll(s.Prompt, s.TaskToken, "[REDACTED]"))
 	if privateKeyStart.MatchString(prompt) || len(prompt) > 64<<10 {
 		return "", errors.New("unsafe council prompt")
