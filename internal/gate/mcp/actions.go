@@ -353,9 +353,10 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 	})
 
 	// git.push always needs an out-of-band approval. The approved value names
-	// the commit; the precheck and the run step both compare it with the live
-	// head of the task branch, and the pusher compares once more just before
-	// it pushes.
+	// the commit and the destination; the precheck and the run step both
+	// compare them with the live head of the task branch and the live push URL
+	// of the remote, and the pusher compares the head once more just before it
+	// pushes to the URL the run step resolved.
 	registerTypedActionDef(g, "git.push", typedAction[PushBranchInput]{
 		validate:         validatePushInput,
 		requiresApproval: true,

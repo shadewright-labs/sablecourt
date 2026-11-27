@@ -62,7 +62,7 @@ end run`
 // action lands. The dialog shows them first and never shortens them.
 var targetFields = map[string][]string{
 	"action:git.open_pr":               {"owner", "repo", "head", "base"},
-	"action:git.push":                  {"branch", "commit_sha"},
+	"action:git.push":                  {"branch", "commit_sha", "destination"},
 	"action:git.merge_pr":              {"owner", "repo", "pr_number", "commit_sha"},
 	"action:git.create_branch":         {"branch", "base"},
 	"action:sandbox.propose_promotion": {"workload", "branch"},

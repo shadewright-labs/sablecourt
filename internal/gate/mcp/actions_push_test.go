@@ -120,7 +120,7 @@ func TestGitPushApprovedFlowAndCommitPinning(t *testing.T) {
 	gate, _, queue, token := setupGitPushGate(t, repoDir, wl, domain.EffectAllow, nil)
 	h := gate.ActionHandler()
 
-	payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}`
+	payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}`
 	// Missing approval must pause with 202.
 	rec := postAction(t, h, http.MethodPost, "/git.push", token, `{"payload":`+payload+`}`)
 	if rec.Code != http.StatusAccepted {
@@ -224,7 +224,7 @@ func TestGitPushRefusesCommitChangeAfterApproval(t *testing.T) {
 	gate, _, queue, token := setupGitPushGate(t, repoDir, wl, domain.EffectApprove, nil)
 	h := gate.ActionHandler()
 
-	payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}`
+	payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}`
 	rec := postAction(t, h, http.MethodPost, "/git.push", token, `{"payload":`+payload+`}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
@@ -296,7 +296,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "protected branch main",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"main","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"main","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "must start with sablecourt/",
 		},
@@ -304,7 +304,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "other task branch refused",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"sablecourt/other-task","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"sablecourt/other-task","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "not this task's branch",
 		},
@@ -312,7 +312,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "unknown remote target",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","remote":"evil"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `","remote":"evil"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "unknown remote",
 		},
@@ -320,7 +320,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "remote URL injection refused",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","remote":"https://evil.example/repo.git"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `","remote":"https://evil.example/repo.git"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "illegal characters",
 		},
@@ -328,7 +328,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "unknown requested repo target",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","repo":"other/repo"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `","repo":"other/repo"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "does not match granted repository",
 		},
@@ -336,7 +336,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "workload without granted repo",
 			wl:       ungrantedRepoWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "no granted repository",
 		},
@@ -344,7 +344,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "workload granted different repo",
 			wl:       restrictedRepoWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "not in workload grants.repos",
 		},
@@ -360,7 +360,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "unknown field force refused",
 			wl:       coderWL,
 			effect:   domain.EffectApprove,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","force":true}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `","force":true}}`,
 			wantCode: http.StatusBadRequest,
 			wantErr:  "invalid action payload",
 		},
@@ -368,7 +368,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "policy deny blocks push",
 			wl:       coderWL,
 			effect:   domain.EffectDeny,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusForbidden,
 			wantErr:  "policy denied",
 		},
@@ -376,7 +376,7 @@ func TestGitPushRefusalPaths(t *testing.T) {
 			name:     "missing approval pauses with 202 even under policy allow",
 			wl:       coderWL,
 			effect:   domain.EffectAllow,
-			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}}`,
+			body:     `{"payload":{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}}`,
 			wantCode: http.StatusAccepted,
 		},
 	}

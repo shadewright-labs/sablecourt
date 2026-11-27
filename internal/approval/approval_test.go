@@ -128,7 +128,8 @@ func TestConfirmationMessageShowsTargetAndDigest(t *testing.T) {
 }
 
 // The dialogs of git.push and git.merge_pr show the approved commit SHA in
-// full among the target fields, before any other field.
+// full among the target fields, before any other field; the git.push dialog
+// also shows the push destination there.
 func TestConfirmationMessageShowsApprovedCommit(t *testing.T) {
 	sha := strings.Repeat("ab", 20)
 	cases := []struct {
@@ -138,8 +139,8 @@ func TestConfirmationMessageShowsApprovedCommit(t *testing.T) {
 	}{
 		{
 			capability: "action:git.push",
-			payload:    map[string]any{"branch": "sablecourt/task-1", "commit_sha": sha, "remote": "origin"},
-			targets:    []string{`branch: "sablecourt/task-1"`, `commit_sha: "` + sha + `"`},
+			payload:    map[string]any{"branch": "sablecourt/task-1", "commit_sha": sha, "destination": "https://github.com/acme/widgets.git", "remote": "origin"},
+			targets:    []string{`branch: "sablecourt/task-1"`, `commit_sha: "` + sha + `"`, `destination: "https://github.com/acme/widgets.git"`},
 		},
 		{
 			capability: "action:git.merge_pr",

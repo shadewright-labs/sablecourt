@@ -41,9 +41,9 @@ func TestCanonicalEncodingOfTypedActionsIsFixed(t *testing.T) {
 		},
 		{
 			"git.push",
-			PushBranchInput{Branch: "sablecourt/task-1", CommitSHA: strings.Repeat("ab", 20)},
-			`{"branch":"sablecourt/task-1","commit_sha":"abababababababababababababababababababab"}`,
-			"10f95b3c6811fb6b2497361ddd2c4118fe7020397cd579fc142620d8576b644f",
+			PushBranchInput{Branch: "sablecourt/task-1", CommitSHA: strings.Repeat("ab", 20), Destination: "https://github.com/acme/widgets.git"},
+			`{"branch":"sablecourt/task-1","commit_sha":"abababababababababababababababababababab","destination":"https://github.com/acme/widgets.git"}`,
+			"c08b0e33f4cab658da5a5e2f5587613734d8777ff6d6fbfb3c390667b85ee8e2",
 		},
 		{
 			"git.merge_pr",

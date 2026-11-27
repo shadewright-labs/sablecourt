@@ -23,15 +23,21 @@ import (
 
 const runtimeHandlesNamespace = "system:runtime-handles"
 
-// PushBranchInput is the approved value of git.push. CommitSHA is required:
-// the dialog shows it as a target, and the push happens only while the task
-// branch still points at it. An empty Remote means origin.
+// PushBranchInput is the approved value of git.push. CommitSHA and
+// Destination are required and the dialog shows both as targets. The push
+// happens only while the task branch still points at CommitSHA and the push
+// URL of Remote, without user information, is still Destination. An empty
+// Remote means origin.
 type PushBranchInput struct {
-	Branch    string `json:"branch"`
-	CommitSHA string `json:"commit_sha"`
-	Remote    string `json:"remote,omitempty"`
-	Repo      string `json:"repo,omitempty"`
+	Branch      string `json:"branch"`
+	CommitSHA   string `json:"commit_sha"`
+	Destination string `json:"destination"`
+	Remote      string `json:"remote,omitempty"`
+	Repo        string `json:"repo,omitempty"`
 }
+
+// maxDestinationLen bounds the destination of a git.push value.
+const maxDestinationLen = 2048
 
 // PushBranchRequest is a push the gate has checked. URL is the push URL of
 // Remote as git resolved it when the request was checked (pushurl and
@@ -162,6 +168,9 @@ func validatePushInput(in PushBranchInput) error {
 	if !isCommitID(in.CommitSHA) {
 		return errors.New("commit_sha must be a full 40- or 64-character lowercase hex SHA")
 	}
+	if err := validateDestination(in.Destination); err != nil {
+		return err
+	}
 	if in.Remote != "" {
 		if err := validateSafeRemote(in.Remote); err != nil {
 			return newActionError(http.StatusForbidden, "unknown_target", err.Error())
@@ -170,9 +179,88 @@ func validatePushInput(in PushBranchInput) error {
 	return nil
 }
 
+// validateDestination checks the destination of a git.push value on its own:
+// present, bounded, no whitespace or control characters, not an option, and
+// with no user information, so a credential never enters the approved value.
+func validateDestination(dest string) error {
+	if dest == "" {
+		return errors.New("destination is required: the push URL of the remote, without user information")
+	}
+	if len(dest) > maxDestinationLen {
+		return fmt.Errorf("destination is longer than %d bytes", maxDestinationLen)
+	}
+	if strings.HasPrefix(dest, "-") {
+		return errors.New("destination must not start with -")
+	}
+	for _, r := range dest {
+		if r <= ' ' || r == 0x7f {
+			return errors.New("destination must not contain whitespace or control characters")
+		}
+	}
+	got, hadUser, err := stripUserinfo(dest)
+	if hadUser || errors.Is(err, errURLPassword) {
+		return errors.New("destination must not carry user information")
+	}
+	if err != nil {
+		return fmt.Errorf("destination: %v", err)
+	}
+	if got != dest {
+		return fmt.Errorf("destination is not in canonical form, expected %q", got)
+	}
+	return nil
+}
+
+// errURLPassword refuses a URL that carries a password.
+var errURLPassword = errors.New("push URL carries a password")
+
+// pushDestination returns the destination a push URL names: the URL with any
+// user name removed. A URL with a password, or a URL that does not parse, is
+// refused. A local path is returned as it is. The error text never quotes
+// the URL, which may hold a credential.
+func pushDestination(pushURL string) (string, error) {
+	dest, _, err := stripUserinfo(pushURL)
+	return dest, err
+}
+
+// stripUserinfo removes the user name from a URL (scheme://user@host/... or
+// the scp-like user@host:path) and reports whether it had one.
+func stripUserinfo(raw string) (string, bool, error) {
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", false, errors.New("push URL does not parse")
+		}
+		if u.User == nil {
+			return u.String(), false, nil
+		}
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return "", true, errURLPassword
+		}
+		u.User = nil
+		return u.String(), true, nil
+	}
+	if !isRemoteURL(raw) {
+		return raw, false, nil
+	}
+	colon := strings.Index(raw, ":")
+	hostPart, path := raw[:colon], raw[colon:]
+	at := strings.LastIndex(hostPart, "@")
+	if at < 0 {
+		return raw, false, nil
+	}
+	if strings.Contains(hostPart[:at], ":") {
+		return "", true, errURLPassword
+	}
+	if at == len(hostPart)-1 {
+		return "", true, errors.New("push URL has no host")
+	}
+	return hostPart[at+1:] + path, true, nil
+}
+
 // resolvePushRequest checks a git.push value against live state: the branch
-// is this task's branch, the repository and remote are granted, and the
-// branch head is the approved commit_sha. Any drift refuses the push.
+// is this task's branch, the repository and remote are granted, the push URL
+// of the remote names the approved destination, and the branch head is the
+// approved commit_sha. Any drift refuses the push.
 func resolvePushRequest(ctx context.Context, g *Gate, defaultRepoRoot string, wl domain.Workload, taskID string, in PushBranchInput) (PushBranchRequest, error) {
 	remote := in.Remote
 	if remote == "" {
@@ -185,6 +273,13 @@ func resolvePushRequest(ctx context.Context, g *Gate, defaultRepoRoot string, wl
 	repoDir, pushURL, err := resolveGrantedRepoDir(ctx, defaultRepoRoot, g.snapshotFromContext(ctx).allowedRepo, wl, remote, in.Repo)
 	if err != nil {
 		return PushBranchRequest{}, err
+	}
+	dest, err := pushDestination(pushURL)
+	if err != nil {
+		return PushBranchRequest{}, newActionError(http.StatusForbidden, "unknown_target", fmt.Sprintf("the push URL of remote %q: %v", remote, err))
+	}
+	if dest != in.Destination {
+		return PushBranchRequest{}, newActionError(http.StatusConflict, "destination_mismatch", fmt.Sprintf("the push URL of remote %q is %q, not the approved destination", remote, dest))
 	}
 	headSHA, err := resolveBranchCommit(ctx, repoDir, in.Branch)
 	if err != nil {

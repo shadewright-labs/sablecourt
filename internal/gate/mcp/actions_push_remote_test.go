@@ -18,7 +18,7 @@ import (
 // git config could otherwise point a push at any URL.
 func TestGitPushRefusesUngrantedConfiguredRemote(t *testing.T) {
 	branch := "sablecourt/task-push-1"
-	repoDir, _, commitSHA := initGitRepoWithBareRemote(t, branch)
+	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 	other := filepath.Join(t.TempDir(), "other.git")
 	if out, err := exec.Command("git", "init", "--bare", other).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v (%s)", err, out)
@@ -45,7 +45,7 @@ func TestGitPushRefusesUngrantedConfiguredRemote(t *testing.T) {
 			}
 			gate, _, _, token := setupGitPushGate(t, repoDir, wl, domain.EffectApprove, nil)
 			rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token,
-				`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","remote":"fork"}}`)
+				`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`","remote":"fork"}}`)
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("push to ungranted remote: got %d, want 403: %s", rec.Code, rec.Body.String())
 			}
@@ -103,7 +103,7 @@ func TestGitPushSendsApprovedObjectNotRefNamedLikeIt(t *testing.T) {
 			repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 			gate, _, queue, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir), domain.EffectApprove, nil)
 			h := gate.ActionHandler()
-			payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `"}`
+			payload := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + bareDir + `"}`
 			body := requestAndApprovePush(t, h, queue, token, payload)
 
 			evilSHA := runGit(t, repoDir, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "unreviewed")
@@ -132,7 +132,7 @@ func TestGitPushChecksPushURL(t *testing.T) {
 		runGit(t, repoDir, "remote", "set-url", "--push", "origin", evilDir)
 		gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir), domain.EffectApprove, nil)
 		rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token,
-			`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`"}}`)
+			`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`"}}`)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("push URL not granted: got %d, want 403: %s", rec.Code, rec.Body.String())
 		}
@@ -144,7 +144,7 @@ func TestGitPushChecksPushURL(t *testing.T) {
 		runGit(t, t.TempDir(), "init", "--bare", evilDir)
 		gate, _, queue, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir), domain.EffectApprove, nil)
 		h := gate.ActionHandler()
-		body := requestAndApprovePush(t, h, queue, token, `{"branch":"`+branch+`","commit_sha":"`+commitSHA+`"}`)
+		body := requestAndApprovePush(t, h, queue, token, `{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`"}`)
 		runGit(t, repoDir, "remote", "set-url", "--push", "origin", evilDir)
 		rec := postAction(t, h, http.MethodPost, "/git.push", token, body)
 		if rec.Code != http.StatusForbidden || remoteHasBranch(evilDir, branch) {
@@ -153,23 +153,23 @@ func TestGitPushChecksPushURL(t *testing.T) {
 	})
 
 	t.Run("GitHub pushurl to another repository", func(t *testing.T) {
-		repoDir, _, commitSHA := initGitRepoWithBareRemote(t, branch)
+		repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 		runGit(t, repoDir, "remote", "set-url", "origin", "https://github.com/shadewright-labs/sablecourt.git")
 		runGit(t, repoDir, "remote", "set-url", "--push", "origin", "https://github.com/attacker/exfil.git")
 		gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, "shadewright-labs/sablecourt"), domain.EffectApprove, nil)
 		rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token,
-			`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`"}}`)
+			`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`"}}`)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("GitHub push URL of another repository: got %d, want 403: %s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("origin of a coding repo with no remote grant", func(t *testing.T) {
-		repoDir, _, commitSHA := initGitRepoWithBareRemote(t, branch)
+		repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 		for _, repos := range [][]string{nil, {repoDir}} {
 			gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, repos...), domain.EffectApprove, nil)
 			rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token,
-				`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`"}}`)
+				`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`"}}`)
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("origin not granted (repos %v): got %d, want 403: %s", repos, rec.Code, rec.Body.String())
 			}
@@ -189,7 +189,7 @@ func TestGitPushOwnerRepoGrantChecksSchemeAndHost(t *testing.T) {
 	} {
 		for _, remote := range []string{"origin", "fork"} {
 			t.Run(remote+" "+remoteURL, func(t *testing.T) {
-				repoDir, _, commitSHA := initGitRepoWithBareRemote(t, branch)
+				repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 				if remote == "origin" {
 					runGit(t, repoDir, "remote", "set-url", "origin", remoteURL)
 				} else {
@@ -197,7 +197,7 @@ func TestGitPushOwnerRepoGrantChecksSchemeAndHost(t *testing.T) {
 				}
 				gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, "shadewright-labs/sablecourt"), domain.EffectApprove, nil)
 				rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token,
-					`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","remote":"`+remote+`"}}`)
+					`{"payload":{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`","remote":"`+remote+`"}}`)
 				if rec.Code != http.StatusForbidden {
 					t.Fatalf("remote %s: got %d, want 403: %s", remoteURL, rec.Code, rec.Body.String())
 				}
@@ -214,7 +214,7 @@ func TestGitPushDriftAfterApprovalSpendsApproval(t *testing.T) {
 	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
 	gate, st, queue, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir), domain.EffectApprove, nil)
 	h := gate.ActionHandler()
-	body := requestAndApprovePush(t, h, queue, token, `{"branch":"`+branch+`","commit_sha":"`+commitSHA+`"}`)
+	body := requestAndApprovePush(t, h, queue, token, `{"branch":"`+branch+`","commit_sha":"`+commitSHA+`","destination":"`+bareDir+`"}`)
 	var sent struct {
 		ApprovalID string `json:"approvalId"`
 	}
@@ -263,5 +263,98 @@ func TestGitHubPushAuthScopesTokenToRepository(t *testing.T) {
 	}
 	if _, env := githubPushAuth("https://github.com/o/r.git", ""); env != nil {
 		t.Errorf("empty token produced git configuration %v", env)
+	}
+}
+
+// The approved value names the push destination. When the push URL changes
+// between the approval and the run, even to another granted destination, the
+// run refuses with 409 and nothing is pushed anywhere.
+func TestGitPushRefusesDestinationChangedAfterApproval(t *testing.T) {
+	branch := "sablecourt/task-push-1"
+	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
+	otherDir := filepath.Join(t.TempDir(), "other.git")
+	runGit(t, t.TempDir(), "init", "--bare", otherDir)
+	gate, _, queue, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir, otherDir), domain.EffectApprove, nil)
+	h := gate.ActionHandler()
+	body := requestAndApprovePush(t, h, queue, token, pushPayload(branch, commitSHA, bareDir, ""))
+
+	runGit(t, repoDir, "remote", "set-url", "--push", "origin", otherDir)
+	rec := postAction(t, h, http.MethodPost, "/git.push", token, body)
+	if rec.Code != http.StatusConflict || !strings.Contains(errorText(t, rec), "destination") {
+		t.Fatalf("push URL changed after approval: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if remoteHasBranch(otherDir, branch) || remoteHasBranch(bareDir, branch) {
+		t.Fatalf("a push happened after the destination changed (other=%v approved=%v)", remoteHasBranch(otherDir, branch), remoteHasBranch(bareDir, branch))
+	}
+}
+
+// The precheck resolves the destination before an approval exists: a value
+// whose destination is not the push URL of the remote is refused with 409 and
+// no approval is created.
+func TestGitPushPrecheckRefusesOtherDestination(t *testing.T) {
+	branch := "sablecourt/task-push-1"
+	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
+	otherDir := filepath.Join(t.TempDir(), "other.git")
+	runGit(t, t.TempDir(), "init", "--bare", otherDir)
+	gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir, otherDir), domain.EffectApprove, nil)
+	rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token, `{"payload":`+pushPayload(branch, commitSHA, otherDir, "")+`}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("destination other than the push URL: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A destination that carries user information is refused before an approval
+// exists, so credentials never reach the approved value or the dialog.
+func TestGitPushRefusesDestinationWithUserinfo(t *testing.T) {
+	branch := "sablecourt/task-push-1"
+	repoDir, bareDir, commitSHA := initGitRepoWithBareRemote(t, branch)
+	gate, _, _, token := setupGitPushGate(t, repoDir, pushWorkload(repoDir, bareDir), domain.EffectApprove, nil)
+	for _, dest := range []string{
+		"https://user:pass" + userAt + "github.com/shadewright-labs/sablecourt.git",
+		"https://token" + userAt + "github.com/shadewright-labs/sablecourt.git",
+		"ssh://git" + userAt + "github.com/shadewright-labs/sablecourt.git",
+		"git" + userAt + "github.com:shadewright-labs/sablecourt.git",
+	} {
+		rec := postAction(t, gate.ActionHandler(), http.MethodPost, "/git.push", token, `{"payload":`+pushPayload(branch, commitSHA, dest, "")+`}`)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(errorText(t, rec), "user information") {
+			t.Errorf("destination %q: got %d, want 400: %s", dest, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// pushPayload builds a git.push value; remote is left out when empty.
+func pushPayload(branch, commitSHA, destination, remote string) string {
+	p := `{"branch":"` + branch + `","commit_sha":"` + commitSHA + `","destination":"` + destination + `"`
+	if remote != "" {
+		p += `,"remote":"` + remote + `"`
+	}
+	return p + `}`
+}
+
+// A push URL that carries a password is refused; a user name alone is
+// removed from the destination the value must name.
+func TestPushDestination(t *testing.T) {
+	cases := []struct {
+		pushURL, want string
+		wantErr       bool
+	}{
+		{"https://github.com/shadewright-labs/sablecourt.git", "https://github.com/shadewright-labs/sablecourt.git", false},
+		{"https://user" + userAt + "github.com/shadewright-labs/sablecourt.git", "https://github.com/shadewright-labs/sablecourt.git", false},
+		{"https://user:s3cr3t" + userAt + "github.com/shadewright-labs/sablecourt.git", "", true},
+		{"ssh://git" + userAt + "git.example:2222/team/repo.git", "ssh://git.example:2222/team/repo.git", false},
+		{"git" + userAt + "github.com:shadewright-labs/sablecourt.git", "github.com:shadewright-labs/sablecourt.git", false},
+		{"git" + userAt + ":sablecourt.git", "", true},
+		{"/srv/git/sablecourt.git", "/srv/git/sablecourt.git", false},
+		{"file:///srv/git/sablecourt.git", "file:///srv/git/sablecourt.git", false},
+		{"https://bad host/x", "", true},
+	}
+	for _, tc := range cases {
+		got, err := pushDestination(tc.pushURL)
+		if (err != nil) != tc.wantErr || got != tc.want {
+			t.Errorf("%s: got %q err %v, want %q err %v", tc.pushURL, got, err, tc.want, tc.wantErr)
+		}
+		if err != nil && strings.Contains(err.Error(), "s3cr3t") {
+			t.Errorf("%s: error text carries the password: %v", tc.pushURL, err)
+		}
 	}
 }

@@ -56,7 +56,7 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
-| `spec.grants.repos` | list of strings | no | Granted repositories (`owner/repo`, URL or absolute path) for GitOps actions such as `git.push` and `git.merge_pr`. `owner/repo` matches only a GitHub URL. A `git.push` target must be listed here unless it is `origin` at the repository pinned at start. |
+| `spec.grants.repos` | list of strings | no | Granted repositories for GitOps actions; an entry must not be empty, have outer whitespace or contain spaces, tabs or newlines. `git.push` accepts `owner/repo`, a URL or an absolute path. `git.open_pr`, `git.pr_checks` and `git.merge_pr` compare entries, when the list is not empty, as normalized `owner/repo` (outer slashes and a `.git` suffix removed). `git.create_branch` ignores the field. In `git.push`, a plain `owner/repo` entry matches only a GitHub push URL. A `git.push` destination must match an entry unless it is `origin` at the repository pinned at start, and it must also equal the `destination` field of the approved value. |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
 
 ### Upstream MCP server (parked)
