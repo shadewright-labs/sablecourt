@@ -305,6 +305,7 @@ func TestMutatingCommandsSendExactRequest(t *testing.T) {
 }
 
 func TestDaemonErrorStatusIsReturnedAndNothingPrinted(t *testing.T) {
+	anchorSHA := strings.Repeat("ab", 32)
 	cases := []struct {
 		name   string
 		args   []string
@@ -349,6 +350,12 @@ func TestDaemonErrorStatusIsReturnedAndNothingPrinted(t *testing.T) {
 		{"task diff", []string{"task", "diff", "t1"}, "GET /api/v1/tasks/t1", http.StatusNotFound, "none", "HTTP 404"},
 		{"task scry", []string{"task", "scry", "t1"}, "GET /api/v1/tasks/t1/scry", http.StatusForbidden, " not yours \n", "HTTP 403: not yours"},
 		{"takeover refused", []string{"task", "takeover", "t1"}, "POST /api/v1/tasks/t1/takeover", http.StatusConflict, "held by another operator", "HTTP 409: held by another operator"},
+		// A daemon that ignores the anchor, or a proxy that drops the query,
+		// answers 200 without "anchored": true. That is not a matched anchor.
+		{"audit verify anchor ignored", []string{"audit", "verify", "--anchor", "12:" + anchorSHA}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":true,"verifiedRows":10}`, "anchor 12 was not checked"},
+		{"audit verify json anchor ignored", []string{"--json", "audit", "verify", "--anchor", "12:" + anchorSHA}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":true,"verifiedRows":10}`, "anchor 12 was not checked"},
+		{"audit verify json not valid", []string{"--json", "audit", "verify"}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":false,"verifiedRows":3}`, "audit hash chain not valid"},
+		{"audit verify json undecodable", []string{"--json", "audit", "verify"}, "GET /api/v1/audit/verify", http.StatusOK, `not json`, "decode verify result"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -466,15 +473,24 @@ func TestJSONFlagPrintsRawDaemonBody(t *testing.T) {
 		{[]string{"voice", "status"}, "GET /api/v1/voice/status"},
 	}
 	const marker = `{"raw":"daemon-body-7f3a"}`
+	// Commands that check the daemon answer before printing it get a body
+	// that passes the check; the rest get the marker.
+	bodies := map[string]string{
+		"GET /api/v1/audit/verify": `{"valid":true,"verifiedRows":1,"raw":"daemon-body-7f3a"}`,
+	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
-			d := newCLIDaemon().on(tc.route, http.StatusOK, marker)
+			body := bodies[tc.route]
+			if body == "" {
+				body = marker
+			}
+			d := newCLIDaemon().on(tc.route, http.StatusOK, body)
 			out, _, err := runCLI(t, d, "", append([]string{"--json"}, tc.args...)...)
 			if err != nil {
 				t.Fatalf("command failed: %v", err)
 			}
-			if out != marker {
-				t.Fatalf("output = %q, want raw body %q", out, marker)
+			if out != body {
+				t.Fatalf("output = %q, want raw body %q", out, body)
 			}
 		})
 	}

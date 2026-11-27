@@ -64,11 +64,7 @@ Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `inter
 
 ## Audit verification limits
 
-The SQLite and PostgreSQL verifiers recalculate hashes and previous-row links for rows that have hashes. They skip legacy rows with an empty hash and verify only rows still present in the database. A deleted middle row breaks a later row's previous-hash link; deletion of the final row leaves no later link to check. External anchoring for detecting tail deletion is parked under tracking [epic #1](https://github.com/shadewright-labs/sablecourt/issues/1).
-
-### Dated amendment, 2026-11-24
-
-The description above corrects the implementation claim in ADR-0009. That accepted ADR was outside this documentation work package and remains unchanged; this amendment records the limit without changing the decision text.
+The SQLite and PostgreSQL verifiers walk every row from `genesis` in ID order. They refuse a row without a hash, a sequence gap, a broken previous-hash link, an unknown hash version and a hash that does not match. Rows written before the version 2 migration keep their version 1 hash, which joins fields with `|`; verification counts them. A deleted middle row breaks the next row's link. Deleting the newest rows, or recomputing the chain after an edit, shows only when the operator passes a head kept outside the database with `sablectl audit verify --anchor SEQ:HASH`. A signed head is left to ADR-0014. The [ADR-0009 amendment](adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md#amendment-2026-11-27-proposed) records these rules.
 
 Workflows can pair an authoring step with an independent `role: verifier` step running on a separate model or CLI harness. The reconciler wraps the verifier prompt with author artifacts and expects `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. On verifier rejection or runtime failure, opt-in remediation (`maxRetries` on `WorkflowStep`, or manual `Fix from failure` / `sablectl task retry --handoff`) packages redacted artifacts and events into `failure-handoff.md` for the next attempt.
 

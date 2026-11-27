@@ -426,19 +426,16 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 			"verification fail when rows up to that head were deleted or the chain was recomputed.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := "/api/v1/audit/verify"
-			if auditAnchor != "" {
-				if _, err := domain.ParseAuditAnchor(auditAnchor); err != nil {
-					return err
-				}
+			anchor, err := domain.ParseAuditAnchor(auditAnchor)
+			if err != nil {
+				return err
+			}
+			if anchor != nil {
 				path += "?anchor=" + url.QueryEscape(auditAnchor)
 			}
 			cli, base := httpClient(10 * time.Second)
 			body, err := fetchGET(cli, base+path)
 			if err != nil {
-				return err
-			}
-			if jsonOut {
-				_, err = cmd.OutOrStdout().Write(body)
 				return err
 			}
 			var res struct {
@@ -454,8 +451,18 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 			if err := json.Unmarshal(body, &res); err != nil {
 				return fmt.Errorf("decode verify result: %w", err)
 			}
+			// Check the answer before printing anything, in --json mode too, so a
+			// daemon that ignores the anchor cannot report an unchecked chain as
+			// anchored.
 			if !res.Valid {
 				return fmt.Errorf("audit hash chain not valid")
+			}
+			if anchor != nil && !res.Anchored {
+				return fmt.Errorf("audit anchor %d was not checked: the daemon did not report \"anchored\": true", anchor.Seq)
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "%s audit hash chain valid (%d rows verified", stJade.Render("✓"), res.VerifiedRows)

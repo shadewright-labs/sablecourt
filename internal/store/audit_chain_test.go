@@ -184,10 +184,14 @@ func TestAuditChainMigrationStores(t *testing.T) {
 		rows       []legacyRow
 		wantErr    string
 		wantLegacy int
+		// removeBlank appends a row after the failed verification, deletes the
+		// rows without a hash and expects the rest of the chain to verify.
+		removeBlank bool
 	}{
-		{"hashed rows keep their version 1 hash", []legacyRow{{outcome: "allow"}, {outcome: "deny"}}, "", 2},
-		{"row without hash fails verification", []legacyRow{{blank: true}, {outcome: "allow"}}, "no stored hash", 0},
-		{"no rows", nil, "", 0},
+		{"hashed rows keep their version 1 hash", []legacyRow{{outcome: "allow"}, {outcome: "deny"}}, "", 2, false},
+		{"row without hash fails verification", []legacyRow{{blank: true}, {outcome: "allow"}}, "no stored hash", 0, false},
+		{"removing rows without hash restores the chain", []legacyRow{{blank: true}, {blank: true}, {outcome: "allow"}, {outcome: "deny"}}, "no stored hash", 2, true},
+		{"no rows", nil, "", 0, false},
 	}
 	for _, backend := range []string{"sqlite", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
@@ -232,6 +236,18 @@ func TestAuditChainMigrationStores(t *testing.T) {
 					if tc.wantErr != "" {
 						if !errors.Is(err, domain.ErrAuditChainBroken) || !strings.Contains(err.Error(), tc.wantErr) {
 							t.Fatalf("verify = %v, want %q", err, tc.wantErr)
+						}
+						if !tc.removeBlank {
+							return
+						}
+						if err := b.st.AppendAudit(t.Context(), domain.AuditRecord{Category: "policy", Action: "a", Outcome: "o", CreatedAt: time.Now()}); err != nil {
+							t.Fatal(err)
+						}
+						b.exec(t, `DELETE FROM audit_log WHERE row_hash = ''`)
+						hashed := tc.wantLegacy + 1
+						head, err = b.st.VerifyAuditChain(t.Context(), nil)
+						if err != nil || head.Rows != hashed || head.Seq != int64(hashed) || head.LegacyRows != tc.wantLegacy {
+							t.Fatalf("after removing rows without hash head=%+v err=%v", head, err)
 						}
 						return
 					}

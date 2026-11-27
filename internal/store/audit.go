@@ -12,8 +12,8 @@ import (
 // AuditChainNext reads the newest audit row inside tx and returns the previous
 // hash and the sequence for the next row. It refuses to extend a chain whose
 // newest row has no stored hash or no sequence, because the next row could not
-// be linked to it; the caller's action then fails instead of starting a second
-// chain at genesis. Both stores call it with the audit table locked or written
+// be linked to it, and never starts a second chain at genesis. The append then
+// writes no row; whether the action fails is up to the caller. Both stores call it with the audit table locked or written
 // in the same transaction.
 func AuditChainNext(ctx context.Context, tx *sql.Tx) (string, int64, error) {
 	var id, seq int64
