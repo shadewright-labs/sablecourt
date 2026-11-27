@@ -109,6 +109,28 @@ Stated limits: Sablecourt trusts the checksums pinned in this repository, and th
 
 Stated limit: only `linux/arm64` is pinned. `sablectl harness build` always requests that platform, and the pins name the arm64 artefact of each tool. `sablectl harness build` configures no emulation. An uncached build needs a builder that can run arm64 steps, natively or through emulation, and running the images needs the same. A direct build of the `codex` target for another architecture fails in the Codex stage, which has no pin for it; the other targets do not depend on that stage.
 
+## Amendment (2026-11-27): container-only harnesses for 0.1.0
+
+Status of this amendment: Proposed.
+
+If accepted, this amendment supersedes the "Host fallback" section of the 2026-11-25 amendment, the third item of its "Open checks" (host-mode `codex`), and the last sentence of the Summary below ("Keep host mode as the weaker fallback for machines without a container runtime"). That text stays as written; where it disagrees with this amendment, this amendment wins.
+
+For 0.1.0, coding tasks and council seats run in harness containers only ([issue 181](https://github.com/shadewright-labs/sablecourt/issues/181)). A standalone coding task uses the same container, the same per-harness login volume and the same per-launch proxy as a council seat. This is the decision [issue 132](https://github.com/shadewright-labs/sablecourt/issues/132) asked for.
+
+Host mode is unsupported. If the code keeps it, it is off by default and runs only behind an explicit flag whose name says it is unsafe. When a user forces it on, the run is outside invariants 2 and 3: Sablecourt makes no claim that the harness cannot reach daemon-held secrets, and redaction is the only control on what it writes ([ADR-0015](0015-redaction-is-defence-in-depth.md)).
+
+The open check on host-mode `codex` without an outer profile is dropped. On `main`, a coding launch outside a container accepts sandbox `none` only when the adapter's `allowUnconfined` field is set, and that field is set only by in-process test fixtures ([internal/runtime/coding/coding.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/coding.go), lines 43 and 101 to 108; [internal/runtime/coding/sandbox.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/sandbox.go), lines 80 to 92). No production path runs `codex` that way, so there is nothing to test.
+
+Why host mode goes:
+
+- No harness finds a login in host mode ([issue 63](https://github.com/shadewright-labs/sablecourt/issues/63), issue 132). The host launch sets `HOME` to the task's private scratch directory and sets neither `CLAUDE_CONFIG_DIR` nor `CODEX_HOME` ([internal/runtime/coding/launch.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/launch.go), lines 270 and 316 to 336), so none of the separate state directories described above is ever used.
+- One harness cannot run under the outer Seatbelt profile. `codex` fails in its own inner sandbox when nested, as the 2026-11-25 amendment records. Another harness, `claude`, keeps its subscription credential in the user's login Keychain, so its profile would have to allow Keychain lookups that any same-user process can also make ([Separate state directories](../harnesses.md#separate-state-directories)).
+- The generated Seatbelt profile allows outbound network connections with no filter ([internal/runtime/coding/sandbox.go](https://github.com/shadewright-labs/sablecourt/blob/main/internal/runtime/coding/sandbox.go), line 157). In Seatbelt that rule also covers connections to local Unix sockets, so the profile does not separate the harness from local services running as the same user.
+
+What this does not change: the container restrictions, one login volume per harness, the subscription login as the only invariant 2 exception, the proxy as the only route out, and the council run, round and wall-time ceilings.
+
+Stated limit: a machine without a container runtime cannot run coding tasks or councils in 0.1.0.
+
 ## Summary
 
 - Accept the two-milestone scope and retained components to unblock #2.

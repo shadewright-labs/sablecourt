@@ -78,6 +78,7 @@ nav = [
       { "ADR-0012: Learning evidence, scope, and expiry" = "adr/0012-learning-evidence-and-expiry.md" },
       { "ADR-0013: Bounded council rounds in Conclaves" = "adr/0013-bounded-council-rounds.md" },
       { "ADR-0014: Identity and authentication" = "adr/0014-identity-and-authentication.md" },
+      { "ADR-0015: Redaction is defence in depth, not a boundary" = "adr/0015-redaction-is-defence-in-depth.md" },
       { "ADR-NNNN: Short title" = "adr/0000-template.md" },
     ] },
   ] },
