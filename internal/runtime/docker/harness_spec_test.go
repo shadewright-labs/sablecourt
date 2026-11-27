@@ -83,8 +83,12 @@ func TestHarnessContainerSpecGuardsForStandaloneAndCouncil(t *testing.T) {
 	} {
 		t.Setenv(env, canaries[name])
 	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatal(err)
+	// The guard resolves the runtime socket, so its directory exists, as it
+	// does for any socket discovery returns.
+	for _, dir := range []string{stateDir, filepath.Join(home, ".docker", "run")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "operator.token"), []byte(canaries["operator token"]), 0o600); err != nil {
 		t.Fatal(err)
@@ -305,11 +309,9 @@ func TestHarnessContainerSpecRefusesUnsafeCheckouts(t *testing.T) {
 				case "protected path through a symlink and dot-dot":
 					// link points into the checkout, so link/../sablecourt.db opens a
 					// file inside it, while the cleaned spelling names a sibling of link.
+					// The file does not exist yet, as before the first start.
 					outside := t.TempDir()
 					sub := mkdir(filepath.Join(checkout, "sub"))
-					if err := os.WriteFile(filepath.Join(checkout, "sablecourt.db"), nil, 0o600); err != nil {
-						t.Fatal(err)
-					}
 					if err := os.Symlink(sub, filepath.Join(outside, "link")); err != nil {
 						t.Fatal(err)
 					}

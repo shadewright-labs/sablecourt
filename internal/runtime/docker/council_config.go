@@ -19,6 +19,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
 )
 
 // CouncilHarness is trusted daemon configuration for one locally built image,
@@ -192,25 +193,20 @@ func safeBindSource(dir string, sockets, protected []string) (string, error) {
 	contains := func(target string) bool {
 		return target != "" && (path == target || strings.HasPrefix(target, path+string(filepath.Separator)))
 	}
-	containsSocket := func(sock string) bool {
-		if sock == "" {
-			return false
-		}
-		if contains(filepath.Clean(sock)) {
-			return true
-		}
-		// EvalSymlinks walks the raw spelling, so in link/../name the ".."
-		// applies to the link's target, as it does when the file is opened.
-		if resolved, err := filepath.EvalSymlinks(sock); err == nil && contains(resolved) {
-			return true
-		}
-		return contains(resolveExistingPrefix(sock))
+	// guarded resolves a socket or protected path with hostpath.Resolve, the
+	// rule the daemon also uses for its own files, and reports whether the
+	// checkout holds it. A path that cannot be fully resolved counts as held,
+	// so the guard fails closed. Paths are never cleaned before resolution: in
+	// link/../name the ".." applies to the link's target, as when it is opened.
+	guarded := func(p string) bool {
+		resolved, err := hostpath.Resolve(p)
+		return err != nil || contains(resolved)
 	}
 	if filepath.Dir(path) == path || contains(home) {
 		return "", errors.New("unsafe checkout directory")
 	}
 	for _, sock := range sockets {
-		if containsSocket(sock) {
+		if sock != "" && guarded(sock) {
 			return "", errors.New("unsafe checkout directory")
 		}
 	}
@@ -218,31 +214,12 @@ func safeBindSource(dir string, sockets, protected []string) (string, error) {
 	if err != nil {
 		return "", errors.New("cannot resolve daemon state directory")
 	}
-	// containsSocket also resolves the target and its parent, which suits any
-	// protected path that may not exist yet. It gets the raw path: a lexical
-	// clean first would drop a symlink that comes before "..".
 	for _, p := range append([]string{stateDir}, protected...) {
-		if p != "" && (!filepath.IsAbs(p) || containsSocket(p)) {
+		if p != "" && guarded(p) {
 			return "", errors.New("unsafe checkout directory")
 		}
 	}
 	return path, nil
-}
-
-// resolveExistingPrefix resolves symlinks in the longest existing prefix of p
-// and appends the rest, so a path that does not exist yet still compares
-// against the resolved checkout.
-func resolveExistingPrefix(p string) string {
-	rest := ""
-	for dir := filepath.Clean(p); ; dir = filepath.Dir(dir) {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(resolved, rest)
-		}
-		if filepath.Dir(dir) == dir {
-			return filepath.Clean(p)
-		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-	}
 }
 
 func preparePrompt(s rt.CouncilLaunch) (string, error) {

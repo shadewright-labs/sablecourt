@@ -83,7 +83,9 @@ func (a *Adapter) dockerSockets() []string {
 	return out
 }
 
-// unixSocketPath returns the cleaned socket path of a unix:// host, or "".
+// unixSocketPath returns the socket path of a unix:// host as written, or "".
+// It is not cleaned: the client dials the raw spelling, so the guard resolves
+// that same spelling.
 func unixSocketPath(host string) string {
 	if host == "" {
 		return ""
@@ -92,7 +94,7 @@ func unixSocketPath(host string) string {
 	if err != nil || u.Scheme != "unix" || u.Host == "" {
 		return ""
 	}
-	return filepath.Clean(u.Host)
+	return u.Host
 }
 
 // SetAttachHub ties log streams to the daemon lifetime across individual Start calls.

@@ -362,6 +362,17 @@ func reconcileCouncilJournals(ctx context.Context, root, key string) error {
 		}
 
 		if incomplete {
+			// The launch may have prepared its own Git metadata directory
+			// before the crash. Left behind, it would refuse every retry of
+			// this task ID. RemoveAll does not follow symlinks inside it. On
+			// failure the journal stays, so the next reconcile tries again.
+			if rec.TaskBase != "" {
+				if err := os.RemoveAll(harnessGitDirPath(rec.TaskBase)); err != nil {
+					_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+					_ = f.Close()
+					return err
+				}
+			}
 			if rec.CreatedWriterLock {
 				_ = releaseWriterLock(root, key, rec.TaskID)
 			}

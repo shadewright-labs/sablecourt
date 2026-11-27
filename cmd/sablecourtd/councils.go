@@ -409,12 +409,17 @@ func ownedDirectoryIdentity(info os.FileInfo, euid uint32) (uint64, uint64, bool
 	return uint64(stat.Dev), stat.Ino, true
 }
 
+// resolveExistingPath resolves the longest existing prefix of an absolute
+// path with its symlinks and appends the rest. The path is not cleaned first:
+// in link/../name the ".." applies to the link's target, as when the file is
+// opened. A "." or ".." in the part that does not exist is refused, because
+// nothing on disk says where it leads.
 func resolveExistingPath(path string) (string, error) {
-	clean := filepath.Clean(path)
-	if !filepath.IsAbs(clean) {
+	if !filepath.IsAbs(path) {
 		return "", errors.New("path must be absolute")
 	}
-	cur := clean
+	sep := string(filepath.Separator)
+	cur := path
 	var tail []string
 	for {
 		resolved, err := filepath.EvalSymlinks(cur)
@@ -427,11 +432,21 @@ func resolveExistingPath(path string) (string, error) {
 		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
 			return "", err
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return clean, nil
+		i := strings.LastIndex(cur, sep)
+		parent, base := cur[:i], cur[i+1:]
+		if parent == "" {
+			parent = sep
 		}
-		tail = append(tail, filepath.Base(cur))
+		switch base {
+		case "":
+		case ".", "..":
+			return "", errors.New("path has a dot component past its existing prefix")
+		default:
+			tail = append(tail, base)
+		}
+		if parent == cur {
+			return "", errors.New("path has no existing prefix")
+		}
 		cur = parent
 	}
 }

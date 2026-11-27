@@ -277,6 +277,13 @@ func TestReconcileLaunchedTaskIsNotUndone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// A crash after the per-launch Git metadata directory was
+			// prepared and before the launch was recorded leaves it behind.
+			gitDir := harnessGitDirPath(taskBase)
+			if err := os.Mkdir(gitDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testWrite(t, gitDir, "HEAD", "ref: refs/heads/main\n", 0o600)
 			cs := f.state(task)
 			cs.ActiveWriterTaskID = task
 			if err := writeCouncilState(f.root, f.key, cs); err != nil {
@@ -304,6 +311,10 @@ func TestReconcileLaunchedTaskIsNotUndone(t *testing.T) {
 			}
 			if active := got.ActiveWriterTaskID == task; active == tc.incomplete {
 				t.Errorf("ActiveWriterTaskID = %q with incomplete = %t", got.ActiveWriterTaskID, tc.incomplete)
+			}
+			_, gitErr := os.Lstat(gitDir)
+			if removed := errors.Is(gitErr, os.ErrNotExist); removed != tc.incomplete {
+				t.Errorf("per-launch Git metadata removed = %t, want %t", removed, tc.incomplete)
 			}
 			if tc.state != nil {
 				_, stErr := os.Stat(taskBase + stateSuffix)
