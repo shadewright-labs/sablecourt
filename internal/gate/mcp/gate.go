@@ -287,8 +287,6 @@ func (g *Gate) SetAllowedRepo(repo string) {
 	g.allowedRepo = repo
 }
 
-type authCtxKey struct{}
-
 type authContext struct {
 	Lease    domain.Lease
 	Workload domain.Workload
@@ -389,27 +387,20 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 
 // MCPHandler returns an authenticated Streamable HTTP handler for MCP tool calls.
 func (g *Gate) MCPHandler() http.Handler {
-	streamHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		ac, ok := r.Context().Value(authCtxKey{}).(authContext)
-		if !ok {
-			return nil
-		}
-		snap, ok := r.Context().Value(snapshotCtxKey{}).(gateSnapshot)
-		if !ok {
-			return nil
-		}
-		return g.newServerForSnapshot(ac.Lease, ac.Workload, snap)
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := g.snapshot()
 		ac, ok := g.authenticateWithSnapshot(w, r, snap)
 		if !ok {
 			return
 		}
-		ctx := context.WithValue(r.Context(), snapshotCtxKey{}, snap)
-		ctx = context.WithValue(ctx, authCtxKey{}, ac)
-		streamHandler.ServeHTTP(w, r.WithContext(ctx))
+		// The server is built here from the snapshot authentication used,
+		// not read back from the request, so every call it serves uses
+		// that snapshot. A stateless handler keeps no state between
+		// requests, so one per request costs only its allocation.
+		srv := g.newServerForSnapshot(ac.Lease, ac.Workload, snap)
+		mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+			return srv
+		}, &mcp.StreamableHTTPOptions{Stateless: true}).ServeHTTP(w, r)
 	})
 }
 

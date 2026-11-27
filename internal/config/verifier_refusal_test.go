@@ -174,6 +174,65 @@ spec:
     modelGate: {allowed: false, providers: [openai], budgetRef: daily}
 ---
 apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-actions, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants:
+    actions: []
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-repos, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants:
+    repos: []
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-delegates, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants:
+    delegateTo: []
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-servers, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants:
+    mcpServers: []
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-lists, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants: {actions: [], repos: [], delegateTo: [], mcpServers: [], mcpTools: []}
+---
+apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: empty-gate, zone: runtime}
+spec:
+  class: coding-agent
+  runtime: {type: worktree-cli}
+  coding: {harness: codex, repoPath: repo}
+  grants:
+    modelGate: {providers: []}
+---
+apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata: {name: court}
 spec:
@@ -199,6 +258,11 @@ func TestLoadPathVerifierSteps(t *testing.T) {
 		{"verifier workload reused by a later author", edit + review + "    - {name: docs, workload: reviewer, role: author, provider: 'cli:codex', model: gpt-6.2-astra}\n", ""},
 		{"verifier holding only read-only tools", edit + "    - {name: review, workload: reader, role: verifier, tier: critic}\n", ""},
 		{"no verifier steps at all", edit + "    - {name: deliver, workload: actor, provider: 'cli:codex', model: gpt-6.2-astra}\n", ""},
+		{"verifier declaring an empty actions list", edit + "    - {name: review, workload: empty-actions, role: verifier, tier: critic}\n", ""},
+		{"verifier declaring an empty repos list", edit + "    - {name: review, workload: empty-repos, role: verifier, tier: critic}\n", ""},
+		{"verifier declaring an empty delegateTo list", edit + "    - {name: review, workload: empty-delegates, role: verifier, tier: critic}\n", ""},
+		{"verifier declaring an empty mcpServers list", edit + "    - {name: review, workload: empty-servers, role: verifier, tier: critic}\n", ""},
+		{"verifier declaring every list empty", edit + "    - {name: review, workload: empty-lists, role: verifier, tier: critic}\n", ""},
 
 		{"verifier on the author's workload", edit + "    - {name: review, workload: author, role: verifier, provider: 'cli:claude', model: claude-opus-5-5}\n", `verifier workload "author" is also used by step "edit"`},
 		{"verifier on a fast step's workload", "    - {name: triage, workload: fixer, tier: fast}\n" + edit + "    - {name: review, workload: fixer, role: verifier, provider: 'cli:agy', model: gemini-3.8-pro}\n", `also used by step "triage"`},
@@ -215,6 +279,7 @@ func TestLoadPathVerifierSteps(t *testing.T) {
 		{"verifier holding an upstream tool", edit + "    - {name: review, workload: upstream-user, role: verifier, tier: critic}\n", `mcpTools entry "docs.search" is not read-only`},
 		{"verifier holding mcpServers", edit + "    - {name: review, workload: upstream-holder, role: verifier, tier: critic}\n", "not grants.mcpServers"},
 		{"verifier with an idle Model Gate grant", edit + "    - {name: review, workload: idle-gate, role: verifier, tier: critic}\n", "not grants.modelGate"},
+		{"verifier with a Model Gate grant of empty providers", edit + "    - {name: review, workload: empty-gate, role: verifier, tier: critic}\n", "not grants.modelGate"},
 		{"model verifier as the first step", review + edit, "no earlier step ran a model"},
 		{"model verifier after only a deterministic step", "    - {name: prep, workload: checker}\n" + review, "no earlier step ran a model"},
 		{"model verifier after only verifiers", "    - {name: check, workload: checker, role: verifier}\n" + review, "no earlier step ran a model"},
@@ -278,6 +343,13 @@ func TestVerifierGrantsRefuseEachNonReadOnlyField(t *testing.T) {
 		}
 		if err := validateVerifierGrants(bundle, "v", g); err == nil {
 			t.Errorf("GrantSet.%s set: verifier grants accepted", f.Name)
+		}
+		// An empty, non-nil list grants nothing and is accepted.
+		if v.Kind() == reflect.Slice {
+			v.Set(reflect.MakeSlice(v.Type(), 0, 0))
+			if err := validateVerifierGrants(bundle, "v", g); err != nil {
+				t.Errorf("GrantSet.%s empty list refused: %v", f.Name, err)
+			}
 		}
 	}
 	ok := domain.GrantSet{MCPTools: append([]string(nil), verifierReadOnlyTools...)}

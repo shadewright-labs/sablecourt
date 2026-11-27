@@ -27,7 +27,8 @@ var verifierReadOnlyTools = []string{
 type verifierGrant int
 
 const (
-	// verifierGrantEmpty: the field must hold its zero value.
+	// verifierGrantEmpty: the field must grant nothing (an empty list or a
+	// zero value).
 	verifierGrantEmpty verifierGrant = iota
 	// verifierGrantReadOnlyTools: every entry must be in verifierReadOnlyTools.
 	verifierGrantReadOnlyTools
@@ -64,7 +65,7 @@ func validateVerifierGrants(bundle *Bundle, name string, grants domain.GrantSet)
 		}
 		switch class {
 		case verifierGrantEmpty:
-			if !v.Field(i).IsZero() {
+			if grantsSomething(v.Field(i)) {
 				return fmt.Errorf("verifier workload %q may hold only read-only grants, not grants.%s%s", name, label, verifierGrantNote(field.Name))
 			}
 		case verifierGrantReadOnlyTools:
@@ -82,6 +83,17 @@ func validateVerifierGrants(bundle *Bundle, name string, grants domain.GrantSet)
 		}
 	}
 	return nil
+}
+
+// grantsSomething reports whether a GrantSet field grants anything. A list
+// grants something only when it has an entry, so an empty list such as
+// `actions: []` grants nothing. Any other field grants something unless it
+// holds its zero value, so every modelGate setting counts.
+func grantsSomething(f reflect.Value) bool {
+	if f.Kind() == reflect.Slice {
+		return f.Len() > 0
+	}
+	return !f.IsZero()
 }
 
 // verifierGrantNote explains a refusal where the reason is not obvious.
