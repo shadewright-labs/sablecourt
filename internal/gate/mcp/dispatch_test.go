@@ -104,6 +104,35 @@ func TestDriftIsRecordedOnlyOnceItsAuditRowIsWritten(t *testing.T) {
 	}
 }
 
+// A drift row whose write failed stays owed even when the origin changes
+// before the next reload, and a return to an earlier origin is a new change:
+// acme/first (written), acme/second (write fails), acme/first again gives
+// three rows, in that order.
+func TestDriftRowStaysOwedAcrossAnotherChange(t *testing.T) {
+	var fail atomic.Bool
+	tg := setupTypedGate(t, typedGateOptions{effect: domain.EffectAllow, wrapStore: func(in store.Store) store.Store {
+		return failDriftAudit{Store: in, fail: &fail}
+	}})
+	tg.setOrigin(t, "https://github.com/acme/first.git")
+	_ = tg.binding.Recheck(context.Background())
+	tg.setOrigin(t, "https://github.com/acme/second.git")
+	fail.Store(true)
+	_ = tg.binding.Recheck(context.Background())
+	fail.Store(false)
+	tg.setOrigin(t, "https://github.com/acme/first.git")
+	_ = tg.binding.Recheck(context.Background())
+	_ = tg.binding.Recheck(context.Background())
+	rows := driftRows(t, tg)
+	if len(rows) != 3 {
+		t.Fatalf("want three drift rows (first, second, first), got %v", rows)
+	}
+	for i, want := range []string{"acme/first", "acme/second", "acme/first"} {
+		if !strings.Contains(rows[i], `"origin":"`+want+`"`) {
+			t.Fatalf("row %d: want origin %s, got %s", i+1, want, rows[i])
+		}
+	}
+}
+
 // The breaker counts what it counted before the typed catalog: on an allowed
 // request every failure of the executor, its payload checks and a refused
 // target included. A request that only asks for an approval ran no executor

@@ -19,6 +19,21 @@ func TestDecodeGenericRefusesAmbiguousObjects(t *testing.T) {
 		{`{"b":{"c":1,"c":2}}`, false},
 		{`{"b":[{"c":1,"C":2}]}`, false},
 		{`{"a":1} {"a":2}`, false},
+		// Keys equal under the simple case folding of strings.EqualFold.
+		{`{"σ":1,"ς":2}`, false},
+		{`{"k":1,"K":2}`, false},
+		{`{"σ":1,"τ":2}`, true},
+		// A string the decoder would change is refused; a literal U+FFFD and a
+		// paired surrogate escape are kept.
+		{`{"t":"\ud800"}`, false},
+		{`{"t":"\udc00x"}`, false},
+		{`{"t":"\ud800\u0041"}`, false},
+		{"{\"t\":\"\xff\"}", false},
+		{"{\"\xff\":1}", false},
+		{`{"t":"�"}`, true},
+		{`{"t":"\ufffd"}`, true},
+		{`{"t":"\ud83d\ude00"}`, true},
+		{`{"t":"\\ud800"}`, true},
 		{`[1,2]`, false},
 		{`null`, false},
 		{``, false},
@@ -38,6 +53,23 @@ func TestDecodeGenericRefusesAmbiguousObjects(t *testing.T) {
 	}
 	if out, _ := json.Marshal(v); string(out) != `{"n":12345678901234567890}` {
 		t.Fatalf("number not kept as written: %s", out)
+	}
+}
+
+func TestDecodeTypedRefusesStringsTheDecoderWouldChange(t *testing.T) {
+	type in struct {
+		Title string `json:"title"`
+	}
+	for _, raw := range []string{`{"title":"\ud800"}`, `{"title":"a\udfffb"}`, "{\"title\":\"\xff\"}"} {
+		if v, err := decodeTyped[in](json.RawMessage(raw)); !errors.Is(err, errInvalidPayload) {
+			t.Errorf("decodeTyped(%q) = %+v, %v; want errInvalidPayload", raw, v, err)
+		}
+	}
+	for raw, want := range map[string]string{`{"title":"\ufffd"}`: "\uFFFD", `{"title":"\ud83d\ude00"}`: "\U0001F600", `{"title":"\\ud800"}`: `\ud800`} {
+		v, err := decodeTyped[in](json.RawMessage(raw))
+		if err != nil || v.Title != want {
+			t.Errorf("decodeTyped(%q) = %+v, %v; want %q", raw, v, err, want)
+		}
 	}
 }
 

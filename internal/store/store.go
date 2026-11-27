@@ -41,7 +41,8 @@ type Store interface {
 	// ConsumeApproval spends an approval: one UPDATE moves the row from
 	// approved to consumed only where it belongs to taskID and capability, pins
 	// payloadSHA256 and expires later than the database's own clock, read
-	// inside that UPDATE. Exactly one affected row means the caller may act. A
+	// inside that UPDATE once the lock on the row is held, so after any wait
+	// for it. Exactly one affected row means the caller may act. A
 	// refusal changes nothing: a matching approved row (which can only have
 	// failed the expiry) returns ErrExpired, a missing row ErrNotFound, and any
 	// other mismatch, or a row that is not approved, ErrConflict. A consumed row

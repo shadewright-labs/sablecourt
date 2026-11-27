@@ -207,14 +207,15 @@ func TestOpenPRRefsAreStrict(t *testing.T) {
 				"owner": "acme", "repo": "widgets", "head": tc.head, "base": tc.base, "title": "Fix",
 			}})
 			rec := tg.post("ops-agent", "git.open_pr", string(body))
-			if rec.Code == http.StatusOK || len(tg.pr.calls()) != before {
-				t.Fatalf("want refusal before GitHub, got %d (sent=%v): %s", rec.Code, len(tg.pr.calls()) != before, rec.Body.String())
+			if rec.Code != http.StatusBadRequest || len(tg.pr.calls()) != before {
+				t.Fatalf("want 400 before GitHub, got %d (sent=%v): %s", rec.Code, len(tg.pr.calls()) != before, rec.Body.String())
 			}
 		})
 	}
+	before := len(tg.pr.calls())
 	rec := tg.post("ops-agent", "git.open_pr", `{"payload":{"owner":"acme","repo":"widgets","head":"sablecourt/x","title":"Fix"}}`)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("omitted base: want refusal, got 200")
+	if rec.Code != http.StatusBadRequest || len(tg.pr.calls()) != before {
+		t.Fatalf("omitted base: want 400 before GitHub, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -228,8 +229,8 @@ func TestCreateBranchRequiresAValidBase(t *testing.T) {
 		`{"payload":{"branch":"sablecourt/no-base","base":" main"}}`,
 		`{"payload":{"branch":"sablecourt/no-base","base":"HEAD@{1}"}}`,
 	} {
-		if rec := tg.post("ops-agent", "git.create_branch", body); rec.Code == http.StatusOK {
-			t.Fatalf("%s: want refusal, got 200", body)
+		if rec := tg.post("ops-agent", "git.create_branch", body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: want 400, got %d: %s", body, rec.Code, rec.Body.String())
 		}
 	}
 	if out, err := exec.Command("git", "-C", tg.repo, "rev-parse", "--verify", "--quiet", "refs/heads/sablecourt/no-base").CombinedOutput(); err == nil {

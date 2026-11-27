@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -15,7 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -140,31 +140,127 @@ func TestLivePostgresConsumeApprovalIfConfigured(t *testing.T) {
 		t.Fatalf("use after a whole-second expiry: err %v, want ErrExpired", err)
 	}
 	fraction := "apr-frac-" + suffix
-	seed(fraction, whole.Add(1500*time.Millisecond))
+	// Its own deadline, taken now and well ahead, so setup time cannot pass it.
+	seed(fraction, time.Now().UTC().Truncate(time.Second).Add(10*time.Second+500*time.Millisecond))
 	if err := st.ConsumeApproval(ctx, fraction, taskID, "action:git.open_pr", "d1"); err != nil {
 		t.Fatalf("use before a fractional expiry: %v", err)
 	}
+}
 
-	// A wait behind a concurrent update of the row that spans the expiry
-	// refuses: the database clock is read when the predicate is evaluated
-	// again after the wait.
-	waited := "apr-wait-" + suffix
-	seed(waited, time.Now().UTC().Add(200*time.Millisecond))
-	holder, err := st.db.BeginTx(ctx, nil)
+// A use that waits for a row lock held across the expiry is refused, whatever
+// the holder does with the row: a committed update makes PostgreSQL evaluate
+// an UPDATE's predicate again, but a rolled-back update or a lock taken by
+// SELECT FOR UPDATE or FOR SHARE does not, so a clock read before the wait
+// would pass. Each case first sees the use blocked by the holder while the
+// approval is still live, and sees it still blocked after the expiry.
+func TestLivePostgresConsumeApprovalAfterLockWaitIfConfigured(t *testing.T) {
+	dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("SABLECOURT_TEST_POSTGRES_DSN not set; skipping live Postgres integration test")
+	}
+	ctx := context.Background()
+	st, err := Open(dsn)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open: %v", err)
 	}
-	if _, err := holder.ExecContext(ctx, `UPDATE approvals SET decided_by = decided_by WHERE id = $1`, waited); err != nil {
-		t.Fatal(err)
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- st.ConsumeApproval(ctx, waited, taskID, "action:git.open_pr", "d1") }()
-	time.Sleep(600 * time.Millisecond)
-	if err := holder.Commit(); err != nil {
-		t.Fatal(err)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	taskID := "task-wait-" + suffix
+	_ = st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "triage-agent", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"})
+	if err := st.CreateTask(ctx, domain.Task{ID: taskID, IdempotencyKey: taskID, WorkloadName: "triage-agent", State: domain.TaskStateWorking}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
 	}
-	if err := <-done; !errors.Is(err, store.ErrExpired) {
-		t.Fatalf("wait spanning the expiry: err %v, want ErrExpired", err)
+
+	cases := []struct {
+		name    string
+		lock    string
+		release func(*sql.Tx) error
+	}{
+		{"committed update", `UPDATE approvals SET decided_by = decided_by WHERE id = $1`, (*sql.Tx).Commit},
+		{"rolled back update", `UPDATE approvals SET decided_by = decided_by WHERE id = $1`, (*sql.Tx).Rollback},
+		{"select for update", `SELECT id FROM approvals WHERE id = $1 FOR UPDATE`, (*sql.Tx).Commit},
+		{"select for share", `SELECT id FROM approvals WHERE id = $1 FOR SHARE`, (*sql.Tx).Commit},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := fmt.Sprintf("apr-wait-%d-%s", i, suffix)
+			expires := time.Now().UTC().Add(700 * time.Millisecond)
+			if err := st.CreateApproval(ctx, domain.Approval{ID: id, TaskID: taskID, WorkloadName: "triage-agent", Capability: "action:git.open_pr", PayloadCanonicalJSON: `{}`, PayloadSHA256: "d1", ExpiresAt: expires}); err != nil {
+				t.Fatalf("CreateApproval: %v", err)
+			}
+			if err := st.DecideApproval(ctx, id, "d1", domain.ApprovalApproved, "operator", `{}`); err != nil {
+				t.Fatalf("DecideApproval: %v", err)
+			}
+
+			holder, err := st.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			released := false
+			defer func() {
+				if !released {
+					_ = holder.Rollback()
+				}
+			}()
+			var holderPID int
+			if err := holder.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := holder.QueryContext(ctx, tc.lock, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = rows.Close()
+
+			done := make(chan error, 1)
+			go func() { done <- st.ConsumeApproval(ctx, id, taskID, "action:git.open_pr", "d1") }()
+
+			// Wait until a backend is blocked by the holder, and require that
+			// to happen while the approval is still live.
+			for {
+				var blocked int
+				if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, holderPID).Scan(&blocked); err != nil {
+					t.Fatal(err)
+				}
+				if blocked > 0 {
+					break
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("use returned without waiting for the lock: %v", err)
+				default:
+				}
+				if !time.Now().Before(expires.Add(-200 * time.Millisecond)) {
+					t.Fatal("the use was not blocked by the holder well before the expiry")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			time.Sleep(time.Until(expires) + 200*time.Millisecond)
+			select {
+			case err := <-done:
+				t.Fatalf("use returned while the holder kept the lock: %v", err)
+			default:
+			}
+			released = true
+			if err := tc.release(holder); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, store.ErrExpired) {
+					t.Fatalf("wait spanning the expiry: err %v, want ErrExpired", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("use still blocked after the holder released the lock")
+			}
+			if got, _ := st.GetApproval(ctx, id); got.Status != domain.ApprovalApproved {
+				t.Fatalf("status %q, want approved", got.Status)
+			}
+		})
 	}
 }
 
@@ -187,59 +283,49 @@ func openFreshPostgres(t *testing.T, dsn string) *PostgresStore {
 			_ = a.Close()
 		}
 	})
-	fresh, err := withDatabase(dsn, name)
+	cfg, err := withDatabase(dsn, name)
 	if err != nil {
-		t.Fatalf("SABLECOURT_TEST_POSTGRES_DSN must be a URL for this test: %v", err)
+		// The parse error may quote the DSN, so it is not printed.
+		t.Fatal("SABLECOURT_TEST_POSTGRES_DSN cannot be parsed as a pgx connection string")
 	}
-	st, err := Open(fresh)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st := &PostgresStore{db: stdlib.OpenDB(*cfg)}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
-// withDatabase returns the URL dsn pointing at database name. A dbname or
-// database query parameter overrides the URL path in pgx, so both are
-// dropped and only the path names the database.
-func withDatabase(dsn, name string) (string, error) {
-	u, err := url.Parse(dsn)
+// withDatabase parses dsn as pgx does (URL or keyword/value) and returns its
+// configuration with the database set to name. Working on the parsed
+// configuration, not the text, means a dbname or database parameter cannot
+// override the choice and no other value is re-encoded.
+func withDatabase(dsn, name string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return "", fmt.Errorf("not a postgres URL: scheme %q", u.Scheme)
-	}
-	q := u.Query()
-	q.Del("dbname")
-	q.Del("database")
-	u.RawQuery = q.Encode()
-	u.Path = "/" + name
-	return u.String(), nil
+	cfg.Database = name
+	return cfg, nil
 }
 
 func TestWithDatabaseSelectsTheNewDatabase(t *testing.T) {
-	cases := []string{
-		"postgres://localhost/postgres",
-		"postgres://localhost/postgres?dbname=sablecourt_test",
-		"postgresql://user@localhost:5432/postgres?sslmode=disable&database=sablecourt_test",
-		"postgres://localhost?dbname=sablecourt_test",
+	cases := []struct{ dsn, password string }{
+		{"postgres://localhost/postgres", ""},
+		{"postgres://localhost/postgres?dbname=sablecourt_test", ""},
+		{"postgresql://user@localhost:5432/postgres?sslmode=disable&database=sablecourt_test", ""},
+		{"postgres://localhost?dbname=sablecourt_test", ""},
+		{"host=localhost dbname=sablecourt_test", ""},
+		{"postgres://user@localhost/postgres?password=a%20b+c", "a b+c"},
 	}
-	for _, dsn := range cases {
-		got, err := withDatabase(dsn, "sc_upgrade_x")
+	for _, tc := range cases {
+		cfg, err := withDatabase(tc.dsn, "sc_upgrade_x")
 		if err != nil {
-			t.Fatalf("withDatabase(%q): %v", dsn, err)
-		}
-		cfg, err := pgconn.ParseConfig(got)
-		if err != nil {
-			t.Fatalf("parse %q: %v", got, err)
+			t.Fatalf("withDatabase(%q): %v", tc.dsn, err)
 		}
 		if cfg.Database != "sc_upgrade_x" {
-			t.Errorf("withDatabase(%q) = %q selects database %q, want sc_upgrade_x", dsn, got, cfg.Database)
+			t.Errorf("withDatabase(%q) selects database %q, want sc_upgrade_x", tc.dsn, cfg.Database)
 		}
-	}
-	if _, err := withDatabase("host=localhost dbname=x", "y"); err == nil {
-		t.Error("a keyword/value DSN was accepted")
+		if cfg.Password != tc.password {
+			t.Errorf("withDatabase(%q) password %q, want %q", tc.dsn, cfg.Password, tc.password)
+		}
 	}
 }
 

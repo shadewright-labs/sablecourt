@@ -277,6 +277,9 @@ func TestGitHubPROpenerRefusesUnsafeNamesAndRedirects(t *testing.T) {
 	if _, err := gh.OpenPR(context.Background(), in); err == nil {
 		t.Fatalf("redirect must not be followed and must fail")
 	}
+	if hits.Load() != 1 {
+		t.Fatalf("the call reached the API %d times, want exactly 1 (the redirect)", hits.Load())
+	}
 	if followed.Load() != 0 {
 		t.Fatalf("client followed a redirect carrying the token")
 	}

@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // errInvalidPayload marks input the gate refuses before policy effects run: a
@@ -47,6 +51,9 @@ func jsonFieldNames(t reflect.Type) []string {
 // returned is the one meaning every reader of raw would agree on.
 func decodeTyped[T any](raw json.RawMessage) (T, error) {
 	var out T
+	if err := checkStringsKept(raw); err != nil {
+		return out, err
+	}
 	allowed := map[string]bool{}
 	for _, n := range jsonFieldNames(reflect.TypeOf(out)) {
 		allowed[n] = true
@@ -104,6 +111,9 @@ func decodeTyped[T any](raw json.RawMessage) (T, error) {
 // two keys in one object that differ only in case, at any depth. Numbers stay
 // as written. It serves actions registered without a typed input.
 func decodeGeneric(raw json.RawMessage) (map[string]any, error) {
+	if err := checkStringsKept(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	v, err := readStrictValue(dec)
@@ -137,13 +147,14 @@ func readStrictValue(dec *json.Decoder) (any, error) {
 					return nil, invalidPayload("malformed object")
 				}
 				key, _ := kt.(string)
-				if prev, ok := folded[strings.ToLower(key)]; ok {
+				fk := foldKey(key)
+				if prev, ok := folded[fk]; ok {
 					if prev == key {
 						return nil, invalidPayload("duplicate key %q", key)
 					}
 					return nil, invalidPayload("keys %q and %q differ only in case", prev, key)
 				}
-				folded[strings.ToLower(key)] = key
+				folded[fk] = key
 				val, err := readStrictValue(dec)
 				if err != nil {
 					return nil, err
@@ -172,4 +183,86 @@ func readStrictValue(dec *json.Decoder) (any, error) {
 	default:
 		return t, nil
 	}
+}
+
+// checkStringsKept refuses JSON text that encoding/json would change while
+// decoding: bytes that are not UTF-8, and a \u escape of an unpaired UTF-16
+// surrogate. Both decode to U+FFFD, so the decoded value, its digest and what
+// the action runs with would differ from what was sent, and would equal a
+// payload that sent U+FFFD itself. A literal U+FFFD stays valid.
+func checkStringsKept(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return invalidPayload("payload is not valid UTF-8")
+	}
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(raw) {
+				return nil // malformed; the decoder refuses it
+			}
+			if raw[i+1] != 'u' {
+				i++
+				continue
+			}
+			r, ok := hexRune(raw, i+2)
+			if !ok {
+				return nil // malformed; the decoder refuses it
+			}
+			i += 5
+			switch {
+			case utf16.IsSurrogate(r) && r < 0xdc00:
+				if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+					return invalidPayload("unpaired surrogate escape in a string")
+				}
+				low, ok := hexRune(raw, i+3)
+				if !ok || utf16.DecodeRune(r, low) == unicode.ReplacementChar {
+					return invalidPayload("unpaired surrogate escape in a string")
+				}
+				i += 6
+			case utf16.IsSurrogate(r):
+				return invalidPayload("unpaired surrogate escape in a string")
+			}
+		}
+	}
+	return nil
+}
+
+// hexRune reads the four hex digits at raw[at:at+4].
+func hexRune(raw []byte, at int) (rune, bool) {
+	if at+4 > len(raw) {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(string(raw[at:at+4]), 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return rune(n), true
+}
+
+// foldKey maps s to one key shared by every string strings.EqualFold treats
+// as equal to it: each rune becomes the smallest rune of its simple case
+// folding orbit (so "Σ", "σ" and "ς" share a key, as do "K", "k" and the
+// Kelvin sign).
+func foldKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < least {
+				least = f
+			}
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
 }

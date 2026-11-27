@@ -135,14 +135,22 @@ type RepoBinding struct {
 	pinErr error
 
 	mu sync.Mutex
-	// drift identifies the origin a reload last found differing from the pin:
-	// the parsed owner/repo, or for an origin that cannot be used the read
-	// error plus a SHA-256 of the raw remote, so two different unusable
+	// drift identifies the origin the last reload observed differing from
+	// the pin: the parsed owner/repo, or for an origin that cannot be used the
+	// read error plus a SHA-256 of the raw remote, so two different unusable
 	// remotes count as two changes. It is "" while the origin matches. A drift
-	// audit row is written only when this changes, not on every reload. The
-	// raw remote may hold credentials and is never logged or audited.
+	// audit row is owed only when this changes, not on every reload. The raw
+	// remote may hold credentials and is never logged or audited.
 	drift string
+	// owed holds drift rows not yet written, oldest first. Each reload tries
+	// them in order and stops at the first failure, so a row stays owed when
+	// the origin changes again before it is written. At most maxOwedDrift are
+	// kept; past that the oldest is dropped, and the reload still logs the
+	// drift it sees.
+	owed []domain.AuditRecord
 }
+
+const maxOwedDrift = 16
 
 // pinOnce reads the origin and pins it on the gate. Only the first call reads;
 // later calls return the first result.
@@ -198,22 +206,28 @@ func (b *RepoBinding) Recheck(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if observed == b.drift {
-		return err
-	}
-	if err != nil {
-		raw, _ := json.Marshal(detail)
-		if appendErr := b.gate.store.AppendAudit(ctx, domain.AuditRecord{
-			Category:   "data_action_gate",
-			Action:     "action:git.open_pr",
-			Outcome:    "denied",
-			DetailJSON: string(raw),
-			CreatedAt:  b.gate.now(),
-		}); appendErr != nil {
-			return err // not recorded as seen, so the next reload writes the row again
+	if observed != b.drift {
+		b.drift = observed
+		if err != nil {
+			raw, _ := json.Marshal(detail)
+			b.owed = append(b.owed, domain.AuditRecord{
+				Category:   "data_action_gate",
+				Action:     "action:git.open_pr",
+				Outcome:    "denied",
+				DetailJSON: string(raw),
+				CreatedAt:  b.gate.now(),
+			})
+			if n := len(b.owed); n > maxOwedDrift {
+				b.owed = append([]domain.AuditRecord(nil), b.owed[n-maxOwedDrift:]...)
+			}
 		}
 	}
-	b.drift = observed
+	for len(b.owed) > 0 {
+		if appendErr := b.gate.store.AppendAudit(ctx, b.owed[0]); appendErr != nil {
+			break // still owed, so the next reload writes it
+		}
+		b.owed = b.owed[1:]
+	}
 	return err
 }
 

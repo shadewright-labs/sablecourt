@@ -145,7 +145,9 @@ func TestConsumeApprovalComparesExpiryAsTime(t *testing.T) {
 // The expiry is compared with SQLite's clock inside the statement, after the
 // statement has taken the write lock. A wait for a lock held by another
 // connection that spans the expiry refuses the approval: no time read before
-// the wait is used.
+// the wait is used. The test requires the use to start well before the expiry
+// and to be still blocked after it, so the refusal cannot come from a use
+// that started late.
 func TestConsumeApprovalWaitingForTheLockSpansTheExpiry(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sablecourt.db")
@@ -157,24 +159,44 @@ func TestConsumeApprovalWaitingForTheLockSpansTheExpiry(t *testing.T) {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	seedApproval(t, st, "apr-w", time.Now().UTC().Add(200*time.Millisecond), domain.ApprovalApproved)
-
 	other, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = other.Close() })
 	other.SetMaxOpenConns(1)
+	expires := time.Now().UTC().Add(600 * time.Millisecond)
+	seedApproval(t, st, "apr-w", expires, domain.ApprovalApproved)
 	if _, err := other.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		t.Fatal(err)
 	}
+	started := make(chan time.Time, 1)
 	done := make(chan error, 1)
-	go func() { done <- st.ConsumeApproval(ctx, "apr-w", "task-1", "action:git.open_pr", "d1") }()
-	time.Sleep(600 * time.Millisecond)
+	go func() {
+		started <- time.Now()
+		done <- st.ConsumeApproval(ctx, "apr-w", "task-1", "action:git.open_pr", "d1")
+	}()
+	if at := <-started; !at.Before(expires.Add(-300 * time.Millisecond)) {
+		t.Fatalf("the use started %v before the expiry, want at least 300ms", expires.Sub(at))
+	}
+	time.Sleep(time.Until(expires) + 200*time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("use returned while the other connection held the write lock: %v", err)
+	default:
+	}
 	if _, err := other.ExecContext(ctx, `COMMIT`); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; !errors.Is(err, store.ErrExpired) {
-		t.Fatalf("err %v, want ErrExpired", err)
+	select {
+	case err := <-done:
+		if !errors.Is(err, store.ErrExpired) {
+			t.Fatalf("err %v, want ErrExpired", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("use still blocked after the other connection released the lock")
+	}
+	if got, _ := st.GetApproval(ctx, "apr-w"); got.Status != domain.ApprovalApproved {
+		t.Fatalf("status %q, want approved", got.Status)
 	}
 }
