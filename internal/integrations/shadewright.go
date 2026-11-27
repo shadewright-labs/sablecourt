@@ -92,13 +92,16 @@ func RejectShadewrightTokenOnOtherRoutes(next http.Handler, secrets secret.Secre
 		}
 		want := strings.TrimSpace(rawWant)
 		if err == nil && want != "" {
-			if redact.RegisterSetting(secName, rawWant) != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "integration token refused"})
-				return
-			}
+			// A short token is refused only to a caller that presents it, so
+			// an unrelated credential (an operator token) still reaches next.
+			short := redact.RegisterSetting(secName, rawWant) != nil
 			for _, v := range authValues {
 				got, ok := extractBearerLoose(v)
 				if ok && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+					if short {
+						writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "integration token refused"})
+						return
+					}
 					w.Header().Set("WWW-Authenticate", `Bearer realm="sablecourt"`)
 					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "shadewright integration token is only valid on integration routes"})
 					return

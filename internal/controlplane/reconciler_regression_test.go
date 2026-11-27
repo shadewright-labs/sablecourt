@@ -926,3 +926,23 @@ func TestLaunchInputWithoutHeldValuesIsUnchanged(t *testing.T) {
 		t.Fatalf("launch input = %s, want it unchanged", a.lastSpec.InputJSON)
 	}
 }
+
+// Fix round 2: TaskForRead redacted the input and artifacts records but
+// returned the caller-supplied idempotency key as stored, so a key that shows
+// a held value left through the task API. The response copy is matched; the
+// stored key is not changed, so replay still finds the task.
+func TestTaskForReadRedactsIdempotencyKey(t *testing.T) {
+	secret := "idem_key_" + strings.Repeat("k7", 12)
+	redact.Register(secret)
+	stored := domain.Task{ID: "t-idem", IdempotencyKey: "retry-" + secret}
+	got := TaskForRead(stored)
+	if strings.Contains(got.IdempotencyKey, secret) || !strings.HasPrefix(got.IdempotencyKey, "retry-") {
+		t.Fatalf("read key = %q", got.IdempotencyKey)
+	}
+	if stored.IdempotencyKey != "retry-"+secret {
+		t.Fatal("stored key changed")
+	}
+	if list := TasksForRead([]domain.Task{stored}); strings.Contains(list[0].IdempotencyKey, secret) {
+		t.Fatalf("list key = %q", list[0].IdempotencyKey)
+	}
+}

@@ -245,3 +245,38 @@ func TestModelGateRefusesEncodedResponsesAndDropsHeldHeaderNames(t *testing.T) {
 		})
 	}
 }
+
+// Fix round 2: a 2xx response refused for its encoding released the budget
+// reservation, although the provider had done the work. It now settles at
+// least the admitted reserve; a refused error response still releases it.
+func TestModelGateSettlesRefusedEncodedSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		charge bool
+	}{
+		{"success", http.StatusOK, true},
+		{"provider error", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate, tok := responseGate(t, map[string]string{"openai_api_key": "sk-" + "settle_" + strings.Repeat("s1", 10)}, func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Encoding": {"br"}}, Body: io.NopCloser(strings.NewReader("compressed"))}, nil
+			})
+			req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","max_tokens":64}`))
+			req.Header.Set("Authorization", "Bearer "+tok)
+			rec := httptest.NewRecorder()
+			gate.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			totals, err := gate.store.TaskBudgetTotals(context.Background(), "t-resp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			charged := totals.TotalInputTokens() > 0 && totals.OutputTokens > 0
+			if charged != tc.charge {
+				t.Fatalf("totals = %+v, want charged=%v", totals, tc.charge)
+			}
+		})
+	}
+}

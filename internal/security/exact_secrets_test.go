@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -380,6 +381,8 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 				if rec.Code != http.StatusOK {
 					t.Fatalf("MCPHandler status=%d body=%s", rec.Code, rec.Body.String())
 				}
+				// HTTP 200 also carries JSON-RPC errors; only a tool result counts.
+				requireToolResult(t, rec.Body.String())
 				return rec.Body.String()
 			},
 		},
@@ -471,6 +474,9 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 			name: "notification",
 			run: func(t *testing.T, payload string) string {
 				t.Helper()
+				notifyMu.Lock()
+				notifyBody = ""
+				notifyMu.Unlock()
 				if err := notifier.Send(ctx, notify.Event{
 					Type:   "matrix.alert",
 					Title:  "alert " + payload,
@@ -480,6 +486,9 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 				}
 				notifyMu.Lock()
 				defer notifyMu.Unlock()
+				if notifyBody == "" {
+					t.Fatal("notify.Send returned without sending a request")
+				}
 				return notifyBody
 			},
 		},
@@ -537,19 +546,35 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 		},
 	}
 
+	// Each case puts a fresh probe word in front of the payload and requires it
+	// in the output, so an empty or stale result fails before the secret scan.
+	// The scan checks every form in the raw output, and the held value itself in
+	// each JSON string of the output after one decode, as a client reads it.
+	// Forms nested inside a JSON string beyond that one decode are a stated
+	// limit of ADR-0015 and are not checked here.
 	encodings := secretEncodings()
+	probeSeq := 0
 	for _, sc := range secrets {
 		for _, enc := range encodings {
-			payload, forbids := enc.encode(sc.value)
+			encoded, forbids := enc.encode(sc.value)
 			for _, p := range paths {
+				probeSeq++
+				probe := "mxprobe" + strconv.Itoa(probeSeq) + "q"
+				payload := probe + " " + encoded
 				t.Run(sc.name+"/"+enc.name+"/"+p.name, func(t *testing.T) {
 					got := p.run(t, payload)
+					views := append([]string{got}, decodedStrings(got)...)
+					if !slices.ContainsFunc(views, func(v string) bool { return strings.Contains(v, probe) }) {
+						t.Fatalf("path %s gave no output from this input: %q", p.name, got)
+					}
 					for _, f := range forbids {
-						if len(f) < redact.MinSecretLength {
-							continue
-						}
-						if strings.Contains(got, f) {
+						if len(f) >= redact.MinSecretLength && strings.Contains(got, f) {
 							t.Fatalf("path %s leaked %s (%s form) in output", p.name, sc.name, enc.name)
+						}
+					}
+					for _, v := range views[1:] {
+						if strings.Contains(v, sc.value) {
+							t.Fatalf("path %s leaked %s (%s form) in a decoded JSON string", p.name, sc.name, enc.name)
 						}
 					}
 				})
@@ -564,15 +589,76 @@ func TestExactSecretRedactionMatrix(t *testing.T) {
 		hub.WriteOutput("live-runtime", []byte("ready\n"))
 		runtimeSecret := synthVal("rot", "_live_", "secret_99887766")
 		redact.Register(runtimeSecret)
-		hub.WriteOutput("live-runtime", []byte("out "+runtimeSecret[:9]+"\r\n"+runtimeSecret[9:]+"\n"))
+		hub.WriteOutput("live-runtime", []byte("liveprobe "+runtimeSecret[:9]+"\r\n"+runtimeSecret[9:]+"\n"))
 		hub.Close("live-runtime")
 		hist, _, _, unsub, err := hub.Subscribe("live-runtime")
 		if err != nil {
 			t.Fatalf("Subscribe: %v", err)
 		}
 		unsub()
+		if !strings.Contains(hist, "liveprobe ") {
+			t.Fatalf("history lacks the write made after registration: %q", hist)
+		}
 		if strings.Contains(hist, runtimeSecret[:9]) || strings.Contains(hist, runtimeSecret[9:]) {
 			t.Fatalf("open stream leaked runtime-registered secret: %q", hist)
 		}
 	})
+}
+
+// requireToolResult fails unless body holds a JSON-RPC tool result, as a JSON
+// object or in an event-stream data frame, with no error and isError unset.
+func requireToolResult(t *testing.T, body string) {
+	t.Helper()
+	for _, frame := range jsonFrames(body) {
+		var msg struct {
+			Result *struct {
+				IsError bool `json:"isError"`
+			} `json:"result"`
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal([]byte(frame), &msg) == nil && msg.Result != nil && msg.Error == nil && !msg.Result.IsError {
+			return
+		}
+	}
+	t.Fatalf("MCP reply is not a successful tool result: %s", body)
+}
+
+// jsonFrames returns body itself and the payload of each event-stream data line.
+func jsonFrames(body string) []string {
+	frames := []string{body}
+	for _, line := range strings.Split(body, "\n") {
+		if data, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "data:"); ok {
+			frames = append(frames, strings.TrimSpace(data))
+		}
+	}
+	return frames
+}
+
+// decodedStrings returns every JSON string value and key in out, read once as
+// JSON or as event-stream data frames, as a client decodes the body.
+func decodedStrings(out string) []string {
+	var found []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			found = append(found, x)
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for k, e := range x {
+				found = append(found, k)
+				walk(e)
+			}
+		}
+	}
+	for _, frame := range jsonFrames(out) {
+		var v any
+		if json.Unmarshal([]byte(frame), &v) == nil {
+			walk(v)
+		}
+	}
+	return found
 }

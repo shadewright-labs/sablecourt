@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -26,7 +27,7 @@ const (
 	KnownSecretCategory = "known_secret"
 
 	// KnownSecretMarker replaces exact-matched daemon-held secrets.
-	KnownSecretMarker = "[REDACTED:known_secret]"
+	KnownSecretMarker = "[REDACTED:known_secret]" // #nosec G101 -- the public marker that replaces held values (ADR-0015), not a credential.
 
 	// maxStreamPending bounds bytes buffered in a Stream when an active prefix
 	// is followed by a long run of CR/LF bytes.
@@ -187,14 +188,16 @@ func (r *Registry) RegisterSetting(setting string, values ...string) error {
 	return err
 }
 
-// RegisterSettingBytes is RegisterSetting for binary credential material.
+// RegisterSettingBytes is RegisterSetting for binary credential material. A
+// non-empty value shorter than MinSecretLength after trimming whitespace is
+// refused, as the registry would not hold its raw form.
 func (r *Registry) RegisterSettingBytes(setting string, values ...[]byte) error {
 	var err error
 	for _, b := range values {
 		if len(b) == 0 {
 			continue
 		}
-		if len(b) < MinSecretLength {
+		if len(strings.TrimSpace(string(b))) < MinSecretLength {
 			err = &ShortSecretError{Setting: setting}
 			continue
 		}
@@ -622,14 +625,22 @@ func buildACMatcher(patterns map[string]struct{}) *acMatcher {
 			b := p[i]
 			nxt := m.findEdge(u, b)
 			if nxt == 0 {
-				nxt = int32(len(m.nodes))
+				// Nodes number at most the registered pattern bytes, so the
+				// limit takes over 2 GiB of held values. Stop rather than wrap
+				// the index. Both bounds are stated so gosec G115 sees them.
+				n := len(m.nodes)
+				if n < 0 || n >= math.MaxInt32 {
+					panic("redact: registered values exceed the exact matcher's node limit")
+				}
+				nxt = int32(n)
 				m.nodes = append(m.nodes, acNode{depth: m.nodes[u].depth + 1})
 				m.addEdge(u, b, nxt)
 			}
 			u = nxt
 		}
-		if int32(len(p)) > m.nodes[u].maxMatchLen {
-			m.nodes[u].maxMatchLen = int32(len(p))
+		// The depth of the node that ends p is len(p).
+		if d := m.nodes[u].depth; d > m.nodes[u].maxMatchLen {
+			m.nodes[u].maxMatchLen = d
 		}
 	}
 	for b := range m.cutAfter {
@@ -878,7 +889,11 @@ func (m *acMatcher) redactRounds(s string) (out string, hits int, settled bool) 
 //
 // The stream emits up to the last safe cut in its buffer. If none appears and
 // the buffer grows past maxStreamPending, it emits the marker and closes. At
-// eof it runs the batch redactor on the rest. The cost is that output comes
+// eof it runs the batch redactor on the rest. The cap is checked after each
+// write, on what is left past the last safe cut, so where a stream closes
+// depends on how the writes split the input: one write that brings a safe byte
+// along can stay open where the same bytes split before it close. Either way no
+// held value is emitted. The cost is that output comes
 // in larger pieces (a clean line waits for a byte no pattern holds) and that a
 // stream with no safe cut before the cap stops. The matcher is loaded on each
 // write, so a value registered later does not change text already emitted.

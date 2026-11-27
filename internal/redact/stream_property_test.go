@@ -37,14 +37,16 @@ func checkStreamProperty(t testing.TB, reg *Registry, doc string, cuts []int) {
 		t.Fatalf("stream cut at %v of %q emitted %q, which shows a held value", cuts, doc, got)
 	}
 	want := reg.RedactExact(doc)
+	// Checked before equality: a stream that closes early can still emit
+	// what batch gives when the rest of doc redacts to the marker alone.
+	if closed && len(doc) <= maxStreamPending && batchSettles(reg.matcher.Load(), doc) {
+		t.Fatalf("stream cut at %v of %q closed with %q, but batch settled to %q", cuts, doc, got, want)
+	}
 	if got == want {
 		return
 	}
 	if !closed || !strings.HasSuffix(got, reg.Marker()) {
 		t.Fatalf("stream cut at %v of %q emitted %q (closed=%v), batch gave %q", cuts, doc, got, closed, want)
-	}
-	if len(doc) <= maxStreamPending && batchSettles(reg.matcher.Load(), doc) {
-		t.Fatalf("stream cut at %v of %q closed with %q, but batch settled to %q", cuts, doc, got, want)
 	}
 }
 
@@ -305,6 +307,37 @@ func TestStreamCutsAndCap(t *testing.T) {
 		if more := s.Write([]byte(held[6:]+" clean"), true); more != nil {
 			t.Fatalf("flood %q: closed stream emitted %q", flood, more)
 		}
+	}
+}
+
+// Fix round 2: the cap is checked after each write, on what the buffer holds
+// once it has emitted up to its last safe cut. A held value's prefix followed by
+// a CR/LF run past the cap has no safe cut, as the matcher skips CR/LF inside a
+// value. The stream closes when the writes split the input before the next safe
+// byte, and does not when one write brings that byte along. Neither emits a
+// held value; the property above allows either above the cap.
+func TestStreamCapDependsOnWriteSplit(t *testing.T) {
+	t.Parallel()
+	reg := NewRegistry()
+	reg.Register(synthSecret("cap_held", "_value_0912"))
+	input := "cap_hel" + strings.Repeat("\n", maxStreamPending+1)
+	const tail = " tail"
+
+	s := reg.NewStream()
+	out := s.Write([]byte(input+tail), false)
+	out = append(out, s.Write(nil, true)...)
+	if s.closed || string(out) != input+tail {
+		t.Fatalf("one write: closed=%v, emitted %d bytes, want %d", s.closed, len(out), len(input+tail))
+	}
+
+	s = reg.NewStream()
+	out = s.Write([]byte(input), false)
+	if !s.closed {
+		t.Fatalf("split before the safe byte: stream open with %d bytes pending", len(s.buf))
+	}
+	out = append(out, s.Write([]byte(tail), true)...)
+	if string(out) != KnownSecretMarker {
+		t.Fatalf("split before the safe byte: emitted %d bytes, want the marker alone", len(out))
 	}
 }
 

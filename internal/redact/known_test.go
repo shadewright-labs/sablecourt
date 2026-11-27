@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -413,5 +414,34 @@ func TestRegistryRedactExactLeavesOtherTextAlone(t *testing.T) {
 	want := strings.Replace(in, held, KnownSecretMarker, 1)
 	if got != want {
 		t.Fatalf("RedactExact = %q, want %q", got, want)
+	}
+}
+
+// Fix round 2: RegisterSettingBytes checked the untrimmed length, while the
+// registry drops a raw form shorter than MinSecretLength after trimming. An
+// 8-byte value ending in a space was accepted without its raw form being
+// held. It is now refused like RegisterSetting refuses it.
+func TestRegisterSettingBytesTrimsLikeTheRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   []byte
+		refused bool
+	}{
+		{"trailing space", []byte("k3y-b1n "), true},
+		{"leading newline", []byte("\nk3y-b1n"), true},
+		{"all whitespace", []byte("        "), true},
+		{"eight bytes", []byte("k3y-b1n!"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewRegistry()
+			err := reg.RegisterSettingBytes("client key", tc.value)
+			var short *ShortSecretError
+			if errors.As(err, &short) != tc.refused {
+				t.Fatalf("err = %v, want refused=%v", err, tc.refused)
+			}
+			if !tc.refused && !reg.ContainsHeld("x"+string(tc.value)+"x") {
+				t.Fatal("accepted value is not held in raw form")
+			}
+		})
 	}
 }

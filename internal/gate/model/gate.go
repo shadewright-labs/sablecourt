@@ -328,9 +328,15 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// The response reaches a workload that never held the provider key, so it
 	// goes through the exact matcher like any other output: headers here, the
 	// body as a stream below. A body the matcher cannot read (compressed
-	// without the transport undoing it) is refused.
+	// without the transport undoing it) is refused. The provider already did
+	// the work of a 2xx response, so its usage, which cannot be read, settles
+	// at least the admitted reserve instead of releasing it.
 	if encodedResponse(upResp.Header) {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"encoded_upstream_response"}`)
+		if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+			releaseReservation = false
+			g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsedUsage{Outcome: usageOutcomeNone}, reserve)
+		}
 		writeErr(w, http.StatusBadGateway, "upstream response encoding not supported")
 		return
 	}
@@ -377,31 +383,39 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// Keep the reservation if actual usage cannot be recorded.
 		releaseReservation = false
 		parsed := parseUsage(activeProvider, upstreamPath, captured.Bytes(), upResp.Header.Get("Content-Type"))
-		settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
-		modelName := settled.Model
-		if modelName == "" {
-			modelName = reqModel
-		}
-		entry := domain.BudgetEntry{
-			TaskID:           lease.TaskID,
-			WorkloadName:     lease.WorkloadName,
-			Provider:         activeProvider,
-			Model:            modelName,
-			InputTokens:      settled.InputTokens,
-			CacheWriteTokens: settled.CacheWriteTokens,
-			CacheReadTokens:  settled.CacheReadTokens,
-			OutputTokens:     settled.OutputTokens,
-			CostMicroUSD:     costMicro,
-			CreatedAt:        g.now(),
-		}
-		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
-			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
-			return
-		}
-		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
-			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
+		g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsed, reserve)
 	}
+}
+
+// settleSuccess charges a 2xx upstream response against its reservation and
+// audits the settled usage. Usage it cannot read settles at least the admitted
+// reserve (see settleUsageForEntry). If settlement fails, the reservation is
+// kept.
+func (g *Gate) settleSuccess(ctx context.Context, lease domain.Lease, activeProvider, reqModel, reservationID string, parsed parsedUsage, reserve domain.BudgetTotals) {
+	settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
+	modelName := settled.Model
+	if modelName == "" {
+		modelName = reqModel
+	}
+	entry := domain.BudgetEntry{
+		TaskID:           lease.TaskID,
+		WorkloadName:     lease.WorkloadName,
+		Provider:         activeProvider,
+		Model:            modelName,
+		InputTokens:      settled.InputTokens,
+		CacheWriteTokens: settled.CacheWriteTokens,
+		CacheReadTokens:  settled.CacheReadTokens,
+		OutputTokens:     settled.OutputTokens,
+		CostMicroUSD:     costMicro,
+		CreatedAt:        g.now(),
+	}
+	if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
+		return
+	}
+	g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
+		fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
+			modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
 }
 
 func isFallbackStatus(code int) bool {

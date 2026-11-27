@@ -9,12 +9,15 @@ import (
 // A2A tasks/get, the dashboard). InputJSON and ArtifactsJSON are declared JSON
 // records: each is decoded once and refused whole, with none of its payload,
 // when it shows a value the daemon holds now, even if the value was registered
-// after the task was stored. The stored row is not changed. Every read path
-// calls this one function, as the workload gate does for its own copy.
+// after the task was stored. The caller-supplied IdempotencyKey is plain text,
+// so held values in it are replaced in place by literal match. The stored row
+// is not changed, so idempotent replay still matches. Every read path calls
+// this one function, as the workload gate does for its own copy.
 func TaskForRead(task domain.Task) domain.Task {
 	reg := redact.DefaultRegistry()
 	task.InputJSON, _ = reg.RedactJSONRecord(task.InputJSON)
 	task.ArtifactsJSON, _ = reg.RedactJSONRecord(task.ArtifactsJSON)
+	task.IdempotencyKey = reg.RedactExact(task.IdempotencyKey)
 	return task
 }
 
