@@ -246,7 +246,20 @@ func RegisterBuiltinGitOps(g *Gate, repoRoot string, prOpener PROpener) *RepoBin
 		return map[string]string{"branch": in.Branch, "base": in.Base, "status": "created"}, nil
 	})
 
-	RegisterTypedAction(g, "git.open_pr", validateOpenPR, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
+	// The target is checked against the pin when the payload is decoded, so a
+	// request for another repository is refused before an approval is
+	// requested or spent. The run step reads the origin again, because the
+	// checkout can change after the approval was asked for.
+	validateOpenPRTarget := func(in OpenPRInput) error {
+		if err := validateOpenPR(in); err != nil {
+			return err
+		}
+		if err := checkPinnedTarget(g.snapshot().allowedRepo, in.Owner, in.Repo); err != nil {
+			return fmt.Errorf("%w: %v", errToolRefused, err)
+		}
+		return nil
+	}
+	RegisterTypedAction(g, "git.open_pr", validateOpenPRTarget, func(ctx context.Context, _ domain.Workload, _ string, in OpenPRInput) (any, error) {
 		if err := checkOpenPRTarget(ctx, repoRoot, g.snapshotFromContext(ctx).allowedRepo, in.Owner, in.Repo); err != nil {
 			return nil, fmt.Errorf("%w: %v", errToolRefused, err)
 		}
@@ -345,8 +358,8 @@ func checkOpenPRTarget(ctx context.Context, repoRoot, allowed, owner, repo strin
 	if err := validateRepoName("repo", repo); err != nil {
 		return err
 	}
-	if allowed == "" {
-		return errors.New("no GitHub repository was pinned for git.open_pr at start")
+	if err := checkPinnedTarget(allowed, owner, repo); err != nil {
+		return err
 	}
 	curOwner, curRepo, err := readGitHubOrigin(ctx, repoRoot)
 	if err != nil {
@@ -354,6 +367,15 @@ func checkOpenPRTarget(ctx context.Context, repoRoot, allowed, owner, repo strin
 	}
 	if !strings.EqualFold(curOwner+"/"+curRepo, allowed) {
 		return fmt.Errorf("origin of the repo root changed to %s/%s but %s was pinned at start; restart the daemon to change the repository", curOwner, curRepo, allowed)
+	}
+	return nil
+}
+
+// checkPinnedTarget allows owner/repo only when it is the repository pinned
+// at start (allowed, "owner/repo"), and nothing when none was pinned.
+func checkPinnedTarget(allowed, owner, repo string) error {
+	if allowed == "" {
+		return errors.New("no GitHub repository was pinned for git.open_pr at start")
 	}
 	if !strings.EqualFold(owner+"/"+repo, allowed) {
 		return fmt.Errorf("git.open_pr target %s/%s is not the configured repository", owner, repo)

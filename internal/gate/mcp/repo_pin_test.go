@@ -152,3 +152,33 @@ func TestRecheckRecordsEachUnusableOrigin(t *testing.T) {
 		}
 	}
 }
+
+// A git.open_pr request for a repository other than the pinned one is refused
+// before an approval is requested: the operator is never asked to approve a
+// call that cannot run. A forged approval ID for such a target is refused
+// before any approval is spent.
+func TestOpenPRTargetIsCheckedBeforeApproval(t *testing.T) {
+	tg := setupTypedGate(t, typedGateOptions{effect: domain.EffectApprove})
+	other := strings.Replace(validOpenPR, `"widgets"`, `"other"`, 1)
+	rec := tg.post("ops-agent", "git.open_pr", `{"payload":`+other+`}`)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "not the configured repository") {
+		t.Fatalf("target outside the pin: want 403 before approval, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := len(tg.approvals(t)); n != 0 {
+		t.Fatalf("%d approvals requested for a target outside the pin", n)
+	}
+
+	id := requestAndApprove(t, tg, "git.open_pr", validOpenPR)
+	rec = tg.post("ops-agent", "git.open_pr", `{"approvalId":"`+id+`","payload":`+other+`}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("approval replayed for another target: want 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, a := range tg.approvals(t) {
+		if a.ID == id && a.Status != domain.ApprovalApproved {
+			t.Fatalf("approval %s is %s after a refused target, want approved", id, a.Status)
+		}
+	}
+	if n := len(tg.pr.calls()); n != 0 {
+		t.Fatalf("%d requests reached GitHub", n)
+	}
+}

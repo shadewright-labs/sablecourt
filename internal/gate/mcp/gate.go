@@ -154,6 +154,9 @@ func RegisterTypedAction[T any](g *Gate, name string, validate func(T) error, ru
 			}
 			if validate != nil {
 				if err := validate(in); err != nil {
+					if errors.Is(err, errToolRefused) {
+						return nil, err // a well-formed request the gate refuses
+					}
 					return nil, fmt.Errorf("%w: %v", errInvalidPayload, err)
 				}
 			}
@@ -378,6 +381,11 @@ func (g *Gate) ActionHandler() http.Handler {
 			// allowed request it refused counted on the breaker. It still does.
 			if decision.Effect == domain.EffectAllow && g.breaker != nil {
 				g.breaker.RecordFailure(capability)
+			}
+			if errors.Is(err, errToolRefused) {
+				auditAction("denied", map[string]any{"reason": "refused", "error": redact.String(err.Error())})
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
+				return
 			}
 			auditAction("denied", map[string]any{"reason": "invalid_payload", "error": redact.String(err.Error())})
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": redact.String(err.Error())})
