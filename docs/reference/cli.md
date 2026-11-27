@@ -588,7 +588,7 @@ Sablecourt local-first and enterprise Kubernetes control plane daemon
 | `--allow-host` | stringSlice | none | Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port) |
 | `--coding-branch-retention` | duration | `0s` | Age before merged coding branches can be pruned (0 disables pruning) |
 | `--db` | string | `sablecourt.db` | SQLite database path |
-| `--gate-host` | string | empty | Optional host:port injected into containers for gates (defaults to --listen) |
+| `--gate-host` | string | empty | Optional host:port injected into containers for gates (defaults to host.docker.internal:<port> when --listen is 127.0.0.1, otherwise --listen; required for a wildcard listener) |
 | `--incident-conclave-template` | string | empty | Default Conclave template for new Shadewright incidents |
 | `--k8s-namespace` | string | `default` | Kubernetes namespace when --runtime=k8s |
 | `--k8s-runtime-class` | string | empty | Optional Kubernetes RuntimeClassName (e.g. gvisor, kata) |

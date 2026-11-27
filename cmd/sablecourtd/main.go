@@ -140,7 +140,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
 	rootCmd.Flags().StringVar(&incidentTemplate, "incident-conclave-template", "", "Default Conclave template for new Shadewright incidents")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
-	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
+	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to host.docker.internal:<port> when --listen is 127.0.0.1, otherwise --listen; required for a wildcard listener)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
 	rootCmd.Flags().StringVar(&runtimeBackend, "runtime", "docker", "Container runtime backend: docker or k8s")
@@ -222,7 +222,7 @@ func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	}
 	adapter.HostModeUnsafe = true
 	if logger != nil {
-		logger.Warn("UNSAFE: host mode is on (--" + unsafeHostHarnessesFlag + "); coding tasks and council seats run on the host when no container runtime is configured, outside invariants 2 and 3")
+		logger.Warn("UNSAFE: host mode is on (--" + unsafeHostHarnessesFlag + "); host launches are allowed only when no container runtime is configured, and such runs are outside invariants 2 and 3")
 	}
 }
 
@@ -539,7 +539,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	registerUpstreamMCP(bundle)
 
 	if isCitadel {
-		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		logger.Info("citadel mode active: coding agents and council seats disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
