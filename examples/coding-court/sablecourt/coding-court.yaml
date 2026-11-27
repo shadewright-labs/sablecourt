@@ -12,8 +12,8 @@
 # a verifier never runs the author's model family. Verifier steps name provider
 # and model because the compiled default critic route is not their harness.
 #
-# The coding blocks set no sandbox: harness containers are the only coding mode
-# for 0.1.0 and have no manifest field yet (issue 181).
+# The coding blocks set sandbox: container. The coding runs in a harness
+# container, the only mode the daemon uses unless host mode is forced.
 apiVersion: sablecourt.io/v1alpha1
 kind: Workload
 metadata:
@@ -26,6 +26,7 @@ spec:
   coding:
     harness: claude
     repoPath: .
+    sandbox: container
   agentCard:
     description: Writes Go changes and their table-driven tests for the Sablecourt repository.
     skills:
@@ -83,6 +84,7 @@ spec:
   coding:
     harness: claude
     repoPath: .
+    sandbox: container
   agentCard:
     description: Writes documentation and decision record text for the Sablecourt repository.
     skills:
@@ -126,6 +128,7 @@ spec:
   coding:
     harness: codex
     repoPath: .
+    sandbox: container
   agentCard:
     description: Reads the author's diff for the Sablecourt repository without writing.
     skills:
@@ -183,6 +186,7 @@ spec:
   coding:
     harness: agy
     repoPath: .
+    sandbox: container
   agentCard:
     description: Read-only verifier for Sablecourt changes on invariant paths, stated as failed controls.
     skills:

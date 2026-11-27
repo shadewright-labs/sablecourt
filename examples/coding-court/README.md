@@ -38,7 +38,7 @@ On `main`, council seats are the built-in workloads `claude`, `codex` and `agy`,
 
 ## Before you run it
 
-- The `coding` blocks set no `sandbox`. Harness containers are the only coding mode for 0.1.0 ([ADR-0011](../../docs/adr/0011-sanctum-scope-trust-and-cli-harnesses.md), amendment of 2026-11-27), and they have no manifest field until [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) lands. The host sandbox values are unsupported.
+- The `coding` blocks set `sandbox: container`: each task runs in a harness container ([harness containers](../../docs/how-it-works/harness-containers.md)), which needs a Docker engine on the machine that runs the daemon. The host sandbox value `seatbelt` is only for forced host mode.
 - The grants hold no Model Gate access, no actions and no delegation. Add what your court needs, and keep verifier workloads free of actions and delegation.
 - A test, `internal/contextpack/examples_cards_test.go`, checks that each card fits the context packet with room left.
 - Edit the cards to fit your repository. A card change is a manifest change and changes the bundle digest.

@@ -21,4 +21,4 @@ Workload and workflow names carry a `sablecourt-` prefix, so both bundles can lo
 
 Both sets share the structure: tests are read before production code, a request for changes needs file and line evidence, and a verifier ends with the verdict line the workflow defines. A card names no model, no tier and no verdict format, and grants nothing ([ADR-0010](../../../docs/adr/0010-agentic-context-learnings-and-verification-pipeline.md), amendment of 2026-11-27).
 
-The harness and family arrangement is the same as in the generic set: developers on one family, the reviewer on a second and security on a third. The coding blocks set no `sandbox` because `main` has no container fields yet ([issue 181](https://github.com/shadewright-labs/sablecourt/issues/181)).
+The harness and family arrangement is the same as in the generic set: developers on one family, the reviewer on a second and security on a third. The coding blocks set `sandbox: container`, so each task runs in a harness container.
