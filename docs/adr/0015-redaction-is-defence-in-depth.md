@@ -97,7 +97,7 @@ Bypasses of the pattern rules are still fixed when cheap, as defence in depth, b
 
 ## Amendment 2026-11-27: what exact match covers in 0.1.0
 
-- Status of this amendment: Proposed
+- Status of this amendment: Accepted (2026-11-27)
 
 Three review passes on [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180) each found a held value that got past the matcher in a form nobody had listed: a backslash before a value that starts with `n`, a duplicate JSON name, a number written with an exponent, a fragment split across two fields. Each fix added a decoded view, and each new view left the next form open. The user decided on 2026-11-27 to stop adding views and to accept exact match with stated limits. It stays a second layer: isolation keeps provider keys in the gate, and a workload holds only its task lease.
 
