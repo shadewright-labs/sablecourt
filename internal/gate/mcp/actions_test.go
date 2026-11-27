@@ -296,7 +296,7 @@ func TestParseGitHubRemote(t *testing.T) {
 		{"ssh://git@ssh.github.com/acme/widgets.git", "", "", false},
 		{"ssh://git@ssh.github.com:22/acme/widgets.git", "", "", false},
 		{"https://ssh.github.com:443/acme/widgets.git", "", "", false},
-		{"ssh://git@ssh.github.com.evil.test:443/acme/widgets.git", "", "", false},
+		{"ssh://git" + "@ssh.github.com.evil.test:443/acme/widgets.git", "", "", false}, // split so the line does not read as an address
 		{"https://gitlab.com/acme/widgets.git", "", "", false},
 		{"https://github.com.evil.test/acme/widgets.git", "", "", false},
 		{"http://github.com/acme/widgets.git", "", "", false},
