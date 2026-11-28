@@ -88,4 +88,5 @@ The epics behind the open work are #1 (scope and local trust), #15 (a CLI harnes
 - How-to: [index](how-to/index.md), covering install, manifests, harness logins, councils, approvals, watching and steering, retry, audit verification and finding why something was refused.
 - Reference: [index](reference/index.md), covering manifests, HTTP API, CLI, configuration, limits, metrics and the [glossary](glossary.md).
 - Design: [index](design/index.md), [architecture](design/architecture.md), [storage](design/storage.md), the [v0.1 baseline](design/v0.1-baseline.md) and the [harness spike record](harnesses.md).
+- Examples: the [coding court](https://github.com/shadewright-labs/sablecourt/blob/main/examples/coding-court/README.md) role cards and workflows.
 - Diagrams: [standard](diagrams/README.md).
