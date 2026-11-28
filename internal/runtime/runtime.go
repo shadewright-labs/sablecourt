@@ -36,13 +36,29 @@ type CommandSpec struct {
 	Argv           []string
 	Timeout        time.Duration
 	MaxOutputBytes int
+	// AuthorBase is the commit the run's first author step started from, as
+	// the daemon recorded it (issue 214). The adapter checks that it is an
+	// ancestor of the pinned commit and names it in the container's Git
+	// metadata as AuthorBaseRef.
+	AuthorBase string
 }
+
+// AuthorBaseRef is the ref a command container's Git metadata holds for the
+// run's first author base.
+const AuthorBaseRef = "refs/sablecourt/author-base"
+
+// GitBaseArtifact names the artifact in which a coding task reports the
+// commit its checkout started from.
+const GitBaseArtifact = "git-base"
 
 // Reasons a command step is refused before its command runs.
 const (
 	CommandNotAllowed         = "command_not_allowed"
 	CommandNoContainerRuntime = "no_container_runtime"
 	CommandContainerRefused   = "container_spec_refused"
+	// CommandAuthorBaseUnavailable: the run has no recorded author base, or
+	// it is not an ancestor of the commit the step checks.
+	CommandAuthorBaseUnavailable = "author_base_unavailable"
 )
 
 // Outcomes of a command that ran.

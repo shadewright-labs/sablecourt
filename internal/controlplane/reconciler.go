@@ -684,6 +684,9 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 			if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
 				member.AuthorCommit = commit
 			}
+			// A retried author keeps the run's first author base; if the
+			// failed attempt was the first, its own base becomes it.
+			member.AuthorBase = runAuthorBase(member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), orig.ArtifactsJSON)
 		}
 		return r.submitTask(ctx, orig.WorkloadName, idem, string(raw), orig.ParentTaskID, member)
 	}
@@ -1625,7 +1628,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit})
+				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase})
 				if err != nil {
 					return err
 				}
@@ -1697,7 +1700,8 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		payload = commandStepPayload(meta.Workflow, nextStep, nextIdx, meta.Input, author, authorIdx)
 	}
 	raw, _ := json.Marshal(payload)
-	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
+	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx,
+		AuthorBase: runAuthorBase(member, !completedVerifier && step.Command == "", completedTask.ArtifactsJSON)}
 	if nextStep.Role == "verifier" || nextStep.Command != "" {
 		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)
 	}

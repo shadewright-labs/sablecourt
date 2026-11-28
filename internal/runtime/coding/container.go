@@ -181,7 +181,11 @@ func harnessGitDirPath(taskBase string) string { return taskBase + ".git" }
 // bind source as root, and no other host user can reach it through that
 // parent. It is not made writable; see the uid 10001 limit on the harness
 // containers page.
-func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *worktreeState) (string, error) {
+//
+// A command step's checkout also gets authorBase, the run's first author base,
+// as the ref scruntime.AuthorBaseRef. The caller has checked that it is an
+// ancestor of HEAD, so its objects are already copied.
+func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *worktreeState, authorBase string) (string, error) {
 	if state.Mode == checkoutModeLive {
 		return "", nil
 	}
@@ -197,10 +201,27 @@ func prepareHarnessGitDir(ctx context.Context, dir, taskBase string, state *work
 	if err := createLiveGitDir(ctx, checkout, gitDir, head); err != nil {
 		return "", fmt.Errorf("create harness Git metadata: %w", err)
 	}
+	if authorBase != "" {
+		if err := writeAuthorBaseRef(gitDir, authorBase); err != nil {
+			return "", errors.Join(fmt.Errorf("name the author base in harness Git metadata: %w", err), os.RemoveAll(gitDir))
+		}
+	}
 	if err := openToHarnessUser(gitDir); err != nil {
 		return "", errors.Join(fmt.Errorf("open harness Git metadata to the container user: %w", err), os.RemoveAll(gitDir))
 	}
 	return gitDir, nil
+}
+
+// writeAuthorBaseRef writes the author base ref as a loose ref file.
+func writeAuthorBaseRef(gitDir, base string) error {
+	if !isCommitID(base) {
+		return errors.New("author base is not a commit ID")
+	}
+	refPath := filepath.Join(gitDir, filepath.FromSlash(scruntime.AuthorBaseRef))
+	if err := os.MkdirAll(filepath.Dir(refPath), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(refPath, []byte(base+"\n"), 0o600)
 }
 
 // checkPrivateParent refuses a directory that is a symlink, is owned by

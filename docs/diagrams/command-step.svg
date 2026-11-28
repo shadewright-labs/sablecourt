@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 456" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Command step</title>
-  <desc id="d">After the author step commits its change, the control plane checks that the step's command is in the allowed set of the workload's manifest, then that a harness container can be built. If either check fails, the step is refused before any container starts, never on the host, and the run is halted. Otherwise the command runs inside the harness container, on a read-only checkout of the author's commit, with no task lease and a proxy that refuses every provider. When it exits, its result is recorded, capped and redacted. A passed result moves the run to the next step, which follows the author's task; a failed result halts the run with the reason recorded on the run.</desc>
+  <desc id="d">After the author step commits its change, the control plane checks that the step's command is in the allowed set of the workload's manifest and that the run has an author base that is an ancestor of the author's commit, then that a harness container can be built. If either check fails, the step is refused before any container starts, never on the host, and the run is halted. Otherwise the command runs inside the harness container, on a read-only checkout of the author's commit, with no task lease and a proxy that refuses every provider. When it exits, its result is recorded, capped and redacted. A passed result moves the run to the next step, which follows the author's task; a failed result halts the run with the reason recorded on the run.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -27,7 +27,8 @@
   <text class="s" x="60" y="147">commits its change</text>
 
   <polygon class="box" points="268,132 344,88 420,132 344,176"/>
-  <text class="s" x="344" y="137" text-anchor="middle">In allowed set?</text>
+  <text class="s" x="344" y="128" text-anchor="middle">Allowed, with</text>
+  <text class="s" x="344" y="146" text-anchor="middle">author base?</text>
 
   <polygon class="box" points="492,132 568,88 644,132 568,176"/>
   <text class="s" x="568" y="137" text-anchor="middle">Container built?</text>

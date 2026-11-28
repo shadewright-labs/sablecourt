@@ -34,8 +34,11 @@ type workflowStepRecord struct {
 	Workflow     string
 	Index        int
 	AuthorCommit string
-	Status       string `json:",omitempty"`
-	Reason       string `json:",omitempty"`
+	// AuthorBase is the commit the run's first author step started from
+	// (issue 214), carried from step to step and never replaced once set.
+	AuthorBase string `json:",omitempty"`
+	Status     string `json:",omitempty"`
+	Reason     string `json:",omitempty"`
 }
 
 func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
@@ -72,19 +75,43 @@ func stepAuthorCommit(completed *workflowStepRecord, completedVerifier bool, art
 }
 
 func authorCommit(artifacts string) string {
+	return commitArtifact(artifacts, "git-commit")
+}
+
+// runAuthorBase is the author base the step after completed carries: the one
+// already recorded for the run, or, when none is and the completed step is an
+// author (not a verifier, not a command step), the commit that author's
+// checkout started from. A later author attempt, pinned to an earlier
+// attempt's commit, never replaces it.
+func runAuthorBase(completed *workflowStepRecord, authorStep bool, artifacts string) string {
+	if completed.AuthorBase != "" || !authorStep {
+		return completed.AuthorBase
+	}
+	return commitArtifact(artifacts, scruntime.GitBaseArtifact)
+}
+
+// validCommitID reports whether id is a full SHA-1 or SHA-256 commit ID in hex.
+func validCommitID(id string) bool {
+	if len(id) != 40 && len(id) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
+}
+
+// commitArtifact returns the commit ID of the one text artifact with this
+// name, or "" when there is none, more than one, or it is not a commit ID.
+func commitArtifact(artifacts, name string) string {
 	var items []scruntime.Artifact
 	if json.Unmarshal([]byte(artifacts), &items) != nil {
 		return ""
 	}
 	commit := ""
 	for _, item := range items {
-		if item.Name != "git-commit" {
+		if item.Name != name {
 			continue
 		}
-		if commit != "" || item.ContentType != "text/plain" || (len(item.Text) != 40 && len(item.Text) != 64) {
-			return ""
-		}
-		if _, err := hex.DecodeString(item.Text); err != nil {
+		if commit != "" || item.ContentType != "text/plain" || !validCommitID(item.Text) {
 			return ""
 		}
 		commit = item.Text

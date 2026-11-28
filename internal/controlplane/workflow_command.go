@@ -78,11 +78,18 @@ func (r *Reconciler) workflowCommand(ctx context.Context, task domain.Task, wl d
 	if !ok || domain.ValidCommandArgv(cmd.Argv) != nil {
 		return nil, refuse
 	}
+	// No recorded author base, or one that cannot name a commit of the same
+	// object format as the pinned commit, fails the step: no comparison is
+	// skipped (issue 214).
+	if len(member.AuthorBase) != len(member.AuthorCommit) || !validCommitID(member.AuthorBase) {
+		return nil, &scruntime.CommandRefusal{Command: meta.Command, Reason: scruntime.CommandAuthorBaseUnavailable}
+	}
 	return &scruntime.CommandSpec{
 		Name:           cmd.Name,
 		Argv:           slices.Clone(cmd.Argv),
 		Timeout:        cmd.Timeout(),
 		MaxOutputBytes: cmd.OutputCap(),
+		AuthorBase:     member.AuthorBase,
 	}, nil
 }
 
@@ -111,9 +118,10 @@ func (r *Reconciler) isCommandStep(workflow string, index int, workload string) 
 // commandRefusalFacts is the fixed-text fact of a refused command step.
 func commandRefusalFacts(refusal *scruntime.CommandRefusal) string {
 	detail := map[string]string{
-		scruntime.CommandNotAllowed:         "the command is not in the allowed set of the step's workload, or the task is not a registered command step",
-		scruntime.CommandNoContainerRuntime: "commands run only in harness containers and no container runtime is configured; there is no host fallback",
-		scruntime.CommandContainerRefused:   "the command's harness container could not be built or started; there is no host fallback",
+		scruntime.CommandNotAllowed:            "the command is not in the allowed set of the step's workload, or the task is not a registered command step",
+		scruntime.CommandNoContainerRuntime:    "commands run only in harness containers and no container runtime is configured; there is no host fallback",
+		scruntime.CommandContainerRefused:      "the command's harness container could not be built or started; there is no host fallback",
+		scruntime.CommandAuthorBaseUnavailable: "the run has no recorded author base, or it is not an ancestor of the commit the step checks",
 	}[refusal.Reason]
 	raw, _ := json.Marshal(struct {
 		Reason  string `json:"reason"`
