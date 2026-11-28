@@ -9,6 +9,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // Workflow command steps (issue 134). A command step runs one entry of its
@@ -113,6 +114,28 @@ func (r *Reconciler) commandStepOf(workflow string, index int, workload string) 
 func (r *Reconciler) isCommandStep(workflow string, index int, workload string) bool {
 	_, _, ok := r.commandStepOf(workflow, index, workload)
 	return ok
+}
+
+// recordedRefusal is the refusal of the task's command_refused event, if it
+// has one, so a halt retried after the refusal path failed stays a refusal.
+func recordedRefusal(ctx context.Context, st store.Store, taskID string) (*scruntime.CommandRefusal, error) {
+	events, err := st.ListTaskEvents(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		if ev.Reason != "command_refused" {
+			continue
+		}
+		var fact struct {
+			Refusal string `json:"refusal"`
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(ev.FactJSON), &fact) == nil && fact.Refusal != "" {
+			return &scruntime.CommandRefusal{Command: fact.Command, Reason: fact.Refusal}, nil
+		}
+	}
+	return nil, nil
 }
 
 // commandRefusalFacts is the fixed-text fact of a refused command step.
@@ -236,6 +259,14 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if cmd, ok := wl.Spec.Coding.Command(step.Command); ok {
 		fact.FailureReason = cmd.FailureReason
 	}
+	if refusal == nil {
+		// A halt written on the refusal path that failed is retried by a
+		// failure path, which carries no refusal: the task's own
+		// command_refused event keeps the halt a refusal.
+		if refusal, err = recordedRefusal(ctx, r.store, task.ID); err != nil {
+			return err
+		}
+	}
 	event, status := "workflow_halted_command_failed", "command_failed"
 	if refusal != nil {
 		event, status = "workflow_halted_command_refused", "command_refused"
@@ -255,5 +286,12 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if err != nil {
 		return err
 	}
-	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID, nil)
+	detail, err := json.Marshal(map[string]any{"workflow": meta.Workflow, "step": step.Name, "step_index": meta.StepIndex, "command": meta.Command})
+	if err != nil {
+		return err
+	}
+	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID, domain.AuditRecord{
+		Category: "workflow", TaskID: task.ID, WorkloadName: task.WorkloadName,
+		Action: "workflow.command", Outcome: status, DetailJSON: string(detail), CreatedAt: r.now(),
+	})
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
-	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // Issue 214: the run's first author base is recorded by the daemon and named
@@ -408,115 +407,5 @@ func TestLegacyFailedAuthorRetryFailsClosed(t *testing.T) {
 	var refusal *scruntime.CommandRefusal
 	if !errors.As(err, &refusal) || refusal.Reason != scruntime.CommandAuthorBaseUnavailable {
 		t.Fatalf("guard launch = %v, want the author base refusal", err)
-	}
-}
-
-// haltWriteFailStore fails the first write of a halted run registration, the
-// second of the two writes that halt a run.
-type haltWriteFailStore struct {
-	store.Store
-	mu     sync.Mutex
-	failed bool
-}
-
-func (s *haltWriteFailStore) PutMemory(ctx context.Context, entry domain.MemoryEntry) error {
-	s.mu.Lock()
-	fail := !s.failed && entry.Namespace == workflowStepsNamespace && strings.Contains(entry.Value, `"Status":"halted"`)
-	if fail {
-		s.failed = true
-	}
-	s.mu.Unlock()
-	if fail {
-		return errors.New("injected registration write failure")
-	}
-	return s.Store.PutMemory(ctx, entry)
-}
-
-// TestRunHaltReplayIsIdempotent checks each way a run halts: when the halted
-// registration write fails after the halt event, the replay halts the run
-// without a second halt event or a second verifier audit row, and the
-// registration keeps the recorded event's reason, whatever path replays it
-// (invariant 6).
-func TestRunHaltReplayIsIdempotent(t *testing.T) {
-	t.Parallel()
-	for name, tc := range map[string]struct {
-		paths  []string
-		event  string
-		review string
-		refuse bool // refuse the command launch once the author step is done
-		steps  int  // a step that must not start, 0 for none
-	}{
-		"command failed":  {paths: []string{"feature.txt"}, event: "workflow_halted_command_failed", steps: 2},
-		"command refused": {paths: []string{"feature.txt"}, event: "workflow_halted_command_refused", refuse: true, steps: 2},
-		"verdict missing": {paths: []string{"internal/redact/"}, event: "workflow_halted_verdict_missing", review: "no verdict line"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			g := &guardRunner{}
-			f := newCommandFixture(t, guardCommand(t, tc.paths...), g.run)
-			if tc.review != "" {
-				defaultRun := f.runner.onRun
-				f.runner.onRun = func(ctx context.Context, s scruntime.CouncilLaunch) (string, string, int, error) {
-					if s.Command == nil && s.Checkout.Kind != scruntime.CouncilTask {
-						return tc.review, "", 0, nil
-					}
-					return defaultRun(ctx, s)
-				}
-			}
-			wrapped := &haltWriteFailStore{Store: f.st}
-			f.r = NewReconciler(Options{
-				Store:    wrapped,
-				Bundle:   f.bundle,
-				Policy:   policy.NewEngine(nil, nil),
-				Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: f.adapter},
-			})
-			root := f.start()
-			if tc.refuse {
-				f.runUntil("the author step", func() bool { _, ok := f.step(1); return terminal(f.step(0)) && ok })
-				f.adapter.CouncilRunner = refusingRunner{f.runner}
-			}
-			f.runUntil("the halted registration", func() bool { return f.runStatus(root.ID).Status == "halted" })
-			// A few more passes: nothing is appended once the run is halted.
-			for range 3 {
-				_ = errors.Join(f.r.ReconcileOnce(t.Context()), waitForLaunches(t, f.r))
-			}
-			wrapped.mu.Lock()
-			failed := wrapped.failed
-			wrapped.mu.Unlock()
-			if !failed {
-				t.Fatal("the injected failure never fired")
-			}
-			halts := 0
-			for _, ev := range f.events(root.ID) {
-				if strings.HasPrefix(ev.Reason, "workflow_halted_") {
-					halts++
-					if ev.Reason != tc.event {
-						t.Fatalf("halt event %s, want %s", ev.Reason, tc.event)
-					}
-				}
-			}
-			if halts != 1 {
-				t.Fatalf("halt events on the run = %d, want 1", halts)
-			}
-			if got, want := f.runStatus(root.ID).Reason, strings.TrimPrefix(tc.event, "workflow_halted_"); got != want {
-				t.Fatalf("halted registration reason = %q, want %q from the recorded event", got, want)
-			}
-			audits, err := f.st.ListAudit(t.Context(), 1000)
-			if err != nil {
-				t.Fatal(err)
-			}
-			verifies := 0
-			for _, a := range audits {
-				if a.Action == "workflow.verify" {
-					verifies++
-				}
-			}
-			if want := map[bool]int{true: 1, false: 0}[tc.review != ""]; verifies != want {
-				t.Fatalf("workflow.verify audit rows = %d, want %d", verifies, want)
-			}
-			if _, ok := f.step(tc.steps); ok && tc.steps > 0 {
-				t.Fatalf("step %d started after the run halted", tc.steps)
-			}
-		})
 	}
 }

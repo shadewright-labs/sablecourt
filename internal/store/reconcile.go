@@ -29,16 +29,100 @@ func insertRegisteredTask(ctx context.Context, db *sql.DB, entry domain.MemoryEn
 	if err := insert(tx); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	if err := putMemoryTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func putMemoryTx(ctx context.Context, tx TaskInserter, entry domain.MemoryEntry) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO court_memory (namespace, key, value, author, updated_at)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT(namespace, key) DO UPDATE SET
 			value = excluded.value, author = excluded.author, updated_at = excluded.updated_at
 	`, entry.Namespace, entry.Key, entry.Value, entry.Author, entry.UpdatedAt.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return err
+	return err
+}
+
+type transitionEffectsKey struct{}
+
+// ErrAlreadyRecorded means UpdateTaskStateWithEffects found the event it
+// would add already on the task and wrote nothing.
+var ErrAlreadyRecorded = errors.New("transition already recorded")
+
+// TransitionEffects are the writes UpdateTaskStateWithEffects commits in the
+// same transaction as the task event: all of them or none.
+type TransitionEffects struct {
+	// Recorded reports whether an existing event of the task is the one
+	// this transition would add. It runs inside the transaction once the
+	// task row is updated, so in PostgreSQL after the row lock is held and
+	// in SQLite under the write lock: two concurrent calls cannot both
+	// miss each other's event.
+	Recorded func(reason, factJSON string) bool
+	Audit    *domain.AuditRecord
+	Memory   *domain.MemoryEntry
+
+	applied bool
+}
+
+// UpdateTaskStateWithEffects is UpdateTaskState with the audit row and the
+// memory entry of effects written in its transaction. When effects.Recorded
+// matches an event the task already has, it writes nothing and returns
+// ErrAlreadyRecorded. A store that does not apply the effects fails the call.
+func UpdateTaskStateWithEffects(ctx context.Context, st Store, taskID string, from, to domain.TaskState, reason, factJSON string, effects TransitionEffects) error {
+	effects.applied = false
+	err := st.UpdateTaskState(context.WithValue(ctx, transitionEffectsKey{}, &effects), taskID, from, to, reason, factJSON)
+	if err == nil && !effects.applied {
+		return errors.New("store did not apply the transition effects")
 	}
-	return tx.Commit()
+	return err
+}
+
+// ApplyTransitionEffects writes the effects carried by ctx inside tx. Each
+// store's UpdateTaskState calls it after the task row update and before the
+// event insert, and rolls back on any error.
+func ApplyTransitionEffects(ctx context.Context, tx *sql.Tx, taskID string, audit AuditTxFunc) error {
+	effects, ok := ctx.Value(transitionEffectsKey{}).(*TransitionEffects)
+	if !ok {
+		return nil
+	}
+	if effects.Recorded != nil {
+		rows, err := tx.QueryContext(ctx, "SELECT reason, fact_json FROM task_events WHERE task_id = $1", taskID)
+		if err != nil {
+			return err
+		}
+		recorded := false
+		for rows.Next() {
+			var reason, fact string
+			if err := rows.Scan(&reason, &fact); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if effects.Recorded(reason, fact) {
+				recorded = true
+				break
+			}
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		if recorded {
+			return ErrAlreadyRecorded
+		}
+	}
+	if effects.Audit != nil {
+		if err := audit(ctx, tx, *effects.Audit); err != nil {
+			return err
+		}
+	}
+	if effects.Memory != nil {
+		if err := putMemoryTx(ctx, tx, *effects.Memory); err != nil {
+			return err
+		}
+	}
+	effects.applied = true
+	return nil
 }
 
 func ListTasks(ctx context.Context, db *sql.DB) ([]domain.Task, error) {

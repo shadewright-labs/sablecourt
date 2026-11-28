@@ -64,50 +64,41 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 	return &step, nil
 }
 
-// haltRun halts a workflow run in two writes: the halt event on the run's
-// root task, then the halted run registration. The store has no transaction
-// over both, so a replay after the second write failed finds the event of
-// the same step (its fact names that step's task under key) and only writes
-// the registration again, with the recorded event's reason rather than the
-// caller's: a refusal replayed through a failure path stays a refusal. The
-// event, and audit when not nil, are appended once (invariant 6): audit is
-// written only by the call that appended the event, after it, so a failed
-// event write or a replay never writes a second row.
-func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string, audit *domain.AuditRecord) error {
+// haltRun halts a workflow run in one store transaction: the halt event on
+// the run's root task, the halt's audit row and the halted run registration
+// are all written or none is (decision of 2026-11-28 on issue 214, ADR-0009,
+// invariant 6). A failed transaction leaves nothing behind, and a later call
+// (the failure path after a refusal, or a later reconcile pass) retries the
+// whole halt. A replay that finds the event of the same
+// step (its fact names that step's task under key), checked inside the
+// transaction, writes nothing: the registration already says halted with the
+// recorded reason.
+func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string, audit domain.AuditRecord) error {
 	root, err := r.store.GetTask(ctx, runID)
 	if err != nil {
 		return err
 	}
-	events, err := r.store.ListTaskEvents(ctx, root.ID)
+	halted := *rootStep
+	halted.Status, halted.Reason = "halted", status
+	entry, err := r.workflowStepEntry(root.ID, halted)
 	if err != nil {
 		return err
 	}
-	recorded := false
-	for _, ev := range events {
-		if !strings.HasPrefix(ev.Reason, "workflow_halted_") {
-			continue
-		}
-		var named map[string]any
-		if json.Unmarshal([]byte(ev.FactJSON), &named) == nil && named[key] == stepTaskID {
-			recorded = true
-			status = strings.TrimPrefix(ev.Reason, "workflow_halted_")
-			break
-		}
+	err = store.UpdateTaskStateWithEffects(ctx, r.store, root.ID, root.State, root.State, event, fact, store.TransitionEffects{
+		Recorded: func(reason, factJSON string) bool {
+			if !strings.HasPrefix(reason, "workflow_halted_") {
+				return false
+			}
+			var named map[string]any
+			return json.Unmarshal([]byte(factJSON), &named) == nil && named[key] == stepTaskID
+		},
+		Audit:  &audit,
+		Memory: &entry,
+	})
+	if errors.Is(err, store.ErrAlreadyRecorded) {
+		return nil
 	}
-	if !recorded {
-		if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, event, fact); err != nil {
-			return err
-		}
-		if audit != nil {
-			_ = r.store.AppendAudit(ctx, *audit)
-		}
-	}
-	rootStep.Status, rootStep.Reason = "halted", status
-	entry, err := r.workflowStepEntry(root.ID, *rootStep)
-	if err != nil {
-		return err
-	}
-	return r.store.PutMemory(ctx, entry)
+	return err
 }
 
 // stepAuthorCommit is the commit a verifier following the completed step must

@@ -1572,9 +1572,10 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 			if err != nil {
 				return err
 			}
-			// haltRun writes the audit row once, with the halt event, so a
-			// replay of this verifier decision does not repeat it.
-			return r.haltRun(ctx, member.RunID, rootStep, "workflow_halted_verdict_missing", string(fact), "verdict_missing", "verifier_task_id", completedTask.ID, &domain.AuditRecord{
+			// haltRun writes the audit row in one transaction with the halt
+			// event and the halted registration, so a replay of this
+			// verifier decision neither repeats nor drops it.
+			return r.haltRun(ctx, member.RunID, rootStep, "workflow_halted_verdict_missing", string(fact), "verdict_missing", "verifier_task_id", completedTask.ID, domain.AuditRecord{
 				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
 				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
 			})
