@@ -1147,7 +1147,7 @@ func TestCouncilDriverCloseAudit(t *testing.T) {
 				t.Fatalf("room state after replay = %s, err = %v, want %s", s.Session.State, err, tc.wantState)
 			}
 			checkAudit("after replay")
-			if _, err := f.VerifyAuditChain(ctx); err != nil {
+			if _, err := f.VerifyAuditChain(ctx, nil); err != nil {
 				t.Fatalf("VerifyAuditChain: %v", err)
 			}
 		})

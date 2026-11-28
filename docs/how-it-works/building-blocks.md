@@ -149,7 +149,7 @@ Flags not listed (`--listen`, `--socket`, `--allow-host`, `--db`, `--manifests` 
 - Checking subscription windows before a council round (#36).
 - Coding tasks on a machine without a container runtime. The 2026-11-27 amendment of [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) drops host mode as a supported path for 0.1.0; forced host mode gives a harness an empty scratch home directory and no login (#17). Separate harness state directories for host mode are dropped by the same amendment.
 - Checkpointed suspend and resume (#14).
-- An audit chain that detects deletion of its newest rows (#10).
+- An audit chain that detects deletion of its newest rows without an operator-kept head; a signed head is ADR-0014 work.
 - A status and learnings the Shadewright side can read (#53, #54).
 
 ## In depth

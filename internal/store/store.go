@@ -63,7 +63,9 @@ type Store interface {
 
 	AppendAudit(ctx context.Context, rec domain.AuditRecord) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditRecord, error)
-	VerifyAuditChain(ctx context.Context) (int, error)
+	// VerifyAuditChain walks audit_log in ID order through domain.AuditChainVerifier
+	// and returns the verified head; a non-nil anchor must match the chain.
+	VerifyAuditChain(ctx context.Context, anchor *domain.AuditAnchor) (domain.AuditChainHead, error)
 
 	SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error
 	LatestCheckpoint(ctx context.Context, taskID string) (string, error)

@@ -305,6 +305,7 @@ func TestMutatingCommandsSendExactRequest(t *testing.T) {
 }
 
 func TestDaemonErrorStatusIsReturnedAndNothingPrinted(t *testing.T) {
+	anchorSHA := strings.Repeat("ab", 32)
 	cases := []struct {
 		name   string
 		args   []string
@@ -349,6 +350,12 @@ func TestDaemonErrorStatusIsReturnedAndNothingPrinted(t *testing.T) {
 		{"task diff", []string{"task", "diff", "t1"}, "GET /api/v1/tasks/t1", http.StatusNotFound, "none", "HTTP 404"},
 		{"task scry", []string{"task", "scry", "t1"}, "GET /api/v1/tasks/t1/scry", http.StatusForbidden, " not yours \n", "HTTP 403: not yours"},
 		{"takeover refused", []string{"task", "takeover", "t1"}, "POST /api/v1/tasks/t1/takeover", http.StatusConflict, "held by another operator", "HTTP 409: held by another operator"},
+		// A daemon that ignores the anchor, or a proxy that drops the query,
+		// answers 200 without "anchored": true. That is not a matched anchor.
+		{"audit verify anchor ignored", []string{"audit", "verify", "--anchor", "12:" + anchorSHA}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":true,"verifiedRows":10}`, "anchor 12 was not checked"},
+		{"audit verify json anchor ignored", []string{"--json", "audit", "verify", "--anchor", "12:" + anchorSHA}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":true,"verifiedRows":10}`, "anchor 12 was not checked"},
+		{"audit verify json not valid", []string{"--json", "audit", "verify"}, "GET /api/v1/audit/verify", http.StatusOK, `{"valid":false,"verifiedRows":3}`, "audit hash chain not valid"},
+		{"audit verify json undecodable", []string{"--json", "audit", "verify"}, "GET /api/v1/audit/verify", http.StatusOK, `not json`, "decode verify result"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -394,6 +401,9 @@ func TestArgumentValidationSendsNoRequest(t *testing.T) {
 		{"approve without digest", []string{"approval", "approve", "a1"}, `required flag(s) "digest" not set`},
 		{"invalid api url", []string{"--api", "daemon-without-scheme", "approval", "approve", "a1", "--digest", "d"}, "invalid daemon API URL"},
 		{"api url with user info", []string{"--api", "http://user:pass@example.com", "approval", "deny", "a1"}, "invalid daemon API URL"},
+		{"audit anchor without hash", []string{"audit", "verify", "--anchor", "12"}, "want SEQ:HASH"},
+		{"audit anchor at sequence 0", []string{"audit", "verify", "--anchor", "0:" + strings.Repeat("ab", 32)}, "positive integer"},
+		{"audit anchor with short hash", []string{"audit", "verify", "--anchor", "3:abc"}, "64 lowercase hex"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -463,15 +473,24 @@ func TestJSONFlagPrintsRawDaemonBody(t *testing.T) {
 		{[]string{"voice", "status"}, "GET /api/v1/voice/status"},
 	}
 	const marker = `{"raw":"daemon-body-7f3a"}`
+	// Commands that check the daemon answer before printing it get a body
+	// that passes the check; the rest get the marker.
+	bodies := map[string]string{
+		"GET /api/v1/audit/verify": `{"valid":true,"verifiedRows":1,"raw":"daemon-body-7f3a"}`,
+	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
-			d := newCLIDaemon().on(tc.route, http.StatusOK, marker)
+			body := bodies[tc.route]
+			if body == "" {
+				body = marker
+			}
+			d := newCLIDaemon().on(tc.route, http.StatusOK, body)
 			out, _, err := runCLI(t, d, "", append([]string{"--json"}, tc.args...)...)
 			if err != nil {
 				t.Fatalf("command failed: %v", err)
 			}
-			if out != marker {
-				t.Fatalf("output = %q, want raw body %q", out, marker)
+			if out != body {
+				t.Fatalf("output = %q, want raw body %q", out, body)
 			}
 		})
 	}
@@ -510,6 +529,12 @@ func TestListCommandsRenderDaemonRecords(t *testing.T) {
 			[]string{"policy", "coder", "git:push", "denied", "pending", "ok", "-"}},
 		{"no audit", []string{"audit", "tail"}, "GET /api/v1/audit", "", `[]`, []string{"No audit events recorded."}},
 		{"audit verify", []string{"audit", "verify"}, "GET /api/v1/audit/verify", "", `{"valid":true,"verifiedRows":42}`, []string{"audit hash chain valid (42 rows verified)"}},
+		{"audit verify prints head", []string{"audit", "verify"}, "GET /api/v1/audit/verify", "",
+			`{"valid":true,"verifiedRows":12,"legacyRows":2,"anchored":false,"head":{"seq":12,"id":14,"hash":"` + sha + `"}}`,
+			[]string{"12 rows verified, 2 written with the version 1 hash)", "head: 12:" + sha}},
+		{"audit verify anchored", []string{"audit", "verify", "--anchor", "12:" + sha}, "GET /api/v1/audit/verify", "anchor=12%3A" + sha,
+			`{"valid":true,"verifiedRows":12,"legacyRows":0,"anchored":true,"head":{"seq":12,"id":12,"hash":"` + sha + `"}}`,
+			[]string{"(12 rows verified, anchor matched)", "head: 12:" + sha}},
 		{"providers", []string{"provider", "list"}, "GET /api/v1/providers", "",
 			`[{"id":"openai","displayName":"OpenAI","kind":"api","connected":true,"models":[{"id":"m1"},{"id":"m2"}],"detail":"` + strings.Repeat("d", 60) + `"},{"id":"local","displayName":"Local","kind":"ollama","connected":false}]`,
 			[]string{"OpenAI", "connected", "2", "...", "Local", "not connected"}},

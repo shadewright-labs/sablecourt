@@ -397,7 +397,7 @@ func TestCloseCouncilAuditAndRollback(t *testing.T) {
 	if len(closes) != 1 || closes[0].Outcome != string(domain.ConclaveStateCompleted) || !strings.Contains(closes[0].DetailJSON, `"conclave_id":"panel"`) {
 		t.Fatalf("conclave.close audits = %+v, want 1 completed row", closes)
 	}
-	if _, err := s.VerifyAuditChain(ctx); err != nil {
+	if _, err := s.VerifyAuditChain(ctx, nil); err != nil {
 		t.Fatalf("VerifyAuditChain: %v", err)
 	}
 }

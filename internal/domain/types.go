@@ -1,9 +1,6 @@
 package domain
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"math"
 	"time"
 )
@@ -323,6 +320,8 @@ type Approval struct {
 
 type AuditRecord struct {
 	ID           int64
+	Seq          int64
+	HashVersion  int
 	Category     string
 	TaskID       string
 	WorkloadName string
@@ -332,17 +331,6 @@ type AuditRecord struct {
 	PrevHash     string
 	RowHash      string
 	CreatedAt    time.Time
-}
-
-// ComputeAuditRowHash derives a deterministic tamper-evident SHA-256 chain hash for an audit row.
-func ComputeAuditRowHash(prevHash string, rec AuditRecord, createdAtRFC3339 string) string {
-	if prevHash == "" {
-		prevHash = "genesis"
-	}
-	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-		prevHash, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome, rec.DetailJSON, createdAtRFC3339)
-	sum := sha256.Sum256([]byte(payload))
-	return hex.EncodeToString(sum[:])
 }
 
 type ProviderPrefs struct {

@@ -661,7 +661,7 @@ func TestClosePlainRoomKeepsTerminalStateAndAuditsOnce(t *testing.T) {
 			if closes[0].Outcome != string(tc.first) || !strings.Contains(closes[0].DetailJSON, fmt.Sprintf(`"conclave_id":%q`, sess.ID)) {
 				t.Fatalf("conclave.close audit = %+v, want outcome %s", closes[0], tc.first)
 			}
-			if _, err := st.VerifyAuditChain(ctx); err != nil {
+			if _, err := st.VerifyAuditChain(ctx, nil); err != nil {
 				t.Fatalf("VerifyAuditChain: %v", err)
 			}
 		})

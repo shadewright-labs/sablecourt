@@ -94,9 +94,9 @@ Court Memory is a key-value store in the store, shown on `/memory`, with MCP too
 
 Status: built, with limits. Signed heads are decided only.
 
-[![Audit hash chain anchored at genesis and linked by SHA-256 across rows, with signed heads marked planned, and sablectl audit verify walking audit_log through GET /api/v1/audit/verify to report valid (200) or a failed verification (409: a hash mismatch or a read error).](diagrams/audit-chain.svg)](diagrams/audit-chain.svg "Open full size")
+[![Audit hash chain anchored at genesis and linked by SHA-256 across rows, with signed heads marked planned, and sablectl audit verify walking audit_log through GET /api/v1/audit/verify to report valid (200, with the chain head) or a failed verification (409: a missing or mismatched hash, an unmet anchor, or a read error).](diagrams/audit-chain.svg)](diagrams/audit-chain.svg "Open full size")
 
-Each audit row written now stores the hash of the previous row, anchored at the word `genesis`. `sablectl audit verify` calls `GET /api/v1/audit/verify` on the daemon, which has the store walk `audit_log` in id order and recompute the chain over hashed rows, returning 200 with the verified count or 409 on a `prev_hash` or `row_hash` mismatch. Verification skips rows without a hash (older rows) and cannot see deletion of the last rows (#10); ADR-0009 claims more than this, and the code is what is described here. See [audit](how-it-works/audit.md).
+Each audit row stores its sequence number and the hash of the previous row, anchored at the word `genesis`. `sablectl audit verify` calls `GET /api/v1/audit/verify` on the daemon, which has the store walk `audit_log` in id order and recompute each hash over length-prefixed fields that include the row ID. It answers 200 with the verified count and the chain head, or 409 when a row has no hash, a sequence or `prev_hash` does not follow, or a `row_hash` does not match. Deleting the newest rows is seen only when the operator passes back a head recorded earlier (`--anchor SEQ:HASH`). Rows written before the row ID was hashed keep their older hash and are counted as version 1 rows. See [audit](how-it-works/audit.md).
 
 ## Mode
 

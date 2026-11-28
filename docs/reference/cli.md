@@ -102,7 +102,9 @@ No flags of its own.
 
 Verify the tamper-evident SHA-256 hash chain across all audit records
 
-No flags of its own.
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--anchor` | string | empty | Chain head recorded earlier as SEQ:HASH; verification fails if the chain no longer contains it |
 
 ### `sablectl auth`
 
