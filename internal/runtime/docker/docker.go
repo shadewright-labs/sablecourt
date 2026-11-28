@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -412,8 +413,15 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		"SABLECOURT_TASK_ID=" + spec.TaskID,
 		"SABLECOURT_WORKLOAD=" + spec.Workload.Metadata.Name,
 	}
-	if spec.InputJSON != "" {
-		env = append(env, "SABLECOURT_INPUT_JSON="+spec.InputJSON)
+	// The input goes in on stdin, never in the environment, where docker
+	// inspect and process listings show it (issue 261).
+	inputLine, err := scruntime.StdinInputLine(spec.InputJSON)
+	if err != nil {
+		return scruntime.Handle{}, err
+	}
+	deliver := inputLine != ""
+	if deliver {
+		env = append(env, scruntime.InputStdinEnv+"=1")
 	}
 	if spec.DataGateURL != "" {
 		env = append(env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL)
@@ -450,7 +458,10 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		Config: &container.Config{
 			Image:     image.ID,
 			Env:       env,
-			OpenStdin: a.AttachHub != nil,
+			OpenStdin: a.AttachHub != nil || deliver,
+			// Without Takeover, stdin closes once the input is written, so
+			// the workload reads EOF after it.
+			StdinOnce: deliver && a.AttachHub == nil,
 			Labels: map[string]string{
 				"sablecourt.io/task-id":  spec.TaskID,
 				"sablecourt.io/workload": spec.Workload.Metadata.Name,
@@ -469,16 +480,23 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		ExternalID:  created.ID,
 		WorkDir:     spec.WorkDir,
 	}
+	var stdinConn net.Conn
 	var stdinCloser io.WriteCloser
-	if a.AttachHub != nil {
+	if a.AttachHub != nil || deliver {
 		if att, ok := a.engineClient().(containerAttacher); ok {
 			if hijacked, err := att.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
 				Stream: true,
 				Stdin:  true,
 			}); err == nil && hijacked.Conn != nil {
+				stdinConn = hijacked.Conn
 				stdinCloser = hijacked.Conn
 			}
 		}
+	}
+	if deliver && stdinConn == nil {
+		// Fail closed: the workload never starts without its input. The
+		// created container is stopped by the caller's cleanup of the handle.
+		return handle, fmt.Errorf("attach stdin of container %s: %w", created.ID, scruntime.ErrInputNotDelivered)
 	}
 
 	if _, err := a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
@@ -486,6 +504,16 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 			_ = stdinCloser.Close()
 		}
 		return handle, fmt.Errorf("start container %s: %w", created.ID, err)
+	}
+	if deliver {
+		if err := writeStdinInput(stdinConn, inputLine); err != nil {
+			_ = stdinConn.Close()
+			return handle, fmt.Errorf("write input to container %s: %w", created.ID, errors.Join(scruntime.ErrInputNotDelivered, err))
+		}
+		if a.AttachHub == nil {
+			_ = stdinConn.Close()
+			stdinCloser = nil
+		}
 	}
 
 	if a.AttachHub != nil {
@@ -501,6 +529,21 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	}
 
 	return handle, nil
+}
+
+// inputWriteTimeout bounds the stdin write of the task input. A workload that
+// does not read its stdin while the input is larger than the pipe buffers
+// fails with input_not_delivered instead of stalling the launch.
+const inputWriteTimeout = 10 * time.Second
+
+func writeStdinInput(conn net.Conn, line string) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(inputWriteTimeout)); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(conn, line); err != nil {
+		return err
+	}
+	return conn.SetWriteDeadline(time.Time{})
 }
 
 func (a *Adapter) streamLogs(ctx context.Context, taskID, containerID string, ls logStreamer) {

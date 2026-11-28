@@ -32,7 +32,10 @@ func TestMainSendsContextPacketFirst(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("SABLECOURT_INPUT_JSON", string(input))
+			t.Setenv("SABLECOURT_INPUT_STDIN", "1")
+			previous := taskInputSource
+			taskInputSource = strings.NewReader(string(input) + "\n")
+			t.Cleanup(func() { taskInputSource = previous })
 			t.Setenv("SABLECOURT_TASK_TOKEN", "test-token")
 			t.Setenv("SABLECOURT_MODEL_GATE_URL", "/model")
 			t.Setenv("SABLECOURT_DATA_GATE_URL", "/control/gate/mcp")

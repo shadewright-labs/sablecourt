@@ -43,6 +43,7 @@ func TestK8sWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 		t.Run(runtimeType, func(t *testing.T) {
 			fakeClient := fake.NewSimpleClientset()
 			adapter := NewAdapter(Options{Client: fakeClient, Namespace: "sablecourt-workloads"})
+			adapter.attachPod = discardAttach
 			ownTok := synthK8sSecret("sc_", "task_", "11223344556677889900aabbccddeeff")
 			handle, err := adapter.Start(ctx, scruntime.LaunchSpec{
 				TaskID:         "k8s-reach-" + runtimeType,

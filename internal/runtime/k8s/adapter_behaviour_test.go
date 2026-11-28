@@ -100,6 +100,7 @@ func TestStartValidationEnvAndWorkloadKind(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				client := fake.NewSimpleClientset()
 				a := NewAdapter(Options{Client: client})
+				a.attachPod = discardAttach
 				spec := scruntime.LaunchSpec{
 					TaskID:         "task_01",
 					InputJSON:      `{"x":1}`,
@@ -151,7 +152,7 @@ func TestStartValidationEnvAndWorkloadKind(t *testing.T) {
 				for _, e := range env {
 					envMap[e.Name] = e.Value
 				}
-				if envMap["SABLECOURT_INPUT_JSON"] != spec.InputJSON || envMap["SABLECOURT_DATA_GATE_URL"] != spec.DataGateURL || envMap["SABLECOURT_TASK_TOKEN"] != spec.TaskToken {
+				if _, leaked := envMap["SABLECOURT_INPUT_JSON"]; leaked || envMap[scruntime.InputStdinEnv] != "1" || envMap["SABLECOURT_DATA_GATE_URL"] != spec.DataGateURL || envMap["SABLECOURT_TASK_TOKEN"] != spec.TaskToken {
 					t.Errorf("unexpected env map: %+v", envMap)
 				}
 				_, hasModel := envMap["SABLECOURT_MODEL_GATE_URL"]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,6 +29,42 @@ type taskInput struct {
 	ConclaveID    string `json:"conclaveId"`
 	Role          string `json:"role"`
 	ContextPacket string `json:"context_packet"`
+}
+
+// maxTaskInputBytes bounds the stdin line that carries the task input.
+const maxTaskInputBytes = 8 << 20
+
+// taskInputSource is where the task input is read from; tests replace it.
+var taskInputSource io.Reader = os.Stdin
+
+// readTaskInput reads the task input from the first line of stdin when the
+// runtime set SABLECOURT_INPUT_STDIN=1. The runtime never puts the input in
+// the environment. The line is one JSON value: an object is decoded into
+// the input fields, a JSON string is the prompt, and any other line that
+// does not decode is used as the prompt as it is. A missing newline within
+// maxTaskInputBytes is an error, so a cut input is never acted on.
+func readTaskInput(flag string, r io.Reader) (taskInput, error) {
+	var in taskInput
+	if flag != "1" {
+		return in, nil
+	}
+	line, err := bufio.NewReaderSize(io.LimitReader(r, maxTaskInputBytes+1), 64<<10).ReadString('\n')
+	if err != nil {
+		return in, fmt.Errorf("no complete input line on stdin: %w", err)
+	}
+	raw := strings.TrimSpace(line)
+	if raw == "" {
+		return in, nil
+	}
+	var prompt string
+	if json.Unmarshal([]byte(raw), &prompt) == nil {
+		in.Prompt = prompt
+		return in, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		in = taskInput{Prompt: raw}
+	}
+	return in, nil
 }
 
 func (in taskInput) peerWake() bool {
@@ -62,12 +99,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	var in taskInput
-	rawIn := strings.TrimSpace(os.Getenv("SABLECOURT_INPUT_JSON"))
-	if rawIn != "" {
-		if err := json.Unmarshal([]byte(rawIn), &in); err != nil {
-			in.Prompt = rawIn
-		}
+	in, err := readTaskInput(os.Getenv("SABLECOURT_INPUT_STDIN"), taskInputSource)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sablecourt-agent cannot read its task input: %v\n", err)
+		os.Exit(1)
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(in.Provider))

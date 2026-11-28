@@ -237,9 +237,17 @@ func TestDockerAdapterPingImageNetworkAndLifecycle(t *testing.T) {
 		for chunk := range ch {
 			got.WriteString(chunk)
 		}
-		if !slices.Contains(eng.createdOpts.Config.Env, "SABLECOURT_INPUT_JSON="+spec.InputJSON) ||
+		if !slices.Contains(eng.createdOpts.Config.Env, scruntime.InputStdinEnv+"=1") ||
 			!slices.Contains(eng.createdOpts.Config.Env, "SABLECOURT_DATA_GATE_URL="+spec.DataGateURL) {
 			t.Fatalf("missing env vars: %v", eng.createdOpts.Config.Env)
+		}
+		for _, kv := range eng.createdOpts.Config.Env {
+			if strings.Contains(kv, spec.InputJSON) || strings.HasPrefix(kv, "SABLECOURT_INPUT_JSON=") {
+				t.Fatalf("input reached the environment: %q", kv)
+			}
+		}
+		if conn2.body.String() != spec.InputJSON+"\n" {
+			t.Fatalf("stdin = %q, want the input line", conn2.body.String())
 		}
 		if got.String() != "hello world\n" {
 			t.Fatalf("hub output = %q, want %q", got.String(), "hello world\n")

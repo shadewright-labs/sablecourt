@@ -188,6 +188,8 @@ func (s *SQLiteStore) ListWorkloads(ctx context.Context) ([]domain.WorkloadRecor
 
 func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) (err error) {
 	defer func() { store.NoteEffectIf(ctx, err, "task %s was created", t.ID) }()
+	// The store write boundary for task input (issue 261).
+	t.InputJSON = store.RedactTaskInput(t.InputJSON)
 	now := nowRFC3339()
 	created := now
 	if !t.CreatedAt.IsZero() {
@@ -277,6 +279,7 @@ func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]doma
 
 func (s *SQLiteStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) (err error) {
 	defer func() { store.NoteEffectIf(ctx, err, "a message was added to task %s", msg.TaskID) }()
+	msg.Content = store.RedactTaskInput(msg.Content)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO task_messages (task_id, role, content, created_at)
 		VALUES (?, ?, ?, ?)

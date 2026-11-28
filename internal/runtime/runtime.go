@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -274,4 +276,41 @@ type CouncilInspector interface {
 // LocalImageResolver resolves a local image reference to its immutable sha256 ID without pulling.
 type LocalImageResolver interface {
 	ResolveLocalImage(context.Context, string) (string, error)
+}
+
+// ErrInputNotDelivered: the runtime could not hand the task input to the
+// workload (stdin attach or write failed). The task fails with reason
+// input_not_delivered instead of running without its input.
+var ErrInputNotDelivered = errors.New("task input not delivered")
+
+// InputStdinEnv tells a Docker or Kubernetes workload that its task input is
+// the first line of its stdin. The variable holds only "1", never the input:
+// environment values show in docker inspect, pod specs and process listings.
+const InputStdinEnv = "SABLECOURT_INPUT_STDIN"
+
+// StdinInputLine frames task input for delivery on a workload's stdin: one
+// line of JSON ending in a newline. JSON input is compacted, so its strings
+// keep their escaped line breaks and the frame stays one line. Input that is
+// not JSON is sent as a JSON string. Empty input yields an empty frame.
+func StdinInputLine(input string) (string, error) {
+	if input == "" {
+		return "", nil
+	}
+	var buf bytes.Buffer
+	if json.Valid([]byte(input)) {
+		if err := json.Compact(&buf, []byte(input)); err != nil {
+			return "", fmt.Errorf("frame task input: %w", ErrInputNotDelivered)
+		}
+	} else {
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return "", fmt.Errorf("frame task input: %w", ErrInputNotDelivered)
+		}
+		buf.Write(raw)
+	}
+	if bytes.ContainsAny(buf.Bytes(), "\r\n") {
+		return "", fmt.Errorf("frame task input: %w", ErrInputNotDelivered)
+	}
+	buf.WriteByte('\n')
+	return buf.String(), nil
 }

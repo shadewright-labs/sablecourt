@@ -34,7 +34,7 @@ The Model Gate takes `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`). 
 | Pod security | `automountServiceAccountToken: false`, `runAsNonRoot`, seccomp `RuntimeDefault` |
 | Container `workload` | image from `runtime.image` (required), `allowPrivilegeEscalation: false`, all capabilities dropped, `readOnlyRootFilesystem` from the workload's `readOnlyRootfs` |
 | Sandbox | `runtimeClassName` only when `--k8s-runtime-class` is set; with the flag empty the pod runs under the node's default runtime |
-| Environment | `SABLECOURT_MANAGED`, `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_INPUT_JSON`, `SABLECOURT_DATA_GATE_URL`, `SABLECOURT_TASK_TOKEN` (the lease) and, with a model grant, `SABLECOURT_MODEL_GATE_URL` |
+| Environment | `SABLECOURT_MANAGED`, `SABLECOURT_TASK_ID`, `SABLECOURT_WORKLOAD`, `SABLECOURT_INPUT_STDIN` (the input itself goes in on standard input through a pod attach), `SABLECOURT_DATA_GATE_URL`, `SABLECOURT_TASK_TOKEN` (the lease) and, with a model grant, `SABLECOURT_MODEL_GATE_URL` |
 | Labels | `app.kubernetes.io/managed-by: sablecourt`, `sablecourt.io/workload`, `sablecourt.io/zone`; the Job (not the pod) also carries `sablecourt.io/task-id` |
 | Not set | resource requests or limits, volumes, a named service account, `activeDeadlineSeconds` |
 

@@ -159,7 +159,7 @@ func TestContainerAndCouncilWorkloadsCannotReachDaemonSecrets(t *testing.T) {
 		eng := newCouncilEngine()
 		eng.net = network.Network{Name: DefaultNetworkName, ID: "net-id", Internal: true, Driver: "bridge"}
 		eng.imageID = "sha256:" + strings.Repeat("a", 64)
-		adapter := testAdapter(eng, DefaultNetworkName)
+		adapter := testAdapter(stdinAttachEngine{eng}, DefaultNetworkName)
 		ownTok := synthDockerSecret("sc_", "task_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 		_, err := adapter.Start(ctx, rt.LaunchSpec{
 			TaskID:         "task-cont-reach",

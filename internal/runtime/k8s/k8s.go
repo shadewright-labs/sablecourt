@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -43,6 +44,14 @@ type Adapter struct {
 	runtimeClassName string
 	attachHub        *attach.Hub
 	attachCtx        context.Context
+	// attachPod attaches to the workload container of a pod; nil means the
+	// SPDY attach through restConfig. Tests replace it.
+	attachPod func(ctx context.Context, pod string, stdin io.Reader, out io.Writer) error
+
+	mu sync.Mutex
+	// undelivered holds the external IDs of launches whose input could not
+	// be written to the pod's stdin; Observe reports them failed.
+	undelivered map[string]bool
 }
 
 func (a *Adapter) SetAttachHub(ctx context.Context, hub *attach.Hub) {
@@ -112,8 +121,18 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		{Name: "SABLECOURT_TASK_ID", Value: spec.TaskID},
 		{Name: "SABLECOURT_WORKLOAD", Value: spec.Workload.Metadata.Name},
 	}
-	if spec.InputJSON != "" {
-		env = append(env, corev1.EnvVar{Name: "SABLECOURT_INPUT_JSON", Value: spec.InputJSON})
+	// The input goes in on stdin through a pod attach, never in the pod
+	// spec, where anyone who can read pods sees it (issue 261).
+	inputLine, err := scruntime.StdinInputLine(spec.InputJSON)
+	if err != nil {
+		return scruntime.Handle{}, err
+	}
+	deliver := inputLine != ""
+	if deliver {
+		if !a.canAttach() {
+			return scruntime.Handle{}, fmt.Errorf("no pod attach configured: %w", scruntime.ErrInputNotDelivered)
+		}
+		env = append(env, corev1.EnvVar{Name: scruntime.InputStdinEnv, Value: "1"})
 	}
 	if spec.DataGateURL != "" {
 		env = append(env, corev1.EnvVar{Name: "SABLECOURT_DATA_GATE_URL", Value: spec.DataGateURL})
@@ -146,7 +165,9 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 				Name:  "workload",
 				Image: spec.Workload.Spec.Runtime.Image,
 				Env:   env,
-				Stdin: a.attachHub != nil,
+				Stdin: a.attachHub != nil || deliver,
+				// Without Takeover, stdin closes when the input attach ends.
+				StdinOnce: deliver && a.attachHub == nil,
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &falseVal,
 					ReadOnlyRootFilesystem:   &readOnlyRoot,
@@ -162,7 +183,8 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		podSpec.RuntimeClassName = &rc
 	}
 
-	logCtx := ctx
+	// The watcher outlives Start, whose context ends when Start returns.
+	logCtx := context.WithoutCancel(ctx)
 	if a.attachCtx != nil {
 		logCtx = a.attachCtx
 	}
@@ -197,14 +219,17 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 		if err != nil {
 			return scruntime.Handle{}, fmt.Errorf("create kubernetes deployment: %w", err)
 		}
-		if a.attachHub != nil {
-			a.attachHub.Register(spec.TaskID, nil)
-			go a.streamPodLogsBySelector(logCtx, spec.TaskID, "sablecourt.io/deployment="+created.Name)
-		}
-		return scruntime.Handle{
+		handle := scruntime.Handle{
 			AdapterName: "k8s",
 			ExternalID:  "deploy/" + created.Name,
-		}, nil
+		}
+		if a.attachHub != nil {
+			a.attachHub.Register(spec.TaskID, nil)
+		}
+		if a.attachHub != nil || deliver {
+			go a.watchPod(logCtx, spec.TaskID, "sablecourt.io/deployment="+created.Name, handle, inputLine)
+		}
+		return handle, nil
 	}
 
 	job := &batchv1.Job{
@@ -238,14 +263,151 @@ func (a *Adapter) Start(ctx context.Context, spec scruntime.LaunchSpec) (scrunti
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("create kubernetes job: %w", err)
 	}
-	if a.attachHub != nil {
-		a.attachHub.Register(spec.TaskID, nil)
-		go a.streamPodLogsBySelector(logCtx, spec.TaskID, "job-name="+created.Name)
-	}
-	return scruntime.Handle{
+	handle := scruntime.Handle{
 		AdapterName: "k8s",
 		ExternalID:  created.Name,
-	}, nil
+	}
+	if a.attachHub != nil {
+		a.attachHub.Register(spec.TaskID, nil)
+	}
+	if a.attachHub != nil || deliver {
+		go a.watchPod(logCtx, spec.TaskID, "job-name="+created.Name, handle, inputLine)
+	}
+	return handle, nil
+}
+
+// inputPodPolls is how many one-second polls the input delivery waits for
+// the pod to leave Pending (image pulls included) before it gives up.
+const inputPodPolls = 300
+
+func (a *Adapter) canAttach() bool {
+	return a.attachPod != nil || a.restConfig != nil
+}
+
+// watchPod waits for the launch's pod, writes the task input as the first
+// line of its stdin, and serves Scry and Takeover when a hub is set. When
+// the input cannot be written in full, the launch is stopped and Observe
+// reports it failed with reason input_not_delivered, so the workload never
+// runs on without its input.
+func (a *Adapter) watchPod(parent context.Context, taskID, selector string, handle scruntime.Handle, input string) {
+	if input == "" {
+		a.streamPodLogsBySelector(parent, taskID, selector)
+		return
+	}
+	if a.attachHub != nil {
+		defer a.attachHub.Close(taskID)
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	defer cancel()
+	podName := a.waitForPod(ctx, selector, inputPodPolls)
+	in := &inputReader{data: input}
+	if podName != "" {
+		var stdin io.Reader = in
+		var out io.Writer
+		if a.attachHub != nil {
+			stdinR, stdinW := io.Pipe()
+			a.attachHub.Register(taskID, stdinW)
+			defer func() { _ = stdinR.Close() }()
+			stdin = io.MultiReader(in, stdinR)
+			out = &hubWriter{hub: a.attachHub, taskID: taskID}
+		}
+		_ = a.attach(ctx, podName, stdin, out)
+	}
+	if !in.done() {
+		a.inputNotDelivered(handle)
+	}
+}
+
+// inputReader yields the input once and records whether it was read in full.
+type inputReader struct {
+	mu   sync.Mutex
+	data string
+	off  int
+}
+
+func (r *inputReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.off >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	return n, nil
+}
+
+func (r *inputReader) done() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.off >= len(r.data)
+}
+
+func (a *Adapter) inputNotDelivered(handle scruntime.Handle) {
+	a.mu.Lock()
+	if a.undelivered == nil {
+		a.undelivered = map[string]bool{}
+	}
+	a.undelivered[handle.ExternalID] = true
+	a.mu.Unlock()
+	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = a.Stop(stopCtx, handle)
+}
+
+func (a *Adapter) inputFailed(externalID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.undelivered[externalID]
+}
+
+func (a *Adapter) attach(ctx context.Context, podName string, stdin io.Reader, out io.Writer) error {
+	if a.attachPod != nil {
+		return a.attachPod(ctx, podName, stdin, out)
+	}
+	if a.restConfig == nil {
+		return errors.New("no pod attach configured")
+	}
+	rc := a.client.CoreV1().RESTClient()
+	if rc == nil {
+		return errors.New("no REST client for pod attach")
+	}
+	req := rc.Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(a.namespace).
+		SubResource("attach").
+		VersionedParams(&corev1.PodAttachOptions{
+			Container: "workload",
+			Stdin:     true,
+			Stdout:    out != nil,
+			Stderr:    out != nil,
+		}, scheme.ParameterCodec)
+	exec, err := remotecommand.NewSPDYExecutor(a.restConfig, http.MethodPost, req.URL())
+	if err != nil {
+		return err
+	}
+	opts := remotecommand.StreamOptions{Stdin: stdin}
+	if out != nil {
+		opts.Stdout, opts.Stderr = out, out
+	}
+	return exec.StreamWithContext(ctx, opts)
+}
+
+func (a *Adapter) waitForPod(ctx context.Context, selector string, polls int) string {
+	for range polls {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err == nil && len(pods.Items) > 0 && pods.Items[0].Status.Phase != corev1.PodPending {
+			return pods.Items[0].Name
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(1 * time.Second):
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) streamPodLogsBySelector(parent context.Context, taskID, selector string) {
@@ -323,6 +485,9 @@ func (a *Adapter) streamPodLogsBySelector(parent context.Context, taskID, select
 }
 
 func (a *Adapter) Observe(ctx context.Context, handle scruntime.Handle) (scruntime.Observation, error) {
+	if a.inputFailed(handle.ExternalID) {
+		return scruntime.Observation{ObservedAt: time.Now().UTC(), State: scruntime.StateFailed, ExitCode: 1, Message: "input_not_delivered"}, nil
+	}
 	if depName, isDeploy := strings.CutPrefix(handle.ExternalID, "deploy/"); isDeploy {
 		dep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, depName, metav1.GetOptions{})
 		if err != nil {

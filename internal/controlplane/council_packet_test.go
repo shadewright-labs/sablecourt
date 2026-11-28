@@ -34,7 +34,9 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 		{"blank", "  ", false},
 		{"missing", nil, false},
 		{"oversize", strings.Repeat("p", (32<<10)+1), false},
-		{"secret", "fixture " + secret, false},
+		// The store redacts task input on write (issue 261), so a reserved
+		// packet that carried a secret is stored, and launched, without it.
+		{"secret", "fixture " + secret, true},
 		{"invalid UTF-8", "invalid-utf8-marker", false},
 	} {
 		for _, class := range []domain.WorkloadClass{domain.ClassCodingAgent, domain.ClassLongLivedAgent, domain.ClassDeterministicController} {
@@ -86,6 +88,12 @@ func TestCouncilPacketAtLaunch(t *testing.T) {
 				}
 				if err := json.Unmarshal([]byte(stub.lastSpec.InputJSON), &launch); err != nil {
 					t.Fatal(err)
+				}
+				if tc.name == "secret" {
+					if launch.Packet != "fixture [REDACTED:openai_key]" {
+						t.Fatalf("launch packet = %q, want the secret replaced", launch.Packet)
+					}
+					return
 				}
 				if launch.Packet != packet.Markdown {
 					t.Fatal("adapter did not receive the reserved packet")

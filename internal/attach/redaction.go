@@ -340,7 +340,9 @@ func redactSpace(b byte) bool {
 // separators are sent to the caller. Only the value needs to be withheld.
 func (r *textRedactor) assignmentAt(b byte) credentialKind {
 	space := redactSpace(b)
-	if r.labelLen != 0 && (space || b == ':' || b == '=') {
+	// A quote may close the label, as in the JSON name "password".
+	quote := b == '"' || b == '\''
+	if r.labelLen != 0 && (space || quote || b == ':' || b == '=') {
 		label := r.label[:r.labelLen]
 		switch {
 		case secretLabel.Match(label):
@@ -351,7 +353,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 	}
 	switch r.assignment {
 	case secretSeparator:
-		if space {
+		if space || quote {
 			return noCredential
 		}
 		if b == ':' || b == '=' {
@@ -373,7 +375,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 			return secret
 		}
 	case bearerColon:
-		if space {
+		if space || quote {
 			return noCredential
 		}
 		if b == ':' {
@@ -382,7 +384,7 @@ func (r *textRedactor) assignmentAt(b byte) credentialKind {
 			return noCredential
 		}
 	case bearerWord:
-		if space && r.bearerPos == 0 {
+		if (space || quote) && r.bearerPos == 0 {
 			return noCredential
 		}
 		const word = "bearer"

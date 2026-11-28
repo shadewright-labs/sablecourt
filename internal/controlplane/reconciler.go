@@ -498,6 +498,9 @@ func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKe
 }
 
 func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON, parentID string, step *workflowStepRecord) (domain.Task, error) {
+	// The store applies the same rule on write; applying it here too keeps
+	// the returned task and the first task message equal to the stored row.
+	inputJSON = store.RedactTaskInput(inputJSON)
 	if step == nil && strings.HasPrefix(idempotencyKey, "wf:") {
 		return domain.Task{}, errWorkflowKeyReserved
 	}
@@ -920,6 +923,7 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		idempotencyKey = parentTaskID + ":" + targetWorkload + ":" + id
 	}
 	now := r.now()
+	inputJSON = store.RedactTaskInput(inputJSON)
 	child := domain.Task{
 		ID:                id,
 		ParentTaskID:      parentTaskID,
@@ -1374,7 +1378,13 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s[:n]
 }
 
+// inputNotDeliveredFacts is fixed text: adapter errors can carry launch input.
+const inputNotDeliveredFacts = `{"reason":"input_not_delivered","detail":"the runtime could not hand the task input to the workload on its stdin"}`
+
 func launchFailureFacts(err error) string {
+	if errors.Is(err, scruntime.ErrInputNotDelivered) {
+		return inputNotDeliveredFacts
+	}
 	if errors.Is(err, scruntime.ErrCodingRuntimeUnavailable) {
 		// Fixed text: adapter errors can carry launch input.
 		return `{"reason":"coding_runtime_unavailable","detail":"coding tasks run in harness containers only: no container runtime is configured and host mode is off (see sablectl doctor)"}`
@@ -1400,12 +1410,16 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	startFailed := false
 	launchFacts := `{}`
 	var refusal *scruntime.CommandRefusal
+	inputNotDelivered := false
 	defer func() {
 		if launchErr != nil && claimed {
 			cleanupCtx := context.WithoutCancel(ctx)
 			reason := "launch_failed"
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
 				reason = "author_checkout_unavailable"
+			}
+			if inputNotDelivered {
+				reason = "input_not_delivered"
 			}
 			if refusal != nil || errors.As(launchErr, &refusal) {
 				reason, launchFacts = "command_refused", commandRefusalFacts(refusal)
@@ -1479,11 +1493,14 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
-	// The input reaches the workload as an environment value. It is a declared
-	// JSON record: decoded once and, when it shows a daemon-held value, refused
-	// whole (redact.RefusedJSON, none of the payload). Exact match only, so
-	// ordinary task text is not rewritten by pattern rules.
-	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(inputJSON)
+	// The input reaches the workload on its stdin, never in its environment
+	// (issue 261). The pattern rules and exact match run on every string
+	// first (store.RedactTaskInput, the rule the store applies on write, so
+	// a row stored before that rule existed is covered too). Then it is a
+	// declared JSON record: decoded once and, when it still shows a
+	// daemon-held value, refused whole (redact.RefusedJSON, none of the
+	// payload).
+	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(store.RedactTaskInput(inputJSON))
 	if readOnly && command == nil {
 		var payload struct {
 			Packet string `json:"context_packet"`
@@ -1563,6 +1580,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 	// Keep a command refusal even when the start call also ran out of time.
 	_ = errors.As(startErr, &refusal)
+	inputNotDelivered = errors.Is(startErr, scruntime.ErrInputNotDelivered)
 	if callCtx.Err() != nil {
 		startErr = callCtx.Err()
 	}

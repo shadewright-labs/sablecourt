@@ -112,7 +112,7 @@ Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/cod
 | `SABLECOURT_MANAGED` | `1` | `1` | `1` |
 | `SABLECOURT_TASK_ID` | task ID | task ID | task ID |
 | `SABLECOURT_WORKLOAD` | workload name | workload name | workload name |
-| `SABLECOURT_INPUT_JSON` | task input, when set | not passed | not passed |
+| `SABLECOURT_INPUT_STDIN` | `1` when the task has input; the input itself is the first line of the container's standard input, one JSON value, and is never in the environment | not passed | not passed |
 | `SABLECOURT_DATA_GATE_URL` | URL of `/gate/` | same | same |
 | `SABLECOURT_MODEL_GATE_URL` | URL of `/gate/model/`, when the workload holds a Model Gate grant | not passed | not passed |
 | `SABLECOURT_TASK_TOKEN` | the `sc_task_` lease | same | read by the container bootstrap from standard input, then unset |
