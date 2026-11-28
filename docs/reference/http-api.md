@@ -98,8 +98,8 @@ Source: `cmd/sablecourtd/main.go`.
 | `GET /api/v1/audit/verify` | Walk the audit hash chain. 200 with `verifiedRows`, `legacyRows` (version 1 rows) and the chain `head` (`seq`, `id`, `hash`); 409 with the error when a row has no hash or does not match, or the chain does not reach the optional `anchor=SEQ:HASH`; 400 for a malformed anchor. |
 | `GET /api/v1/audit/export` | The newest 10000 audit rows as `application/x-ndjson`, oldest first. |
 | `GET /api/v1/memory` | List up to 100 Court Memory entries, never those in a `learning:` namespace. Query `namespace` and `q` (substring match). |
-| `POST /api/v1/memory` | Set an entry; the value is redacted, and a `learning:` namespace is refused with 403. Body `{"namespace","key","value"}`. |
-| `DELETE /api/v1/memory/{namespace}/{key}` | Delete an entry; a `learning:` namespace is refused with 403. |
+| `POST /api/v1/memory` | Set an entry; the value is redacted, and a `learning:` namespace is refused with 403. Body `{"namespace","key","value"}`. The `memory.put` audit row (category `memory`) is written in the same transaction: when it cannot be written nothing is stored (500). |
+| `DELETE /api/v1/memory/{namespace}/{key}` | Delete an entry; a `learning:` namespace is refused with 403 and a missing entry with 404. The `memory.delete` audit row is written in the same transaction: when it cannot be written nothing is deleted (500). |
 | `GET /api/v1/schedules` | List declared Schedules. |
 | `POST /api/v1/schedules/{name}/run` | Run a Schedule now. |
 | `POST /api/v1/reload` | Reload the manifests. |
@@ -108,7 +108,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |
 | `GET /api/v1/providers/tiers` | The `fast`, `coding` and `critic` model routes. |
-| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model","family"}` (`family` optional); a malformed or disagreeing family returns 400 and saves nothing. |
+| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model","family"}` (`family` optional); a malformed or disagreeing family returns 400 and saves nothing. The routes and one `model_tiers.save` audit row are written in one transaction: when the row cannot be written nothing is saved (500). |
 | `GET /api/v1/learnings` | Up to 100 accepted, unexpired learnings from the ADR-0012 record that match `?repo=` and `?path=`, as a JSON array of `domain.Learning` objects (Go field names, `[]` when none match). `repo` is a repository remote URL with an `https`, `http` or `ssh` scheme, a host and no credentials, query or fragment; any other value, including a bare repository name, gets 400 with an `error` message. `path` is a comma-separated list of repository paths; spaces around each entry are trimmed. Legacy `learning:*` rows in Court Memory are not read. Before ADR-0012 this route returned Court Memory entries and took a repository name. |
 | `POST /api/v1/learnings` | Disabled: refuses every call ([ADR-0012](../adr/0012-learning-evidence-and-expiry.md)). |
 | `POST /api/v1/notify/test` | Send a test alert, with a redacted title and text, to the configured chat webhook (secret `notify_webhook_url`, or `SABLECOURT_NOTIFY_WEBHOOK_URL`). With no webhook configured nothing is sent and the reply is still 200 `{"status":"sent"}`; a failed send is 502. |

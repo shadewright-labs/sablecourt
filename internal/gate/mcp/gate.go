@@ -361,7 +361,7 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 			if msg, ok := store.AuditFailureText(ctx, err, "the approval request"); ok {
 				return errorToolResult(msg), nil
 			}
-			return errorToolResult("failed to enqueue approval: " + err.Error()), nil
+			return errorToolResult("failed to enqueue approval: " + redact.String(err.Error())), nil
 		}
 		_ = g.store.UpdateTaskState(ctx, lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))
 		msg, _ := json.Marshal(map[string]string{

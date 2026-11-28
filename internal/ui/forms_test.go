@@ -87,6 +87,16 @@ func (s failingStore) DeleteMemory(ctx context.Context, ns, key string) error {
 	return s.Store.DeleteMemory(ctx, ns, key)
 }
 
+// ChangeMemory fails a change that stores entries under "putmemory" and one
+// that deletes entries under "deletememory", as the memory forms write
+// through it.
+func (s failingStore) ChangeMemory(ctx context.Context, c store.MemoryChange) error {
+	if (s.fail == "putmemory" && len(c.Put) > 0) || (s.fail == "deletememory" && len(c.Delete) > 0) {
+		return errStoreDown
+	}
+	return s.Store.ChangeMemory(ctx, c)
+}
+
 // seedWorkload stores the workload record that tasks reference.
 func seedWorkload(t *testing.T, st store.Store, name string) {
 	t.Helper()

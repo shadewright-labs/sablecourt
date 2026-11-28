@@ -104,3 +104,8 @@ func (s *PostgresStore) DeleteMemory(ctx context.Context, namespace, key string)
 	}
 	return nil
 }
+
+// ChangeMemory writes change and its audit row in one transaction.
+func (s *PostgresStore) ChangeMemory(ctx context.Context, change store.MemoryChange) error {
+	return store.ApplyMemoryChange(ctx, s.db, change, s.appendAuditTx)
+}

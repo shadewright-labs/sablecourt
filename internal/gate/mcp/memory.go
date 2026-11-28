@@ -31,8 +31,15 @@ func isReservedReadNamespace(ns string) bool {
 
 // auditMemory writes a memory record and returns an error wrapping
 // store.ErrAuditWrite when the write fails. Refusals ignore the error (it is
-// logged); a write or delete that already happened reports it.
+// logged). A write or delete writes its record with the change instead (see
+// memoryRecord and store.ChangeMemory).
 func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, workloadName, action, outcome string, detail map[string]string) error {
+	return store.RecordAudit(ctx, st, memoryRecord(gate, taskID, workloadName, action, outcome, detail))
+}
+
+// memoryRecord builds the memory audit record of a tool call, with each
+// detail value redacted.
+func memoryRecord(gate *Gate, taskID, workloadName, action, outcome string, detail map[string]string) domain.AuditRecord {
 	for field, value := range detail {
 		detail[field] = redact.String(value)
 	}
@@ -41,7 +48,7 @@ func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, worklo
 	if gate != nil && gate.now != nil {
 		now = gate.now()
 	}
-	return store.RecordAudit(ctx, st, domain.AuditRecord{
+	return domain.AuditRecord{
 		Category:     "memory",
 		TaskID:       taskID,
 		WorkloadName: workloadName,
@@ -49,7 +56,7 @@ func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, worklo
 		Outcome:      outcome,
 		DetailJSON:   string(detailBytes),
 		CreatedAt:    now,
-	})
+	}
 }
 
 // RegisterBuiltinMemory registers redacted project-level Court Memory MCP tools
@@ -94,12 +101,14 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				Author:    wl.Metadata.Name,
 				UpdatedAt: gate.now(),
 			}
-			if err := st.PutMemory(ctx, entry); err != nil {
-				return "", err
-			}
-			if err := auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "stored", map[string]string{
-				"namespace": entry.Namespace,
-				"key":       entry.Key,
+			// The record is written in the same transaction as the entry: a
+			// record that cannot be written stores nothing.
+			if err := st.ChangeMemory(ctx, store.MemoryChange{
+				Audit: memoryRecord(gate, taskID, wl.Metadata.Name, "memory.put", "stored", map[string]string{
+					"namespace": entry.Namespace,
+					"key":       entry.Key,
+				}),
+				Put: []domain.MemoryEntry{entry},
 			}); err != nil {
 				return "", err
 			}
@@ -135,12 +144,12 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			if key == "" {
 				return "", errors.New("key is required")
 			}
-			if err := st.DeleteMemory(ctx, ns, key); err != nil {
-				return "", err
-			}
-			if err := auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "deleted", map[string]string{
-				"namespace": ns,
-				"key":       key,
+			if err := st.ChangeMemory(ctx, store.MemoryChange{
+				Audit: memoryRecord(gate, taskID, wl.Metadata.Name, "memory.delete", "deleted", map[string]string{
+					"namespace": ns,
+					"key":       key,
+				}),
+				Delete: []store.MemoryKey{{Namespace: ns, Key: key}},
 			}); err != nil {
 				return "", err
 			}

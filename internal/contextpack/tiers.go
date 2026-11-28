@@ -60,9 +60,11 @@ func GetModelTiers(ctx context.Context, st store.Store) []TierRoute {
 	return out
 }
 
-// SaveModelTiers persists role-based model routes into Court Memory. A route
-// whose family is malformed or disagrees with the built-in family of its
-// model refuses the whole save before anything is written.
+// SaveModelTiers persists role-based model routes into Court Memory, with one
+// audit row, in one transaction. A route whose family is malformed or
+// disagrees with the built-in family of its model refuses the whole save
+// before anything is written, and so does an audit row that cannot be
+// written (the error then wraps store.ErrAuditWrite).
 func SaveModelTiers(ctx context.Context, st store.Store, routes []TierRoute) error {
 	if st == nil {
 		return nil
@@ -88,24 +90,41 @@ func SaveModelTiers(ctx context.Context, st store.Store, routes []TierRoute) err
 		}
 		clean = append(clean, r)
 	}
+	if len(clean) == 0 {
+		return nil
+	}
 	now := time.Now().UTC()
+	change := store.MemoryChange{}
+	tiers := make([]string, 0, len(clean))
 	for _, r := range clean {
-		t := r.Tier
 		raw, err := json.Marshal(r)
 		if err != nil {
 			return err
 		}
-		if err := st.PutMemory(ctx, domain.MemoryEntry{
+		change.Put = append(change.Put, domain.MemoryEntry{
 			Namespace: ModelTiersNamespace,
-			Key:       t,
+			Key:       r.Tier,
 			Value:     string(raw),
 			Author:    "operator",
 			UpdatedAt: now,
-		}); err != nil {
-			return err
-		}
+		})
+		tiers = append(tiers, r.Tier)
 	}
-	return nil
+	detail, err := json.Marshal(map[string]any{"namespace": ModelTiersNamespace, "tiers": tiers})
+	if err != nil {
+		return err
+	}
+	// The routes and their audit row are written in one transaction: a row
+	// that cannot be written saves no route.
+	change.Audit = domain.AuditRecord{
+		Category:     "memory",
+		WorkloadName: "operator",
+		Action:       "model_tiers.save",
+		Outcome:      "stored",
+		DetailJSON:   string(detail),
+		CreatedAt:    now,
+	}
+	return st.ChangeMemory(ctx, change)
 }
 
 // IsRouteRefusal reports whether an error from SaveModelTiers refused a route

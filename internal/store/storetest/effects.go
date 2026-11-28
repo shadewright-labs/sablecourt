@@ -429,5 +429,16 @@ func StoreScenarios() []Scenario {
 				return st.PutMemory(ctx, domain.MemoryEntry{Namespace: "notes", Key: "k", Value: "v"})
 			},
 			Run: func(ctx context.Context, st store.Store) error { return st.DeleteMemory(ctx, "notes", "k") }},
+		{Name: "change memory with its audit row", Methods: []string{"ChangeMemory"}, Commits: true,
+			Setup: func(ctx context.Context, st store.Store) error {
+				return st.PutMemory(ctx, domain.MemoryEntry{Namespace: "notes", Key: "old", Value: "v"})
+			},
+			Run: func(ctx context.Context, st store.Store) error {
+				return st.ChangeMemory(ctx, store.MemoryChange{
+					Audit:  domain.AuditRecord{Category: "memory", WorkloadName: "operator", Action: "memory.put", Outcome: "stored"},
+					Put:    []domain.MemoryEntry{{Namespace: "notes", Key: "k", Value: "v"}},
+					Delete: []store.MemoryKey{{Namespace: "notes", Key: "old"}},
+				})
+			}},
 	}
 }

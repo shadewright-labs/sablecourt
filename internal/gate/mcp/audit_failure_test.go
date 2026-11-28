@@ -148,16 +148,16 @@ func TestToolAuditWriteFailures(t *testing.T) {
 	}
 }
 
-// memory.put and memory.delete change Court Memory before their own record
-// is written, so a failed record is returned as the tool's error, with the
-// change recorded on the call's effects.
+// memory.put and memory.delete write their record in the same transaction as
+// the change (issue 228), so a record that cannot be written is the tool's
+// error and Court Memory is left as it was, with no effect recorded.
 func TestMemoryToolAuditWriteFailures(t *testing.T) {
 	cases := []struct {
 		name, tool, args, wantErr string
 		wantEffects               []string
 	}{
-		{"put", "memory.put", `{"namespace":"notes","key":"k","value":"v"}`, "audit record could not be written", []string{"memory entry notes/k was stored"}},
-		{"delete", "memory.delete", `{"namespace":"notes","key":"k"}`, "audit record could not be written", []string{"memory entry notes/k was deleted"}},
+		{"put", "memory.put", `{"namespace":"notes","key":"k","value":"changed"}`, "audit record could not be written", nil},
+		{"delete", "memory.delete", `{"namespace":"notes","key":"k"}`, "audit record could not be written", nil},
 		{"reserved namespace stays refused", "memory.put", `{"namespace":"system:x","key":"k","value":"v"}`, "reserved", nil},
 	}
 	for _, tc := range cases {
@@ -177,6 +177,9 @@ func TestMemoryToolAuditWriteFailures(t *testing.T) {
 			}
 			if !slices.Equal(effects.List(), tc.wantEffects) {
 				t.Fatalf("effects %q, want %q", effects.List(), tc.wantEffects)
+			}
+			if e, err := tg.st.GetMemory(context.Background(), "notes", "k"); err != nil || e.Value != "v" {
+				t.Fatalf("memory changed without its record: %+v %v", e, err)
 			}
 		})
 	}

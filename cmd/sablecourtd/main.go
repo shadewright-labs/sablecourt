@@ -1024,6 +1024,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := contextpack.SaveModelTiers(r.Context(), st, routes); err != nil {
+			if writeAuditError(w, r, err, "model tier save") {
+				return
+			}
 			status := http.StatusInternalServerError
 			if contextpack.IsRouteRefusal(err) {
 				status = http.StatusBadRequest
@@ -1570,7 +1573,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			Author:    "operator",
 			UpdatedAt: time.Now().UTC(),
 		}
-		if err := st.PutMemory(r.Context(), entry); err != nil {
+		if err := st.ChangeMemory(r.Context(), store.MemoryChange{
+			Audit: operatorMemoryAudit("memory.put", "stored", entry.Namespace, entry.Key),
+			Put:   []domain.MemoryEntry{entry},
+		}); err != nil {
+			if writeAuditError(w, r, err, "memory write") {
+				return
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1581,8 +1590,19 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "learning namespace is reserved"})
 			return
 		}
-		if err := st.DeleteMemory(r.Context(), r.PathValue("namespace"), r.PathValue("key")); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		ns, key := r.PathValue("namespace"), r.PathValue("key")
+		if err := st.ChangeMemory(r.Context(), store.MemoryChange{
+			Audit:  operatorMemoryAudit("memory.delete", "deleted", ns, key),
+			Delete: []store.MemoryKey{{Namespace: ns, Key: key}},
+		}); err != nil {
+			if writeAuditError(w, r, err, "memory delete") {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -2254,6 +2274,20 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // from the effects recorded on the request: it lists what the request had
 // changed, or says that the request named by what was refused. Every route
 // that can meet a failed audit write checks it before mapping other errors.
+// operatorMemoryAudit is the audit row of an operator's change to one Court
+// Memory entry, written in the change's transaction.
+func operatorMemoryAudit(action, outcome, namespace, key string) domain.AuditRecord {
+	detail, _ := json.Marshal(map[string]string{"namespace": redact.String(namespace), "key": redact.String(key)})
+	return domain.AuditRecord{
+		Category:     "memory",
+		WorkloadName: "operator",
+		Action:       action,
+		Outcome:      outcome,
+		DetailJSON:   string(detail),
+		CreatedAt:    time.Now().UTC(),
+	}
+}
+
 func writeAuditError(w http.ResponseWriter, r *http.Request, err error, what string) bool {
 	msg, ok := store.AuditFailureText(r.Context(), err, what)
 	if ok {

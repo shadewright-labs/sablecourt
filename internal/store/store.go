@@ -93,6 +93,11 @@ type Store interface {
 	GetMemory(ctx context.Context, namespace, key string) (domain.MemoryEntry, error)
 	SearchMemory(ctx context.Context, namespace, query string, limit int) ([]domain.MemoryEntry, error)
 	DeleteMemory(ctx context.Context, namespace, key string) error
+	// ChangeMemory writes change's audit row and memory writes in one
+	// transaction (see ApplyMemoryChange): when the row cannot be written,
+	// nothing is stored or deleted and the error wraps ErrAuditWrite. Every
+	// memory write an operator or a workload asks for goes through it.
+	ChangeMemory(ctx context.Context, change MemoryChange) error
 }
 
 // ConsumeRefusal names why ConsumeApproval updated no row, from the row as

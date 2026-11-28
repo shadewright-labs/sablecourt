@@ -68,6 +68,22 @@ func (s *Store) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
 	return s.Store.AppendAudit(ctx, rec)
 }
 
+// ChangeMemory fails, writing nothing, while Fail is in effect for the
+// change's audit row, as a store whose transaction cannot write that row
+// does; otherwise it passes through.
+func (s *Store) ChangeMemory(ctx context.Context, change store.MemoryChange) error {
+	s.mu.Lock()
+	fail := s.failing && (s.match == nil || s.match(change.Audit))
+	if fail {
+		s.refused = append(s.refused, change.Audit)
+	}
+	s.mu.Unlock()
+	if fail {
+		return store.AuditWriteError(ctx, change.Audit, ErrInjected)
+	}
+	return s.Store.ChangeMemory(ctx, change)
+}
+
 // Action matches records of the named action.
 func Action(name string) func(domain.AuditRecord) bool {
 	return func(rec domain.AuditRecord) bool { return rec.Action == name }

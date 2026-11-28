@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -101,6 +102,41 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 		{name: "retry is refused before its task", fail: "task.submit",
 			post: task("task_f", domain.TaskStateFailed, "/ui/tasks/task_f/retry"),
 			what: "retry"},
+		// Court Memory changes write their row in the change's transaction
+		// (issue 228): a row that cannot be written changes nothing.
+		{name: "memory set is refused and not stored", fail: "memory.put",
+			post: func(*testing.T, store.Store) (string, url.Values) {
+				return "/ui/memory/set", url.Values{"scope": {"notes"}, "key": {"new"}, "value": {"v"}}
+			},
+			what: "memory write",
+			check: func(t *testing.T, st store.Store, _ string) {
+				if _, err := st.GetMemory(ctx, "notes", "new"); err == nil {
+					t.Fatal("memory stored without its row")
+				}
+			}},
+		{name: "memory delete is refused and keeps the entry", fail: "memory.delete",
+			post: func(t *testing.T, st store.Store) (string, url.Values) {
+				if err := st.PutMemory(ctx, domain.MemoryEntry{Namespace: "notes", Key: "old", Value: "v"}); err != nil {
+					t.Fatal(err)
+				}
+				return "/ui/memory/delete", url.Values{"scope": {"notes"}, "key": {"old"}}
+			},
+			what: "memory delete",
+			check: func(t *testing.T, st store.Store, _ string) {
+				if _, err := st.GetMemory(ctx, "notes", "old"); err != nil {
+					t.Fatalf("memory deleted without its row: %v", err)
+				}
+			}},
+		{name: "model tier save is refused and not stored", fail: "model_tiers.save",
+			post: func(*testing.T, store.Store) (string, url.Values) {
+				return "/ui/providers/tiers", url.Values{"tier_fast_provider": {"local"}, "tier_fast_model": {"llama-3"}}
+			},
+			what: "model tier save",
+			check: func(t *testing.T, st store.Store, _ string) {
+				if _, err := st.GetMemory(ctx, contextpack.ModelTiersNamespace, "fast"); err == nil {
+					t.Fatal("model tier stored without its row")
+				}
+			}},
 		{name: "submission is refused", fail: "task.submit",
 			post: func(*testing.T, store.Store) (string, url.Values) {
 				return "/ui/tasks", url.Values{"workload": {"coder"}, "input_json": {"hi"}}

@@ -72,14 +72,17 @@ func (d *Dashboard) handleSetMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	cleanVal := redact.Text(value).Text
 	now := time.Now().UTC()
-	if err := d.store.PutMemory(r.Context(), domain.MemoryEntry{
-		Namespace: scope,
-		Key:       key,
-		Value:     cleanVal,
-		Author:    "operator",
-		UpdatedAt: now,
+	if err := d.store.ChangeMemory(r.Context(), store.MemoryChange{
+		Audit: operatorMemoryAudit("memory.put", "stored", scope, key, now),
+		Put: []domain.MemoryEntry{{
+			Namespace: scope,
+			Key:       key,
+			Value:     cleanVal,
+			Author:    "operator",
+			UpdatedAt: now,
+		}},
 	}); err != nil {
-		http.Redirect(w, r, "/memory?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/memory?err="+url.QueryEscape(errText(r.Context(), err, "memory write", "")), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/memory?notice="+url.QueryEscape(fmt.Sprintf("Saved memory %s/%s", scope, key)), http.StatusSeeOther)
@@ -100,11 +103,29 @@ func (d *Dashboard) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/memory?err="+url.QueryEscape("scope and key are required"), http.StatusSeeOther)
 		return
 	}
-	if err := d.store.DeleteMemory(r.Context(), scope, key); err != nil {
-		http.Redirect(w, r, "/memory?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+	if err := d.store.ChangeMemory(r.Context(), store.MemoryChange{
+		Audit:  operatorMemoryAudit("memory.delete", "deleted", scope, key, time.Now().UTC()),
+		Delete: []store.MemoryKey{{Namespace: scope, Key: key}},
+	}); err != nil {
+		http.Redirect(w, r, "/memory?err="+url.QueryEscape(errText(r.Context(), err, "memory delete", "")), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/memory?notice="+url.QueryEscape(fmt.Sprintf("Deleted memory %s/%s", scope, key)), http.StatusSeeOther)
+}
+
+// operatorMemoryAudit is the audit row of an operator's change to one Court
+// Memory entry, written in the change's transaction. It matches the row of
+// the daemon's /api/v1/memory routes.
+func operatorMemoryAudit(action, outcome, namespace, key string, at time.Time) domain.AuditRecord {
+	detail, _ := json.Marshal(map[string]string{"namespace": redact.String(namespace), "key": redact.String(key)})
+	return domain.AuditRecord{
+		Category:     "memory",
+		WorkloadName: "operator",
+		Action:       action,
+		Outcome:      outcome,
+		DetailJSON:   string(detail),
+		CreatedAt:    at,
+	}
 }
 
 func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
@@ -237,29 +258,20 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		"conclave_id":      id,
 		"message_id":       msgID,
 	})
-	// Recorded before it is stored: a record that cannot be written refuses
-	// the proposal.
-	if err := store.RecordAudit(r.Context(), d.store, domain.AuditRecord{
-		Category:     "memory",
-		WorkloadName: "operator",
-		Action:       "learning.propose",
-		Outcome:      "proposed",
-		DetailJSON:   string(detailBytes),
-		CreatedAt:    now,
-	}); err != nil {
-		redirectConclaveErr(w, r, id, errText(r.Context(), err, "proposal", ""))
-		return
-	}
-	if err := d.store.PutMemory(r.Context(), entry); err != nil {
-		store.LogClosingAudit(r.Context(), d.store, domain.AuditRecord{
+	// Recorded in the same transaction as the proposal: a record that
+	// cannot be written refuses the proposal and stores nothing.
+	if err := d.store.ChangeMemory(r.Context(), store.MemoryChange{
+		Audit: domain.AuditRecord{
 			Category:     "memory",
 			WorkloadName: "operator",
 			Action:       "learning.propose",
-			Outcome:      "error",
+			Outcome:      "proposed",
 			DetailJSON:   string(detailBytes),
-			CreatedAt:    time.Now().UTC(),
-		})
-		redirectConclaveErr(w, r, id, err.Error())
+			CreatedAt:    now,
+		},
+		Put: []domain.MemoryEntry{entry},
+	}); err != nil {
+		redirectConclaveErr(w, r, id, errText(r.Context(), err, "proposal", ""))
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Proposed learning saved (pending review): "+entry.Namespace+"/"+entry.Key), http.StatusSeeOther)
@@ -280,7 +292,7 @@ func (d *Dashboard) handleProviderSaveTiers(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	if err := contextpack.SaveModelTiers(r.Context(), d.store, routes); err != nil {
-		http.Redirect(w, r, "/providers?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/providers?err="+url.QueryEscape(errText(r.Context(), err, "model tier save", "")), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/providers?notice="+url.QueryEscape("Saved role-based model tiers (fast / coding / critic)"), http.StatusSeeOther)
