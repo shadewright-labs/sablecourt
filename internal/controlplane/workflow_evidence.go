@@ -61,6 +61,16 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 	return &step, nil
 }
 
+// stepAuthorCommit is the commit a verifier following the completed step must
+// review. Only an author step's artifacts set a new commit; a completed verifier
+// passes on the commit it was pinned to, whatever artifacts it emitted.
+func stepAuthorCommit(completed *workflowStepRecord, completedVerifier bool, artifacts string) string {
+	if completedVerifier {
+		return completed.AuthorCommit
+	}
+	return authorCommit(artifacts)
+}
+
 func authorCommit(artifacts string) string {
 	var items []scruntime.Artifact
 	if json.Unmarshal([]byte(artifacts), &items) != nil {

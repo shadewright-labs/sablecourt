@@ -1596,9 +1596,15 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if nextStep.Role != "" {
 		payload["role"] = nextStep.Role
 	}
+	completedVerifier := step.Role == "verifier" || meta.Role == "verifier"
 	if nextStep.Role == "verifier" {
+		// A verifier after a verifier reviews the same author step.
 		payload["author_task_id"] = completedTask.ID
 		payload["author_step_index"] = meta.StepIndex
+		if completedVerifier {
+			payload["author_task_id"] = meta.AuthorTaskID
+			payload["author_step_index"] = meta.AuthorStepIndex
+		}
 		maxR := nextStep.MaxRetries
 		if maxR == 0 {
 			maxR = meta.MaxRetries
@@ -1623,7 +1629,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	raw, _ := json.Marshal(payload)
 	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
 	if nextStep.Role == "verifier" {
-		next.AuthorCommit = authorCommit(completedTask.ArtifactsJSON)
+		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, completedTask.ArtifactsJSON)
 	}
 	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
 	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)
