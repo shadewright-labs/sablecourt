@@ -22,7 +22,7 @@ A task carries an idempotency key. If none is given the task ID is used. Submitt
 
 | State | Meaning | Left by |
 | --- | --- | --- |
-| `submitted` | Stored, nothing started. No lease, no heartbeat and no budget ceiling yet. | The reconciler claims it (`dispatch_claimed`) or fails it (`workload_missing`, `adapter_missing`); an operator cancels it. |
+| `submitted` | Stored, nothing started. No lease and no heartbeat yet; a budget ceiling, when the task has one, is stored when it is created. | The reconciler claims it (`dispatch_claimed`), fails it (`workload_missing`, `adapter_missing`), or cancels a Conclave or council turn whose room is inactive, past its wall time or in a new run window; an operator, or a closing Conclave or council, cancels it. |
 | `working` | Launched; the runtime is observed on every pass. | Exit observed, a failure reason, cancel, suspend, or the MCP Gate asking for an approval. |
 | `input-required` | An action or tool call waits for an approval. | The reconciler returns it to `working` when every approval of the task is decided and none is pending (`approval_decided`). |
 | `suspended` | An operator suspended it. | Resume or cancel. |
