@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 440" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">What a council looks like</title>
-  <desc id="d">What a council looks like. The operator's question and any Decrees for a seat's role or for all go into the council, a fixed panel of three seats, claude, codex and agy. In Docker mode, each turn of a seat runs in one harness container; the forced host mode uses a Seatbelt sandbox instead. In round 1 each seat answers alone. A barrier is a precondition: round 2 does not start until all three round 1 answers are recorded. In round 2 each seat also reads the recorded, redacted answers of round 1. In parallel mode a seat sees only peer answers from earlier rounds; with the sequential flag it also sees the seats before it in its own round. At close the daemon writes a digest from the recorded answers. Ceilings bound the council: two rounds by default, at most six starts and a wall time of 15 minutes.</desc>
+  <desc id="d">What a council looks like. The question, which the CLI redacts and limits to 30 KiB, and the operator Decrees addressed to a seat's role or to all go into each turn's packet. The panel has three seats, claude, codex and agy. A barrier sits between rounds: the scheduler moves to round 2 only after all three round 1 answers are recorded. A round 2 packet carries the recorded round 1 answers that the seat may see. In parallel mode a packet carries answers of earlier rounds; in sequential mode the seats take turns and a seat also sees the answers of the seats before it in its own round. At close the daemon writes a digest from the recorded turns. Ceilings by default: two rounds, six starts and a wall time of 15 minutes.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -32,59 +32,55 @@
   </defs>
   <rect width="1120" height="440" rx="18" fill="#08060e"/>
   <rect class="lane" x="250" y="24" width="600" height="392" rx="14"/>
-  <text class="lanet" x="270" y="54">COUNCIL: THREE SEATS, A CONTAINER PER TURN (DOCKER)</text>
+  <text class="lanet" x="270" y="54">COUNCIL: THREE SEATS</text>
   <rect class="box" x="274" y="76" width="170" height="76" rx="10"/>
   <text class="h" x="290" y="102">claude</text>
-  <text class="s" x="290" y="123">round 1: answers</text>
-  <text class="s" x="290" y="141">the question alone</text>
+  <text class="s" x="290" y="123">round 1 turn</text>
   <rect class="box" x="464" y="76" width="170" height="76" rx="10"/>
   <text class="h" x="480" y="102">codex</text>
-  <text class="s" x="480" y="123">round 1: answers</text>
-  <text class="s" x="480" y="141">the question alone</text>
+  <text class="s" x="480" y="123">round 1 turn</text>
   <rect class="box" x="654" y="76" width="170" height="76" rx="10"/>
   <text class="h" x="670" y="102">agy</text>
-  <text class="s" x="670" y="123">round 1: answers</text>
-  <text class="s" x="670" y="141">the question alone</text>
+  <text class="s" x="670" y="123">round 1 turn</text>
   <rect class="key" x="274" y="184" width="550" height="58" rx="10"/>
   <text class="h" x="290" y="210">Barrier</text>
-  <text class="s" x="290" y="231">round 2 starts only when all three round 1 answers are recorded</text>
+  <text class="s" x="290" y="231">round 2 only after all three round 1 answers are recorded</text>
   <rect class="box" x="274" y="282" width="170" height="76" rx="10"/>
   <text class="h" x="290" y="308">claude</text>
-  <text class="s" x="290" y="329">round 2: also reads</text>
-  <text class="s" x="290" y="347">round 1 answers</text>
+  <text class="s" x="290" y="329">round 2: packet adds</text>
+  <text class="s" x="290" y="347">visible round 1 answers</text>
   <rect class="box" x="464" y="282" width="170" height="76" rx="10"/>
   <text class="h" x="480" y="308">codex</text>
-  <text class="s" x="480" y="329">round 2: also reads</text>
-  <text class="s" x="480" y="347">round 1 answers</text>
+  <text class="s" x="480" y="329">round 2: packet adds</text>
+  <text class="s" x="480" y="347">visible round 1 answers</text>
   <rect class="box" x="654" y="282" width="170" height="76" rx="10"/>
   <text class="h" x="670" y="308">agy</text>
-  <text class="s" x="670" y="329">round 2: also reads</text>
-  <text class="s" x="670" y="347">round 1 answers</text>
+  <text class="s" x="670" y="329">round 2: packet adds</text>
+  <text class="s" x="670" y="347">visible round 1 answers</text>
   <path class="f" d="M359 152V178" marker-end="url(#a)"/>
   <path class="f" d="M359 242V276" marker-end="url(#a)"/>
   <path class="f" d="M549 152V178" marker-end="url(#a)"/>
   <path class="f" d="M549 242V276" marker-end="url(#a)"/>
   <path class="f" d="M739 152V178" marker-end="url(#a)"/>
   <path class="f" d="M739 242V276" marker-end="url(#a)"/>
-  <text class="cap" x="274" y="382">Parallel: a seat sees peer answers of earlier rounds only.</text>
-  <text class="cap" x="274" y="400">With --sequential it also sees the seats before it.</text>
+  <text class="cap" x="274" y="382">Parallel: a packet carries answers of earlier rounds.</text>
+  <text class="cap" x="274" y="400">Sequential: seats take turns and also see earlier seats of the round.</text>
   <rect class="box" x="24" y="150" width="202" height="100" rx="10"/>
   <text class="h" x="40" y="176">Question</text>
-  <text class="s" x="40" y="197">redacted, at most 30 KiB</text>
-  <text class="s" x="40" y="215">Decrees for the seat's role</text>
-  <text class="s" x="40" y="233">or for all</text>
+  <text class="s" x="40" y="197">redacted, at most 30 KiB;</text>
+  <text class="s" x="40" y="215">Decrees addressed to</text>
+  <text class="s" x="40" y="233">the seat's role or to all</text>
   <path class="f" d="M226 200H244" marker-end="url(#a)"/>
   <rect class="box" x="886" y="150" width="210" height="100" rx="10"/>
   <text class="h" x="902" y="176">Digest</text>
   <text class="s" x="902" y="197">written at close from</text>
-  <text class="s" x="902" y="215">the recorded answers,</text>
-  <text class="s" x="902" y="233">no summary</text>
+  <text class="s" x="902" y="215">the recorded turns</text>
   <path class="f" d="M850 200H880" marker-end="url(#a)"/>
   <text class="lbl" x="868" y="190" text-anchor="middle">close</text>
   <rect class="box" x="886" y="290" width="210" height="100" rx="10"/>
-  <text class="h" x="902" y="316">Ceilings</text>
-  <text class="s" x="902" y="337">rounds: 2 by default</text>
-  <text class="s" x="902" y="355">starts: 6 at most</text>
+  <text class="h" x="902" y="316">Default ceilings</text>
+  <text class="s" x="902" y="337">rounds: 2</text>
+  <text class="s" x="902" y="355">starts: 6</text>
   <text class="s" x="902" y="373">wall time: 15 minutes</text>
 
 </svg>

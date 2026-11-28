@@ -28,7 +28,7 @@ Host mode is covered by the 2026-11-27 amendment to [ADR-0011](0011-sanctum-scop
 
 The pattern redactor is a best-effort filter. It is defence in depth and Sablecourt does not describe it as a boundary.
 
-[![Pattern redaction and exact-match redaction of registered secret values apply to text Sablecourt writes, while content sent to providers through the Model Gate and the council proxy is not redacted.](../diagrams/redaction-paths.svg)](../diagrams/redaction-paths.svg "Open full size")
+[![Pattern redaction applies to text Sablecourt writes, while content sent to providers through the Model Gate and the council proxy is not redacted.](../diagrams/redaction-paths.svg)](../diagrams/redaction-paths.svg "Open full size")
 
 Figure: where the pattern redactor applies and the two model-provider paths on which content leaves unredacted. Other outbound data, such as pull request fields and upstream MCP tool arguments, is not redacted either and is not drawn.
 

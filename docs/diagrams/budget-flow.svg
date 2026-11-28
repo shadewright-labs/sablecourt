@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 344" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Model Gate budget flow</title>
-  <desc id="d">Flow of budget accounting for one Model Gate call. The gate estimates tokens and cost from the request body and reserves them in one store transaction against per-task limits, the daily per-workload cost limit and any child task ceiling for 15 minutes. If a limit is exhausted or a child ceiling is missing or invalid, the gate denies the call with 429 or 403 and stops before forwarding. Within limits, the gate forwards the request to the provider or an external gateway and streams the response back. On a 2xx response it removes the reservation and settles reported usage (or the reserved estimate when none is reported) to the budget ledger and audit chain. On a non-2xx response or upstream error it releases the reservation and charges nothing. A note states that subscription harness inference runs outside the Model Gate and is not counted here.</desc>
+  <desc id="d">Flow of budget accounting for one Model Gate call. The gate estimates tokens and cost from the request body and reserves them in one store transaction, checked against the per-task limits, the daily cost limit of the workload and, for a task with a parent, the child ceiling. If a limit would be exceeded, the gate refuses the call with 429; if the child ceiling is missing or invalid, with 403. Both stop before forwarding. Within limits, the gate forwards the request to the configured upstream and streams the response back. On a 2xx response it settles the reservation into the budget ledger, at the reported usage or at least the reserve when usage cannot be read, and writes an audit row. On a non-2xx response or an upstream error it releases the reservation and charges nothing. A note states that harness traffic to provider hosts goes through the council proxy tunnels, not the Model Gate, and is not counted here.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -39,23 +39,23 @@
 
   <rect class="key" x="268" y="36" width="236" height="72" rx="12"/>
   <text class="h" x="284" y="62">Reserve in store</text>
-  <text class="s" x="284" y="83">per-task, daily per-workload</text>
-  <text class="s" x="284" y="100">child ceiling, 15 min hold</text>
+  <text class="s" x="284" y="83">per-task, daily cost, and</text>
+  <text class="s" x="284" y="100">child ceiling with a parent</text>
 
   <rect class="box" x="584" y="36" width="208" height="72" rx="10"/>
   <text class="h" x="600" y="62">Forward call</text>
-  <text class="s" x="600" y="83">to provider or gateway</text>
+  <text class="s" x="600" y="83">to configured upstream</text>
   <text class="s" x="600" y="100">stream back to workload</text>
 
   <rect class="box" x="864" y="36" width="232" height="72" rx="10"/>
   <text class="h" x="880" y="62">Settle to ledger</text>
-  <text class="s" x="880" y="83">reported usage, or reserve</text>
-  <text class="s" x="880" y="100">if none reported; audited</text>
+  <text class="s" x="880" y="83">reported usage, at least the</text>
+  <text class="s" x="880" y="100">reserve if unreadable; audited</text>
 
   <rect class="bad" x="268" y="212" width="236" height="72" rx="10"/>
   <text class="no" x="284" y="238">Denied (429 / 403)</text>
   <text class="s" x="284" y="259">429 budget exceeded</text>
-  <text class="s" x="284" y="276">403 invalid child ceiling</text>
+  <text class="s" x="284" y="276">403 missing or bad ceiling</text>
 
   <rect class="box" x="584" y="212" width="208" height="72" rx="10"/>
   <text class="h" x="600" y="238">Release reserve</text>
@@ -68,9 +68,9 @@
   <path class="f" d="M792 72H858" marker-end="url(#a)"/>
   <text class="lbl" x="825" y="64" text-anchor="middle">2xx</text>
   <path class="deny" d="M386 108V206" marker-end="url(#x)"/>
-  <text class="no" x="398" y="162">exhausted / invalid</text>
+  <text class="no" x="398" y="162">over limit / bad ceiling</text>
   <path class="f" d="M688 108V206" marker-end="url(#a)"/>
   <text class="lbl" x="700" y="162">non-2xx / error</text>
 
-  <text class="cap" x="24" y="320">Subscription harness inference runs on its own login outside the Model Gate and is not counted here.</text>
+  <text class="cap" x="24" y="320">Harness traffic to provider hosts goes through council proxy tunnels, not the Model Gate, and is not counted here.</text>
 </svg>

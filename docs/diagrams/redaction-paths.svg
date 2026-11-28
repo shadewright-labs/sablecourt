@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 648" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Where redaction applies</title>
-  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and by exact match, which finds the secret values registered with the daemon and replaces them by value; the redacted text goes to the store, the UI and peer prompts. Exact match is built. In the second zone, the two model-provider paths, no redaction applies to what is sent to the provider. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the request body it read (at most 16 MiB) to the model providers outside Sablecourt without redacting it, in a new upstream request with its own headers and the provider credential. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
+  <desc id="d">Two zones. In the first, text Sablecourt writes, which includes coding output, council diffs, Conclave post bodies and context packets, passes through the redactor. The redactor has two parts that run on the same input: the pattern rules, which are best effort and match only the secret shapes they list, and exact match, which replaces occurrences of the secret values registered with the daemon. In the second zone, the two model-provider paths, no redaction applies to what is sent to the provider. The built-in agent (the sablecourt-agent container) sends its requests, with the context packet and the task messages, to the Model Gate, which forwards the request body it read (at most 16 MiB) without redacting it, in a new upstream request, to the model providers outside Sablecourt. A harness container, which has its checkout mounted, opens tunnels through the council proxy, which copies the tunnel bytes without decrypting them to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -41,21 +41,16 @@
   <text class="s" x="60" y="152">Conclave posts, context packets</text>
   <rect class="key" x="366" y="88" width="250" height="72" rx="12"/>
   <text class="h" x="382" y="114">Pattern redactor</text>
-  <text class="s" x="382" y="135">best effort,</text>
-  <text class="s" x="382" y="152">known secret shapes only</text>
-  <rect class="box" x="688" y="88" width="250" height="72" rx="10"/>
-  <text class="h" x="704" y="114">Store, UI, peer prompts</text>
-  <text class="s" x="704" y="135">where readers and peers see it</text>
+  <text class="s" x="382" y="135">best effort, matches the</text>
+  <text class="s" x="382" y="152">secret shapes it lists</text>
   <rect class="box" x="366" y="208" width="250" height="72" rx="10"/>
   <text class="h" x="382" y="234">Exact match</text>
-  <text class="s" x="382" y="255">secret values registered with</text>
-  <text class="s" x="382" y="272">the daemon, matched by value</text>
+  <text class="s" x="382" y="255">secret values registered</text>
+  <text class="s" x="382" y="272">with the daemon</text>
   <path class="f" d="M294 124H360" marker-end="url(#a)"/>
   <text class="lbl" x="327" y="116" text-anchor="middle">filtered</text>
-  <path class="f" d="M616 124H682" marker-end="url(#a)"/>
-  <text class="lbl" x="649" y="116" text-anchor="middle">redacted</text>
   <path class="f" d="M491 208V166" marker-end="url(#a)"/>
-  <text class="lbl" x="503" y="192" text-anchor="start">also filters</text>
+  <text class="lbl" x="503" y="192" text-anchor="start">runs with it</text>
   <rect class="box" x="44" y="388" width="210" height="64" rx="10"/>
   <text class="h" x="60" y="414">Built-in agent</text>
   <text class="s" x="60" y="435">sablecourt-agent container</text>
@@ -71,18 +66,18 @@
   <text class="lbl" x="680" y="412" text-anchor="middle">unredacted body</text>
   <rect class="box" x="44" y="492" width="210" height="72" rx="10"/>
   <text class="h" x="60" y="518">Harness container</text>
-  <text class="s" x="60" y="539">any file in its checkout</text>
+  <text class="s" x="60" y="539">its checkout mounted</text>
   <rect class="box" x="400" y="492" width="210" height="72" rx="10"/>
   <text class="h" x="416" y="518">Council proxy</text>
-  <text class="s" x="416" y="539">copies a TLS tunnel,</text>
-  <text class="s" x="416" y="556">cannot read it</text>
+  <text class="s" x="416" y="539">copies tunnel bytes,</text>
+  <text class="s" x="416" y="556">does not decrypt them</text>
   <rect class="ext" x="756" y="492" width="210" height="72" rx="10"/>
   <text class="h" x="772" y="518">Provider hosts</text>
   <text class="s" x="772" y="539">listed hosts, port 443</text>
   <path class="f" d="M254 528H394" marker-end="url(#a)"/>
-  <text class="lbl" x="324" y="520" text-anchor="middle">requests</text>
+  <text class="lbl" x="324" y="520" text-anchor="middle">opens tunnels</text>
   <path class="f" d="M610 528H750" marker-end="url(#a)"/>
-  <text class="lbl" x="680" y="520" text-anchor="middle">TLS tunnel</text>
+  <text class="lbl" x="680" y="520" text-anchor="middle">tunnel, port 443</text>
   <rect class="key" x="24" y="608" width="28" height="16" rx="4"/>
   <text class="lbl" x="62" y="621" text-anchor="start">the subject of the ADR</text>
   <rect class="ext" x="300" y="608" width="28" height="16" rx="4"/>

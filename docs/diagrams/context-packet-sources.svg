@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 608" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">What feeds the context packet</title>
-  <desc id="d">What feeds a context packet and what stays out. Required parts, never cut: the role card of the workload manifest, the task input (prompt, input, failure handoff and the workflow step header), and for a Vassal woken by a peer the mention message as untrusted data. Optional parts, dropped whole and oldest first while the packet is over 32 KiB, so required text alone can leave it over 32 KiB: for a task in a Conclave the last 5 Decrees and decisions and the last 4 Relics, each Relic body cut at 2 KiB, up to 10 learnings only for a long-lived agent whose only model grant is the local provider, and the repository pre-check (git status and diff stat, go vet when there is a go.mod, sg scan when there is an sgconfig.yml, 10 seconds in total). All of it passes the redactor into the context packet, which goes in the context_packet field of the launch input. Kept out: a context_packet field from the caller is deleted and rebuilt, a repo_path from the caller is ignored in favour of the workload's coding.repoPath, learnings are not added when the model destination is remote or unknown, a council turn gets its own packet, and a deterministic controller gets no daemon-built packet, so a context_packet field in its input is not removed. The caller's original input still stays in the task history and can reach a provider through the built-in agent.</desc>
+  <desc id="d">What feeds a context packet and what stays out. Required parts, which the size fit never drops: the role card of the workload, if it has one; the task header, prompt, input and failure handoff; and, when a peer's message woke a Vassal, that message as untrusted data. Optional entries, dropped whole and oldest first while the packet is over 32 KiB: for a task in a Conclave, up to five recent operator Decrees and decisions and up to four Relics, a Relic body longer than 2048 bytes cut to its first 2048; up to ten learnings, only when the destination check allows them; and the repository pre-check (git status and diff stat, go vet when there is a go.mod, sg scan when there is an sgconfig.yml, under one 10 second deadline). Required text alone can leave the packet over 32 KiB. The redactor runs over the required part and each optional entry, and the packet goes in the context_packet field of the launch input. Kept out of the packet: a context_packet field from the caller, which is deleted and replaced by the packet; a repo_path field from the caller, because the assembler uses the workload's coding.repoPath; learnings when the destination check fails; a council turn, which gets the packet its reservation holds; and a deterministic controller task that is not a council task, which gets no packet. The submitted input is stored as a task message, and the built-in agent sends the task messages to the Model Gate.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -32,36 +32,36 @@
   </defs>
   <rect width="1280" height="608" rx="18" fill="#08060e"/>
   <rect class="lane" x="24" y="24" width="420" height="250" rx="14"/>
-  <text class="lanet" x="44" y="54">REQUIRED, NEVER CUT</text>
+  <text class="lanet" x="44" y="54">REQUIRED, NEVER DROPPED</text>
   <rect class="box" x="44" y="72" width="380" height="56" rx="10"/>
   <text class="h" x="60" y="98">Workload manifest</text>
-  <text class="s" x="60" y="119">role card</text>
+  <text class="s" x="60" y="119">role card, if it has one</text>
   <rect class="box" x="44" y="140" width="380" height="56" rx="10"/>
-  <text class="h" x="60" y="166">Task input</text>
-  <text class="s" x="60" y="187">prompt, input, failure handoff, step header</text>
+  <text class="h" x="60" y="166">Task</text>
+  <text class="s" x="60" y="187">header, prompt, input, failure handoff</text>
   <rect class="box" x="44" y="208" width="380" height="56" rx="10"/>
   <text class="h" x="60" y="234">Peer mention</text>
-  <text class="s" x="60" y="255">message that woke a Vassal, as untrusted data</text>
+  <text class="s" x="60" y="255">when a peer woke a Vassal, as untrusted data</text>
   <rect class="lane" x="24" y="294" width="420" height="290" rx="14"/>
-  <text class="lanet" x="44" y="324">OPTIONAL, DROPPED OLDEST FIRST</text>
+  <text class="lanet" x="44" y="324">OPTIONAL, DROPPED WHOLE, OLDEST FIRST</text>
   <rect class="box" x="44" y="342" width="380" height="62" rx="10"/>
   <text class="h" x="60" y="368">Conclave room</text>
-  <text class="s" x="60" y="389">last 5 Decrees, last 4 Relics (cut at 2 KiB)</text>
+  <text class="s" x="60" y="389">up to 5 Decrees and decisions, 4 Relics</text>
   <rect class="box" x="44" y="416" width="380" height="62" rx="10"/>
   <text class="h" x="60" y="442">Learnings</text>
-  <text class="s" x="60" y="463">up to 10, only for a local long-lived agent</text>
+  <text class="s" x="60" y="463">up to 10, if the destination check allows</text>
   <rect class="box" x="44" y="490" width="380" height="62" rx="10"/>
   <text class="h" x="60" y="516">Repository pre-check</text>
-  <text class="s" x="60" y="537">git status, go vet and sg scan when present, 10 s</text>
+  <text class="s" x="60" y="537">git, go vet, sg scan; one 10 s deadline</text>
   <rect class="key" x="520" y="240" width="240" height="130" rx="10"/>
   <text class="h" x="536" y="266">Context packet</text>
   <text class="s" x="536" y="287">redacted Markdown; optional</text>
-  <text class="s" x="536" y="305">parts dropped to fit 32 KiB,</text>
+  <text class="s" x="536" y="305">entries dropped over 32 KiB;</text>
   <text class="s" x="536" y="323">required text can exceed it</text>
   <path class="f" d="M444 149H482V285H514" marker-end="url(#a)"/>
-  <text class="lbl" x="490" y="226">never cut</text>
+  <text class="lbl" x="490" y="226">kept</text>
   <path class="f" d="M444 440H482V325H514" marker-end="url(#a)"/>
-  <text class="lbl" x="490" y="400">cut whole</text>
+  <text class="lbl" x="490" y="400">dropped whole</text>
   <rect class="box" x="520" y="440" width="240" height="64" rx="10"/>
   <text class="h" x="536" y="466">Launch input</text>
   <text class="s" x="536" y="487">context_packet field</text>
@@ -70,23 +70,23 @@
   <text class="lanet" x="880" y="54">KEPT OUT OF THE PACKET</text>
   <rect class="bad" x="880" y="72" width="356" height="64" rx="10"/>
   <text class="h" x="896" y="98">Caller's context_packet</text>
-  <text class="s" x="896" y="119">deleted, then rebuilt (not for a controller)</text>
+  <text class="s" x="896" y="119">deleted, replaced by the packet</text>
   <rect class="bad" x="880" y="152" width="356" height="64" rx="10"/>
   <text class="h" x="896" y="178">Caller's repo_path</text>
-  <text class="s" x="896" y="199">ignored: coding.repoPath is used</text>
+  <text class="s" x="896" y="199">not used: coding.repoPath is</text>
   <rect class="bad" x="880" y="232" width="356" height="64" rx="10"/>
-  <text class="h" x="896" y="258">Learnings for a remote model</text>
-  <text class="s" x="896" y="279">none in the packet</text>
+  <text class="h" x="896" y="258">Learnings, check failed</text>
+  <text class="s" x="896" y="279">destination check does not allow</text>
   <rect class="bad" x="880" y="312" width="356" height="64" rx="10"/>
   <text class="h" x="896" y="338">Council turn</text>
-  <text class="s" x="896" y="359">gets its own packet, not this one</text>
+  <text class="s" x="896" y="359">gets the packet its reservation holds</text>
   <rect class="bad" x="880" y="392" width="356" height="64" rx="10"/>
   <text class="h" x="896" y="418">Deterministic controller</text>
-  <text class="s" x="896" y="439">no daemon-built packet; input as submitted</text>
+  <text class="s" x="896" y="439">not a council task: no packet added</text>
   <rect class="box" x="880" y="472" width="356" height="92" rx="10"/>
-  <text class="h" x="896" y="498">Original input</text>
-  <text class="s" x="896" y="519">stays in the task history and can</text>
-  <text class="s" x="896" y="537">still reach a provider through</text>
-  <text class="s" x="896" y="555">the built-in agent</text>
+  <text class="h" x="896" y="498">Submitted input</text>
+  <text class="s" x="896" y="519">stored as a task message; the</text>
+  <text class="s" x="896" y="537">built-in agent sends task</text>
+  <text class="s" x="896" y="555">messages to the Model Gate</text>
 
 </svg>

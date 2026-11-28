@@ -1,6 +1,6 @@
 # Run a council
 
-Status: partly built. A council is refused up front when a harness image, tool or login is missing, and the end-to-end smoke test (#80) is still open.
+Status: partly built (#36 and the end-to-end smoke test #80 are open). With Docker configured, a council request is refused before the council is created when a harness image, login volume, login file or (for `claude` and `agy`) tool is missing.
 
 Ask `claude`, `codex` and `agy` one question about a repository and read the answers and the digest.
 
