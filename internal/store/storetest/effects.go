@@ -37,7 +37,7 @@ var readMethods = map[string]bool{
 	"ListWorkloads": true, "GetTask": true, "GetTaskByIdempotencyKey": true, "ListTasks": true,
 	"ListReconcileTasks": true, "ListTaskEvents": true, "ListTaskMessages": true,
 	"GetApproval": true, "ListApprovals": true, "GetActiveLeaseByTokenHash": true,
-	"TaskBudgetTotals": true, "WorkloadDailyBudgetTotals": true, "TotalBudgetTotals": true,
+	"TaskBudgetTotals": true, "TaskLedgerModels": true, "WorkloadDailyBudgetTotals": true, "TotalBudgetTotals": true,
 	"LatestCheckpoint": true, "ListProviderPrefs": true, "GetConclave": true, "ListConclaves": true,
 	"ListConclaveMessages": true, "GetConclaveRelic": true, "ListConclaveRelics": true,
 	"GetDevice": true, "ListDevices": true, "GetMemory": true, "SearchMemory": true,

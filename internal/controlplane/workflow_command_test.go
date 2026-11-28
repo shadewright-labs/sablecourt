@@ -86,9 +86,9 @@ func newCommandFixture(t *testing.T, cmd domain.CodingCommand, command func(cont
 	bundle := &config.Bundle{
 		Workloads: map[string]domain.Workload{"coder": wl},
 		Workflows: map[string]domain.Workflow{commandWorkflow: {Metadata: domain.ObjectMeta{Name: commandWorkflow}, Spec: domain.WorkflowSpec{Steps: []domain.WorkflowStep{
-			{Name: "author", Workload: "coder", Role: "author", Prompt: "implement the change"},
+			{Name: "author", Workload: "coder", Role: "author", Model: "claude-opus-5-5", Prompt: "implement the change"},
 			{Name: "check", Workload: "coder", Command: cmd.Name},
-			{Name: "review", Workload: "coder", Role: "verifier", Prompt: "review the change"},
+			{Name: "review", Workload: "coder", Role: "verifier", Model: "gpt-6.2-astra", Prompt: "review the change"},
 		}}}},
 	}
 	runner := newCPFakeCouncilRunner()

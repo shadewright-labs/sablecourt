@@ -696,7 +696,7 @@ func (r *Reconciler) startWorkflow(ctx context.Context, workflowName, idempotenc
 		if !ok {
 			return domain.Task{}, fmt.Errorf("workflow step %q has no configured workload", step.Name)
 		}
-		if _, _, err := resolveTierRoute(ctx, r.store, wl, step.Tier, step.Provider, step.Model); err != nil {
+		if _, err := resolveTierRoute(ctx, r.store, wl, step.Tier, step.Provider, step.Model); err != nil {
 			return domain.Task{}, fmt.Errorf("workflow step %q: %w", step.Name, err)
 		}
 	}
@@ -1077,7 +1077,7 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		if task.State == domain.TaskStateFailed {
 			// A command step that failed on any other path (lost on restart,
 			// observation failures, a failed launch) still halts its run.
-			return r.haltCommandStep(ctx, task, nil)
+			return errors.Join(r.haltCommandStep(ctx, task, nil), r.haltVerifierFamily(ctx, task))
 		}
 		return nil
 	}
@@ -1111,7 +1111,7 @@ func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, fac
 		return err
 	}
 	// Every failed command step halts its workflow run; a no-op for other tasks.
-	cleanupErr := errors.Join(r.haltCommandStep(cleanupCtx, task, nil), r.stopTask(cleanupCtx, task.ID))
+	cleanupErr := errors.Join(r.haltCommandStep(cleanupCtx, task, nil), r.haltVerifierFamily(cleanupCtx, task), r.stopTask(cleanupCtx, task.ID))
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
 	}
@@ -1411,6 +1411,11 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 				reason, launchFacts = "command_refused", commandRefusalFacts(refusal)
 				launchErr = errors.Join(launchErr, r.haltCommandStep(cleanupCtx, task, refusal))
 			}
+			// failTask halts the run of a verifier the family rule refused.
+			var familyRefusal *verifierFamilyRefusal
+			if errors.As(launchErr, &familyRefusal) {
+				reason, launchFacts = verifierRefusalReason, familyRefusal.facts()
+			}
 			cleanupErr := r.failTask(cleanupCtx, task, reason, launchFacts)
 			if startFailed && cleanupErr != nil {
 				launchErr = errors.Join(launchErr, r.store.RevokeTaskLeases(cleanupCtx, task.ID))
@@ -1464,6 +1469,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	}
 	var inputJSON string
 	var pinned []string
+	var tierRoute dispatchRoute
 	if command != nil {
 		// A command step gives no model a prompt, so it gets no context packet
 		// and none of its host pre-checks run. Without a container runner it
@@ -1474,7 +1480,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		}
 		inputJSON = "{}"
 	} else {
-		wl, inputJSON, pinned, err = r.prepareLaunchInput(ctx, task, wl)
+		wl, inputJSON, pinned, tierRoute, err = r.prepareLaunchInput(ctx, task, wl)
 		if err != nil {
 			return err
 		}
@@ -1484,6 +1490,12 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	// whole (redact.RefusedJSON, none of the payload). Exact match only, so
 	// ordinary task text is not rewritten by pattern rules.
 	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(inputJSON)
+	// Every launch records the model it asks for; a verifier step is checked
+	// against its run's chain before anything starts (ADR-0010, amendment
+	// of 2026-11-27).
+	if err := r.recordDispatch(ctx, task, dispatchedRoute(wl, command != nil, tierRoute, inputJSON)); err != nil {
+		return err
+	}
 	if readOnly && command == nil {
 		var payload struct {
 			Packet string `json:"context_packet"`
@@ -1794,7 +1806,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase, AuthorBaseState: member.AuthorBaseState})
+				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase, AuthorBaseState: member.AuthorBaseState, Chain: member.Chain})
 				if err != nil {
 					return err
 				}
@@ -1866,7 +1878,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		payload = commandStepPayload(meta.Workflow, nextStep, nextIdx, meta.Input, author, authorIdx)
 	}
 	raw, _ := json.Marshal(payload)
-	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
+	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx, Chain: member.Chain}
 	setRunAuthorBase(&next, member, completedTask)
 	if nextStep.Role == "verifier" || nextStep.Command != "" {
 		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)

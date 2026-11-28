@@ -901,7 +901,7 @@ func TestWorkflowCheckoutAndVerdict(t *testing.T) {
 			wl.Spec.Class = domain.ClassCodingAgent
 			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
 			r.bundle.Workloads["worker"] = wl
-			steps := []domain.WorkflowStep{{Name: "edit", Workload: "worker", Role: "author"}, {Name: "check", Workload: "worker", Role: "verifier", MaxRetries: 1}, {Name: "deliver", Workload: "worker"}}
+			steps := []domain.WorkflowStep{{Name: "edit", Workload: "worker", Role: "author", Model: "claude-opus-5-5"}, {Name: "check", Workload: "worker", Role: "verifier", Model: "gpt-6.2-astra", MaxRetries: 1}, {Name: "deliver", Workload: "worker"}}
 			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: steps}}}
 			a := &pinnedAdapter{}
 			a.nextState = scruntime.StateCompleted
@@ -1041,9 +1041,9 @@ func TestVerifierChainKeepsAuthorCommit(t *testing.T) {
 			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
 			r.bundle.Workloads["worker"] = wl
 			steps := []domain.WorkflowStep{
-				{Name: "edit", Workload: "worker", Role: "author"},
-				{Name: "review", Workload: "worker", Role: "verifier", MaxRetries: 1},
-				{Name: "security", Workload: "worker", Role: "verifier"},
+				{Name: "edit", Workload: "worker", Role: "author", Model: "claude-opus-5-5"},
+				{Name: "review", Workload: "worker", Role: "verifier", Model: "gpt-6.2-astra", MaxRetries: 1},
+				{Name: "security", Workload: "worker", Role: "verifier", Model: "gemini-3.8-pro"},
 			}
 			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: steps}}}
 			a := &recordingPinnedAdapter{}

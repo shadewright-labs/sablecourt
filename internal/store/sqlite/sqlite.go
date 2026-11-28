@@ -635,6 +635,23 @@ func (s *SQLiteStore) TaskBudgetTotals(ctx context.Context, taskID string) (doma
 	return totals, err
 }
 
+func (s *SQLiteStore) TaskLedgerModels(ctx context.Context, taskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT model FROM budget_ledger WHERE task_id = ? ORDER BY model`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var models []string
+	for rows.Next() {
+		var model string
+		if err := rows.Scan(&model); err != nil {
+			return nil, err
+		}
+		models = append(models, model)
+	}
+	return models, rows.Err()
+}
+
 func (s *SQLiteStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	start := dayStartUTC.UTC().Format(time.RFC3339Nano)

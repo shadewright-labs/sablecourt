@@ -575,6 +575,23 @@ func (s *PostgresStore) TaskBudgetTotals(ctx context.Context, taskID string) (do
 	return totals, err
 }
 
+func (s *PostgresStore) TaskLedgerModels(ctx context.Context, taskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT model FROM budget_ledger WHERE task_id = $1 ORDER BY model`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var models []string
+	for rows.Next() {
+		var model string
+		if err := rows.Scan(&model); err != nil {
+			return nil, err
+		}
+		models = append(models, model)
+	}
+	return models, rows.Err()
+}
+
 func (s *PostgresStore) WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error) {
 	var totals domain.BudgetTotals
 	err := s.db.QueryRowContext(ctx, `

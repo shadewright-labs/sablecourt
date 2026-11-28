@@ -58,6 +58,10 @@ type Store interface {
 	ReserveBudget(ctx context.Context, req BudgetReservationRequest) (BudgetReservationResult, error)
 	SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error
 	TaskBudgetTotals(ctx context.Context, taskID string) (domain.BudgetTotals, error)
+	// TaskLedgerModels returns the distinct model names budget_ledger holds
+	// for a task, in name order. A verifier dispatch counts them in its chain
+	// (ADR-0010, amendment of 2026-11-27).
+	TaskLedgerModels(ctx context.Context, taskID string) ([]string, error)
 	WorkloadDailyBudgetTotals(ctx context.Context, workloadName string, dayStartUTC time.Time) (domain.BudgetTotals, error)
 	TotalBudgetTotals(ctx context.Context) (domain.BudgetTotals, error)
 

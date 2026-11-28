@@ -47,6 +47,12 @@ type workflowStepRecord struct {
 	AuthorBaseState string `json:",omitempty"`
 	Status          string `json:",omitempty"`
 	Reason          string `json:",omitempty"`
+	// Chain holds every model that ran a step feeding the change under
+	// review in this run (ADR-0010, amendment of 2026-11-27): each author,
+	// retry and fix round adds its entry at dispatch, an entry never
+	// leaves, and a verifier never joins. Each registration carries the
+	// chain of the step before it.
+	Chain []chainEntry `json:",omitempty"`
 }
 
 func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
@@ -397,7 +403,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	return wl, nil
 }
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, []string, error) {
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (_ domain.Workload, _ string, _ []string, route dispatchRoute, _ error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
 	var payload map[string]json.RawMessage
@@ -410,11 +416,11 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
 		if err != nil {
-			return wl, "", nil, err
+			return wl, "", nil, route, err
 		}
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
-		return wl, task.InputJSON, nil, nil
+		return wl, task.InputJSON, nil, route, nil
 	}
 
 	// Only the dispatcher can create a round reservation. Its immutable input
@@ -424,7 +430,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		wl, err = r.prepareCouncilCheckout(ctx, payload, assignment, wl)
 		if err != nil {
-			return wl, "", nil, err
+			return wl, "", nil, route, err
 		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
@@ -432,7 +438,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
 			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
 			redact.String(markdown) != markdown {
-			return wl, "", nil, errors.New("invalid reserved council packet")
+			return wl, "", nil, route, errors.New("invalid reserved council packet")
 		}
 	}
 	// Typed consumers may match field names case-insensitively. The checkout
@@ -455,7 +461,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
 		raw, err := json.Marshal(payload)
-		return wl, string(raw), nil, err
+		return wl, string(raw), nil, route, err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -464,7 +470,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		})
 		sanitized, err := json.Marshal(precheckInput)
 		if err != nil {
-			return wl, "", nil, err
+			return wl, "", nil, route, err
 		}
 		task.InputJSON = string(sanitized)
 	}
@@ -472,24 +478,25 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	if raw, ok := payload["tier"]; ok {
 		var tier, provider, model string
 		if err := json.Unmarshal(raw, &tier); err != nil || tier == "" {
-			return wl, "", nil, errors.New("invalid model tier")
+			return wl, "", nil, route, errors.New("invalid model tier")
 		}
 		if raw, ok := payload["provider"]; ok {
 			if err := json.Unmarshal(raw, &provider); err != nil || provider == "" {
-				return wl, "", nil, errors.New("invalid tier provider")
+				return wl, "", nil, route, errors.New("invalid tier provider")
 			}
 		}
 		if raw, ok := payload["model"]; ok {
 			if err := json.Unmarshal(raw, &model); err != nil || model == "" {
-				return wl, "", nil, errors.New("invalid tier model")
+				return wl, "", nil, route, errors.New("invalid tier model")
 			}
 		}
-		provider, model, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
+		resolved, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
 		if err != nil {
-			return wl, "", nil, err
+			return wl, "", nil, route, err
 		}
-		payload["provider"], _ = json.Marshal(provider)
-		payload["model"], _ = json.Marshal(model)
+		payload["provider"], _ = json.Marshal(resolved.Provider)
+		payload["model"], _ = json.Marshal(resolved.Model)
+		route = resolved
 	}
 
 	// A packet with learnings pins the task's leases to the providers it was
@@ -504,7 +511,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
-	return wl, string(raw), pinned, err
+	return wl, string(raw), pinned, route, err
 }
 
 // isCheckoutField reports whether key selects a council checkout, in any case.
@@ -538,37 +545,44 @@ func referencesCouncil(ctx context.Context, st store.Store, payload map[string]j
 	return false, nil
 }
 
-func resolveTierRoute(ctx context.Context, st store.Store, wl domain.Workload, tier, provider, model string) (string, string, error) {
+// resolveTierRoute resolves a workflow step's route: explicit provider and
+// model when the step names them, otherwise the stored tier route, otherwise
+// the shipped default. Only a tier route carries an operator family.
+func resolveTierRoute(ctx context.Context, st store.Store, wl domain.Workload, tier, provider, model string) (dispatchRoute, error) {
 	tier = strings.ToLower(strings.TrimSpace(tier))
 	switch tier {
 	case "fast", "coding", "critic":
 	default:
-		return "", "", errors.New("unknown model tier")
+		return dispatchRoute{}, errors.New("unknown model tier")
 	}
+	route := dispatchRoute{Source: routeSourceStep}
 	if provider == "" && model == "" {
 		entry, err := st.GetMemory(ctx, contextpack.ModelTiersNamespace, tier)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			for _, route := range contextpack.DefaultModelTiers {
-				if route.Tier == tier {
-					provider, model = route.Provider, route.Model
+			route.Source = routeSourceTierDefault
+			for _, def := range contextpack.DefaultModelTiers {
+				if def.Tier == tier {
+					provider, model, route.Family = def.Provider, def.Model, def.Family
 					break
 				}
 			}
 		case err != nil:
-			return "", "", fmt.Errorf("load model tier: %w", err)
+			return dispatchRoute{}, fmt.Errorf("load model tier: %w", err)
 		default:
-			var route contextpack.TierRoute
-			if len(entry.Value) > 1024 || json.Unmarshal([]byte(entry.Value), &route) != nil || route.Tier != tier {
-				return "", "", errors.New("invalid stored model tier")
+			var stored contextpack.TierRoute
+			if len(entry.Value) > 1024 || json.Unmarshal([]byte(entry.Value), &stored) != nil || stored.Tier != tier {
+				return dispatchRoute{}, errors.New("invalid stored model tier")
 			}
-			provider, model = route.Provider, route.Model
+			provider, model, route.Family = stored.Provider, stored.Model, stored.Family
+			route.Source = routeSourceTier
 		}
 	}
 	if err := config.ValidateTierRoute(wl, provider, model); err != nil {
-		return "", "", err
+		return dispatchRoute{}, err
 	}
-	return provider, model, nil
+	route.Provider, route.Model = provider, model
+	return route, nil
 }
 
 type verifierLaunch struct {
