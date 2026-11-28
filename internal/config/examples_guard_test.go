@@ -196,6 +196,93 @@ func TestInvariantPathGuard(t *testing.T) {
 			r.commit("agent")
 			return base
 		}, paths: []string{"./internal/redact/"}, want: fail},
+		// Repository config and agent-written files must not change what the
+		// guard sees: a gitlink change in a listed directory counts whatever
+		// .gitmodules or the repository config say.
+		"gitlink change": {change: func(r guardRepo, base string) string {
+			r.git("update-index", "--add", "--cacheinfo", "160000,"+base+",internal/redact/sub")
+			r.git("-c", "user.name=t", "-c", "user.email=t", "commit", "-q", "-m", "agent")
+			return base
+		}, want: match, output: "internal/redact/sub"},
+		"gitlink change hidden by .gitmodules and repository config": {change: func(r guardRepo, base string) string {
+			r.write(".gitmodules", "[submodule \"sub\"]\n\tpath = internal/redact/sub\n\turl = ./sub\n\tignore = all\n")
+			r.git("update-index", "--add", "--cacheinfo", "160000,"+base+",internal/redact/sub")
+			r.git("config", "diff.ignoreSubmodules", "all")
+			r.git("config", "submodule.sub.ignore", "all")
+			r.git("config", "diff.relative", "true")
+			r.git("config", "diff.external", "/bin/true")
+			r.git("add", ".gitmodules")
+			r.git("-c", "user.name=t", "-c", "user.email=t", "commit", "-q", "-m", "agent")
+			return base
+		}, want: match, output: "internal/redact/sub"},
+		"replace ref hiding the change": {change: func(r guardRepo, base string) string {
+			r.write("internal/redact/rules.go", "package redact // changed\n")
+			head := r.commit("agent")
+			// A commit with the base's tree and the base as parent stands in
+			// for the agent's commit, so the replaced history shows no change.
+			stand := r.git("-c", "user.name=t", "-c", "user.email=t", "commit-tree", base+"^{tree}", "-p", base, "-m", "agent")
+			r.git("replace", head, stand)
+			return base
+		}, want: match, output: "internal/redact/rules.go"},
+		"listed exact name with a newline": {change: func(r guardRepo, base string) string {
+			r.write("docs/a\nb.md", "x\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"docs/a\nb.md"}, want: match},
+		"listed file named like a status letter, unlisted change": {change: func(r guardRepo, base string) string {
+			r.write("cmd/tool/main.go", "package main // changed\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"M"}, want: pass},
+		"listed file named like a status letter, changed": {change: func(r guardRepo, base string) string {
+			r.write("M", "x\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"M"}, want: match},
+		"listed path starting with a dash": {change: func(r guardRepo, base string) string {
+			r.write("-x/f.go", "package x\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"-x/"}, want: match},
+		"listed entry with glob characters is literal": {change: func(r guardRepo, base string) string {
+			r.write("internal/redact/new.go", "package redact\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"internal/*"}, want: pass},
+		"mode-only change": {change: func(r guardRepo, base string) string {
+			r.git("update-index", "--chmod=+x", "internal/redact/rules.go")
+			r.git("-c", "user.name=t", "-c", "user.email=t", "commit", "-q", "-m", "agent")
+			return base
+		}, want: match, output: "internal/redact/rules.go"},
+		"listed file replaced by a symlink": {change: func(r guardRepo, base string) string {
+			if err := os.Remove(filepath.Join(r.dir, "internal", "redact", "rules.go")); err != nil {
+				r.t.Fatal(err)
+			}
+			if err := os.Symlink("../../cmd/tool/main.go", filepath.Join(r.dir, "internal", "redact", "rules.go")); err != nil {
+				r.t.Fatal(err)
+			}
+			r.commit("agent")
+			return base
+		}, want: match, output: "internal/redact/rules.go"},
+		"copy out of a listed path": {change: func(r guardRepo, base string) string {
+			r.write("cmd/tool/rules.go", "package redact\n")
+			r.commit("agent")
+			return base
+		}, want: pass},
+		"copy into a listed path": {change: func(r guardRepo, base string) string {
+			r.write("internal/redact/main.go", "package main\n")
+			r.commit("agent")
+			return base
+		}, want: match, output: "internal/redact/main.go"},
+		"git diff error": {change: func(r guardRepo, base string) string {
+			r.write("internal/redact/rules.go", "package redact // changed\n")
+			r.commit("agent")
+			tree := r.git("rev-parse", "HEAD^{tree}")
+			if err := os.Remove(filepath.Join(r.dir, ".git", "objects", tree[:2], tree[2:])); err != nil {
+				r.t.Fatal(err)
+			}
+			return base
+		}, want: fail},
 		"base missing": {change: func(r guardRepo, _ string) string {
 			r.write("cmd/tool/main.go", "package main // changed\n")
 			r.commit("agent")

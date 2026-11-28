@@ -255,17 +255,5 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if err != nil {
 		return err
 	}
-	root, err := r.store.GetTask(ctx, member.RunID)
-	if err != nil {
-		return err
-	}
-	if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, event, string(raw)); err != nil {
-		return err
-	}
-	rootStep.Status, rootStep.Reason = "halted", status
-	entry, err := r.workflowStepEntry(root.ID, *rootStep)
-	if err != nil {
-		return err
-	}
-	return r.store.PutMemory(ctx, entry)
+	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID)
 }

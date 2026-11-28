@@ -681,12 +681,13 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 			return domain.Task{}, err
 		}
 		if member != nil && payload["role"] != "verifier" {
+			// A retried author keeps the run's first author base; if the
+			// failed attempt was the first (not pinned to an earlier commit),
+			// its own base becomes it. Read before the pin below changes.
+			member.AuthorBase = runAuthorBase(member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), orig.ArtifactsJSON)
 			if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
 				member.AuthorCommit = commit
 			}
-			// A retried author keeps the run's first author base; if the
-			// failed attempt was the first, its own base becomes it.
-			member.AuthorBase = runAuthorBase(member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), orig.ArtifactsJSON)
 		}
 		return r.submitTask(ctx, orig.WorkloadName, idem, string(raw), orig.ParentTaskID, member)
 	}
@@ -1571,19 +1572,11 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
 				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
 			})
-			root, err := r.store.GetTask(ctx, member.RunID)
+			fact, err := json.Marshal(map[string]string{"verifier_task_id": completedTask.ID})
 			if err != nil {
 				return err
 			}
-			if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, "workflow_halted_verdict_missing", fmt.Sprintf(`{"verifier_task_id":%q}`, completedTask.ID)); err != nil {
-				return err
-			}
-			rootStep.Status, rootStep.Reason = "halted", "verdict_missing"
-			entry, err := r.workflowStepEntry(root.ID, *rootStep)
-			if err != nil {
-				return err
-			}
-			return r.store.PutMemory(ctx, entry)
+			return r.haltRun(ctx, member.RunID, rootStep, "workflow_halted_verdict_missing", string(fact), "verdict_missing", "verifier_task_id", completedTask.ID)
 		}
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{

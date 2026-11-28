@@ -17,6 +17,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // Issue 214: the run's first author base is recorded by the daemon and named
@@ -192,23 +193,42 @@ func TestAuthorRetryKeepsFirstAuthorBase(t *testing.T) {
 	if len(seen) != 2 || seen[0] != base || seen[1] != base {
 		t.Fatalf("author base refs seen = %q, want the first base %s twice", seen, base)
 	}
-	var retryCommit string
+	var retryID, retryCommit string
 	for _, task := range f.tasks() {
 		if strings.Contains(task.InputJSON, `"retry_count":1`) && strings.Contains(task.InputJSON, `"role":"author"`) {
-			retryCommit = authorCommit(task.ArtifactsJSON)
+			retryID, retryCommit = task.ID, authorCommit(task.ArtifactsJSON)
 			if got := commitArtifact(task.ArtifactsJSON, scruntime.GitBaseArtifact); got == base || got == "" {
 				t.Fatalf("the retry's own git-base = %q; the test needs it to differ from the first base", got)
 			}
 		}
 	}
+	if retryID == "" || retryCommit == "" {
+		t.Fatalf("no retried author with a commit (id %q, commit %q)", retryID, retryCommit)
+	}
+	// The second guard is the one that checks the retried author; it is
+	// pinned to the retry's commit, with the first author base.
+	retryGuards := 0
 	for _, c := range commands {
 		reg, err := f.r.workflowStep(t.Context(), c.ID)
 		if err != nil || reg == nil || reg.AuthorBase != base {
 			t.Fatalf("guard registration = %+v, %v; want author base %s", reg, err, base)
 		}
-		if strings.Contains(c.ArtifactsJSON, "fix.txt") && reg.AuthorCommit != retryCommit {
+		var meta struct {
+			AuthorTaskID string `json:"author_task_id"`
+		}
+		if err := json.Unmarshal([]byte(c.InputJSON), &meta); err != nil || meta.AuthorTaskID == "" {
+			t.Fatalf("guard input %s names no author task: %v", c.InputJSON, err)
+		}
+		if meta.AuthorTaskID != retryID {
+			continue
+		}
+		retryGuards++
+		if reg.AuthorCommit != retryCommit {
 			t.Fatalf("second guard pinned to %s, want the retry's commit %s", reg.AuthorCommit, retryCommit)
 		}
+	}
+	if retryGuards != 1 {
+		t.Fatalf("guards of the retried author = %d, want 1", retryGuards)
 	}
 }
 
@@ -296,22 +316,182 @@ func TestRunAuthorBase(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		recorded  string
+		pinned    string
 		author    bool
 		artifacts string
 		want      string
 	}{
-		"first author records its base":      {author: true, artifacts: arts(base), want: base},
-		"a later author keeps the first":     {recorded: base, author: true, artifacts: arts(other), want: base},
-		"a verifier or command records none": {author: false, artifacts: arts(base), want: ""},
-		"a verifier passes the base on":      {recorded: base, author: false, artifacts: arts(other), want: base},
-		"two base artifacts":                 {author: true, artifacts: arts(base, other), want: ""},
-		"base not a commit ID":               {author: true, artifacts: arts("HEAD"), want: ""},
-		"no artifacts":                       {author: true, artifacts: "", want: ""},
+		"first author records its base":          {author: true, artifacts: arts(base), want: base},
+		"a pinned author with no base sets none": {pinned: other, author: true, artifacts: arts(other), want: ""},
+		"a later author keeps the first":         {recorded: base, author: true, artifacts: arts(other), want: base},
+		"a verifier or command records none":     {author: false, artifacts: arts(base), want: ""},
+		"a verifier passes the base on":          {recorded: base, author: false, artifacts: arts(other), want: base},
+		"two base artifacts":                     {author: true, artifacts: arts(base, other), want: ""},
+		"base not a commit ID":                   {author: true, artifacts: arts("HEAD"), want: ""},
+		"no artifacts":                           {author: true, artifacts: "", want: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := runAuthorBase(&workflowStepRecord{AuthorBase: tc.recorded}, tc.author, tc.artifacts); got != tc.want {
+			if got := runAuthorBase(&workflowStepRecord{AuthorBase: tc.recorded, AuthorCommit: tc.pinned}, tc.author, tc.artifacts); got != tc.want {
 				t.Fatalf("runAuthorBase = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLegacyFailedAuthorRetryFailsClosed checks a failed first author from
+// before issue 214, with a git-commit but no git-base: the run's first author
+// base is unknown, so neither its retry nor any later step may record one,
+// and the guard after the retry is refused instead of comparing from the
+// retry's own base (which would leave out the failed attempt's changes).
+func TestLegacyFailedAuthorRetryFailsClosed(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), nil)
+	ctx := t.Context()
+	commitA, commitB, retryBase := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	now := time.Now().UTC()
+	orig := domain.Task{ID: "task_legacy", IdempotencyKey: "task_legacy", WorkloadName: "coder", State: domain.TaskStateSubmitted,
+		InputJSON: `{"workflow":"` + commandWorkflow + `","step_index":0,"role":"author"}`, CreatedAt: now, UpdatedAt: now}
+	entry, err := f.r.workflowStepEntry(orig.ID, workflowStepRecord{RunID: orig.ID, Workflow: commandWorkflow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := json.Marshal([]scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: commitA}})
+	if err := f.st.CreateTask(ctx, orig); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.PutMemory(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskState(ctx, orig.ID, domain.TaskStateSubmitted, domain.TaskStateFailed, "runtime_failed", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskArtifacts(ctx, orig.ID, string(legacy)); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := f.r.RetryTaskWithHandoff(ctx, orig.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := f.r.workflowStep(ctx, retry.ID)
+	if err != nil || reg == nil || reg.AuthorBase != "" || reg.AuthorCommit != commitA {
+		t.Fatalf("retry registration = %+v, %v; want no base, commit %s", reg, err, commitA)
+	}
+	// The retry, pinned to commitA, completes and reports its own checkout base.
+	retryArts, _ := json.Marshal([]scruntime.Artifact{
+		{Name: "git-commit", ContentType: "text/plain", Text: commitB},
+		{Name: scruntime.GitBaseArtifact, ContentType: "text/plain", Text: retryBase},
+	})
+	if err := f.st.UpdateTaskState(ctx, retry.ID, retry.State, domain.TaskStateCompleted, "", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskArtifacts(ctx, retry.ID, string(retryArts)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.advanceWorkflowStep(ctx, retry); err != nil {
+		t.Fatal(err)
+	}
+	var guard *domain.Task
+	for _, task := range f.tasks() {
+		if task.ParentTaskID == retry.ID {
+			guard = &task
+		}
+	}
+	if guard == nil {
+		t.Fatal("no guard step after the retry")
+	}
+	reg, err = f.r.workflowStep(ctx, guard.ID)
+	if err != nil || reg == nil || reg.AuthorBase != "" {
+		t.Fatalf("guard registration = %+v, %v; want no author base (the first author's is unknown)", reg, err)
+	}
+	_, err = f.r.workflowCommand(ctx, *guard, f.bundle.Workloads["coder"])
+	var refusal *scruntime.CommandRefusal
+	if !errors.As(err, &refusal) || refusal.Reason != scruntime.CommandAuthorBaseUnavailable {
+		t.Fatalf("guard launch = %v, want the author base refusal", err)
+	}
+}
+
+// haltWriteFailStore fails the first write of a halted run registration, the
+// second of the two writes that halt a run.
+type haltWriteFailStore struct {
+	store.Store
+	mu     sync.Mutex
+	failed bool
+}
+
+func (s *haltWriteFailStore) PutMemory(ctx context.Context, entry domain.MemoryEntry) error {
+	s.mu.Lock()
+	fail := !s.failed && entry.Namespace == workflowStepsNamespace && strings.Contains(entry.Value, `"Status":"halted"`)
+	if fail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if fail {
+		return errors.New("injected registration write failure")
+	}
+	return s.Store.PutMemory(ctx, entry)
+}
+
+// TestRunHaltReplayIsIdempotent checks each way a run halts: when the halted
+// registration write fails after the halt event, the replay halts the run
+// without a second halt event (invariant 6).
+func TestRunHaltReplayIsIdempotent(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		paths  []string
+		event  string
+		review string
+		steps  int // a step that must not start, 0 for none
+	}{
+		"command failed":  {paths: []string{"feature.txt"}, event: "workflow_halted_command_failed", steps: 2},
+		"verdict missing": {paths: []string{"internal/redact/"}, event: "workflow_halted_verdict_missing", review: "no verdict line"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			g := &guardRunner{}
+			f := newCommandFixture(t, guardCommand(t, tc.paths...), g.run)
+			if tc.review != "" {
+				defaultRun := f.runner.onRun
+				f.runner.onRun = func(ctx context.Context, s scruntime.CouncilLaunch) (string, string, int, error) {
+					if s.Command == nil && s.Checkout.Kind != scruntime.CouncilTask {
+						return tc.review, "", 0, nil
+					}
+					return defaultRun(ctx, s)
+				}
+			}
+			wrapped := &haltWriteFailStore{Store: f.st}
+			f.r = NewReconciler(Options{
+				Store:    wrapped,
+				Bundle:   f.bundle,
+				Policy:   policy.NewEngine(nil, nil),
+				Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: f.adapter},
+			})
+			root := f.start()
+			f.runUntil("the halted registration", func() bool { return f.runStatus(root.ID).Status == "halted" })
+			// A few more passes: nothing is appended once the run is halted.
+			for range 3 {
+				_ = errors.Join(f.r.ReconcileOnce(t.Context()), waitForLaunches(t, f.r))
+			}
+			wrapped.mu.Lock()
+			failed := wrapped.failed
+			wrapped.mu.Unlock()
+			if !failed {
+				t.Fatal("the injected failure never fired")
+			}
+			halts := 0
+			for _, ev := range f.events(root.ID) {
+				if strings.HasPrefix(ev.Reason, "workflow_halted_") {
+					halts++
+					if ev.Reason != tc.event {
+						t.Fatalf("halt event %s, want %s", ev.Reason, tc.event)
+					}
+				}
+			}
+			if halts != 1 {
+				t.Fatalf("halt events on the run = %d, want 1", halts)
+			}
+			if _, ok := f.step(tc.steps); ok && tc.steps > 0 {
+				t.Fatalf("step %d started after the run halted", tc.steps)
 			}
 		})
 	}

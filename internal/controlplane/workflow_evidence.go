@@ -64,6 +64,44 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 	return &step, nil
 }
 
+// haltRun halts a workflow run in two writes: the halt event on the run's
+// root task, then the halted run registration. The store has no transaction
+// over both, so a replay after the second write failed finds the event of
+// the same step (its fact names that step's task under key) and only writes
+// the registration again: the event is appended once (invariant 6).
+func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string) error {
+	root, err := r.store.GetTask(ctx, runID)
+	if err != nil {
+		return err
+	}
+	events, err := r.store.ListTaskEvents(ctx, root.ID)
+	if err != nil {
+		return err
+	}
+	recorded := false
+	for _, ev := range events {
+		if !strings.HasPrefix(ev.Reason, "workflow_halted_") {
+			continue
+		}
+		var named map[string]any
+		if json.Unmarshal([]byte(ev.FactJSON), &named) == nil && named[key] == stepTaskID {
+			recorded = true
+			break
+		}
+	}
+	if !recorded {
+		if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, event, fact); err != nil {
+			return err
+		}
+	}
+	rootStep.Status, rootStep.Reason = "halted", status
+	entry, err := r.workflowStepEntry(root.ID, *rootStep)
+	if err != nil {
+		return err
+	}
+	return r.store.PutMemory(ctx, entry)
+}
+
 // stepAuthorCommit is the commit a verifier following the completed step must
 // review. Only an author step's artifacts set a new commit; a completed verifier
 // passes on the commit it was pinned to, whatever artifacts it emitted.
@@ -79,12 +117,15 @@ func authorCommit(artifacts string) string {
 }
 
 // runAuthorBase is the author base the step after completed carries: the one
-// already recorded for the run, or, when none is and the completed step is an
-// author (not a verifier, not a command step), the commit that author's
+// already recorded for the run, or, when none is and the completed step is
+// the run's first author attempt (an author, not a verifier or command step,
+// not pinned to an earlier attempt's commit), the commit that author's
 // checkout started from. A later author attempt, pinned to an earlier
-// attempt's commit, never replaces it.
+// attempt's commit, never sets or replaces it: when the first attempt's base
+// is unknown (a task from before issue 214), it stays unknown and the
+// command step is refused.
 func runAuthorBase(completed *workflowStepRecord, authorStep bool, artifacts string) string {
-	if completed.AuthorBase != "" || !authorStep {
+	if completed.AuthorBase != "" || !authorStep || completed.AuthorCommit != "" {
 		return completed.AuthorBase
 	}
 	return commitArtifact(artifacts, scruntime.GitBaseArtifact)
