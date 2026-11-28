@@ -11,7 +11,7 @@ In Sanctum container mode, each council harness turn (`claude`, `codex`, `agy`) 
 
 ## What the preflight checks
 
-[![A council request passes three checks for each of claude, codex and agy: the image is present, the login volume is valid, and the tool and a credential file are found. A failed check refuses the request with the command to run; when all pass, the daemon runs a dispatch check and then creates the council.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
+[![A council request passes three checks for each of claude, codex and agy: the image is present, the login volume is valid, and a credential file is found, plus the installed tool for claude and agy. A failed check refuses the request with the command to run; when all pass, the daemon runs a dispatch check and then creates the council.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
 
 The preflight runs for a new council request in container mode. A repeated request with the same idempotency key and the same content returns the stored council before the preflight. For each role in the order `claude`, `codex`, `agy`:
 
@@ -21,9 +21,9 @@ The preflight runs for a new council request in container mode. A repeated reque
 
    For `claude` and `agy` the probe container also mounts the tool volume read-only, and the daemon inspects that volume again after it creates the container and before it starts it. Before the credential test the probe checks that the tool is a regular executable file and not a symlink, that `VERSION` names the pinned version and that its SHA-256 is the pinned one, without running it. A failure is refused with `sablectl harness install <role>`.
 
-The probe makes no call to a provider, so it cannot tell an expired or revoked login from a valid one. Such a login passes the preflight and fails at the turn. The probe container is removed afterwards, on a best-effort basis.
+The probe makes no call to a provider, so it cannot tell an expired or revoked login from a valid one. Such a login passes the preflight when a qualifying credential file is present and the other checks pass, and the turn can still fail. The probe container is removed afterwards, on a best-effort basis.
 
-A refused request writes no council, room or task record. After all three roles pass, the daemon checks that the panel workloads can be dispatched, and then creates the council. The checks run under their own 45 second limit, separate from the 10 second limit of the checkout check, and each probe container has a 20 second limit of its own.
+A refused request writes no council, room or task record. The credential probe container is a temporary Docker object, created before the verdict and removed afterwards. After all three roles pass, the daemon checks that the panel workloads can be dispatched, and then creates the council. The checks run under their own 45 second limit, separate from the 10 second limit of the checkout check, and each probe container has a 20 second limit of its own.
 
 ## Errors
 

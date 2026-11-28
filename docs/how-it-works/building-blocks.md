@@ -138,14 +138,14 @@ Each row is a setting that changes which part holds a credential, which adapter 
 | `--secret-file` | none | Secrets are read from the system keyring first and then from this 0600 JSON file. |
 | `--postgres-dsn`, or `SABLECOURT_POSTGRES_DSN` | SQLite at `--db` | Tasks, leases, budgets, rooms and the audit log are kept in PostgreSQL. |
 | `--gate-host` | `host.docker.internal:<port>` while the daemon listens on loopback | The gate address given to container workloads. Host processes do not use it. |
-| Room type: council or manifest Conclave | (per room) | In a council the daemon posts each completed harness turn's final message to the room. In a Conclave opened from a manifest it does not (#28); a Vassal's message reaches the room only when the Vassal posts it through the Conclave tools of the MCP Gate. |
+| Room type: council or manifest Conclave | (per room) | In a council the daemon posts each completed harness turn's final message to the room. In a Conclave opened from a manifest it does not (#219); a Vassal's message reaches the room only when the Vassal posts it through the Conclave tools of the MCP Gate. |
 | Checkout: plain coding task, or council `live`, `ref` or `writer` | plain task: a worktree of the workload's repository | A plain coding task gets a worktree and a `.sablecourt-session.json` marker file in it. A council turn writes no marker: `live` gives a read-only view of the working tree, `ref` a read-only checkout of one commit, and `writer` gives one role a writable worktree on its own branch. |
 
 Flags not listed (`--listen`, `--socket`, `--allow-host`, `--db`, `--manifests` and the `--manifests-git-*` flags, `--max-concurrent`, `--coding-branch-retention`, `--repo-root`, `--incident-conclave-template`) and the variables `SABLECOURT_STATE_DIR`, `SABLECOURT_PUBLIC_URL` and `SABLECOURT_NOTIFY_WEBHOOK_URL` change addresses, locations, limits or notifications, not which part does what.
 
 ## Not built yet
 
-- Posting a harness Vassal's final message to a room opened from a manifest Conclave (#28); councils already do.
+- Posting a harness Vassal's final message to a room opened from a manifest Conclave (#219); councils already do.
 - Checking subscription windows before a council round (#36).
 - Coding tasks on a machine without a container runtime. The 2026-11-27 amendment of [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) drops host mode as a supported path for 0.1.0; forced host mode gives a harness an empty scratch home directory and no login (#17). Separate harness state directories for host mode are dropped by the same amendment.
 - Checkpointed suspend and resume (#14).

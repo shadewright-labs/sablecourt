@@ -58,7 +58,7 @@ Each area below carries one of four words:
 | MCP Gate, typed actions, policy | Built | Known faults in #9; the upstream MCP bridge is parked | [tools and actions](how-it-works/tools-and-actions.md) |
 | Approvals | Partly built | Device pairing answers `503`; no single-use claim yet (ADR-0014 Stage 0, #5, #9) | [approvals](how-it-works/approvals.md) |
 | Conclaves | Built | Voice and live Takeover are parked | [Conclaves](how-it-works/conclaves.md) |
-| Council | Partly built | Final message posting (#28), subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
+| Council | Partly built | Subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
 | Harness containers | Built | End-to-end smoke test (#80) | [harness containers](how-it-works/harness-containers.md) |
 | Context packets, verifier steps, failure handoff | Built | | [context and learning](how-it-works/context-and-learning.md) |
 | Learning (ADR-0012) | Partly built | The store and the packet matcher with its destination check (#99) exist. Propose, accept, matching for other workloads and outcomes are decided only (#43 to #47), so no packet carries a learning yet | [context and learning](how-it-works/context-and-learning.md) |

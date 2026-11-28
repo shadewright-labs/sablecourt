@@ -76,7 +76,7 @@ A Conclave is a room where several workloads, called Vassals, work on one topic.
 
 ## Council and harness
 
-Status: partly built (#28, #36, #80 open).
+Status: partly built (#36, #80 open).
 
 [![States of one council turn: reserved moves to running when the harness starts, to recorded on a clean exit with a final message, or to failed with retries back to reserved while starts remain.](diagrams/council-turn-states.svg)](diagrams/council-turn-states.svg "Open full size")
 

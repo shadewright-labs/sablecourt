@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 440" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">What a council looks like</title>
-  <desc id="d">What a council looks like. The operator's question and any Decrees for a seat's role or for all go into the council, a fixed panel of three seats, claude, codex and agy. Each turn of a seat is one harness container. In round 1 each seat answers alone. A barrier holds round 2 until all three round 1 answers are recorded. In round 2 each seat also reads the recorded, redacted answers of round 1. In parallel mode a seat sees only earlier rounds; with the sequential flag it also sees the seats before it in its own round. At close the daemon writes a digest from the recorded answers. Ceilings bound the council: two rounds by default, at most six starts and a wall time of 15 minutes.</desc>
+  <desc id="d">What a council looks like. The operator's question and any Decrees for a seat's role or for all go into the council, a fixed panel of three seats, claude, codex and agy. In Docker mode, each turn of a seat runs in one harness container; the forced host mode uses a Seatbelt sandbox instead. In round 1 each seat answers alone. A barrier is a precondition: round 2 does not start until all three round 1 answers are recorded. In round 2 each seat also reads the recorded, redacted answers of round 1. In parallel mode a seat sees only peer answers from earlier rounds; with the sequential flag it also sees the seats before it in its own round. At close the daemon writes a digest from the recorded answers. Ceilings bound the council: two rounds by default, at most six starts and a wall time of 15 minutes.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -32,7 +32,7 @@
   </defs>
   <rect width="1120" height="440" rx="18" fill="#08060e"/>
   <rect class="lane" x="250" y="24" width="600" height="392" rx="14"/>
-  <text class="lanet" x="270" y="54">COUNCIL: THREE SEATS, ONE HARNESS CONTAINER PER TURN</text>
+  <text class="lanet" x="270" y="54">COUNCIL: THREE SEATS, A CONTAINER PER TURN (DOCKER)</text>
   <rect class="box" x="274" y="76" width="170" height="76" rx="10"/>
   <text class="h" x="290" y="102">claude</text>
   <text class="s" x="290" y="123">round 1: answers</text>
@@ -66,7 +66,7 @@
   <path class="f" d="M549 242V276" marker-end="url(#a)"/>
   <path class="f" d="M739 152V178" marker-end="url(#a)"/>
   <path class="f" d="M739 242V276" marker-end="url(#a)"/>
-  <text class="cap" x="274" y="382">Parallel: a seat sees only earlier rounds, redacted.</text>
+  <text class="cap" x="274" y="382">Parallel: a seat sees peer answers of earlier rounds only.</text>
   <text class="cap" x="274" y="400">With --sequential it also sees the seats before it.</text>
   <rect class="box" x="24" y="150" width="202" height="100" rx="10"/>
   <text class="h" x="40" y="176">Question</text>

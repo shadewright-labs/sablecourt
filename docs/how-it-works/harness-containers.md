@@ -49,7 +49,7 @@ Without the flag, or with it but no working host sandbox, the daemon still regis
 
 ## Preflight
 
-Before it creates a council, the daemon checks each harness image, login volume, tool (`claude` and `agy`) and credential path, and refuses with the command to run when one is missing; `sablectl harness login <role>` creates the labelled login volume and runs the login through Docker from the CLI. The checks, the order and the refusals are on [council harness images and logins](../council-harnesses.md) and in the [council](council.md) page. The check makes no provider call, so a volume with an expired login passes it.
+Before it creates a council, the daemon checks each harness image, login volume, tool (`claude` and `agy`) and credential path, and refuses with the command to run when one is missing (a Docker error, timeout or cancellation is refused without a command); `sablectl harness login <role>` creates the labelled login volume and runs the login through Docker from the CLI. The checks, the order and the refusals are on [council harness images and logins](../council-harnesses.md) and in the [council](council.md) page. The check makes no provider call, so a volume with an expired login can pass it.
 
 ## In depth
 

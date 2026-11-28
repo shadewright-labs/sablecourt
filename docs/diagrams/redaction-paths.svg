@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 648" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Where redaction applies</title>
-  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and by exact match, which replaces each secret the daemon holds in memory by value; the redacted text goes to the store, the UI and peer prompts. Exact match is built. In the second zone, the two model-provider paths, no redaction applies. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the same bytes to the model providers outside Sablecourt. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
+  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and by exact match, which finds the secret values registered with the daemon and replaces them by value; the redacted text goes to the store, the UI and peer prompts. Exact match is built. In the second zone, the two model-provider paths, no redaction applies to what is sent to the provider. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the request body it read (at most 16 MiB) to the model providers outside Sablecourt without redacting it, in a new upstream request with its own headers and the provider credential. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -48,8 +48,8 @@
   <text class="s" x="704" y="135">where readers and peers see it</text>
   <rect class="box" x="366" y="208" width="250" height="72" rx="10"/>
   <text class="h" x="382" y="234">Exact match</text>
-  <text class="s" x="382" y="255">each secret the daemon holds</text>
-  <text class="s" x="382" y="272">in memory, replaced by value</text>
+  <text class="s" x="382" y="255">secret values registered with</text>
+  <text class="s" x="382" y="272">the daemon, matched by value</text>
   <path class="f" d="M294 124H360" marker-end="url(#a)"/>
   <text class="lbl" x="327" y="116" text-anchor="middle">filtered</text>
   <path class="f" d="M616 124H682" marker-end="url(#a)"/>
@@ -61,14 +61,14 @@
   <text class="s" x="60" y="435">sablecourt-agent container</text>
   <rect class="box" x="400" y="388" width="210" height="64" rx="10"/>
   <text class="h" x="416" y="414">Model Gate</text>
-  <text class="s" x="416" y="435">forwards bytes as sent</text>
+  <text class="s" x="416" y="435">forwards the body it read</text>
   <rect class="ext" x="756" y="388" width="210" height="64" rx="10"/>
   <text class="h" x="772" y="414">Model providers</text>
   <text class="s" x="772" y="435">API endpoints</text>
   <path class="f" d="M254 420H394" marker-end="url(#a)"/>
   <text class="lbl" x="324" y="412" text-anchor="middle">request</text>
   <path class="f" d="M610 420H750" marker-end="url(#a)"/>
-  <text class="lbl" x="680" y="412" text-anchor="middle">same bytes</text>
+  <text class="lbl" x="680" y="412" text-anchor="middle">unredacted body</text>
   <rect class="box" x="44" y="492" width="210" height="72" rx="10"/>
   <text class="h" x="60" y="518">Harness container</text>
   <text class="s" x="60" y="539">any file in its checkout</text>
