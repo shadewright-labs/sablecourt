@@ -106,7 +106,7 @@ Status: Sanctum built. Citadel built, parked.
 
 ## Not built yet
 
-- Learning acceptance through the ADR-0012 record, and repository and incident scope matching in the packet (decided in [ADR-0012](adr/0012-learning-evidence-and-expiry.md), not built).
+- Learning acceptance through the ADR-0012 record, and repository, path and incident scope matching in the packet (decided in [ADR-0012](adr/0012-learning-evidence-and-expiry.md), not built).
 - Passkeys, server-side sessions and roles (decided in [ADR-0014](adr/0014-identity-and-authentication.md), Proposed, not built).
 - Signed audit heads (ADR-0014 Stage 3, Proposed).
 

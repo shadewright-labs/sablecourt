@@ -574,6 +574,28 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 	if len(listed) != 1 || listed[0].Statement != "Accepted advice for local agents" || strings.Contains(rec.Body.String(), "Legacy advice") {
 		t.Fatalf("listed learnings %s", rec.Body.String())
 	}
+	for _, q := range []string{"repo=sablecourt", "repo=https://user:pw%40example.test/org/repo", "repo=ftp://example.test/org/repo"} {
+		rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings?"+q, "")
+		if rec.Code != http.StatusBadRequest || !strings.Contains(apiError(t, rec), "repository remote URL") {
+			t.Fatalf("invalid repo query %q returned %d %s, want 400", q, rec.Code, rec.Body.String())
+		}
+	}
+	seedAPILearningScoped(t, env.st, "path-advice", "Advice for b.go", domain.LearningScope{PathGlobs: []string{"b.go"}})
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"path=a.go,%20b.go", 2},
+		{"path=%20b.go%20,", 2},
+		{"path=a.go", 1},
+		{"repo=https://example.test/org/repo&path=a.go,%20b.go", 2},
+	} {
+		rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings?"+tc.query, "")
+		listed = nil
+		if err := json.Unmarshal(rec.Body.Bytes(), &listed); rec.Code != http.StatusOK || err != nil || len(listed) != tc.want {
+			t.Fatalf("list learnings %q: %d %s %v, want %d entries", tc.query, rec.Code, rec.Body.String(), err, tc.want)
+		}
+	}
 	rec = apiCall(env.h, http.MethodGet, "/api/v1/providers", "")
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("providers without registry %d %s", rec.Code, rec.Body.String())
@@ -588,19 +610,27 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 func seedAPILearning(t *testing.T, st store.Store, statement string) {
 	t.Helper()
 	ctx := context.Background()
-	ls, err := store.Learnings(st)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "learning-evidence", AgentCardJSON: "{}"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CreateTask(ctx, domain.Task{ID: "learning-evidence", IdempotencyKey: "learning-evidence", WorkloadName: "learning-evidence", State: domain.TaskStateCompleted, ArtifactsJSON: `[{"name":"record","text":"recorded observation"}]`}); err != nil {
 		t.Fatal(err)
 	}
+	seedAPILearningScoped(t, st, "advice", statement, domain.LearningScope{Global: true})
+}
+
+// seedAPILearningScoped proposes and accepts a learning backed by the task
+// artifact that seedAPILearning records.
+func seedAPILearningScoped(t *testing.T, st store.Store, id, statement string, scope domain.LearningScope) {
+	t.Helper()
+	ctx := context.Background()
+	ls, err := store.Learnings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC().Add(-time.Minute)
 	l, err := ls.ProposeLearning(ctx, domain.Learning{
-		ID: "advice", Statement: statement, Scope: domain.LearningScope{Global: true}, SourceKind: domain.LearningSourceTask,
+		ID: id, Statement: statement, Scope: scope, SourceKind: domain.LearningSourceTask,
 		SourceID: "learning-evidence", EvidenceRef: "artifact:record", Author: "operator-1", CreatedAt: now,
 	})
 	if err != nil {

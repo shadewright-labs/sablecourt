@@ -61,7 +61,7 @@ For a local destination the assembler asks the store for records that are `accep
 
 The most specific records come first. At most ten enter the packet, as `- [id] statement` lines under "Scoped Learnings", and the section stops before a line that would take it past 4 KiB. Each line passes through the redactor. The 32 KiB packet trim can still drop learning entries, oldest first. The injection count of a record is not updated yet.
 
-`GET /api/v1/learnings?repo=&path=` (operator credential) lists up to 100 such records, where `repo` is a repository remote URL. It does not apply the destination check, because it answers the operator and builds no prompt.
+`GET /api/v1/learnings?repo=&path=` (operator credential) lists up to 100 such records as `domain.Learning` objects, where `repo` is a repository remote URL; an invalid `repo` gets 400. It does not apply the destination check, because it answers the operator and builds no prompt.
 
 The Conclave page has a "Save as learning" button next to each message. It writes a proposal as a Court Memory entry under `proposed:learning:...` with the redacted rule and its source message, and an audit row `learning.propose`. Nothing acts on these proposals, and they never reach a packet.
 

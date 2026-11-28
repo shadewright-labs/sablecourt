@@ -332,8 +332,8 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 // packet may carry learnings (ADR-0012): long-lived agents run in the Docker
 // adapter, and no model gateway receives the requests.
 func packetLearningDestination(adapters map[domain.WorkloadClass]scruntime.Adapter, modelGatewayURL string) contextpack.Destination {
-	_, dockerAgents := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
-	return contextpack.Destination{DockerAgents: dockerAgents, ModelGateway: modelGatewayURL != ""}
+	da, ok := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	return contextpack.Destination{DockerAgents: ok && da != nil, ModelGateway: modelGatewayURL != ""}
 }
 
 func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
@@ -995,11 +995,27 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	})
 	mux.HandleFunc("GET /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
-		var paths []string
-		if p := strings.TrimSpace(r.URL.Query().Get("path")); p != "" {
-			paths = strings.Split(p, ",")
+		if repo != "" {
+			// MatchLearnings yields none on a store error, so reject a bad
+			// remote URL here instead of answering with an empty list.
+			normalized, err := store.NormalizeRepoRemoteURL(repo)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo: " + err.Error()})
+				return
+			}
+			repo = normalized
 		}
-		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
+		var paths []string
+		for p := range strings.SplitSeq(r.URL.Query().Get("path"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		learnings := contextpack.MatchLearnings(r.Context(), st, repo, paths, 100)
+		if learnings == nil {
+			learnings = []domain.Learning{}
+		}
+		writeJSON(w, http.StatusOK, learnings)
 	})
 	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "legacy learning publication is disabled"})

@@ -224,6 +224,7 @@ func TestPacketLearningDestinationWiring(t *testing.T) {
 	}{
 		{"docker, no gateway", dockerAgents, "", contextpack.Destination{DockerAgents: true}},
 		{"docker with gateway", dockerAgents, "http://gateway.example.test", contextpack.Destination{DockerAgents: true, ModelGateway: true}},
+		{"typed nil docker adapter", map[domain.WorkloadClass]scruntime.Adapter{domain.ClassLongLivedAgent: (*docker.Adapter)(nil)}, "", contextpack.Destination{}},
 		{"no long-lived runtime", map[domain.WorkloadClass]scruntime.Adapter{}, "", contextpack.Destination{}},
 		{"other long-lived runtime", map[domain.WorkloadClass]scruntime.Adapter{domain.ClassLongLivedAgent: &councilTestAdapter{}}, "", contextpack.Destination{}},
 		{"docker under another class only", map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: &docker.Adapter{}}, "", contextpack.Destination{}},
