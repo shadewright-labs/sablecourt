@@ -50,7 +50,7 @@ func TestHarnessGitDirCopiesSharedIndex(t *testing.T) {
 	testWrite(t, work, "added.txt", "x\n", 0o600)
 	testGit(t, work, "add", "added.txt")
 
-	gitDir, err := prepareHarnessGitDir(context.Background(), work, taskBase, state)
+	gitDir, err := prepareHarnessGitDir(context.Background(), work, taskBase, state, "")
 	if err != nil {
 		t.Fatalf("prepareHarnessGitDir: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestHarnessGitDirCopiesSharedIndex(t *testing.T) {
 // no other host user can reach it.
 func TestHarnessGitDirReadableByHarnessUser(t *testing.T) {
 	work, state, taskBase := harnessGitDirFixture(t)
-	gitDir, err := prepareHarnessGitDir(context.Background(), work, taskBase, state)
+	gitDir, err := prepareHarnessGitDir(context.Background(), work, taskBase, state, "")
 	if err != nil {
 		t.Fatalf("prepareHarnessGitDir: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestHarnessGitDirRefusesSharedParent(t *testing.T) {
 			if err := os.Chmod(filepath.Dir(taskBase), mode); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := prepareHarnessGitDir(context.Background(), work, taskBase, state); err == nil {
+			if _, err := prepareHarnessGitDir(context.Background(), work, taskBase, state, ""); err == nil {
 				t.Fatal("launch Git directory prepared under a parent other users can reach")
 			}
 			if _, err := os.Lstat(harnessGitDirPath(taskBase)); !os.IsNotExist(err) {
@@ -137,7 +137,7 @@ func TestHarnessGitDirRefusesSharedIndexSymlink(t *testing.T) {
 	if err := os.Symlink(moved, shared); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := prepareHarnessGitDir(context.Background(), work, taskBase, state); err == nil {
+	if _, err := prepareHarnessGitDir(context.Background(), work, taskBase, state, ""); err == nil {
 		t.Fatal("shared index symlink accepted")
 	}
 	if _, err := os.Lstat(harnessGitDirPath(taskBase)); !os.IsNotExist(err) {

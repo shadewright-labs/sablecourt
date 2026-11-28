@@ -23,7 +23,7 @@ type stubRunner struct{ scruntime.CouncilRunner }
 func TestValidateCommandLaunchRefusals(t *testing.T) {
 	t.Parallel()
 	commit := strings.Repeat("a", 40)
-	good := scruntime.CommandSpec{Name: "check", Argv: []string{"make", "check"}, Timeout: time.Minute, MaxOutputBytes: 1024}
+	good := scruntime.CommandSpec{Name: "check", Argv: []string{"make", "check"}, Timeout: time.Minute, MaxOutputBytes: 1024, AuthorBase: strings.Repeat("b", 40)}
 	withContainers := &Adapter{CouncilRunner: stubRunner{}}
 	for name, tc := range map[string]struct {
 		adapter  *Adapter
@@ -52,6 +52,9 @@ func TestValidateCommandLaunchRefusals(t *testing.T) {
 		"output cap over ceiling": {adapter: withContainers, mutate: func(_ *scruntime.LaunchSpec, c *scruntime.CommandSpec) {
 			c.MaxOutputBytes = domain.MaxCommandOutputBytes + 1
 		}, commit: commit, readOnly: true, reason: scruntime.CommandNotAllowed},
+		"no author base":           {adapter: withContainers, mutate: func(_ *scruntime.LaunchSpec, c *scruntime.CommandSpec) { c.AuthorBase = "" }, commit: commit, readOnly: true, reason: scruntime.CommandAuthorBaseUnavailable},
+		"author base not a commit": {adapter: withContainers, mutate: func(_ *scruntime.LaunchSpec, c *scruntime.CommandSpec) { c.AuthorBase = "HEAD~1" }, commit: commit, readOnly: true, reason: scruntime.CommandAuthorBaseUnavailable},
+		"author base other format": {adapter: withContainers, mutate: func(_ *scruntime.LaunchSpec, c *scruntime.CommandSpec) { c.AuthorBase = strings.Repeat("b", 64) }, commit: commit, readOnly: true, reason: scruntime.CommandAuthorBaseUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

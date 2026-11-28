@@ -1,7 +1,9 @@
 package coding
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,6 +34,25 @@ func (a *Adapter) validateCommandLaunch(spec scruntime.LaunchSpec, input launchI
 		c.Timeout <= 0 || c.Timeout > domain.MaxCommandTimeout ||
 		c.MaxOutputBytes <= 0 || c.MaxOutputBytes > domain.MaxCommandOutputBytes {
 		return &scruntime.CommandRefusal{Command: c.Name, Reason: scruntime.CommandNotAllowed}
+	}
+	if !isCommitID(c.AuthorBase) || len(c.AuthorBase) != len(commit) {
+		return &scruntime.CommandRefusal{Command: c.Name, Reason: scruntime.CommandAuthorBaseUnavailable}
+	}
+	return nil
+}
+
+// checkAuthorBase refuses a command step whose recorded author base is not
+// an ancestor of (or equal to) the commit it checks (issue 214). Its objects
+// are then already among those copied for the pinned commit, so naming it in
+// the container's Git metadata adds no read.
+func checkAuthorBase(ctx context.Context, repo gitRepo, c *scruntime.CommandSpec, commit string) error {
+	refuse := &scruntime.CommandRefusal{Command: c.Name, Reason: scruntime.CommandAuthorBaseUnavailable}
+	id, err := repo.commitID(ctx, c.AuthorBase)
+	if err != nil || id != c.AuthorBase {
+		return refuse
+	}
+	if _, err := repo.run(ctx, "merge-base", "--is-ancestor", c.AuthorBase, commit); err != nil {
+		return errors.Join(refuse, err)
 	}
 	return nil
 }

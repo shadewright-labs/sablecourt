@@ -200,6 +200,13 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			return scruntime.Handle{}, err
 		}
 	}
+	authorBase := ""
+	if spec.Command != nil {
+		if err := checkAuthorBase(ctx, state.commonGit(), spec.Command, commit); err != nil {
+			return scruntime.Handle{}, err
+		}
+		authorBase = spec.Command.AuthorBase
+	}
 	handle = scruntime.Handle{
 		AdapterName: "coding:" + cfg.Harness,
 		ExternalID:  spec.TaskID,
@@ -219,7 +226,7 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	}
 
 	if spec.CouncilContainer {
-		gitDir, err := prepareHarnessGitDir(ctx, dir, taskBase, state)
+		gitDir, err := prepareHarnessGitDir(ctx, dir, taskBase, state, authorBase)
 		if err != nil {
 			return scruntime.Handle{}, err
 		}
@@ -493,7 +500,13 @@ func (a *Adapter) CollectArtifacts(ctx context.Context, handle scruntime.Handle)
 	if state.Mode == checkoutModeWriter && !state.ReadOnly && state.Result != nil && state.Result.ExitCode != 0 {
 		return state.Artifacts, nil
 	}
-	return append(state.Artifacts, scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip}), nil
+	// git-base is the commit this checkout started from, from the daemon's own
+	// worktree state; the control plane keeps the first author's as the run's
+	// author base (issue 214).
+	return append(state.Artifacts,
+		scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: state.Tip},
+		scruntime.Artifact{Name: scruntime.GitBaseArtifact, ContentType: "text/plain", Text: state.Base},
+	), nil
 }
 
 func (a *Adapter) loadResult(ctx context.Context, taskBase string, handle scruntime.Handle, state *worktreeState) (bool, error) {
