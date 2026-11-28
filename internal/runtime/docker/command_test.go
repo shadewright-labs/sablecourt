@@ -41,6 +41,8 @@ func TestHarnessContainerSpecRefusesBadCommand(t *testing.T) {
 		"as a login":        {login: true},
 		"no wall time":      {mutate: func(s *rt.CouncilLaunch) { s.Limits.WallTime = 0 }},
 		"unknown harness":   {mutate: func(s *rt.CouncilLaunch) { s.Harness = "other" }},
+		"writable checkout": {mutate: func(s *rt.CouncilLaunch) { s.Checkout.Kind = rt.CouncilTask }},
+		"live checkout":     {mutate: func(s *rt.CouncilLaunch) { s.Checkout.Kind = rt.CouncilLive; s.Checkout.GitDir = "" }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, f, s := fixtureRun(t)

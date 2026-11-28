@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -152,5 +153,34 @@ func TestUTF8Tail(t *testing.T) {
 		if len(got) > n || !utf8.ValidString(got) || !strings.HasSuffix(s, got) {
 			t.Fatalf("utf8Tail(%q, %d) = %q", s, n, got)
 		}
+	}
+}
+
+// TestBuildCommandProcessResultTailIsRedactionStable checks the cap cut: a
+// cut that leaves a secret-shaped fragment is redacted and cut again, so the
+// stored output stays within the cap and redacting it again changes nothing.
+func TestBuildCommandProcessResultTailIsRedactionStable(t *testing.T) {
+	t.Parallel()
+	// A word character glued to the front hides each token from its rule
+	// until the cut removes it.
+	github := "gh" + "p_" + strings.Repeat("G", 24)
+	aws := "AK" + "IA" + strings.Repeat("W", 16)
+	for name, tc := range map[string]struct {
+		stdout string
+		cap    int
+		gone   string
+	}{
+		"cut exposes a GitHub token": {stdout: "x" + github, cap: len(github), gone: github},
+		"cut exposes an AWS key":     {stdout: strings.Repeat("y", 50) + "x" + aws, cap: len(aws), gone: aws},
+		"plain tail":                 {stdout: strings.Repeat("z", 40), cap: 8},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			out := buildCommandProcessResult(scruntime.CouncilResult{Stdout: tc.stdout}, commandRecord{Name: "check", MaxOutputBytes: tc.cap})
+			got := out.Command.Output
+			if len(got) > tc.cap || redact.String(got) != got || (tc.gone != "" && strings.Contains(got, tc.gone)) || !out.Command.OutputTruncated {
+				t.Fatalf("output = %q (cap %d, truncated %v), want a redaction-stable tail without %q", got, tc.cap, out.Command.OutputTruncated, tc.gone)
+			}
+		})
 	}
 }

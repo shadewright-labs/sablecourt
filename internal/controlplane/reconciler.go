@@ -895,6 +895,11 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		return err
 	}
 	if len(events) == 0 || events[len(events)-1].Reason != "runtime_exit_observed" {
+		if task.State == domain.TaskStateFailed {
+			// A command step that failed on any other path (lost on restart,
+			// observation failures, a failed launch) still halts its run.
+			return r.haltCommandStep(ctx, task, nil)
+		}
 		return nil
 	}
 	reason := "runtime_completed"
@@ -926,7 +931,8 @@ func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, fac
 	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
 		return err
 	}
-	cleanupErr := r.stopTask(cleanupCtx, task.ID)
+	// Every failed command step halts its workflow run; a no-op for other tasks.
+	cleanupErr := errors.Join(r.haltCommandStep(cleanupCtx, task, nil), r.stopTask(cleanupCtx, task.ID))
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
 	}
@@ -1274,11 +1280,22 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if commit != "" && !supportsPin {
 		return errAuthorCheckoutUnavailable
 	}
-	wl, inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
-	if err != nil {
-		return err
+	var inputJSON string
+	if command != nil {
+		// A command step gives no model a prompt, so it gets no context packet
+		// and none of its host pre-checks run. Without a container runner it
+		// is refused here, before any setup (issue 134).
+		if cap, ok := adapter.(councilContainerCapable); !ok || !cap.SupportsCouncilContainers() || wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
+			return &scruntime.CommandRefusal{Command: command.Name, Reason: scruntime.CommandNoContainerRuntime}
+		}
+		inputJSON = "{}"
+	} else {
+		wl, inputJSON, err = r.prepareLaunchInput(ctx, task, wl)
+		if err != nil {
+			return err
+		}
 	}
-	if readOnly {
+	if readOnly && command == nil {
 		var payload struct {
 			Packet string `json:"context_packet"`
 		}
@@ -1342,7 +1359,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		spec.DataGateURL = r.hostDataGateURL
 	}
 	// Only non-deterministic workloads with explicit Model Gate grants receive Model Gate coordinates.
-	if wl.Spec.Class != domain.ClassDeterministicController && wl.Spec.Grants.ModelGate.Allowed {
+	if wl.Spec.Class != domain.ClassDeterministicController && wl.Spec.Grants.ModelGate.Allowed && command == nil {
 		spec.ModelGateURL = r.modelGateURL
 		spec.ModelGateToken = token
 	}
@@ -1355,6 +1372,8 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	} else {
 		handle, startErr = adapter.Start(callCtx, spec)
 	}
+	// Keep a command refusal even when the start call also ran out of time.
+	_ = errors.As(startErr, &refusal)
 	if callCtx.Err() != nil {
 		startErr = callCtx.Err()
 	}
@@ -1362,7 +1381,6 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	startFailed = startErr != nil
 	if startFailed {
 		launchFacts = launchFailureFacts(startErr)
-		_ = errors.As(startErr, &refusal)
 	} else {
 		if handle.LogPath == "" && handle.WorkDir != "" && strings.HasPrefix(handle.AdapterName, "coding:") {
 			handle.LogPath = handle.WorkDir + ".log"
@@ -1766,7 +1784,7 @@ func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapte
 			Name:        redact.String(artifact.Name),
 			ContentType: redact.String(artifact.ContentType),
 			URI:         redact.String(artifact.URI),
-			Text:        redact.String(artifact.Text),
+			Text:        redactArtifactText(artifact.ContentType, artifact.Text),
 		})
 	}
 	raw, err := json.Marshal(clean)
@@ -1784,6 +1802,58 @@ func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapte
 	}
 	relic.CreatedAt = r.now()
 	return writerStore.PutCouncilRelic(ctx, taskID, *relic)
+}
+
+// redactArtifactText redacts an artifact's text before it is stored. A JSON
+// artifact is redacted value by value, so a pattern can never consume the
+// escapes of its encoding and leave text that no longer decodes; text that is
+// not valid JSON is redacted as plain text.
+func redactArtifactText(contentType, text string) string {
+	if contentType != "application/json" || !json.Valid([]byte(text)) {
+		return redact.String(text)
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return redact.String(text)
+	}
+	raw, err := json.Marshal(redactJSONValue(v))
+	if err != nil {
+		return redact.String(text)
+	}
+	return string(raw)
+}
+
+func redactJSONValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return redact.String(t)
+	case []any:
+		for i := range t {
+			t[i] = redactJSONValue(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if _, ok := val.(string); ok && sensitiveJSONField(k) {
+				val = "[REDACTED:secret]"
+			}
+			out[redact.String(k)] = redactJSONValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// sensitiveJSONField reports whether the redaction rule for a sensitive JSON
+// field, such as "password", matches this key. Redacting keys and values
+// apart would miss such a field, so its string value is replaced whole.
+func sensitiveJSONField(key string) bool {
+	frag, err := json.Marshal(map[string]string{key: "placeholder"})
+	return err == nil && redact.String(string(frag)) != string(frag)
 }
 
 func newTaskID() (string, error) {

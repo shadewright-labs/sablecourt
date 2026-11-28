@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
@@ -225,6 +225,10 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 		if login || s.Prompt != "" || s.Model != "" {
 			return o, errors.New("a command launch carries no prompt, model or login")
 		}
+		// A command checks a pinned commit; it never gets a writable or live checkout.
+		if s.Checkout.Kind != rt.CouncilReview {
+			return o, errors.New("a command launch needs a read-only checkout pinned to a commit")
+		}
 		if err := domain.ValidCommandArgv(s.Command); err != nil {
 			return o, fmt.Errorf("invalid command: %w", err)
 		}
@@ -275,6 +279,9 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.Mounts)
 		if err != nil {
 			return o, err
+		}
+		if command && slices.ContainsFunc(ms, func(m mount.Mount) bool { return !m.ReadOnly }) {
+			return o, errors.New("a command launch mounts its checkout read-only")
 		}
 		mounts = append(mounts, ms...)
 		m := ms[0]

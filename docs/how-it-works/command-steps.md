@@ -70,6 +70,8 @@ The adapter repeats the container and checkout checks, so a launch that reached 
 It uses the same container spec function, and so the same guards, as a coding task: the user, the read-only root, the dropped capabilities, `no-new-privileges`, the CPU, memory and process limits, the mount check and the environment allowlist. These differ:
 
 - The argv is the manifest's, started under the same `timeout` entrypoint; there is no shell unless the argv names one.
+- No context packet is built for it, so none of the host pre-checks that feed a verifier's prompt run, and it gets no Model Gate coordinates.
+- The container spec function refuses a command launch whose checkout is not the read-only one pinned to a commit.
 - No login volume and no tool volume are mounted. `HOME` is `/scratch`, the `noexec` tmpfs.
 - Standard input carries nothing and is closed: the command never receives the task lease, which the daemon still mints so the per-launch proxy can start.
 - The proxy runs with the `command` profile, which allows no provider host, so every tunnel is refused. The gate route is there, but without the lease every gate call is refused.
@@ -78,7 +80,7 @@ It uses the same container spec function, and so the same guards, as a coding ta
 
 ## The result
 
-The command's standard output and standard error are each redacted by the runner, joined (output first) and redacted again, then capped. The step stores one artifact, `command-result` (`application/json`):
+The command's standard output and standard error are each redacted by the runner, joined (output first) and redacted again, then capped. If the cap cuts the output where a redaction rule then matches, the kept tail is redacted and cut again, so storing it never changes it or grows it past the cap. The step's result is the artifact `command-result` (`application/json`); the control plane redacts it field by field, so the stored JSON always decodes:
 
 | Field | Meaning |
 | --- | --- |
@@ -88,9 +90,9 @@ The command's standard output and standard error are each redacted by the runner
 | `output` | The redacted output, at most `maxOutputBytes`. |
 | `output_truncated` | Set when the output passed the cap; only its last `maxOutputBytes` bytes are kept. |
 
-Only `passed` completes the step. Any other outcome fails it, including `output_over_cap` with exit status 0. The step keeps no session log or final message, so no copy of the output exceeds the cap.
+Only `passed` completes the step. Any other outcome fails it, including `output_over_cap` with exit status 0. The step keeps no session log or final message, so no copy of the output exceeds the cap. Like every coding task it also stores `git-status` (of the read-only checkout) and `git-commit` (the pinned commit it checked).
 
-When a command step fails or is refused, the control plane adds an event to the run's first task and marks the run halted, so no later step starts:
+When a command step fails on any path (the command's outcome, a refusal, a launch that could not be set up, observation failures, or a daemon restart) or is refused, the control plane adds an event to the run's first task and marks the run halted, so no later step starts. A step that failed without a stored result has outcome `failed` and no `exit_code` in the event:
 
 | Event on the run | Fields |
 | --- | --- |
@@ -108,5 +110,5 @@ A step after a command step follows the author's task, not the command's: a veri
 - `/scratch` is mounted `noexec` and the checkout is read-only, so a command cannot run a program it builds. `go test`, for example, builds its test binary into a temporary directory and runs it there, and fails in a command step.
 - The checkout's Git metadata holds only the objects reachable from the author's commit and `HEAD`, with no other branch. A command can compare the commit with its own ancestors (for example `git diff --name-only HEAD~1`), but the daemon does not tell it which commit the author started from.
 - A proxy image built before command steps existed does not know the `command` profile, and the proxy name does not change with its code. Command steps are then refused with `container_spec_refused` until `sablectl harness build` builds the proxy again.
-- If the daemon restarts while a command runs, its output is lost and the step fails with outcome `failed`.
+- If the daemon restarts while a command runs, its output is lost: the step fails with no `command-result` artifact, and the run halts with outcome `failed`.
 - Standard output and standard error are kept apart and joined after the run, so their order relative to each other is lost. A stream longer than 1 MiB is dropped by the runner, which fails the step with `output_over_cap`.

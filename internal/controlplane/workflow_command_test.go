@@ -511,3 +511,129 @@ func TestCommandStepRefusalOnSubmittedTask(t *testing.T) {
 		t.Fatal("a refused task reached the container runner")
 	}
 }
+
+// TestCommandStepQuotedSecretDoesNotCorruptResultJSON checks that a passed
+// command whose output holds a quoted secret shape keeps a valid stored
+// result and does not halt the run.
+func TestCommandStepQuotedSecretDoesNotCorruptResultJSON(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), func(context.Context, scruntime.CouncilLaunch) (string, string, int, error) {
+		return `err: "password=supersecret"`, "", 0, nil
+	})
+	root := f.start()
+	f.runUntil("the review step", func() bool { return terminal(f.step(2)) })
+	check, _ := f.step(1)
+	res, ok := CommandStepResult(check)
+	if !ok || res.Outcome != scruntime.CommandPassed || res.ExitCode != 0 {
+		t.Fatalf("command result corrupted: ok=%v res=%+v artifacts=%s", ok, res, check.ArtifactsJSON)
+	}
+	if status := f.runStatus(root.ID); status.Status != "" {
+		t.Fatalf("passed command step halted run: %+v", status)
+	}
+}
+
+// TestCommandStepMissingProxyHaltsRun checks that a command step whose
+// container launch cannot be set up halts the run.
+func TestCommandStepMissingProxyHaltsRun(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), func(context.Context, scruntime.CouncilLaunch) (string, string, int, error) {
+		t.Error("the command ran")
+		return "", "", 0, nil
+	})
+	root := f.start()
+	f.runUntil("author step", func() bool { _, ok := f.step(1); return terminal(f.step(0)) && ok })
+	f.adapter.CouncilProxy = nil
+	f.runUntil("command failure", func() bool { return terminal(f.step(1)) })
+	if status := f.runStatus(root.ID); status.Status != "halted" {
+		t.Fatalf("run status = %+v, want halted", status)
+	}
+}
+
+// TestRedactArtifactTextKeepsJSONValid checks that a JSON artifact is
+// redacted value by value: the result always decodes, secrets in values and
+// sensitive fields are gone, and plain text keeps the plain-text rules.
+func TestRedactArtifactTextKeepsJSONValid(t *testing.T) {
+	t.Parallel()
+	token := "ghp_" + strings.Repeat("T", 36)
+	for name, tc := range map[string]struct {
+		contentType, in string
+		wantGone        []string
+		wantKept        []string
+	}{
+		"quoted kv in a value":     {contentType: "application/json", in: `{"output":"err: \"password=supersecret\""}`, wantGone: []string{"supersecret"}, wantKept: []string{`password=`}},
+		"redacted marker in value": {contentType: "application/json", in: `{"output":"err: \"password=[REDACTED:secret]\""}`, wantKept: []string{`password=[REDACTED:secret]`}},
+		"escape after short value": {contentType: "application/json", in: `{"output":"password=12345\nnext"}`, wantKept: []string{`password=12345`, "next"}},
+		"token next to a kv":       {contentType: "application/json", in: `{"output":"` + token + ` api_key=abcdef123"}`, wantGone: []string{token, "abcdef123"}},
+		"sensitive field":          {contentType: "application/json", in: `{"password":"hunter22","exit_code":0}`, wantGone: []string{"hunter22"}, wantKept: []string{`"exit_code":0`}},
+		"nested array":             {contentType: "application/json", in: `{"lines":["ok","` + token + `"]}`, wantGone: []string{token}, wantKept: []string{`"ok"`}},
+		"invalid json":             {contentType: "application/json", in: `{"output":"` + token, wantGone: []string{token}},
+		"plain text":               {contentType: "text/plain", in: "token " + token, wantGone: []string{token}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := redactArtifactText(tc.contentType, tc.in)
+			if tc.contentType == "application/json" && json.Valid([]byte(tc.in)) && !json.Valid([]byte(got)) {
+				t.Fatalf("redacted JSON does not decode: %s", got)
+			}
+			for _, s := range tc.wantGone {
+				if strings.Contains(got, s) {
+					t.Fatalf("%q survived redaction: %s", s, got)
+				}
+			}
+			for _, s := range tc.wantKept {
+				if !strings.Contains(got, s) {
+					t.Fatalf("%q lost: %s", s, got)
+				}
+			}
+		})
+	}
+}
+
+// TestCommandStepLostOnRestartHaltsRun checks that a command step failed by
+// recovery, as after a daemon restart while the command ran, halts its run.
+func TestCommandStepLostOnRestartHaltsRun(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	f := newCommandFixture(t, checkCommand(0, 0), func(ctx context.Context, _ scruntime.CouncilLaunch) (string, string, int, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return "", "", 0, nil
+	})
+	defer close(release)
+	root := f.start()
+	f.runUntil("the running command", func() bool {
+		check, ok := f.step(1)
+		return ok && check.State == domain.TaskStateWorking && len(f.commandLaunches()) == 1
+	})
+	check, _ := f.step(1)
+	if err := f.r.failLostTask(t.Context(), check, `{"reason":"container_not_alive"}`); err != nil {
+		t.Fatal(err)
+	}
+	if status := f.runStatus(root.ID); status.Status != "halted" || status.Reason != "command_failed" {
+		t.Fatalf("run status = %+v, want halted by command_failed", status)
+	}
+	if _, ok := f.event(root.ID, "workflow_halted_command_failed"); !ok {
+		t.Fatal("no halt event on the run")
+	}
+}
+
+// TestCommandStepSkipsVerifierContext checks that a command step builds no
+// verifier context packet: it runs no host pre-checks and records no
+// verifier_checkout_pinned event, since no model reads a prompt.
+func TestCommandStepSkipsVerifierContext(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), func(context.Context, scruntime.CouncilLaunch) (string, string, int, error) {
+		return "ok", "", 0, nil
+	})
+	f.start()
+	f.runUntil("the command step", func() bool { return terminal(f.step(1)) })
+	check, _ := f.step(1)
+	if check.State != domain.TaskStateCompleted {
+		t.Fatalf("command step state = %s", check.State)
+	}
+	if ev, ok := f.event(check.ID, "verifier_checkout_pinned"); ok {
+		t.Fatalf("command step recorded a verifier context packet: %s", ev.FactJSON)
+	}
+}

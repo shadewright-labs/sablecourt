@@ -54,7 +54,7 @@ func buildCommandProcessResult(res scruntime.CouncilResult, rec commandRecord) *
 	case res.OutputOverflow:
 		result.Output, result.OutputTruncated = "", true
 	case len(output) > rec.MaxOutputBytes:
-		result.Output, result.OutputTruncated = utf8Tail(output, rec.MaxOutputBytes), true
+		result.Output, result.OutputTruncated = redactedTail(output, rec.MaxOutputBytes), true
 	}
 	out := &processResult{ExitCode: res.ExitCode, Command: result}
 	switch {
@@ -93,6 +93,23 @@ func commandArtifact(state *worktreeState) (scruntime.Artifact, bool) {
 		return scruntime.Artifact{}, false
 	}
 	return scruntime.Artifact{Name: scruntime.CommandResultArtifact, ContentType: "application/json", Text: string(raw)}, true
+}
+
+// redactedTail returns at most maxBytes from the end of s that redaction
+// leaves unchanged. A cut can leave a fragment that a rule matches, and its
+// replacement can be longer than the fragment, so the tail is redacted and cut
+// again until it is stable; a tail that does not settle is dropped. Redacting
+// the stored output again therefore never changes it or grows it past the cap.
+func redactedTail(s string, maxBytes int) string {
+	tail := utf8Tail(s, maxBytes)
+	for range 3 {
+		r := redact.String(tail)
+		if r == tail {
+			return tail
+		}
+		tail = utf8Tail(r, maxBytes)
+	}
+	return ""
 }
 
 // utf8Tail returns at most maxBytes from the end of s, starting on a rune.
