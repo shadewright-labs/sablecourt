@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 730" role="img" aria-labelledby="t d" data-diagram="nested" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">A2A task envelope fields</title>
-  <desc id="d">The fields of a task envelope as domain.Task holds them today, grouped by who fills them. A submitter (the API, the dashboard, a webhook or a schedule) supplies the target workload, the input and an optional idempotency key that defaults to the task ID. A solid line labelled submits a task leads to the control plane group, which sets the task ID, the state that starts as submitted, the parent link when a workflow starts its next step, and the artifacts recorded when the task finishes. A red note says a submitter never sets the task ID, the state or the artifacts. A dashed planned group shows a workload proposing a child task: the control plane would check a delegate grant and store a sub-budget ceiling, which is not checked against the parent cap; no gate tool or route calls this path yet, and a dashed line labelled proposes a child task, planned, leads from it to the control plane group. A last group, from the manifest, holds the agent card description and skills for each workload. A legend marks built and planned.</desc>
+  <desc id="d">The fields of a task envelope as domain.Task holds them today, grouped by who fills them. The callers of SubmitTask (the API, A2A, the dashboard, a webhook and the scheduler) pass the target workload name, the input JSON and an optional idempotency key, which becomes the task ID when empty. A solid line labelled SubmitTask leads to the control plane group, which generates the task ID, sets the state, which starts as submitted and which the control plane moves, sets the parent link when a workflow starts its next step, and records the artifacts when the task finishes. A red note says SubmitTask takes no task ID, state or artifacts. A dashed planned group shows a workload proposing a child task: ProposeChildTask would check a delegate grant and store a sub-budget ceiling as given, without checking it against the parent cap; it has no caller yet, and a dashed line labelled proposes a child task, planned, leads from it to the control plane group. A last group, from the manifest, holds the agent card description and skills for each workload. A legend marks built and planned.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -32,24 +32,24 @@
   </defs>
   <rect width="1120" height="730" rx="18" fill="#08060e"/>
   <rect class="lane" x="24" y="24" width="1072" height="150" rx="14"/>
-  <text class="lanet" x="44" y="54">SUPPLIED BY THE SUBMITTER (API, DASHBOARD, WEBHOOK, SCHEDULE)</text>
+  <text class="lanet" x="44" y="54">PASSED TO SubmitTask BY ITS CALLERS (API, A2A, DASHBOARD, WEBHOOK, SCHEDULER)</text>
   <rect class="box" x="44" y="76" width="320" height="72" rx="10"/>
   <text class="h" x="60" y="102">Target workload</text>
-  <text class="s" x="60" y="123">the workload to start</text>
+  <text class="s" x="60" y="123">a workload name from the manifest</text>
   <rect class="box" x="400" y="76" width="320" height="72" rx="10"/>
   <text class="h" x="416" y="102">Input</text>
-  <text class="s" x="416" y="123">the prompt for the task</text>
+  <text class="s" x="416" y="123">input JSON for the task</text>
   <rect class="box" x="756" y="76" width="312" height="72" rx="10"/>
   <text class="h" x="772" y="102">Idempotency key</text>
   <text class="s" x="772" y="123">optional</text>
-  <text class="s" x="772" y="140">defaults to the task ID</text>
+  <text class="s" x="772" y="140">empty becomes the task ID</text>
   <path class="f" d="M560 174V210" marker-end="url(#a)"/>
-  <text class="lbl" x="572" y="198" text-anchor="start">submits a task</text>
+  <text class="lbl" x="572" y="198" text-anchor="start">SubmitTask</text>
   <rect class="lane" x="24" y="214" width="1072" height="150" rx="14"/>
   <text class="lanet" x="44" y="244">SET BY THE CONTROL PLANE</text>
   <rect class="box" x="44" y="266" width="238" height="72" rx="10"/>
   <text class="h" x="60" y="292">Task ID</text>
-  <text class="s" x="60" y="313">new for each task</text>
+  <text class="s" x="60" y="313">generated for each task</text>
   <rect class="box" x="306" y="266" width="238" height="72" rx="10"/>
   <text class="h" x="322" y="292">State</text>
   <text class="s" x="322" y="313">starts as submitted</text>
@@ -62,19 +62,19 @@
   <text class="h" x="846" y="292">Artifacts</text>
   <text class="s" x="846" y="313">typed output of the task</text>
   <text class="s" x="846" y="330">recorded when it finishes</text>
-  <text class="no" x="44" y="356" text-anchor="start">never set by a submitter: task ID, state, artifacts</text>
+  <text class="no" x="44" y="356" text-anchor="start">SubmitTask takes no task ID, state or artifacts</text>
   <path class="r" d="M560 404V368" marker-end="url(#m)"/>
   <text class="lbl" x="572" y="392" text-anchor="start">proposes a child task (planned)</text>
   <rect class="lane" x="24" y="404" width="1072" height="140" rx="14" stroke-dasharray="5 4"/>
   <text class="lanet" x="44" y="434">PLANNED: A WORKLOAD PROPOSES A CHILD TASK</text>
   <rect class="plan" x="44" y="456" width="320" height="72" rx="10"/>
   <text class="h" x="60" y="482">Delegate grant</text>
-  <text class="s" x="60" y="503">checked before the child starts</text>
+  <text class="s" x="60" y="503">checked before the child is created</text>
   <rect class="plan" x="400" y="456" width="320" height="72" rx="10"/>
   <text class="h" x="416" y="482">Sub-budget ceiling</text>
-  <text class="s" x="416" y="503">stored on the child task</text>
+  <text class="s" x="416" y="503">stored as given on the child</text>
   <text class="s" x="416" y="520">parent cap check not built</text>
-  <text class="cap" x="744" y="496" text-anchor="start">no gate tool or route calls it yet</text>
+  <text class="cap" x="744" y="496" text-anchor="start">ProposeChildTask has no caller yet</text>
   <rect class="lane" x="24" y="564" width="1072" height="100" rx="14"/>
   <text class="lanet" x="44" y="594">FROM THE MANIFEST</text>
   <rect class="box" x="44" y="608" width="320" height="42" rx="10"/>

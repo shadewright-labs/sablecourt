@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 412" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 500" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Scry and Takeover</title>
-  <desc id="d">Live attach to a running task. The task process writes raw output to the attach hub in sablecourtd, which redacts the output before it enters a 64 KiB ring. An operator opens a Scry, a read-only stream of that redacted output, and can ask for Takeover, after which the hub passes that operator stdin to the task process. The hub allows one takeover holder per task. A second operator who asks for takeover while it is held gets a refusal back from the endpoint, drawn as a red line from the hub to the second operator labelled 409 while held. The daemon endpoints, not the hub, write the audit log rows for a scry attach, an acquired takeover and a detach; a refused takeover is not recorded. A legend marks flow and refused lines.</desc>
+  <desc id="d">Live attach to a running task. The runtime writes the task process output to the attach hub in sablecourtd, which redacts it before it enters a 64 KiB ring. An operator opens a Scry, a read-only stream of that redacted output, and can ask for Takeover, after which the hub passes that operator input to the task process stdin. The hub allows one takeover holder per task, identified by an operator ID string. A takeover request that names a different operator ID while it is held gets HTTP 409, drawn as a red line from the hub to the operator with the other ID. The daemon endpoints call the hub and then append the audit log rows for a scry attach, an acquired takeover and a detach, best effort; a refused takeover is not recorded. A legend marks flow and refused lines.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -30,26 +30,29 @@
       .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
     </style>
   </defs>
-  <rect width="1120" height="412" rx="18" fill="#08060e"/>
-  <rect class="lane" x="24" y="24" width="250" height="330" rx="14"/>
+  <rect width="1120" height="500" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="250" height="416" rx="14"/>
   <text class="lanet" x="44" y="54">OPERATORS</text>
   <rect class="box" x="44" y="96" width="210" height="64" rx="10"/>
   <text class="h" x="60" y="122">Operator</text>
   <text class="s" x="60" y="143">scry and takeover</text>
   <rect class="box" x="44" y="196" width="210" height="64" rx="10"/>
-  <text class="h" x="60" y="222">Second operator</text>
+  <text class="h" x="60" y="222">Operator, other ID</text>
   <text class="s" x="60" y="243">while takeover is held</text>
-  <rect class="lane" x="330" y="24" width="480" height="330" rx="14"/>
+  <rect class="lane" x="330" y="24" width="480" height="416" rx="14"/>
   <text class="lanet" x="350" y="54">SABLECOURTD</text>
   <rect class="key" x="450" y="96" width="240" height="150" rx="12"/>
   <text class="h" x="466" y="122">Attach hub</text>
   <text class="s" x="466" y="143">64 KiB ring of redacted output</text>
   <text class="s" x="466" y="160">one takeover holder per task</text>
   <text class="s" x="466" y="177">output redacted before the ring</text>
-  <rect class="box" x="450" y="270" width="240" height="64" rx="10"/>
-  <text class="h" x="466" y="296">Audit log</text>
-  <text class="s" x="466" y="317">scry, takeover and detach rows</text>
-  <rect class="lane" x="866" y="24" width="230" height="330" rx="14"/>
+  <rect class="box" x="450" y="290" width="240" height="64" rx="10"/>
+  <text class="h" x="466" y="316">Daemon endpoints</text>
+  <text class="s" x="466" y="337">scry, takeover, detach handlers</text>
+  <rect class="box" x="450" y="378" width="240" height="64" rx="10"/>
+  <text class="h" x="466" y="404">Audit log</text>
+  <text class="s" x="466" y="425">scry, takeover and detach rows</text>
+  <rect class="lane" x="866" y="24" width="230" height="416" rx="14"/>
   <text class="lanet" x="886" y="54">RUNNING TASK</text>
   <rect class="box" x="886" y="96" width="190" height="72" rx="10"/>
   <text class="h" x="902" y="122">Task process</text>
@@ -67,10 +70,12 @@
   <text class="lbl" x="791" y="108" text-anchor="middle">raw output</text>
   <path class="f" d="M696 144H886" marker-end="url(#a)"/>
   <text class="lbl" x="791" y="136" text-anchor="middle">stdin, holder only</text>
-  <path class="f" d="M570 246V270" marker-end="url(#a)"/>
-  <text class="lbl" x="582" y="263" text-anchor="start">endpoint records</text>
-  <path class="f" d="M24 384H64" marker-end="url(#a)"/>
-  <text class="lbl" x="74" y="388" text-anchor="start">flow</text>
-  <path class="deny" d="M200 384H240" marker-end="url(#x)"/>
-  <text class="lbl" x="250" y="388" text-anchor="start">refused</text>
+  <path class="f" d="M570 290V250" marker-end="url(#a)"/>
+  <text class="lbl" x="582" y="274" text-anchor="start">call the hub</text>
+  <path class="f" d="M570 354V378" marker-end="url(#a)"/>
+  <text class="lbl" x="582" y="371" text-anchor="start">append, best effort</text>
+  <path class="f" d="M24 472H64" marker-end="url(#a)"/>
+  <text class="lbl" x="74" y="476" text-anchor="start">flow</text>
+  <path class="deny" d="M200 472H240" marker-end="url(#x)"/>
+  <text class="lbl" x="250" y="476" text-anchor="start">refused</text>
 </svg>

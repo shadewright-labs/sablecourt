@@ -11,7 +11,7 @@ Allowing arbitrary peer-to-peer calls between agents in v0.1 complicates budget 
 
 Enforce a strict hub-and-spoke topology in v0.1: workloads communicate only with the Sablecourt Control Plane and its capability gates, with zero direct workload-to-workload network connectivity.
 
-[![The API gives workloads no route to each other, and a child task goes through the control plane, shown as planned.](../diagrams/hub-and-spoke.svg)](../diagrams/hub-and-spoke.svg "Open full size")
+[![Workloads have no direct route to each other: every task, including one sent over A2A, enters through the control plane; the child-task proposal is shown as planned.](../diagrams/hub-and-spoke.svg)](../diagrams/hub-and-spoke.svg "Open full size")
 
 Figure: the API has no workload-to-workload route and a child task goes through the control plane; the child task proposal, its policy check and the child start are dashed because no gate tool or route calls the proposal yet. Network-level isolation between containers is not drawn.
 
@@ -21,15 +21,15 @@ Represent every unit of work using an A2A-compatible task envelope:
 - Explicit task states (`submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`).
 - Typed artifacts, parent task reference, deterministic idempotency key, and explicit budget ceiling.
 
-[![The task envelope fields grouped by who fills them: a submitter supplies the target, input and key, the control plane sets the ID, state, parent link and artifacts, a workload proposing a child task with a sub-budget is drawn as planned, and the agent card comes from the manifest.](../diagrams/a2a-task-envelope.svg)](../diagrams/a2a-task-envelope.svg "Open full size")
+[![The task envelope fields grouped by who fills them: the callers of SubmitTask pass the target, input and key, the control plane sets the ID, state, parent link and artifacts, a workload proposing a child task with a sub-budget is drawn as planned, and the agent card comes from the manifest.](../diagrams/a2a-task-envelope.svg)](../diagrams/a2a-task-envelope.svg "Open full size")
 
-Figure: the task envelope as `domain.Task` holds it and who fills each field. A submitter (the API, the dashboard, a webhook or a schedule) supplies the target, the input and an optional idempotency key; the control plane sets the task ID, the state, the parent link and the artifacts; the agent card comes from the manifest. A workload proposing a child task, with a delegate grant check and a sub-budget ceiling, is dashed: `ProposeChildTask` exists but no gate tool or route calls it, and it stores the sub-budget as given without checking it against the parent cap.
+Figure: the task envelope as `domain.Task` holds it and who fills each field. The callers of `SubmitTask` (the API, A2A, the dashboard, a webhook and the scheduler) pass the target workload, the input and an optional idempotency key, which becomes the task ID when empty; the control plane sets the task ID, the state, the parent link and the artifacts; the agent card comes from the manifest. A workload proposing a child task, with a delegate grant check and a sub-budget ceiling, is dashed: `ProposeChildTask` exists but has no caller, and it stores the sub-budget as given without checking it against the parent cap.
 
 When one agent needs work from another in v0.1, it proposes a child task to the Control Plane; deterministic policy checks whether the caller is allowed to spawn that target workload and allocates a sub-budget from the parent cap before dispatching.
 
-[![A parent workload would propose a child task to the control plane, which would check the delegate grant, create the child and start it, with the result returning through the control plane; only the start is built, and the API has no route between the two workloads.](../diagrams/a2a-delegation-sequence.svg)](../diagrams/a2a-delegation-sequence.svg "Open full size")
+[![A parent workload would propose a child task to the control plane, which would check the delegate grant and create the child; the child start and its artifacts on the child task are built, how a result reaches the parent is not specified, and workload-facing task routes act only on the caller's own task.](../diagrams/a2a-delegation-sequence.svg)](../diagrams/a2a-delegation-sequence.svg "Open full size")
 
-Figure: one delegation as a sequence. Only the start of the child is built; the proposal, the policy check, the child task with its sub-budget and the return of the result are dashed because no gate tool or route calls the proposal yet.
+Figure: one delegation as a sequence. The start of a submitted task and the recording of its artifacts are built; the proposal, the policy check and the child task with its sub-budget are dashed because `ProposeChildTask` has no caller yet. The ADR does not specify how a child's result reaches the parent.
 
 ## Alternatives considered
 

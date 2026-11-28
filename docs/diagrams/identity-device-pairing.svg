@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 312" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 220" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Approval device pairing</title>
-  <desc id="d">Flow of pairing an approval device, all planned and drawn dashed. Start pairing issues a single-use code with a short expiry. The device sends its P-256 public key and proof of possession of the matching private key. An enrolled passkey or an already paired device confirms the enrolment with fresh proof. The device is then bound to a person principal and an audit row is appended. A red refused line from start pairing leads to a box saying the pairing start and complete routes answer 503 today, because device enrolment needs independent confirmation. A legend marks planned and refused.</desc>
+  <desc id="d">What this ADR plans for pairing an approval device, drawn dashed because it is not built. The device proves possession of its P-256 private key, and an enrolled passkey or an already paired device then gives fresh confirmation. A red refused line leads to a box saying the pairing start and complete routes answer 503 today, because device enrolment needs independent confirmation. A legend marks planned and refused.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -30,35 +30,25 @@
       .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
     </style>
   </defs>
-  <rect width="1120" height="312" rx="18" fill="#08060e"/>
-  <rect class="plan" x="32" y="56" width="210" height="72" rx="10"/>
-  <text class="h" x="48" y="82">Start pairing</text>
-  <text class="s" x="48" y="103">a single-use code</text>
-  <text class="s" x="48" y="120">with a short expiry</text>
-  <rect class="plan" x="314" y="56" width="210" height="72" rx="10"/>
-  <text class="h" x="330" y="82">Device sends its key</text>
-  <text class="s" x="330" y="103">a P-256 public key, plus</text>
-  <text class="s" x="330" y="120">proof of its private key</text>
-  <rect class="plan" x="596" y="56" width="210" height="72" rx="10"/>
-  <text class="h" x="612" y="82">Confirm</text>
-  <text class="s" x="612" y="103">an enrolled passkey or</text>
-  <text class="s" x="612" y="120">paired device, fresh</text>
-  <rect class="plan" x="878" y="56" width="210" height="72" rx="10"/>
-  <text class="h" x="894" y="82">Device is bound</text>
-  <text class="s" x="894" y="103">to a person principal</text>
-  <text class="s" x="894" y="120">audit row appended</text>
-  <path class="r" d="M242 92H310" marker-end="url(#m)"/>
-  <text class="lbl" x="276" y="84" text-anchor="middle">code</text>
-  <path class="r" d="M524 92H592" marker-end="url(#m)"/>
-  <text class="lbl" x="558" y="84" text-anchor="middle">key</text>
-  <path class="r" d="M806 92H874" marker-end="url(#m)"/>
-  <text class="lbl" x="840" y="84" text-anchor="middle">confirmed</text>
-  <path class="deny" d="M137 128V176" marker-end="url(#x)"/>
-  <rect class="bad" x="32" y="176" width="420" height="64" rx="10"/>
-  <text class="no" x="48" y="202" text-anchor="start">Pairing start and complete answer 503 today</text>
-  <text class="s" x="48" y="224" text-anchor="start">device enrolment needs independent confirmation</text>
-  <path class="r" d="M32 284H72" marker-end="url(#m)"/>
-  <text class="lbl" x="82" y="288" text-anchor="start">planned</text>
-  <path class="deny" d="M260 284H300" marker-end="url(#x)"/>
-  <text class="lbl" x="310" y="288" text-anchor="start">refused</text>
+  <rect width="1120" height="220" rx="18" fill="#08060e"/>
+  <rect class="plan" x="32" y="40" width="250" height="72" rx="10"/>
+  <text class="h" x="48" y="66">Key possession proof</text>
+  <text class="s" x="48" y="87">a P-256 key, proved by</text>
+  <text class="s" x="48" y="104">its private key</text>
+  <rect class="plan" x="358" y="40" width="250" height="72" rx="10"/>
+  <text class="h" x="374" y="66">Fresh confirmation</text>
+  <text class="s" x="374" y="87">an enrolled passkey or</text>
+  <text class="s" x="374" y="104">a paired device</text>
+  <rect class="bad" x="720" y="40" width="360" height="72" rx="10"/>
+  <text class="no" x="736" y="66" text-anchor="start">Pairing routes answer 503 today</text>
+  <text class="s" x="736" y="87" text-anchor="start">start and complete, until independent</text>
+  <text class="s" x="736" y="104" text-anchor="start">confirmation lands in Stage 1</text>
+  <path class="r" d="M282 76H354" marker-end="url(#m)"/>
+  <text class="lbl" x="318" y="68" text-anchor="middle">then</text>
+  <path class="deny" d="M608 76H716" marker-end="url(#x)"/>
+  <text class="lbl" x="662" y="68" text-anchor="middle">refused</text>
+  <path class="r" d="M32 172H72" marker-end="url(#m)"/>
+  <text class="lbl" x="82" y="176" text-anchor="start">planned</text>
+  <path class="deny" d="M260 172H300" marker-end="url(#x)"/>
+  <text class="lbl" x="310" y="176" text-anchor="start">refused</text>
 </svg>

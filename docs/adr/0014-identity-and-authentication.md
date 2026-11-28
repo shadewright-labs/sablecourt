@@ -94,9 +94,9 @@ Immediately after shared sign-in, `sablecourtd` prompts an `approver` without an
 
 Approval devices use an ECDSA P-256 key with user verification, enrolled only after cryptographic proof of possession and fresh confirmation from an already enrolled passkey or paired device; device pairing endpoints remain disabled (`503`) until that flow lands in Stage 1. This ADR amends [ADR-0011](0011-sanctum-scope-trust-and-cli-harnesses.md) by unparking approval device pairing once proof of possession and independent factor confirmation land in Stage 1, and amends [ADR-0012](0012-learning-evidence-and-expiry.md) by narrowing who accepts, confirms, or retires a learning from any authenticated operator to the `approver` role (while `operator` continues to propose learnings). Subscription CLI logins permitted by [ADR-0011](0011-sanctum-scope-trust-and-cli-harnesses.md) (`claude`, `codex`, `agy`) remain a local-mode (`sanctum`) feature only; shared installations route all inference through Model Gate keys or an upstream gateway.
 
-[![Pairing an approval device by single-use code, a key with proof of possession and fresh confirmation, with the pairing routes answering 503 until it is built.](../diagrams/identity-device-pairing.svg)](../diagrams/identity-device-pairing.svg "Open full size")
+[![Planned device pairing needs proof of possession of a P-256 key and fresh confirmation by an enrolled passkey or paired device, with the pairing routes answering 503 until it is built.](../diagrams/identity-device-pairing.svg)](../diagrams/identity-device-pairing.svg "Open full size")
 
-Figure: device pairing as this ADR proposes it. Every step is dashed because none is built; the two pairing routes answer 503 on main until independent confirmation lands in Stage 1.
+Figure: device pairing as this ADR proposes it. Both requirements are dashed because they are planned; the two pairing routes answer 503 on main until independent confirmation lands in Stage 1.
 
 ### Service to service
 
