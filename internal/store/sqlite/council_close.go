@@ -14,7 +14,8 @@ import (
 )
 
 // CloseCouncil renders the evidence under the same write lock as answer acceptance.
-func (s *SQLiteStore) CloseCouncil(ctx context.Context, id string, terminal domain.ConclaveState, reason string) (domain.ConclaveRelic, error) {
+func (s *SQLiteStore) CloseCouncil(ctx context.Context, id string, terminal domain.ConclaveState, reason string) (closedRelic domain.ConclaveRelic, err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "council %s was closed as %s", id, terminal) }()
 	return s.closeCouncil(ctx, id, terminal, reason, false)
 }
 

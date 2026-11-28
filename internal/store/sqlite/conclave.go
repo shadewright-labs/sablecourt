@@ -10,7 +10,8 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-func (s *SQLiteStore) CreateConclave(ctx context.Context, c domain.ConclaveSession) error {
+func (s *SQLiteStore) CreateConclave(ctx context.Context, c domain.ConclaveSession) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "conclave %s was opened", c.ID) }()
 	return createConclave(ctx, s.db, c)
 }
 
@@ -67,7 +68,8 @@ func (s *SQLiteStore) ListConclaves(ctx context.Context) ([]domain.ConclaveSessi
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error {
+func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "conclave %s moved to %s", id, state) }()
 	handled, err := store.UpdateConclaveState(ctx, s.db, readCouncilPolicy, id, state, wardReason, time.Now().UTC(), s.appendAuditTx)
 	if err != nil || handled {
 		return err
@@ -82,7 +84,8 @@ func (s *SQLiteStore) UpdateConclaveState(ctx context.Context, id string, state 
 	return err
 }
 
-func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
+func (s *SQLiteStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (msgID int64, err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "message %d was stored in conclave %s", msgID, msg.ConclaveID) }()
 	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, readCouncilPolicy, msg, s.appendAuditTx); handled {
 		return id, err
 	}
@@ -125,11 +128,14 @@ func (s *SQLiteStore) ListConclaveMessages(ctx context.Context, conclaveID strin
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error {
+func (s *SQLiteStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) (err error) {
+	defer func() {
+		store.NoteEffectIf(ctx, err, "relic %s was written to conclave %s", relic.Name, relic.ConclaveID)
+	}()
 	if handled, err := store.PutGuardedConclaveReportRelic(ctx, s.db, relic); handled {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO conclave_relics (conclave_id, name, author_role, content_type, body, sha256, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(conclave_id, name) DO UPDATE SET
@@ -187,6 +193,7 @@ func (s *SQLiteStore) ListConclaveRelics(ctx context.Context, conclaveID string)
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) FinishConclaveWake(ctx context.Context, id int64) error {
+func (s *SQLiteStore) FinishConclaveWake(ctx context.Context, id int64) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the wake for message %d was finished", id) }()
 	return store.FinishConclaveWake(ctx, s.db, id)
 }

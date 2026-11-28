@@ -296,6 +296,9 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 }
 
 func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload domain.Workload, def ToolDef, args json.RawMessage) (*mcp.CallToolResult, error) {
+	// Each call gets its own effects recorder, even when calls share a
+	// request, so a failed audit write names only what this call changed.
+	ctx, _ = store.TrackNewEffects(ctx)
 	capability := "mcp:" + def.Name
 	snap := g.snapshotFromContext(ctx)
 	if snap.policy == nil {
@@ -319,7 +322,7 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		}
 		apr, err := g.approvals.Request(ctx, lease.TaskID, workload.Metadata.Name, capability, payload, 15*time.Minute)
 		if err != nil {
-			if msg, ok := store.AuditFailureText(err, "the approval request"); ok {
+			if msg, ok := store.AuditFailureText(ctx, err, "the approval request"); ok {
 				return errorToolResult(msg), nil
 			}
 			return errorToolResult("failed to enqueue approval: " + err.Error()), nil
@@ -337,9 +340,11 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		// change state: it is recorded before it runs, and a record that
 		// cannot be written refuses it.
 		if err := g.record(ctx, lease.TaskID, workload.Metadata.Name, capability, "started", `{}`); err != nil {
-			return errorToolResult("tool call refused: its audit record could not be written"), nil
+			msg, _ := store.AuditFailureText(ctx, err, "the tool call")
+			return errorToolResult(msg), nil
 		}
 		out, err := def.Handler(ctx, workload, lease.TaskID, args)
+		store.NoteEffectIf(ctx, err, "tool %s ran", def.Name)
 		if err != nil {
 			outcome := "error"
 			if errors.Is(err, errToolRefused) {
@@ -348,7 +353,7 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 			g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, outcome, fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
 			// A failed audit write inside the tool says what already
 			// happened, as it does for an action.
-			if msg, ok := store.AuditFailureText(err, def.Name); ok {
+			if msg, ok := store.AuditFailureText(ctx, err, "the tool call"); ok {
 				return errorToolResult(msg), nil
 			}
 			return errorToolResult(redact.String(err.Error())), nil
@@ -356,7 +361,8 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		red := redact.Text(out)
 		detail := fmt.Sprintf(`{"redaction_hits":%d}`, red.Hits)
 		if err := g.record(ctx, lease.TaskID, workload.Metadata.Name, capability, "allowed", detail); err != nil {
-			return errorToolResult("the tool ran, but its audit record could not be written"), nil
+			msg, _ := store.AuditFailureText(ctx, err, "the tool call")
+			return errorToolResult(msg), nil
 		}
 		return textToolResult(red.Text), nil
 
@@ -408,6 +414,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), snapshotCtxKey{}, snap)
+		ctx, _ = store.TrackEffects(ctx)
 		actionName := strings.TrimPrefix(r.URL.Path, "/")
 		if actionName == "" {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "action name required"})
@@ -517,9 +524,8 @@ func (g *Gate) ActionHandler() http.Handler {
 				auditAction("error", map[string]any{"error": redact.String(err.Error())})
 				// A failed audit write in the check (git.merge_pr writes its
 				// evidence row there) is a local failure, answered with HTTP
-				// 500 like every other failed audit write. No approval exists
-				// yet and none was spent.
-				if msg, ok := store.AuditFailureText(err, "the action"); ok {
+				// 500 like every other failed audit write.
+				if msg, ok := store.AuditFailureText(ctx, err, "the action"); ok {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 					return
 				}
@@ -537,7 +543,7 @@ func (g *Gate) ActionHandler() http.Handler {
 					return
 				}
 				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, wlName, capability, value, 15*time.Minute)
-				if msg, ok := store.AuditFailureText(err, "the approval request"); ok {
+				if msg, ok := store.AuditFailureText(ctx, err, "the approval request"); ok {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 					return
 				}
@@ -591,8 +597,12 @@ func (g *Gate) ActionHandler() http.Handler {
 				Outcome:      "consumed",
 				DetailJSON:   string(consumedJSON),
 				CreatedAt:    g.now(),
-			}); err != nil || ctx.Err() != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording the approval use failed; the approval is spent and the action did not run, request a new approval"})
+			}); err != nil {
+				msg, _ := store.AuditFailureText(ctx, err, "the action")
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			} else if ctx.Err() != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "request cancelled before the action ran; approval " + req.ApprovalID + " is spent, request a new one"})
 				return
 			}
 			ctx = context.WithValue(ctx, approvalCtxKey{}, req.ApprovalID)
@@ -606,8 +616,12 @@ func (g *Gate) ActionHandler() http.Handler {
 				started["allowed_repo"] = snap.allowedRepo
 			}
 			startedJSON, _ := json.Marshal(started)
-			if err := g.record(ctx, ac.Lease.TaskID, wlName, capability, "started", string(startedJSON)); err != nil || ctx.Err() != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "action refused: its audit record could not be written, the action did not run"})
+			if err := g.record(ctx, ac.Lease.TaskID, wlName, capability, "started", string(startedJSON)); err != nil {
+				msg, _ := store.AuditFailureText(ctx, err, "the action")
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			} else if ctx.Err() != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "request cancelled"})
 				return
 			}
 		default:
@@ -616,6 +630,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 
 		result, err := def.run(ctx, ac.Workload, ac.Lease.TaskID, value)
+		store.NoteEffectIf(ctx, err, "action %s ran", actionName)
 		if err != nil {
 			// Every error of the executor counts on the breaker, as before the
 			// typed catalog, a refused target included.
@@ -630,13 +645,9 @@ func (g *Gate) ActionHandler() http.Handler {
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			// A failed audit write inside the executor is a local failure,
-			// answered with HTTP 500 like every other failed audit write. An
-			// approval presented with the request is spent by now, so the
-			// answer says so instead of saying that nothing changed.
-			if approvalUsed != "" {
-				err = spentApproval(approvalUsed, err)
-			}
-			if msg, ok := store.AuditFailureText(err, "the action"); ok {
+			// answered with HTTP 500 like every other failed audit write. The
+			// answer lists what the request changed, a spent approval included.
+			if msg, ok := store.AuditFailureText(ctx, err, "the action"); ok {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 				return
 			}
@@ -655,8 +666,9 @@ func (g *Gate) ActionHandler() http.Handler {
 		allowedJSON, _ := json.Marshal(allowed)
 		if err := g.record(ctx, ac.Lease.TaskID, wlName, capability, "allowed", string(allowedJSON)); err != nil {
 			// The side effect has happened and cannot be undone here; the
-			// caller is told so instead of receiving the result.
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the action ran, but its audit record could not be written; do not repeat it"})
+			// caller is told what changed instead of receiving the result.
+			msg, _ := store.AuditFailureText(ctx, err, "the action")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 			return
 		}
 
@@ -700,20 +712,6 @@ func (g *Gate) authenticateWithSnapshot(w http.ResponseWriter, r *http.Request, 
 		return authContext{}, false
 	}
 	return authContext{Lease: lease, Workload: wl}, true
-}
-
-// spentApproval marks a failed audit write met after approval id was spent
-// as one that came after that effect. When the executor reported no effect
-// of its own, the action did not run.
-func spentApproval(id string, err error) error {
-	if !errors.Is(err, store.ErrAuditWrite) {
-		return err
-	}
-	var after *store.AfterEffectError
-	if errors.As(err, &after) {
-		return store.AfterEffect("approval "+id+" was spent, request a new one", err)
-	}
-	return store.AfterEffect("approval "+id+" was spent and the action did not run", err)
 }
 
 // audit writes a record that cannot change what happens next, a refusal or

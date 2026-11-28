@@ -1,10 +1,13 @@
 package attach
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
 	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 const defaultRingSize = 64 * 1024
@@ -131,16 +134,19 @@ func (h *Hub) Subscribe(taskID string) (string, <-chan string, bool, func(), err
 	return history, ch, false, unsub, nil
 }
 
-// AcquireTakeover reserves exclusive stdin control for operatorID. The
-// reservation refuses other operators but allows no input until
-// ConfirmTakeover, so the caller can record the takeover first and hand it
-// back with ReleaseTakeover when the record cannot be written.
-func (h *Hub) AcquireTakeover(taskID, operatorID string) error {
+// AcquireTakeover reserves exclusive stdin control for operatorID and
+// reports whether this call made the reservation. The reservation refuses
+// other operators but allows no input until ConfirmTakeover, so the caller
+// can record the takeover first and drop the reservation with
+// AbandonTakeover when the record cannot be written. An operator who already
+// holds the takeover, pending or confirmed, keeps it as it is, and the call
+// reports no reservation, so the caller has nothing to drop.
+func (h *Hub) AcquireTakeover(taskID, operatorID string) (bool, error) {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
 	h.mu.RUnlock()
 	if !ok {
-		return ErrSessionNotFound
+		return false, ErrSessionNotFound
 	}
 	if operatorID == "" {
 		operatorID = "operator"
@@ -148,22 +154,46 @@ func (h *Hub) AcquireTakeover(taskID, operatorID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return ErrSessionNotFound
+		return false, ErrSessionNotFound
 	}
 	if s.stdin == nil {
-		return ErrTakeoverUnsupported
+		return false, ErrTakeoverUnsupported
 	}
 	if s.takeoverOwner != "" && s.takeoverOwner != operatorID {
-		return ErrTakeoverHeld
+		return false, ErrTakeoverHeld
+	}
+	if s.takeoverOwner == operatorID {
+		return false, nil
 	}
 	s.takeoverOwner = operatorID
 	s.takeoverPending = true
-	return nil
+	return true, nil
+}
+
+// AbandonTakeover drops a reservation operatorID made with AcquireTakeover
+// while it is still pending. A confirmed takeover is kept.
+func (h *Hub) AbandonTakeover(taskID, operatorID string) {
+	h.mu.RLock()
+	s, ok := h.sessions[taskID]
+	h.mu.RUnlock()
+	if !ok {
+		return
+	}
+	if operatorID == "" {
+		operatorID = "operator"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.takeoverOwner == operatorID && s.takeoverPending {
+		s.takeoverOwner = ""
+		s.takeoverPending = false
+	}
 }
 
 // ConfirmTakeover lets operatorID, who reserved the takeover with
-// AcquireTakeover, write input. It fails when the reservation is gone.
-func (h *Hub) ConfirmTakeover(taskID, operatorID string) error {
+// AcquireTakeover, write input, and notes the takeover on ctx
+// (store.NoteEffect). It fails when the reservation is gone.
+func (h *Hub) ConfirmTakeover(ctx context.Context, taskID, operatorID string) error {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
 	h.mu.RUnlock()
@@ -181,12 +211,16 @@ func (h *Hub) ConfirmTakeover(taskID, operatorID string) error {
 	if s.takeoverOwner != operatorID {
 		return ErrTakeoverNotHeld
 	}
-	s.takeoverPending = false
+	if s.takeoverPending {
+		s.takeoverPending = false
+		store.NoteEffect(ctx, "operator %s took over task %s", operatorID, taskID)
+	}
 	return nil
 }
 
-// ReleaseTakeover relinquishes exclusive stdin control.
-func (h *Hub) ReleaseTakeover(taskID, operatorID string) {
+// ReleaseTakeover relinquishes exclusive stdin control and notes a released
+// takeover on ctx (store.NoteEffect).
+func (h *Hub) ReleaseTakeover(ctx context.Context, taskID, operatorID string) {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
 	h.mu.RUnlock()
@@ -195,7 +229,12 @@ func (h *Hub) ReleaseTakeover(taskID, operatorID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if operatorID == "" || s.takeoverOwner == operatorID {
+	if s.takeoverOwner != "" && (operatorID == "" || s.takeoverOwner == operatorID) {
+		if s.takeoverPending {
+			store.NoteEffect(ctx, "the pending takeover of task %s by %s was dropped", taskID, s.takeoverOwner)
+		} else {
+			store.NoteEffect(ctx, "the takeover of task %s by %s was released", taskID, s.takeoverOwner)
+		}
 		s.takeoverOwner = ""
 		s.takeoverPending = false
 	}

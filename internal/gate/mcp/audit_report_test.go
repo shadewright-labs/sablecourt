@@ -18,9 +18,10 @@ import (
 )
 
 // git.merge_pr meets a failed audit write at each of its steps. Every one
-// answers HTTP 500 and says what already happened (issue 107 row 3): before
-// an approval exists nothing changed; once the approval is spent, the answer
-// says so and that the merge did not run; after the merge, that it ran.
+// answers HTTP 500 listing exactly the effects the request recorded (issue
+// 107 row 3, issue 179): before the check evidence is stored nothing
+// changed; then the stored evidence; once the approval is spent, that; after
+// the merge, the merge and the run.
 func TestMergePRAuditFailuresSayWhatHappened(t *testing.T) {
 	ctx := context.Background()
 	sha := strings.Repeat("a1", 20)
@@ -32,29 +33,33 @@ func TestMergePRAuditFailuresSayWhatHappened(t *testing.T) {
 		name         string
 		approved     bool
 		fail         func(domain.AuditRecord) bool
-		wantBody     []string
+		wantEffects  []string
 		wantMerges   int
 		wantEvidence bool
 	}{
 		{
 			name: "precheck evidence row", fail: audittest.Action("evidence:git.pr_checks"),
-			wantBody: []string{"refused: its audit record could not be written, nothing was changed"},
 		},
 		{
 			name: "approval request row", fail: approvalRow("pending"), wantEvidence: true,
-			wantBody: []string{"approval request refused: its audit record could not be written, nothing was changed"},
+			wantEffects: []string{"memory entry " + prChecksNamespace + "/shadewright-labs/sablecourt#42 was stored"},
 		},
 		{
 			name: "approval use row", approved: true, fail: approvalRow("consumed"),
-			wantBody: []string{"approval is spent", "did not run"},
+			wantEffects: []string{"approval {approval} was spent"},
 		},
 		{
 			name: "run evidence row after the approval is spent", approved: true, fail: audittest.Action("evidence:git.pr_checks"),
-			wantBody: []string{"was spent and the action did not run, but an audit record could not be written"},
+			wantEffects: []string{"approval {approval} was spent"},
 		},
 		{
 			name: "allowed row after the merge", approved: true, fail: outcome("allowed"), wantMerges: 1, wantEvidence: true,
-			wantBody: []string{"the action ran", "do not repeat it"},
+			wantEffects: []string{
+				"approval {approval} was spent",
+				"memory entry " + prChecksNamespace + "/shadewright-labs/sablecourt#42 was stored",
+				"pull request shadewright-labs/sablecourt#42 was merged",
+				"action git.merge_pr ran",
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -68,6 +73,7 @@ func TestMergePRAuditFailuresSayWhatHappened(t *testing.T) {
 			h := gate.ActionHandler()
 			openTestPR(t, h, token)
 			body := `{"payload":` + payload + `}`
+			approvalID := ""
 			if tc.approved {
 				rec := postAction(t, h, http.MethodPost, "/git.merge_pr", token, body)
 				if rec.Code != http.StatusAccepted {
@@ -85,17 +91,11 @@ func TestMergePRAuditFailuresSayWhatHappened(t *testing.T) {
 					t.Fatal(err)
 				}
 				body = `{"approvalId":"` + pending.ApprovalID + `","payload":` + payload + `}`
+				approvalID = pending.ApprovalID
 			}
 			faults.Fail(tc.fail)
-			rec := postAction(t, h, http.MethodPost, "/git.merge_pr", token, body)
-			if rec.Code != http.StatusInternalServerError {
-				t.Fatalf("got %d %s, want 500", rec.Code, rec.Body.String())
-			}
-			for _, want := range tc.wantBody {
-				if !strings.Contains(rec.Body.String(), want) {
-					t.Fatalf("body %s, want it to contain %q", rec.Body.String(), want)
-				}
-			}
+			rec, effects := postActionTracked(t, h, "/git.merge_pr", token, body)
+			requireAuditAnswer(t, rec, "the action", effects, tc.wantEffects, map[string]string{"{approval}": approvalID})
 			if backend.mergeCalls != tc.wantMerges {
 				t.Fatalf("MergePR called %d times, want %d", backend.mergeCalls, tc.wantMerges)
 			}
@@ -113,17 +113,16 @@ func TestMergePRAuditFailuresSayWhatHappened(t *testing.T) {
 	}
 }
 
-// An MCP tool whose executor meets a failed audit write says what already
-// happened, through the same text as an action.
+// An MCP tool whose executor meets a failed audit write answers with the
+// effects the call recorded, through the same text as an action.
 func TestToolAuditFailureSaysWhatHappened(t *testing.T) {
 	refused := store.RecordAudit(context.Background(), nil, domain.AuditRecord{})
 	cases := []struct {
-		name     string
-		err      error
-		wantText string
+		name    string
+		effects []string
 	}{
-		{"refused before its effect", refused, "probe.write refused: its audit record could not be written, nothing was changed"},
-		{"after its effect", store.AfterEffect("memory entry stored", refused), "memory entry stored, but an audit record could not be written"},
+		{"refused before its effect", nil},
+		{"after its effects", []string{"memory entry notes/k was stored", "memory entry notes/j was deleted"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,8 +135,11 @@ func TestToolAuditFailureSaysWhatHappened(t *testing.T) {
 				{Workload: "*", Capability: "mcp:*", Effect: domain.EffectAllow},
 			}}}
 			g := New(Options{Store: tg.st, Bundle: &config.Bundle{Workloads: map[string]domain.Workload{"ops-agent": wl}}, Policy: policy.NewEngine([]domain.Policy{pol}, nil)})
-			def := ToolDef{Name: "probe.write", Handler: func(context.Context, domain.Workload, string, json.RawMessage) (string, error) {
-				return "", tc.err
+			def := ToolDef{Name: "probe.write", Handler: func(ctx context.Context, _ domain.Workload, _ string, _ json.RawMessage) (string, error) {
+				for _, e := range tc.effects {
+					store.NoteEffect(ctx, "%s", e)
+				}
+				return "", refused
 			}}
 			g.RegisterTool(def)
 			res, err := g.invokeTool(context.Background(), domain.Lease{TaskID: "task-ops-agent", WorkloadName: "ops-agent"}, wl, def, json.RawMessage(`{}`))
@@ -145,8 +147,8 @@ func TestToolAuditFailureSaysWhatHappened(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := res.Content[0].(*mcp.TextContent).Text
-			if !res.IsError || !strings.Contains(text, tc.wantText) {
-				t.Fatalf("got error=%v %q, want %q", res.IsError, text, tc.wantText)
+			if want := audittest.Answer("the tool call", tc.effects...); !res.IsError || text != want {
+				t.Fatalf("got error=%v %q, want %q", res.IsError, text, want)
 			}
 		})
 	}

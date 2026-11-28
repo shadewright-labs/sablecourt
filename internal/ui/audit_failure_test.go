@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,17 +20,21 @@ import (
 
 // dashAuditCase is one dashboard form whose audit write fails.
 type dashAuditCase struct {
-	name    string
-	fail    string
-	post    func(t *testing.T, st store.Store) (string, url.Values)
-	wantErr string
-	check   func(t *testing.T, st store.Store, path string)
+	name string
+	fail string
+	post func(t *testing.T, st store.Store) (string, url.Values)
+	// what names the request in a refusal; wantEffects are the effects the
+	// form records before the failed write, {new} standing for the ID of the
+	// task the redirect names. The error lists exactly those effects.
+	what        string
+	wantEffects []string
+	check       func(t *testing.T, st store.Store, path string)
 }
 
 // The dashboard's audit writes by class (issue 107 row 3): a form that starts
-// work is recorded first and refused with "nothing was changed" when the
-// record cannot be written; a form whose effect already happened (a retry
-// task created, a task cancelled or suspended) names that effect.
+// work is recorded first and refused, with no effect, when the record cannot
+// be written; a form whose effect already happened (a retry task created, a
+// task cancelled or suspended) lists the effects it recorded (issue 179).
 func TestDashboardAuditWriteFailures(t *testing.T) {
 	ctx := context.Background()
 	cases := []dashAuditCase{
@@ -47,7 +52,7 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 				}
 				return "/ui/conclaves/cc-1/learning", url.Values{"scope": {"global"}, "key": {"conclave-msg-" + strconv.FormatInt(msgID, 10)}, "rule": {"Keep PRs small"}}
 			},
-			wantErr: "proposal refused: its audit record could not be written",
+			what: "proposal",
 			check: func(t *testing.T, st store.Store, _ string) {
 				entries, err := st.SearchMemory(ctx, "proposed:learning:global", "", 10)
 				if err != nil {
@@ -68,7 +73,8 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 				}
 				return "/ui/tasks/task_failed/retry", url.Values{}
 			},
-			wantErr: "was submitted, but an audit record could not be written",
+			what:        "retry",
+			wantEffects: []string{"task {new} was created", "a message was added to task {new}"},
 			check: func(t *testing.T, st store.Store, path string) {
 				if _, err := st.GetTask(ctx, strings.TrimPrefix(path, "/tasks/")); err != nil {
 					t.Fatalf("retry task missing: %v", err)
@@ -84,22 +90,22 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 	}
 	cases = append(cases, []dashAuditCase{
 		{name: "cancel reports the task it cancelled", fail: "task.cancel",
-			post:    task("task_c", domain.TaskStateWorking, "/ui/tasks/task_c/cancel"),
-			wantErr: "task task_c was cancelled, but an audit record could not be written"},
+			post: task("task_c", domain.TaskStateWorking, "/ui/tasks/task_c/cancel"),
+			what: "cancel", wantEffects: []string{"recovery of task task_c was claimed", "task task_c moved from working to cancelled", "the leases of task task_c were revoked"}},
 		{name: "suspend reports the task it suspended", fail: "task.suspend",
-			post:    task("task_s", domain.TaskStateWorking, "/ui/tasks/task_s/suspend"),
-			wantErr: "task task_s was suspended, but an audit record could not be written"},
+			post: task("task_s", domain.TaskStateWorking, "/ui/tasks/task_s/suspend"),
+			what: "suspend", wantEffects: []string{"a checkpoint of task task_s was saved", "the leases of task task_s were revoked", "task task_s moved from working to suspended"}},
 		{name: "resume is refused", fail: "task.resume",
-			post:    task("task_r", domain.TaskStateSuspended, "/ui/tasks/task_r/resume"),
-			wantErr: "resume refused: its audit record could not be written, nothing was changed"},
+			post: task("task_r", domain.TaskStateSuspended, "/ui/tasks/task_r/resume"),
+			what: "resume"},
 		{name: "retry is refused before its task", fail: "task.submit",
-			post:    task("task_f", domain.TaskStateFailed, "/ui/tasks/task_f/retry"),
-			wantErr: "retry refused: its audit record could not be written, nothing was changed"},
+			post: task("task_f", domain.TaskStateFailed, "/ui/tasks/task_f/retry"),
+			what: "retry"},
 		{name: "submission is refused", fail: "task.submit",
 			post: func(*testing.T, store.Store) (string, url.Values) {
 				return "/ui/tasks", url.Values{"workload": {"coder"}, "input_json": {"hi"}}
 			},
-			wantErr: "task submission refused: its audit record could not be written, nothing was changed"},
+			what: "task submission"},
 	}...)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,14 +128,19 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 			faults.Fail(audittest.Action(tc.fail))
 			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			reqCtx, effects := store.TrackEffects(req.Context())
 			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
+			mux.ServeHTTP(rec, req.WithContext(reqCtx))
 			target, _, errMsg := redirectTarget(t, rec)
-			if !strings.Contains(errMsg, tc.wantErr) {
-				t.Fatalf("redirect %s err=%q, want %q", target, errMsg, tc.wantErr)
+			if errMsg != audittest.Answer(tc.what, effects.List()...) {
+				t.Fatalf("redirect %s err=%q does not list the recorded effects %q", target, errMsg, effects.List())
 			}
-			if strings.Contains(tc.wantErr, ", but ") && strings.Contains(errMsg, "nothing was changed") {
-				t.Fatalf("err=%q says nothing changed after an effect", errMsg)
+			var want []string
+			for _, e := range tc.wantEffects {
+				want = append(want, strings.ReplaceAll(e, "{new}", strings.TrimPrefix(target, "/tasks/")))
+			}
+			if !slices.Equal(effects.List(), want) {
+				t.Fatalf("effects %q, want %q", effects.List(), want)
 			}
 			if len(faults.Refused()) == 0 {
 				t.Fatal("no audit write was attempted")

@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -42,7 +43,11 @@ func TestGitHubWebhookAuditWriteFailureAnswers500(t *testing.T) {
 	req.Header.Set("X-Hub-Signature-256", sign(payload, "top-secret-key"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), "nothing was changed") {
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if rr.Code != http.StatusInternalServerError || body.Error != audittest.Answer("task dispatch") {
 		t.Fatalf("got %d %s", rr.Code, rr.Body.String())
 	}
 }

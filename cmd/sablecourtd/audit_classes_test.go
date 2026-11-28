@@ -134,29 +134,43 @@ func TestPromotionRecordedBeforeBranch(t *testing.T) {
 	}
 }
 
-// Every operator and gate route that hits a failed audit write answers 500
-// (issue 107 row 3), and says what already happened when something did.
+// Every operator route that hits a failed audit write answers 500 (issue 107
+// row 3) listing exactly the effects the request recorded (issue 179). In
+// wantEffects {room} stands for the conclave the request or prepare opened
+// and {new} for a task the request created.
 func TestAuditWriteFailuresAnswer500(t *testing.T) {
 	ctx := context.Background()
-	withConclave := func(t *testing.T, env apiEnv) string {
-		env.bundle.Conclaves = map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{
-			{Role: "coder", Workload: "coder", Activation: domain.ActivationOnMention},
-		}}}}
-		rec := apiCall(env.h, http.MethodPost, "/api/v1/conclaves", `{"template":"council","title":"t"}`)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("open conclave: %d %s", rec.Code, rec.Body.String())
+	openWith := func(activation domain.ConclaveActivation) func(t *testing.T, env apiEnv) string {
+		return func(t *testing.T, env apiEnv) string {
+			env.bundle.Conclaves = map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{
+				{Role: "coder", Workload: "coder", Activation: activation},
+			}}}}
+			rec := apiCall(env.h, http.MethodPost, "/api/v1/conclaves", `{"template":"council","title":"t"}`)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("open conclave: %d %s", rec.Code, rec.Body.String())
+			}
+			_, after, _ := strings.Cut(rec.Body.String(), `"ID":"`)
+			id, _, _ := strings.Cut(after, `"`)
+			return id
 		}
-		_, after, _ := strings.Cut(rec.Body.String(), `"ID":"`)
-		id, _, _ := strings.Cut(after, `"`)
-		return id
+	}
+	withConclave := openWith(domain.ActivationOnMention)
+	template := func(activation domain.ConclaveActivation) func(t *testing.T, env apiEnv) string {
+		return func(t *testing.T, env apiEnv) string {
+			env.bundle.Conclaves = map[string]domain.Conclave{"council": {Spec: domain.ConclaveSpec{Vassals: []domain.ConclaveVassal{
+				{Role: "coder", Workload: "coder", Activation: activation},
+			}}}}
+			return ""
+		}
 	}
 	cases := []struct {
-		name     string
-		prepare  func(t *testing.T, env apiEnv) string
-		fail     string
-		path     string
-		body     string
-		wantBody string
+		name        string
+		prepare     func(t *testing.T, env apiEnv) string
+		fail        string
+		path        string
+		body        string
+		what        string
+		wantEffects []string
 	}{
 		{
 			name: "retry", fail: "task.submit",
@@ -164,7 +178,7 @@ func TestAuditWriteFailuresAnswer500(t *testing.T) {
 				env.seedTask(t, "task_old", domain.TaskStateFailed)
 				return ""
 			},
-			path: "/api/v1/tasks/task_old/retry", wantBody: "nothing was changed",
+			path: "/api/v1/tasks/task_old/retry", what: "retry",
 		},
 		{
 			name: "schedule run", fail: "task.submit",
@@ -175,23 +189,25 @@ func TestAuditWriteFailuresAnswer500(t *testing.T) {
 				}}
 				return ""
 			},
-			path: "/api/v1/schedules/nightly/run", wantBody: "nothing was changed",
+			path: "/api/v1/schedules/nightly/run", what: "schedule run",
 		},
 		{
-			name: "open conclave", fail: "conclave.open",
-			prepare: func(t *testing.T, env apiEnv) string {
-				env.bundle.Conclaves = map[string]domain.Conclave{"council": {}}
-				return ""
-			},
-			path: "/api/v1/conclaves", body: `{"template":"council","title":"t"}`, wantBody: "nothing was changed",
+			name: "open conclave", fail: "conclave.open", prepare: template(domain.ActivationOnMention),
+			path: "/api/v1/conclaves", body: `{"template":"council","title":"t"}`, what: "opening the conclave",
+		},
+		{
+			name: "open conclave whose always-on task is refused after the room is opened", fail: "task.submit", prepare: template(domain.ActivationAlwaysOn),
+			path: "/api/v1/conclaves", body: `{"template":"council","title":"t"}`, what: "opening the conclave",
+			wantEffects: []string{"conclave {room} was opened", "conclave {room} moved to cancelled"},
 		},
 		{
 			name: "store relic", fail: "conclave.relic_put", prepare: withConclave,
-			path: "/api/v1/conclaves/{id}/relics", body: `{"name":"r","body":"x"}`, wantBody: "nothing was changed",
+			path: "/api/v1/conclaves/{room}/relics", body: `{"name":"r","body":"x"}`, what: "storing the relic",
 		},
 		{
-			name: "decree whose wake is refused", fail: "task.submit", prepare: withConclave,
-			path: "/api/v1/conclaves/{id}/decree", body: `{"to":"all","body":"go"}`, wantBody: "was stored, but",
+			name: "decree whose wake is refused after the message is stored", fail: "task.submit", prepare: withConclave,
+			path: "/api/v1/conclaves/{room}/decree", body: `{"to":"all","body":"go"}`, what: "posting the message",
+			wantEffects: []string{"message 1 was stored in conclave {room}"},
 		},
 	}
 	for _, tc := range cases {
@@ -201,22 +217,27 @@ func TestAuditWriteFailuresAnswer500(t *testing.T) {
 				faults = audittest.Wrap(in)
 				return faults
 			}})
-			path := tc.path
+			path, room := tc.path, ""
 			if tc.prepare != nil {
-				path = strings.ReplaceAll(path, "{id}", tc.prepare(t, env))
+				room = tc.prepare(t, env)
+				path = strings.ReplaceAll(path, "{room}", room)
 			}
 			faults.Fail(audittest.Action(tc.fail))
-			rec := apiCall(env.h, http.MethodPost, path, tc.body)
-			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), tc.wantBody) {
-				t.Fatalf("got %d %s, want 500 containing %q", rec.Code, rec.Body.String(), tc.wantBody)
+			before := taskIDs(t, env.st)
+			rec, effects := apiCallTracked(env.h, http.MethodPost, path, tc.body)
+			if room == "" {
+				rooms, err := env.st.ListConclaves(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rooms) == 1 {
+					room = rooms[0].ID
+				}
 			}
-			if b := rec.Body.String(); !strings.Contains(b, "nothing was changed") && !strings.Contains(b, ", but an audit record could not be written") {
-				t.Fatalf("500 does not say what already happened: %s", b)
-			}
+			requireAuditAnswer(t, rec, tc.what, effects, tc.wantEffects, map[string]string{"{room}": room, "{new}": newTaskID(t, env.st, before)})
 			if len(faults.Refused()) == 0 {
 				t.Fatal("no audit write was attempted")
 			}
-			_ = ctx
 		})
 	}
 }

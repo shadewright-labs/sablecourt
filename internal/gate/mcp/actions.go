@@ -464,6 +464,7 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 		if err != nil {
 			return nil, fmt.Errorf("git branch failed: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
+		store.NoteEffect(ctx, "branch %s was created from %s", in.Branch, in.Base)
 		return map[string]string{"branch": in.Branch, "base": in.Base, "status": "created"}, nil
 	})
 
@@ -496,6 +497,7 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 				return nil, errors.New("PR opener not configured")
 			}
 			prURL, err := prOpener.OpenPR(ctx, in)
+			store.NoteEffectIf(ctx, err, "pull request %s was opened from %s to %s", prURL, in.Head, in.Base)
 			if err != nil {
 				// A retry after a failed provenance write finds the pull
 				// request the first call opened instead of stranding it.
@@ -544,6 +546,7 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 				return nil, err
 			}
 			res, err := pusher.PushBranch(ctx, req)
+			store.NoteEffectIf(ctx, err, "commit %s was pushed to branch %s", res.Commit, res.Branch)
 			if err != nil {
 				return nil, err
 			}
@@ -606,13 +609,15 @@ func RegisterBuiltinGitOpsWithOptions(g *Gate, opts GitOpsOptions) *RepoBinding 
 			if method == "" {
 				method = "squash"
 			}
-			return prMerger.MergePR(ctx, MergePRRequest{
+			res, err := prMerger.MergePR(ctx, MergePRRequest{
 				Owner:       in.Owner,
 				Repo:        in.Repo,
 				PRNumber:    in.PRNumber,
 				CommitSHA:   in.CommitSHA,
 				MergeMethod: method,
 			})
+			store.NoteEffectIf(ctx, err, "pull request %s/%s#%d was merged", in.Owner, in.Repo, in.PRNumber)
+			return res, err
 		},
 	})
 

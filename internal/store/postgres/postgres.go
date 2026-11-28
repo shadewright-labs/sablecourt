@@ -96,8 +96,9 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresStore) UpsertWorkload(ctx context.Context, w domain.WorkloadRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) UpsertWorkload(ctx context.Context, w domain.WorkloadRecord) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "workload %s was registered", w.Name) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO workloads (name, zone, class, manifest_digest, agent_card_json, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT(name) DO UPDATE SET
@@ -135,7 +136,8 @@ func (s *PostgresStore) ListWorkloads(ctx context.Context) ([]domain.WorkloadRec
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
+func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "task %s was created", t.ID) }()
 	now := nowRFC3339()
 	created := now
 	if !t.CreatedAt.IsZero() {
@@ -145,7 +147,7 @@ func (s *PostgresStore) CreateTask(ctx context.Context, t domain.Task) error {
 	if !t.UpdatedAt.IsZero() {
 		updated = t.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	err := store.InsertTask(ctx, s.db, nil, t, func(inserter store.TaskInserter) error {
+	err = store.InsertTask(ctx, s.db, nil, t, func(inserter store.TaskInserter) error {
 		_, err := inserter.ExecContext(ctx, `
 			INSERT INTO tasks (
 				id, parent_task_id, idempotency_key, workload_name, state,
@@ -202,8 +204,9 @@ func (s *PostgresStore) ListTaskEvents(ctx context.Context, taskID string) ([]do
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a message was added to task %s", msg.TaskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO task_messages (task_id, role, content, created_at)
 		VALUES ($1, $2, $3, $4)
 	`, msg.TaskID, msg.Role, msg.Content, formatTime(msg.CreatedAt))
@@ -233,7 +236,8 @@ func (s *PostgresStore) ListTaskMessages(ctx context.Context, taskID string) ([]
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
+func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "task %s moved from %s to %s", taskID, from, to) }()
 	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, nil, to, reason, s.appendAuditTx)
 	if err != nil {
 		return err
@@ -264,7 +268,8 @@ func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from
 	return store.CommitTaskTransition(ctx, tx, taskID, to, now)
 }
 
-func (s *PostgresStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) error {
+func (s *PostgresStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the artifacts of task %s were updated", taskID) }()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET artifacts_json = $1, updated_at = $2 WHERE id = $3
 	`, defaultJSON(artifactsJSON, "[]"), nowRFC3339(), taskID)
@@ -277,7 +282,8 @@ func (s *PostgresStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifac
 	return nil
 }
 
-func (s *PostgresStore) RecordHeartbeat(ctx context.Context, taskID string, at time.Time) error {
+func (s *PostgresStore) RecordHeartbeat(ctx context.Context, taskID string, at time.Time) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a heartbeat of task %s was recorded", taskID) }()
 	ts := formatTime(at)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET last_heartbeat_at = $1, updated_at = $2 WHERE id = $3
@@ -291,8 +297,9 @@ func (s *PostgresStore) RecordHeartbeat(ctx context.Context, taskID string, at t
 	return nil
 }
 
-func (s *PostgresStore) CreateApproval(ctx context.Context, a domain.Approval) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) CreateApproval(ctx context.Context, a domain.Approval) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was requested", a.ID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO approvals (
 			id, task_id, workload_name, capability, payload_canonical_json,
 			payload_sha256, status, decided_by, proof_json, expires_at, created_at
@@ -374,7 +381,8 @@ func (s *PostgresStore) ListApprovals(ctx context.Context, status domain.Approva
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error {
+func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was %s", id, status) }()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE approvals
 		SET status = $1, decided_by = $2, proof_json = $3, decided_at = $4
@@ -389,7 +397,8 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 	return nil
 }
 
-func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was spent", id) }()
 	// One read-committed transaction: lock the row first, then spend it with
 	// an UPDATE compared against the database's clock. The lock comes first
 	// because PostgreSQL evaluates an UPDATE's predicate again after a row
@@ -442,8 +451,9 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capabil
 	return store.ConsumeRefusal(a, taskID, capability, payloadSHA256)
 }
 
-func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a lease for task %s was minted", lease.TaskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5)
 	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName, lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt))
@@ -475,18 +485,21 @@ func (s *PostgresStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA2
 	return lease, nil
 }
 
-func (s *PostgresStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+func (s *PostgresStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were renewed", taskID) }()
 	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
 }
 
-func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were revoked", taskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE leases SET revoked_at = $1 WHERE task_id = $2 AND revoked_at IS NULL
 	`, nowRFC3339(), taskID)
 	return err
 }
 
-func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error {
+func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "budget use of task %s was recorded", entry.TaskID) }()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
@@ -506,11 +519,15 @@ func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.Budg
 	return tx.Commit()
 }
 
-func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (store.BudgetReservationResult, error) {
+func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (reserved store.BudgetReservationResult, err error) {
+	defer func() {
+		store.NoteEffectWhen(ctx, reserved.ReservationID != "", err, "budget was reserved for task %s", req.TaskID)
+	}()
 	return store.ReserveBudgetTx(ctx, s.db, lockPostgresBudgetRows, req)
 }
 
-func (s *PostgresStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+func (s *PostgresStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "budget reservation %s was settled", reservationID) }()
 	return store.SettleBudgetReservationTx(ctx, s.db, lockPostgresBudgetRows, reservationID, actual)
 }
 
@@ -658,8 +675,9 @@ func (s *PostgresStore) VerifyAuditChain(ctx context.Context) (int, error) {
 	return verified, rows.Err()
 }
 
-func (s *PostgresStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a checkpoint of task %s was saved", taskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO checkpoints (task_id, workload_name, ref_json, created_at)
 		VALUES ($1, $2, $3, $4)
 	`, taskID, workloadName, defaultJSON(refJSON, "{}"), nowRFC3339())
@@ -677,7 +695,8 @@ func (s *PostgresStore) LatestCheckpoint(ctx context.Context, taskID string) (st
 	return refJSON, err
 }
 
-func (s *PostgresStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error {
+func (s *PostgresStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the preferences of provider %s were saved", prefs.ProviderID) }()
 	raw, err := json.Marshal(prefs.EnabledModels)
 	if err != nil {
 		return err
@@ -734,6 +753,7 @@ func defaultJSON(s, fallback string) string {
 	return s
 }
 
-func (s *PostgresStore) ClaimRecovery(ctx context.Context, taskID, previous, owner string) (bool, error) {
+func (s *PostgresStore) ClaimRecovery(ctx context.Context, taskID, previous, owner string) (claimed bool, err error) {
+	defer func() { store.NoteEffectWhen(ctx, claimed, err, "recovery of task %s was claimed", taskID) }()
 	return store.ClaimRecovery(ctx, s.db, taskID, previous, owner)
 }

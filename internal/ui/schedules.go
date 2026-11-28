@@ -52,7 +52,7 @@ func (d *Dashboard) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.scheduler.TriggerNow(r.Context(), sc); err != nil {
-		http.Redirect(w, r, "/schedules?err="+url.QueryEscape(errText(err, "schedule run", "")), http.StatusSeeOther)
+		http.Redirect(w, r, "/schedules?err="+url.QueryEscape(errText(r.Context(), err, "schedule run", "")), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/schedules?notice="+url.QueryEscape(fmt.Sprintf("Triggered schedule %s (%s/%s)", name, sc.Spec.TargetKind, sc.Spec.TargetName)), http.StatusSeeOther)

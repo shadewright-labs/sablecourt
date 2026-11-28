@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,13 +27,16 @@ func outcome(name string) func(domain.AuditRecord) bool {
 // record of a side effect that already ran is reported to the caller.
 func TestActionAuditWriteFailures(t *testing.T) {
 	cases := []struct {
-		name       string
-		effect     domain.PolicyEffect
-		approved   bool
-		fail       func(domain.AuditRecord) bool
-		wantCode   int
-		wantBody   string
-		wantOpened int
+		name     string
+		effect   domain.PolicyEffect
+		approved bool
+		fail     func(domain.AuditRecord) bool
+		wantCode int
+		wantBody string
+		// wantEffects are the effects a 500 lists, {approval} standing for
+		// the approval ID.
+		wantEffects []string
+		wantOpened  int
 	}{
 		{
 			name: "refusal stays refused", effect: domain.EffectDeny, fail: nil,
@@ -40,15 +44,19 @@ func TestActionAuditWriteFailures(t *testing.T) {
 		},
 		{
 			name: "allowed run not recorded before it starts", effect: domain.EffectAllow, fail: outcome("started"),
-			wantCode: 500, wantBody: "the action did not run", wantOpened: 0,
+			wantCode: 500, wantOpened: 0,
 		},
 		{
 			name: "approved run not recorded before it starts", effect: domain.EffectApprove, approved: true, fail: outcome("consumed"),
-			wantCode: 500, wantBody: "did not run", wantOpened: 0,
+			wantCode: 500, wantEffects: []string{"approval {approval} was spent"}, wantOpened: 0,
 		},
 		{
 			name: "run recorded only before it ran", effect: domain.EffectAllow, fail: outcome("allowed"),
-			wantCode: 500, wantBody: "the action ran, but its audit record could not be written", wantOpened: 1,
+			wantCode: 500, wantOpened: 1, wantEffects: []string{
+				"pull request https://github.com/acme/widgets/pull/5 was opened from sablecourt/fix-1 to main",
+				"memory entry system:opened-prs/acme/widgets#5 was stored",
+				"action git.open_pr ran",
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -59,13 +67,24 @@ func TestActionAuditWriteFailures(t *testing.T) {
 				return faults
 			}})
 			body := `{"payload":` + validOpenPR + `}`
+			approvalID := ""
 			if tc.approved {
-				body = `{"approvalId":"` + requestAndApprove(t, tg, "git.open_pr", validOpenPR) + `","payload":` + validOpenPR + `}`
+				approvalID = requestAndApprove(t, tg, "git.open_pr", validOpenPR)
+				body = `{"approvalId":"` + approvalID + `","payload":` + validOpenPR + `}`
 			}
 			faults.Fail(tc.fail)
 			rec := tg.post("ops-agent", "git.open_pr", body)
 			if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %s, want %d containing %q", rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
+			}
+			if tc.wantCode == 500 {
+				var want []string
+				for _, e := range tc.wantEffects {
+					want = append(want, strings.ReplaceAll(e, "{approval}", approvalID))
+				}
+				if got, wantText := errorText(t, rec), audittest.Answer("the action", want...); got != wantText {
+					t.Fatalf("answer %q, want %q", got, wantText)
+				}
 			}
 			if n := len(tg.pr.calls()); n != tc.wantOpened {
 				t.Fatalf("pull request opened %d times, want %d", n, tc.wantOpened)
@@ -89,8 +108,8 @@ func TestToolAuditWriteFailures(t *testing.T) {
 		wantCalls int
 	}{
 		{name: "denial stays denied", effect: domain.EffectDeny, wantText: "policy denied", wantCalls: 0},
-		{name: "call not recorded before it runs", effect: domain.EffectAllow, fail: outcome("started"), wantText: "tool call refused: its audit record could not be written", wantCalls: 0},
-		{name: "call recorded only before it ran", effect: domain.EffectAllow, fail: outcome("allowed"), wantText: "the tool ran, but its audit record could not be written", wantCalls: 1},
+		{name: "call not recorded before it runs", effect: domain.EffectAllow, fail: outcome("started"), wantText: audittest.Answer("the tool call"), wantCalls: 0},
+		{name: "call recorded only before it ran", effect: domain.EffectAllow, fail: outcome("allowed"), wantText: audittest.Answer("the tool call", "tool probe.write ran"), wantCalls: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,14 +149,16 @@ func TestToolAuditWriteFailures(t *testing.T) {
 }
 
 // memory.put and memory.delete change Court Memory before their own record
-// is written, so a failed record is returned as the tool's error.
+// is written, so a failed record is returned as the tool's error, with the
+// change recorded on the call's effects.
 func TestMemoryToolAuditWriteFailures(t *testing.T) {
 	cases := []struct {
 		name, tool, args, wantErr string
+		wantEffects               []string
 	}{
-		{"put", "memory.put", `{"namespace":"notes","key":"k","value":"v"}`, "memory entry stored, but audit record could not be written"},
-		{"delete", "memory.delete", `{"namespace":"notes","key":"k"}`, "memory entry deleted, but audit record could not be written"},
-		{"reserved namespace stays refused", "memory.put", `{"namespace":"system:x","key":"k","value":"v"}`, "reserved"},
+		{"put", "memory.put", `{"namespace":"notes","key":"k","value":"v"}`, "audit record could not be written", []string{"memory entry notes/k was stored"}},
+		{"delete", "memory.delete", `{"namespace":"notes","key":"k"}`, "audit record could not be written", []string{"memory entry notes/k was deleted"}},
+		{"reserved namespace stays refused", "memory.put", `{"namespace":"system:x","key":"k","value":"v"}`, "reserved", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,9 +170,13 @@ func TestMemoryToolAuditWriteFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			faults.Fail(nil)
-			_, err := g.tools[tc.tool].Handler(context.Background(), domain.Workload{Metadata: domain.ObjectMeta{Name: "ops-agent"}}, "task-ops-agent", json.RawMessage(tc.args))
+			ctx, effects := store.TrackEffects(context.Background())
+			_, err := g.tools[tc.tool].Handler(ctx, domain.Workload{Metadata: domain.ObjectMeta{Name: "ops-agent"}}, "task-ops-agent", json.RawMessage(tc.args))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("got %v, want an error containing %q", err, tc.wantErr)
+			}
+			if !slices.Equal(effects.List(), tc.wantEffects) {
+				t.Fatalf("effects %q, want %q", effects.List(), tc.wantEffects)
 			}
 		})
 	}
@@ -172,7 +197,7 @@ func TestPRChecksEvidenceNotStoredWithoutItsRow(t *testing.T) {
 	openTestPR(t, h, token)
 	faults.Fail(audittest.Action("evidence:git.pr_checks"))
 	rec := postAction(t, h, "POST", "/git.pr_checks", token, `{"payload":{"owner":"shadewright-labs","repo":"sablecourt","pr_number":42}}`)
-	if rec.Code != 500 || !strings.Contains(rec.Body.String(), "audit record could not be written") {
+	if rec.Code != 500 || errorText(t, rec) != audittest.Answer("the action") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 	if _, err := st.GetMemory(ctx, prChecksNamespace, "shadewright-labs/sablecourt#42"); !errors.Is(err, store.ErrNotFound) {

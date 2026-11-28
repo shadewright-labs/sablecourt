@@ -201,7 +201,8 @@ func (h *ShadewrightHandler) IncidentHandler() http.Handler {
 		if !decodeJSONObject(w, r, &req) {
 			return
 		}
-		res := h.recordIncident(r.Context(), req)
+		ctx, _ := store.TrackEffects(r.Context())
+		res := h.recordIncident(ctx, req)
 		writeJSON(w, res.code, res.body)
 	})
 }
@@ -238,7 +239,7 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	sess, err := h.store.GetConclave(ctx, id)
 	exists := err == nil
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the escalation", err)
 	}
 
 	var relic domain.ConclaveRelic
@@ -255,12 +256,12 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 		relic, err = h.store.GetConclaveRelic(ctx, id, relicName)
 		hasRelic = err == nil
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 		var finished bool
 		opened, finished, err = incidentAuditProgress(ctx, h.store, id)
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 		if finished {
 			if !hasRelic {
@@ -299,7 +300,7 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 			UpdatedAt:    now,
 		}
 		if err := h.store.CreateConclave(ctx, sess); err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 	}
 	if !opened {
@@ -310,7 +311,7 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 			"vassals":     len(tpl.Spec.Vassals),
 		})
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 		// The room exists by now; a retry of the same incident writes the
 		// row it is missing.
@@ -321,13 +322,13 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 			DetailJSON: detail,
 			CreatedAt:  now,
 		}); err != nil {
-			return conclaveWriteError(store.AfterEffect("conclave "+id+" was created", err))
+			return conclaveWriteError(ctx, "the escalation", err)
 		}
 	}
 	if !hasRelic {
 		relic, err = h.broker.PutRelic(ctx, id, ShadewrightRole, relicName, "application/json", string(evidence))
 		if err != nil {
-			return conclaveWriteError(err)
+			return conclaveWriteError(ctx, "the escalation", err)
 		}
 	} else if relic.Body != redactedEvidence {
 		return errorResponse(http.StatusConflict, "retry evidence differs from stored incident")
@@ -338,14 +339,14 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	initPrompt := fmt.Sprintf("Review untrusted Shadewright incident Relic %s and report findings.", relicName)
 	if h.reconciler != nil {
 		if err := h.broker.ActivateAlwaysOn(ctx, sess, tpl, initPrompt); err != nil {
-			return conclaveWriteError(err)
+			return conclaveWriteError(ctx, "the escalation", err)
 		}
 	}
 
 	reportBody := redact.String(fmt.Sprintf("Shadewright incident escalated (Relic: %s): %s", relicName, summary))
 	msgs, err := h.store.ListConclaveMessages(ctx, id, 0)
 	if err != nil {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the escalation", err)
 	}
 	var opening *domain.ConclaveMessage
 	for i := range msgs {
@@ -358,7 +359,7 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	if opening == nil {
 		current, err := h.store.GetConclave(ctx, id)
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 		if current.State != domain.ConclaveStateActive {
 			return errorResponse(http.StatusConflict, "incident Conclave is inactive")
@@ -373,20 +374,20 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 		}
 		msgID, err := h.store.AppendConclaveMessage(ctx, msg)
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the escalation", err)
 		}
 		msg.ID = msgID
 		opening = &msg
 	}
 	if err := h.broker.WakeMentions(ctx, tpl, *opening); err != nil {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the escalation", err)
 	}
 	detail, err := marshalDetailJSON(map[string]any{
 		"conclave_id": id,
 		"relic":       relicName,
 	})
 	if err != nil {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the escalation", err)
 	}
 	if err := store.RecordAudit(ctx, h.store, domain.AuditRecord{
 		Category:   "integration",
@@ -395,7 +396,7 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 		DetailJSON: detail,
 		CreatedAt:  now,
 	}); err != nil {
-		return conclaveWriteError(store.AfterEffect("the incident was escalated to conclave "+id, err))
+		return conclaveWriteError(ctx, "the escalation", err)
 	}
 
 	status := http.StatusCreated
@@ -420,7 +421,8 @@ func (h *ShadewrightHandler) VerificationHandler() http.Handler {
 		if !decodeJSONObject(w, r, &req) {
 			return
 		}
-		res := h.recordVerification(r.Context(), req)
+		ctx, _ := store.TrackEffects(r.Context())
+		res := h.recordVerification(ctx, req)
 		writeJSON(w, res.code, res.body)
 	})
 }
@@ -447,14 +449,14 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 		if errors.Is(err, store.ErrNotFound) {
 			return errorResponse(http.StatusNotFound, "conclave not found")
 		}
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the verification", err)
 	}
 	if !isShadewrightOwned(sess) {
 		return errorResponse(http.StatusNotFound, "conclave not found")
 	}
 	_, finished, err := incidentAuditProgress(ctx, h.store, conclaveID)
 	if err != nil {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the verification", err)
 	}
 	if !finished {
 		return errorResponse(http.StatusNotFound, "conclave not found")
@@ -465,9 +467,9 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 	switch sess.State {
 	case domain.ConclaveStateActive:
 	case domain.ConclaveStateInputRequired:
-		return conclaveWriteError(conclave.ErrConclavePaused)
+		return conclaveWriteError(ctx, "the verification", conclave.ErrConclavePaused)
 	default:
-		return conclaveWriteError(conclave.ErrConclaveClosed)
+		return conclaveWriteError(ctx, "the verification", conclave.ErrConclaveClosed)
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -489,7 +491,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 	relic, err := h.store.GetConclaveRelic(ctx, conclaveID, relicName)
 	hasRelic := err == nil
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the verification", err)
 	}
 	if hasRelic && (relic.AuthorRole != ShadewrightRole || relic.ContentType != "application/json" ||
 		relic.Body != redactedPayload || relic.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(redactedPayload)))) {
@@ -506,7 +508,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 	var msg domain.ConclaveMessage
 	msgs, err := h.store.ListConclaveMessages(ctx, conclaveID, 0)
 	if err != nil {
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, "the verification", err)
 	}
 	for _, candidate := range msgs {
 		if candidate.FromRole == ShadewrightRole && candidate.ToRole == "operator" &&
@@ -524,7 +526,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 		}
 		audited, err = verificationMessageAudited(ctx, h.store, conclaveID, msg.ID)
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the verification", err)
 		}
 	} else {
 		var newRelic *domain.ConclaveRelic
@@ -535,7 +537,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 		var writtenRelic domain.ConclaveRelic
 		msg, writtenRelic, err = broker.PostIntegrationReport(ctx, sess, ShadewrightRole, msgText, newRelic)
 		if err != nil {
-			return conclaveWriteError(err)
+			return conclaveWriteError(ctx, "the verification", err)
 		}
 		if newRelic != nil {
 			relic = writtenRelic
@@ -550,7 +552,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 			"message_id":  msg.ID,
 		})
 		if err != nil {
-			return internalErrorResponse(err)
+			return internalErrorResponse(ctx, "the verification", err)
 		}
 		if err := store.RecordAudit(ctx, h.store, domain.AuditRecord{
 			Category:   "integration",
@@ -559,7 +561,7 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 			DetailJSON: detail,
 			CreatedAt:  h.now(),
 		}); err != nil {
-			return conclaveWriteError(store.AfterEffect(fmt.Sprintf("the verification was posted as message %d", msg.ID), err))
+			return conclaveWriteError(ctx, "the verification", err)
 		}
 	}
 
@@ -667,14 +669,18 @@ func errorResponse(code int, detail string) integrationResponse {
 	return integrationResponse{code, map[string]string{"error": detail}}
 }
 
-func internalErrorResponse(err error) integrationResponse {
+// internalErrorResponse answers HTTP 500. A failed audit write gets the text
+// of store.AuditFailureText, built from the effects recorded on ctx, so the
+// answer lists what the request named by what had changed.
+func internalErrorResponse(ctx context.Context, what string, err error) integrationResponse {
+	if msg, ok := store.AuditFailureText(ctx, err, what); ok {
+		return errorResponse(http.StatusInternalServerError, msg)
+	}
 	return errorResponse(http.StatusInternalServerError, redact.String(err.Error()))
 }
 
-func conclaveWriteError(err error) integrationResponse {
-	// A failed audit write says what already happened, or that the request
-	// was refused and nothing was changed.
-	if msg, ok := store.AuditFailureText(err, "the escalation"); ok {
+func conclaveWriteError(ctx context.Context, what string, err error) integrationResponse {
+	if msg, ok := store.AuditFailureText(ctx, err, what); ok {
 		return errorResponse(http.StatusInternalServerError, msg)
 	}
 	switch {
@@ -683,7 +689,7 @@ func conclaveWriteError(err error) integrationResponse {
 	case errors.Is(err, conclave.ErrConclavePaused), errors.Is(err, conclave.ErrConclaveClosed), errors.Is(err, conclave.ErrWardTripped), errors.Is(err, store.ErrConclaveRunLimit):
 		return errorResponse(http.StatusConflict, err.Error())
 	default:
-		return internalErrorResponse(err)
+		return internalErrorResponse(ctx, what, err)
 	}
 }
 

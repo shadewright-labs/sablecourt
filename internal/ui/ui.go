@@ -179,14 +179,27 @@ func NewDashboard(opts Options) (*Dashboard, error) {
 	}, nil
 }
 
+// trackingRouter gives each handler it attaches an effects recorder.
+type trackingRouter struct{ router }
+
+func (t trackingRouter) Handle(pattern string, handler http.Handler) {
+	t.router.Handle(pattern, store.TrackEffectsHandler(handler))
+}
+
+func (t trackingRouter) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	t.Handle(pattern, http.HandlerFunc(handler))
+}
+
 // router is the part of *http.ServeMux that RegisterRoutes uses.
 type router interface {
 	Handle(pattern string, handler http.Handler)
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
 
-// RegisterRoutes attaches the dashboard pages and form posts to mux.
+// RegisterRoutes attaches the dashboard pages and form posts to mux. Every
+// handler gets an effects recorder for its request (store.TrackEffects).
 func (d *Dashboard) RegisterRoutes(mux router) {
+	mux = trackingRouter{mux}
 	mux.Handle("GET /{$}", d)
 	mux.HandleFunc("GET /tasks/{id}", d.handleTaskDetail)
 	mux.HandleFunc("GET /providers", d.handleProvidersPage)
@@ -404,7 +417,7 @@ func (d *Dashboard) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := d.reconciler.CancelTask(r.Context(), id, "cancelled from Web UI"); err != nil {
-		redirectErr(w, r, errText(err, "cancel", "Cancel failed: "))
+		redirectErr(w, r, errText(r.Context(), err, "cancel", "Cancel failed: "))
 		return
 	}
 	redirectNotice(w, r, "Cancelled task "+id)
@@ -417,7 +430,7 @@ func (d *Dashboard) handleSuspendTask(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := d.reconciler.SuspendTask(r.Context(), id, "suspended from Web UI"); err != nil {
-		redirectErr(w, r, errText(err, "suspend", "Suspend failed: "))
+		redirectErr(w, r, errText(r.Context(), err, "suspend", "Suspend failed: "))
 		return
 	}
 	redirectNotice(w, r, "Suspended task "+id+" and saved checkpoint")
@@ -430,7 +443,7 @@ func (d *Dashboard) handleResumeTask(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := d.reconciler.ResumeTask(r.Context(), id); err != nil {
-		redirectErr(w, r, errText(err, "resume", "Resume failed: "))
+		redirectErr(w, r, errText(r.Context(), err, "resume", "Resume failed: "))
 		return
 	}
 	redirectNotice(w, r, "Resumed task "+id+" from checkpoint")
@@ -464,7 +477,7 @@ func (d *Dashboard) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	inputBytes, _ := json.Marshal(payload)
 	task, err := d.reconciler.SubmitTask(r.Context(), wl, "", string(inputBytes))
 	if err != nil {
-		redirectErr(w, r, errText(err, "task submission", ""))
+		redirectErr(w, r, errText(r.Context(), err, "task submission", ""))
 		return
 	}
 	redirectNotice(w, r, fmt.Sprintf("Submitted task %s for %s", task.ID, wl))
@@ -479,7 +492,7 @@ func (d *Dashboard) handleApprove(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	expected := r.FormValue("expected_sha256")
 	if _, err := d.approvals.Approve(r.Context(), id, expected, "operator-ui"); err != nil {
-		redirectErr(w, r, errText(err, "approval", "Approval failed: "))
+		redirectErr(w, r, errText(r.Context(), err, "approval", "Approval failed: "))
 		return
 	}
 	redirectNotice(w, r, "Approved "+id+" via out-of-band confirmation")
@@ -492,7 +505,7 @@ func (d *Dashboard) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if _, err := d.approvals.Deny(r.Context(), id, "operator-ui", "denied from Web UI"); err != nil {
-		redirectErr(w, r, errText(err, "denial", "Deny failed: "))
+		redirectErr(w, r, errText(r.Context(), err, "denial", "Deny failed: "))
 		return
 	}
 	redirectNotice(w, r, "Denied "+id)
@@ -705,7 +718,7 @@ func (d *Dashboard) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 	wfName := r.PathValue("name")
 	task, err := d.reconciler.StartWorkflow(r.Context(), wfName, strings.TrimSpace(r.FormValue("input")))
 	if err != nil {
-		http.Redirect(w, r, "/studio?err="+url.QueryEscape(errText(err, "workflow start", "")), http.StatusSeeOther)
+		http.Redirect(w, r, "/studio?err="+url.QueryEscape(errText(r.Context(), err, "workflow start", "")), http.StatusSeeOther)
 		return
 	}
 	redirectNotice(w, r, fmt.Sprintf("Started workflow %s (step 1 task %s)", wfName, task.ID))
@@ -820,11 +833,10 @@ func redirectNotice(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 // errText is the text a form shows for err. A failed audit write gets the
-// text of store.AuditFailureText, which says what already happened or that
-// the request named by what was refused and nothing changed; any other error
-// is shown after prefix.
-func errText(err error, what, prefix string) string {
-	if msg, ok := store.AuditFailureText(err, what); ok {
+// text of store.AuditFailureText, built from the effects recorded on ctx;
+// any other error is shown after prefix.
+func errText(ctx context.Context, err error, what, prefix string) string {
+	if msg, ok := store.AuditFailureText(ctx, err, what); ok {
 		return msg
 	}
 	return prefix + err.Error()

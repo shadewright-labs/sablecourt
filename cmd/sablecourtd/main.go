@@ -1051,7 +1051,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.CancelTask(r.Context(), id, "api_cancelled"); err != nil {
-			if writeAuditError(w, err, "cancel") {
+			if writeAuditError(w, r, err, "cancel") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1064,7 +1064,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		withHandoff := r.URL.Query().Get("handoff") == "true" || r.URL.Query().Get("handoff") == "1"
 		var created bool
 		retried, err := reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "api_retry")
-		if writeAuditError(w, err, "retry") {
+		if writeAuditError(w, r, err, "retry") {
 			return
 		}
 		if err != nil {
@@ -1088,7 +1088,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 				CreatedAt:    time.Now().UTC(),
 			}); err != nil {
-				writeAuditError(w, store.AfterEffect("retry task "+retried.ID+" was submitted", err), "retry")
+				writeAuditError(w, r, err, "retry")
 				return
 			}
 		}
@@ -1107,7 +1107,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.SuspendTask(r.Context(), id, "api_suspended"); err != nil {
-			if writeAuditError(w, err, "suspend") {
+			if writeAuditError(w, r, err, "suspend") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1118,7 +1118,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.ResumeTask(r.Context(), id); err != nil {
-			if writeAuditError(w, err, "resume") {
+			if writeAuditError(w, r, err, "resume") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1187,7 +1187,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if body.Operator == "" {
 				body.Operator = "operator"
 			}
-			if err := attachHub.AcquireTakeover(id, body.Operator); err != nil {
+			reserved, err := attachHub.AcquireTakeover(id, body.Operator)
+			if err != nil {
 				code := http.StatusConflict
 				if errors.Is(err, attach.ErrSessionNotFound) {
 					code = http.StatusNotFound
@@ -1199,7 +1200,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			// it records no heartbeat. The takeover is only reserved until its
 			// record is written: a reserved takeover refuses other operators
 			// but takes no input, and one whose record cannot be written is
-			// handed back.
+			// handed back. A repeat by the operator who holds the takeover
+			// reserves nothing, so a failed record leaves it in place.
 			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:   "attach",
 				TaskID:     id,
@@ -1208,11 +1210,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
 				CreatedAt:  time.Now().UTC(),
 			}); err != nil {
-				attachHub.ReleaseTakeover(id, body.Operator)
-				writeAuditError(w, err, "takeover")
+				if reserved {
+					attachHub.AbandonTakeover(id, body.Operator)
+				}
+				writeAuditError(w, r, err, "takeover")
 				return
 			}
-			if err := attachHub.ConfirmTakeover(id, body.Operator); err != nil {
+			if err := attachHub.ConfirmTakeover(r.Context(), id, body.Operator); err != nil {
 				// Released or closed while the row was written: the row above
 				// names a takeover that never took input.
 				store.LogAudit(r.Context(), st, domain.AuditRecord{
@@ -1259,7 +1263,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			// Releasing control stops operator input, so it is never refused;
 			// a record that cannot be written is reported instead.
-			attachHub.ReleaseTakeover(id, body.Operator)
+			attachHub.ReleaseTakeover(r.Context(), id, body.Operator)
 			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:   "attach",
 				TaskID:     id,
@@ -1268,7 +1272,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
 				CreatedAt:  time.Now().UTC(),
 			}); err != nil {
-				writeAuditError(w, store.AfterEffect("the takeover was released", err), "detach")
+				writeAuditError(w, r, err, "detach")
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "detached", "id": id})
@@ -1394,7 +1398,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				to = "all"
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), id, "operator", to, "decree", text, "")
-			if writeAuditError(w, err, "posting the message") {
+			if writeAuditError(w, r, err, "posting the message") {
 				return
 			}
 			if err != nil {
@@ -1561,7 +1565,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		task, err := reconciler.SubmitTask(r.Context(), body.Workload, body.IdempotencyKey, body.InputJSON)
-		if writeAuditError(w, err, "task submission") {
+		if writeAuditError(w, r, err, "task submission") {
 			return
 		}
 		if err != nil {
@@ -1627,7 +1631,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := scheduler.TriggerNow(r.Context(), sc); err != nil {
-			if writeAuditError(w, err, "schedule run") {
+			if writeAuditError(w, r, err, "schedule run") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1658,7 +1662,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		if body.DeviceID != "" && body.Signature != "" {
 			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
-			if writeAuditError(w, err, "approval") {
+			if writeAuditError(w, r, err, "approval") {
 				return
 			}
 			if err != nil {
@@ -1672,7 +1676,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Approve(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DecidedBy)
-		if writeAuditError(w, err, "approval") {
+		if writeAuditError(w, r, err, "approval") {
 			return
 		}
 		if err != nil {
@@ -1711,7 +1715,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Deny(r.Context(), r.PathValue("id"), body.DecidedBy, body.Reason)
-		if writeAuditError(w, err, "denial") {
+		if writeAuditError(w, r, err, "denial") {
 			return
 		}
 		if err != nil {
@@ -1792,7 +1796,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DetailJSON:   fmt.Sprintf(`{"branch":%q}`, branch),
 			CreatedAt:    time.Now().UTC(),
 		}); err != nil {
-			writeAuditError(w, err, "promotion")
+			writeAuditError(w, r, err, "promotion")
 			return
 		}
 		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
@@ -1808,6 +1812,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
 		}
+		store.NoteEffect(r.Context(), "branch %s was created", branch)
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":   "branch_created",
 			"workload": name,
@@ -1843,7 +1848,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			sess, err := conclaveBroker.Open(r.Context(), body.Template, body.Title, body.Decree)
-			if writeAuditError(w, err, "opening the conclave") {
+			if writeAuditError(w, r, err, "opening the conclave") {
 				return
 			}
 			if err != nil {
@@ -1920,7 +1925,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), "operator", body.To, "decree", body.Body, "")
-			if writeAuditError(w, err, "posting the message") {
+			if writeAuditError(w, r, err, "posting the message") {
 				return
 			}
 			if err != nil {
@@ -1935,7 +1940,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if err := conclaveBroker.Close(r.Context(), r.PathValue("id"), domain.ConclaveState(body.State)); err != nil {
-				if writeAuditError(w, err, "closing the conclave") {
+				if writeAuditError(w, r, err, "closing the conclave") {
 					return
 				}
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1954,7 +1959,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), "operator", body.Name, body.ContentType, body.Body)
-			if writeAuditError(w, err, "storing the relic") {
+			if writeAuditError(w, r, err, "storing the relic") {
 				return
 			}
 			if err != nil {
@@ -1990,7 +1995,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), role, body.To, "proposal", body.Body, lease.TaskID)
-			if writeAuditError(w, err, "posting the message") {
+			if writeAuditError(w, r, err, "posting the message") {
 				return
 			}
 			if err != nil {
@@ -2048,7 +2053,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), role, body.Name, body.ContentType, body.Body)
-			if writeAuditError(w, err, "storing the relic") {
+			if writeAuditError(w, r, err, "storing the relic") {
 				return
 			}
 			if err != nil {
@@ -2082,7 +2087,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	auth.onRoute = cfg.routeSink
 	mux.HandleFunc("GET /login", operatorLoginPage)
 	mux.HandleFunc("POST /login", auth.login)
-	return securityHeadersMiddleware(auth.requireOperatorAuth(serveMux, guardOperatorRequest(serveMux), secrets))
+	// Every request carries an effects recorder, so a failed audit write is
+	// answered with what the request had changed (store.AuditFailureText).
+	return store.TrackEffectsHandler(securityHeadersMiddleware(auth.requireOperatorAuth(serveMux, guardOperatorRequest(serveMux), secrets)))
 }
 
 // Gate requests can arrive after a terminal transition and before lease cleanup.
@@ -2176,12 +2183,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 // writeAuditError answers HTTP 500 when err is a failed audit write and
-// reports whether it did. The text comes from store.AuditFailureText: it says
-// what already happened when the write failed after an effect, and that the
-// request named by what was refused otherwise. Every route that can meet a
-// failed audit write checks it before mapping other errors.
-func writeAuditError(w http.ResponseWriter, err error, what string) bool {
-	msg, ok := store.AuditFailureText(err, what)
+// reports whether it did. The text comes from store.AuditFailureText, built
+// from the effects recorded on the request: it lists what the request had
+// changed, or says that the request named by what was refused. Every route
+// that can meet a failed audit write checks it before mapping other errors.
+func writeAuditError(w http.ResponseWriter, r *http.Request, err error, what string) bool {
+	msg, ok := store.AuditFailureText(r.Context(), err, what)
 	if ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 	}

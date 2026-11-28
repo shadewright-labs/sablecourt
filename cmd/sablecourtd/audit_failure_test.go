@@ -45,24 +45,28 @@ func TestOperatorInputRecordsNoHeartbeat(t *testing.T) {
 // The daemon's operator routes by class of audit write (issue 107 row 3):
 // a route that starts or grants something is refused when its record cannot
 // be written; a route that stops something goes ahead and reports the failed
-// record; a read logs it.
+// record; a read logs it. A 500 lists exactly the effects the request
+// recorded (issue 179); in wantEffects {id} stands for the approval and
+// {new} for a task the request created.
 func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name     string
-		prepare  func(t *testing.T, env apiEnv) string // returns a path fragment the request uses
-		fail     func(domain.AuditRecord) bool
-		method   string
-		path     string
-		body     string
-		wantCode int
-		wantBody string
-		check    func(t *testing.T, env apiEnv, faults *audittest.Store, arg string)
+		name        string
+		prepare     func(t *testing.T, env apiEnv) string // returns a path fragment the request uses
+		fail        func(domain.AuditRecord) bool
+		method      string
+		path        string
+		body        string
+		wantCode    int
+		wantBody    string // for a code other than 500
+		what        string
+		wantEffects []string
+		check       func(t *testing.T, env apiEnv, faults *audittest.Store, arg string)
 	}{
 		{
 			name: "task submission is refused", fail: audittest.Action("task.submit"),
 			method: http.MethodPost, path: "/api/v1/tasks", body: `{"workload":"coder","idempotencyKey":"k-new"}`,
-			wantCode: 500, wantBody: "task submission refused: its audit record could not be written",
+			wantCode: 500, what: "task submission",
 			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
 				if _, err := env.st.GetTaskByIdempotencyKey(ctx, "k-new"); err == nil {
 					t.Fatal("task created without its record")
@@ -79,7 +83,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 				return apr.ID + "|" + apr.PayloadSHA256
 			},
 			method: http.MethodPost, path: "/api/v1/approvals/{id}/approve", body: `{"expectedSha256":"{sha}"}`,
-			wantCode: 500, wantBody: "approval refused",
+			wantCode: 500, what: "approval",
 			check: func(t *testing.T, env apiEnv, _ *audittest.Store, arg string) {
 				apr, err := env.st.GetApproval(ctx, strings.Split(arg, "|")[0])
 				if err != nil {
@@ -93,7 +97,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "takeover is refused and handed back", fail: audittest.Action("task.takeover"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/takeover", body: `{"operator":"alice"}`,
-			wantCode: 500, wantBody: "takeover refused",
+			wantCode: 500, what: "takeover",
 			check: func(t *testing.T, env apiEnv, faults *audittest.Store, _ string) {
 				faults.Heal()
 				if rec := apiCall(env.h, http.MethodPost, "/api/v1/tasks/task_tty/takeover", `{"operator":"bob"}`); rec.Code != http.StatusOK {
@@ -111,7 +115,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			},
 			fail:   audittest.Action("task.detach"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/detach", body: `{"operator":"alice"}`,
-			wantCode: 500, wantBody: "the takeover was released, but an audit record could not be written",
+			wantCode: 500, what: "detach", wantEffects: []string{"the takeover of task task_tty by alice was released"},
 			check: func(t *testing.T, env apiEnv, faults *audittest.Store, _ string) {
 				faults.Heal()
 				if rec := apiCall(env.h, http.MethodPost, "/api/v1/tasks/task_tty/takeover", `{"operator":"bob"}`); rec.Code != http.StatusOK {
@@ -122,7 +126,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "cancel goes ahead and reports the record", fail: audittest.Action("task.cancel"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/cancel",
-			wantCode: 500, wantBody: "task task_tty was cancelled, but an audit record could not be written",
+			wantCode: 500, what: "cancel", wantEffects: []string{"recovery of task task_tty was claimed", "task task_tty moved from working to cancelled", "the leases of task task_tty were revoked"},
 			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
 				task, err := env.st.GetTask(ctx, "task_tty")
 				if err != nil {
@@ -136,7 +140,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "suspend goes ahead and reports the record", fail: audittest.Action("task.suspend"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/suspend",
-			wantCode: 500, wantBody: "task task_tty was suspended, but an audit record could not be written",
+			wantCode: 500, what: "suspend", wantEffects: []string{"a checkpoint of task task_tty was saved", "the leases of task task_tty were revoked", "task task_tty moved from working to suspended"},
 		},
 		{
 			name: "resume is refused",
@@ -146,7 +150,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			},
 			fail:   audittest.Action("task.resume"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_susp/resume",
-			wantCode: 500, wantBody: "resume refused: its audit record could not be written, nothing was changed",
+			wantCode: 500, what: "resume",
 		},
 		{
 			name: "retry reports the task it created",
@@ -156,7 +160,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			},
 			fail:   audittest.Action("task.retry"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_old/retry",
-			wantCode: 500, wantBody: "was submitted, but an audit record could not be written",
+			wantCode: 500, what: "retry", wantEffects: []string{"task {new} was created", "a message was added to task {new}"},
 		},
 		{
 			name: "denial is refused and stays pending",
@@ -169,7 +173,24 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			},
 			fail:   func(rec domain.AuditRecord) bool { return rec.Category == "approval" && rec.Outcome == "denied" },
 			method: http.MethodPost, path: "/api/v1/approvals/{id}/deny", body: `{"reason":"no"}`,
-			wantCode: 500, wantBody: "denial refused: its audit record could not be written, nothing was changed",
+			wantCode: 500, what: "denial",
+		},
+		{
+			name: "repeated takeover by the holder keeps the takeover",
+			prepare: func(t *testing.T, env apiEnv) string {
+				if rec := apiCall(env.h, http.MethodPost, "/api/v1/tasks/task_tty/takeover", `{"operator":"alice"}`); rec.Code != http.StatusOK {
+					t.Fatalf("takeover: %d %s", rec.Code, rec.Body.String())
+				}
+				return ""
+			},
+			fail:   audittest.Action("task.takeover"),
+			method: http.MethodPost, path: "/api/v1/tasks/task_tty/takeover", body: `{"operator":"alice"}`,
+			wantCode: 500, what: "takeover",
+			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
+				if rec := apiCall(env.h, http.MethodPost, "/api/v1/tasks/task_tty/stdin", `{"operator":"alice","data":"pwd\n"}`); rec.Code != http.StatusOK {
+					t.Fatalf("confirmed takeover lost after a refused repeat: %d %s", rec.Code, rec.Body.String())
+				}
+			},
 		},
 		{
 			name: "scry is a read and streams with the record logged", fail: audittest.Action("task.scry"),
@@ -200,13 +221,13 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 				body = strings.ReplaceAll(body, "{sha}", sha)
 			}
 			faults.Fail(tc.fail)
-			rec := apiCall(env.h, tc.method, path, body)
-			if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
+			before := taskIDs(t, env.st)
+			rec, effects := apiCallTracked(env.h, tc.method, path, body)
+			if tc.wantCode == 500 {
+				id, _, _ := strings.Cut(arg, "|")
+				requireAuditAnswer(t, rec, tc.what, effects, tc.wantEffects, map[string]string{"{id}": id, "{new}": newTaskID(t, env.st, before)})
+			} else if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %s, want %d containing %q", rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
-			}
-			// A 500 for a failed audit write says what already happened.
-			if b := rec.Body.String(); tc.wantCode == 500 && !strings.Contains(b, "nothing was changed") && !strings.Contains(b, ", but an audit record could not be written") {
-				t.Fatalf("500 does not say what already happened: %s", b)
 			}
 			if len(faults.Refused()) == 0 {
 				t.Fatal("no audit write was attempted")
@@ -236,10 +257,8 @@ func TestPromotionBranchNotCreatedWhenAuditWriteFails(t *testing.T) {
 		return faults
 	}})
 	faults.Fail(audittest.Action("sandbox.propose_promotion"))
-	rec := apiCall(env.h, http.MethodPost, "/api/v1/promote/trial", "")
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "promotion refused: its audit record could not be written, nothing was changed") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
-	}
+	rec, effects := apiCallTracked(env.h, http.MethodPost, "/api/v1/promote/trial", "")
+	requireAuditAnswer(t, rec, "promotion", effects, nil, nil)
 	out, err := exec.Command("git", "-C", repo, "branch", "--list", "sablecourt/promote-trial").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)

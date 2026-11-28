@@ -101,7 +101,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				"namespace": entry.Namespace,
 				"key":       entry.Key,
 			}); err != nil {
-				return "", store.AfterEffect("memory entry stored", err)
+				return "", err
 			}
 			out, _ := json.Marshal(entry)
 			return string(out), nil
@@ -142,7 +142,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				"namespace": ns,
 				"key":       key,
 			}); err != nil {
-				return "", store.AfterEffect("memory entry deleted", err)
+				return "", err
 			}
 			out, _ := json.Marshal(map[string]string{
 				"namespace": ns,

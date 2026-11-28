@@ -4,6 +4,7 @@ package audittest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -70,4 +71,17 @@ func (s *Store) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
 // Action matches records of the named action.
 func Action(name string) func(domain.AuditRecord) bool {
 	return func(rec domain.AuditRecord) bool { return rec.Action == name }
+}
+
+// Answer returns the text store.AuditFailureText gives a request named what
+// that recorded effects, in that order, before an audit write failed. Tests
+// compare an answer with it to check that the answer lists exactly those
+// effects.
+func Answer(what string, effects ...string) string {
+	ctx, _ := store.TrackEffects(context.Background())
+	for _, e := range effects {
+		store.NoteEffect(ctx, "%s", e)
+	}
+	msg, _ := store.AuditFailureText(ctx, fmt.Errorf("%w", store.ErrAuditWrite), what)
+	return msg
 }

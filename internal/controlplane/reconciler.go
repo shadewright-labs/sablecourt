@@ -130,12 +130,12 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 	cleanupErr := errors.Join(leaseErr, r.stopTask(cleanupCtx, taskID))
 	// Cancelling stops execution, so it is never refused for a missing
 	// record; a record that cannot be written is returned to the caller,
-	// marked as coming after the cancellation.
+	// whose answer lists the effects the store and runtime noted.
 	auditErr := store.RecordAudit(cleanupCtx, r.store, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
 		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
 	})
-	return errors.Join(cleanupErr, store.AfterEffect("task "+taskID+" was cancelled", auditErr))
+	return errors.Join(cleanupErr, auditErr)
 }
 
 func terminalTaskState(state domain.TaskState) bool {
@@ -202,6 +202,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 			stopErr = callCtx.Err()
 		}
 		cancel()
+		store.NoteEffectIf(ctx, stopErr, "the runtime of task %s was stopped", taskID)
 		if stopErr != nil {
 			// Retain the verified handle in memory so the next reconcile pass retries cleanup
 			// and RetryTaskWithHandoff waits until the live process stops.
@@ -224,6 +225,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 	err := adapter.Stop(callCtx, handle)
 	cancel()
+	store.NoteEffectIf(ctx, err, "the runtime of task %s was stopped", taskID)
 	r.mu.Lock()
 	delete(r.stopping, taskID)
 	close(done)
@@ -264,11 +266,12 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		c, err := adapter.Suspend(callCtx, handle)
 		cancel()
+		store.NoteEffectIf(ctx, err, "the runtime of task %s was suspended", taskID)
 		if err == nil {
 			cp = c
 		}
 		callCtx, cancel = context.WithTimeout(ctx, adapterCallTimeout)
-		_ = adapter.Stop(callCtx, handle)
+		store.NoteEffectIf(ctx, adapter.Stop(callCtx, handle), "the runtime of task %s was stopped", taskID)
 		cancel()
 	}
 	if raw, err := json.Marshal(cp); err == nil {
@@ -284,8 +287,8 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 	}
 	// Suspending stops execution, so it is never refused for a missing
 	// record; a record that cannot be written is returned to the caller,
-	// marked as coming after the suspension.
-	return store.AfterEffect("task "+taskID+" was suspended", store.RecordAudit(ctx, r.store, domain.AuditRecord{
+	// whose answer lists the effects the store and runtime noted.
+	return store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       taskID,
 		WorkloadName: task.WorkloadName,
@@ -293,7 +296,7 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		Outcome:      "suspended",
 		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, reason),
 		CreatedAt:    r.now(),
-	}))
+	})
 }
 
 // ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.
@@ -386,7 +389,9 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			// Cancellation may already have removed the handle before Resume returned.
 			stopCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
 			defer cancel()
-			if err := adapter.Stop(stopCtx, handle); err != nil {
+			err := adapter.Stop(stopCtx, handle)
+			store.NoteEffectIf(ctx, err, "the runtime of task %s was stopped", taskID)
+			if err != nil {
 				resumeErr = errors.Join(resumeErr, errors.New("runtime stop failed"))
 			}
 		}
@@ -399,6 +404,7 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			err = callCtx.Err()
 		}
 		cancel()
+		store.NoteEffectIf(ctx, err, "the runtime of task %s was resumed", taskID)
 		if err != nil {
 			return errors.New("runtime resume failed")
 		}
@@ -534,7 +540,7 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		// The earlier task was not found by CreateTask after all. The task
 		// now exists, so the row is written late and a failure is returned.
 		if auditErr := store.RecordAudit(ctx, r.store, submitted); auditErr != nil {
-			return domain.Task{}, store.AfterEffect("task "+task.ID+" was created", auditErr)
+			return domain.Task{}, auditErr
 		}
 	}
 	if err != nil {
@@ -1435,6 +1441,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		startErr = callCtx.Err()
 	}
 	cancel()
+	store.NoteEffectIf(ctx, startErr, "the runtime of task %s was started", task.ID)
 	startFailed = startErr != nil
 	if startFailed {
 		launchFacts = launchFailureFacts(startErr)

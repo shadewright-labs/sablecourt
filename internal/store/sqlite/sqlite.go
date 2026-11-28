@@ -144,9 +144,10 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLiteStore) UpsertWorkload(ctx context.Context, w domain.WorkloadRecord) error {
+func (s *SQLiteStore) UpsertWorkload(ctx context.Context, w domain.WorkloadRecord) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "workload %s was registered", w.Name) }()
 	updatedAt := formatTime(w.UpdatedAt)
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO workloads (name, zone, class, manifest_digest, agent_card_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -185,7 +186,8 @@ func (s *SQLiteStore) ListWorkloads(ctx context.Context) ([]domain.WorkloadRecor
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
+func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "task %s was created", t.ID) }()
 	now := nowRFC3339()
 	created := now
 	if !t.CreatedAt.IsZero() {
@@ -210,7 +212,7 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, t domain.Task) error {
 			OR EXISTS (SELECT 1 FROM council_attempts WHERE council_id=? AND round=? AND role=? AND attempt=? AND task_id=?)`
 		args = append(args, a.ConclaveID, a.ConclaveID, a.Round, a.Role, a.Attempt, t.ID)
 	}
-	err := store.InsertTask(ctx, s.db, readCouncilPolicy, t, func(inserter store.TaskInserter) error {
+	err = store.InsertTask(ctx, s.db, readCouncilPolicy, t, func(inserter store.TaskInserter) error {
 		res, err := inserter.ExecContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -273,8 +275,9 @@ func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string) ([]doma
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) AppendTaskMessage(ctx context.Context, msg domain.TaskMessage) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a message was added to task %s", msg.TaskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO task_messages (task_id, role, content, created_at)
 		VALUES (?, ?, ?, ?)
 	`, msg.TaskID, msg.Role, msg.Content, formatTime(msg.CreatedAt))
@@ -306,7 +309,8 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) error {
+func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "task %s moved from %s to %s", taskID, from, to) }()
 	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, readCouncilPolicy, to, reason, s.appendAuditTx)
 	if err != nil {
 		return err
@@ -339,7 +343,8 @@ func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, 
 	return store.CommitTaskTransition(ctx, tx, taskID, to, now)
 }
 
-func (s *SQLiteStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) error {
+func (s *SQLiteStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifactsJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the artifacts of task %s were updated", taskID) }()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET artifacts_json = ?, updated_at = ? WHERE id = ?
 	`, defaultJSON(artifactsJSON, "[]"), nowRFC3339(), taskID)
@@ -356,7 +361,8 @@ func (s *SQLiteStore) UpdateTaskArtifacts(ctx context.Context, taskID, artifacts
 	return nil
 }
 
-func (s *SQLiteStore) RecordHeartbeat(ctx context.Context, taskID string, at time.Time) error {
+func (s *SQLiteStore) RecordHeartbeat(ctx context.Context, taskID string, at time.Time) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a heartbeat of task %s was recorded", taskID) }()
 	ts := formatTime(at)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET last_heartbeat_at = ?, updated_at = ? WHERE id = ?
@@ -374,13 +380,14 @@ func (s *SQLiteStore) RecordHeartbeat(ctx context.Context, taskID string, at tim
 	return nil
 }
 
-func (s *SQLiteStore) CreateApproval(ctx context.Context, a domain.Approval) error {
+func (s *SQLiteStore) CreateApproval(ctx context.Context, a domain.Approval) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was requested", a.ID) }()
 	now := nowRFC3339()
 	created := now
 	if !a.CreatedAt.IsZero() {
 		created = a.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO approvals (
 			id, task_id, workload_name, capability, payload_canonical_json,
 			payload_sha256, status, decided_by, proof_json, expires_at, created_at
@@ -464,7 +471,8 @@ func (s *SQLiteStore) ListApprovals(ctx context.Context, status domain.ApprovalS
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) error {
+func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 string, status domain.ApprovalStatus, decidedBy, proofJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was %s", id, status) }()
 	now := nowRFC3339()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE approvals
@@ -484,7 +492,8 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, expectedSHA256 str
 	return nil
 }
 
-func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) error {
+func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "approval %s was spent", id) }()
 	// One statement in the driver's autocommit transaction, compared against
 	// SQLite's own clock. julianday('now') is read while the statement runs,
 	// after it has taken the database write lock, so a wait for that lock (up
@@ -519,8 +528,9 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capabilit
 	return store.ConsumeRefusal(a, taskID, capability, payloadSHA256)
 }
 
-func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a lease for task %s was minted", lease.TaskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName,
@@ -564,19 +574,22 @@ func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256
 	return lease, nil
 }
 
-func (s *SQLiteStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+func (s *SQLiteStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were renewed", taskID) }()
 	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
 }
 
-func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were revoked", taskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE leases SET revoked_at = ? WHERE task_id = ? AND revoked_at IS NULL
 	`, nowRFC3339(), taskID)
 	return err
 }
 
-func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "budget use of task %s was recorded", entry.TaskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO budget_ledger (
 			task_id, workload_name, provider, model, input_tokens, cache_write_tokens, cache_read_tokens, output_tokens, cost_microusd, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -585,11 +598,15 @@ func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.Budget
 	return err
 }
 
-func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (store.BudgetReservationResult, error) {
+func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (reserved store.BudgetReservationResult, err error) {
+	defer func() {
+		store.NoteEffectWhen(ctx, reserved.ReservationID != "", err, "budget was reserved for task %s", req.TaskID)
+	}()
 	return store.ReserveBudgetTx(ctx, s.db, nil, req)
 }
 
-func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) error {
+func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "budget reservation %s was settled", reservationID) }()
 	return store.SettleBudgetReservationTx(ctx, s.db, nil, reservationID, actual)
 }
 
@@ -724,8 +741,9 @@ func (s *SQLiteStore) VerifyAuditChain(ctx context.Context) (int, error) {
 	return verified, rows.Err()
 }
 
-func (s *SQLiteStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) SaveCheckpoint(ctx context.Context, taskID, workloadName, refJSON string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "a checkpoint of task %s was saved", taskID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO checkpoints (task_id, workload_name, ref_json, created_at)
 		VALUES (?, ?, ?, ?)
 	`, taskID, workloadName, defaultJSON(refJSON, "{}"), nowRFC3339())
@@ -746,7 +764,8 @@ func (s *SQLiteStore) LatestCheckpoint(ctx context.Context, taskID string) (stri
 	return refJSON, err
 }
 
-func (s *SQLiteStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) error {
+func (s *SQLiteStore) UpsertProviderPrefs(ctx context.Context, prefs domain.ProviderPrefs) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "the preferences of provider %s were saved", prefs.ProviderID) }()
 	raw, err := json.Marshal(prefs.EnabledModels)
 	if err != nil {
 		return err
@@ -804,6 +823,7 @@ func defaultJSON(s, fallback string) string {
 	return s
 }
 
-func (s *SQLiteStore) ClaimRecovery(ctx context.Context, taskID, previous, owner string) (bool, error) {
+func (s *SQLiteStore) ClaimRecovery(ctx context.Context, taskID, previous, owner string) (claimed bool, err error) {
+	defer func() { store.NoteEffectWhen(ctx, claimed, err, "recovery of task %s was claimed", taskID) }()
 	return store.ClaimRecovery(ctx, s.db, taskID, previous, owner)
 }

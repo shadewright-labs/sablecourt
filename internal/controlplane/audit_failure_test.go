@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,21 +24,22 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 		// prepare runs with audit writes succeeding.
 		prepare func(t *testing.T, r *Reconciler, task domain.Task)
 		fail    func(domain.AuditRecord) bool
-		act     func(r *Reconciler, task domain.Task) error
+		act     func(ctx context.Context, r *Reconciler, task domain.Task) error
 		wantErr bool
-		// wantText is what store.AuditFailureText answers for the error.
-		wantText string
-		check    func(t *testing.T, st store.Store, task domain.Task)
+		// wantEffects are the effects the call records before the failed
+		// write, with {id} for the task ID; the answer of
+		// store.AuditFailureText lists exactly these.
+		wantEffects []string
+		check       func(t *testing.T, st store.Store, task domain.Task)
 	}{
 		{
 			name: "submit is refused and creates no task",
 			fail: audittest.Action("task.submit"),
-			act: func(r *Reconciler, _ domain.Task) error {
+			act: func(ctx context.Context, r *Reconciler, _ domain.Task) error {
 				_, err := r.SubmitTask(ctx, "worker", "second", "{}")
 				return err
 			},
-			wantErr:  true,
-			wantText: "op refused: its audit record could not be written, nothing was changed",
+			wantErr: true,
 			check: func(t *testing.T, st store.Store, _ domain.Task) {
 				if _, err := st.GetTaskByIdempotencyKey(ctx, "second"); !errors.Is(err, store.ErrNotFound) {
 					t.Fatalf("task created without its record: %v", err)
@@ -47,7 +49,7 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 		{
 			name: "an idempotent replay writes nothing and still returns the task",
 			fail: audittest.Action("task.submit"),
-			act: func(r *Reconciler, _ domain.Task) error {
+			act: func(ctx context.Context, r *Reconciler, _ domain.Task) error {
 				_, err := r.SubmitTask(ctx, "worker", "original", "{}")
 				return err
 			},
@@ -55,7 +57,7 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 		{
 			name: "delegation is refused and creates no child",
 			fail: audittest.Action("delegate:worker"),
-			act: func(r *Reconciler, task domain.Task) error {
+			act: func(ctx context.Context, r *Reconciler, task domain.Task) error {
 				_, err := r.ProposeChildTask(ctx, task.ID, "worker", "child-1", "{}", "")
 				return err
 			},
@@ -71,20 +73,21 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 			prepare: func(t *testing.T, r *Reconciler, task domain.Task) {
 				launchAndSuspend(t, r, task)
 			},
-			fail:     audittest.Action("task.resume"),
-			act:      func(r *Reconciler, task domain.Task) error { return r.ResumeTask(ctx, task.ID) },
-			wantErr:  true,
-			wantText: "op refused: its audit record could not be written, nothing was changed",
+			fail:    audittest.Action("task.resume"),
+			act:     func(ctx context.Context, r *Reconciler, task domain.Task) error { return r.ResumeTask(ctx, task.ID) },
+			wantErr: true,
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateSuspended)
 			},
 		},
 		{
-			name:     "cancel goes ahead and reports the record",
-			fail:     audittest.Action("task.cancel"),
-			act:      func(r *Reconciler, task domain.Task) error { return r.CancelTask(ctx, task.ID, "") },
-			wantErr:  true,
-			wantText: " was cancelled, but an audit record could not be written",
+			name: "cancel goes ahead and reports the record",
+			fail: audittest.Action("task.cancel"),
+			act: func(ctx context.Context, r *Reconciler, task domain.Task) error {
+				return r.CancelTask(ctx, task.ID, "")
+			},
+			wantErr:     true,
+			wantEffects: []string{"task {id} moved from submitted to cancelled", "the leases of task {id} were revoked"},
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateCancelled)
 			},
@@ -96,10 +99,12 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			fail:     audittest.Action("task.suspend"),
-			act:      func(r *Reconciler, task domain.Task) error { return r.SuspendTask(ctx, task.ID, "") },
-			wantErr:  true,
-			wantText: " was suspended, but an audit record could not be written",
+			fail: audittest.Action("task.suspend"),
+			act: func(ctx context.Context, r *Reconciler, task domain.Task) error {
+				return r.SuspendTask(ctx, task.ID, "")
+			},
+			wantErr:     true,
+			wantEffects: []string{"the runtime of task {id} was suspended", "the runtime of task {id} was stopped", "a checkpoint of task {id} was saved", "the leases of task {id} were revoked", "task {id} moved from working to suspended"},
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateSuspended)
 			},
@@ -110,7 +115,7 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 				failTask(t, r.store, task.ID, domain.TaskStateSubmitted)
 			},
 			fail: audittest.Action("task.auto_remediate"),
-			act: func(r *Reconciler, task domain.Task) error {
+			act: func(ctx context.Context, r *Reconciler, task domain.Task) error {
 				failed, err := r.store.GetTask(ctx, task.ID)
 				if err != nil {
 					return err
@@ -134,15 +139,26 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 				tc.prepare(t, r, task)
 			}
 			faults.Fail(tc.fail)
-			err := tc.act(r, task)
+			callCtx, effects := store.TrackEffects(ctx)
+			err := tc.act(callCtx, r, task)
 			if tc.wantErr != errors.Is(err, store.ErrAuditWrite) {
 				t.Fatalf("got %v, want ErrAuditWrite: %v", err, tc.wantErr)
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if msg, _ := store.AuditFailureText(err, "op"); !strings.Contains(msg, tc.wantText) {
-				t.Fatalf("text %q, want %q", msg, tc.wantText)
+			if tc.wantErr {
+				msg, _ := store.AuditFailureText(callCtx, err, "op")
+				if want := audittest.Answer("op", effects.List()...); msg != want {
+					t.Fatalf("answer %q does not list the recorded effects %q", msg, effects.List())
+				}
+				var want []string
+				for _, e := range tc.wantEffects {
+					want = append(want, strings.ReplaceAll(e, "{id}", task.ID))
+				}
+				if !slices.Equal(effects.List(), want) {
+					t.Fatalf("effects %q, want %q", effects.List(), want)
+				}
 			}
 			if tc.check != nil {
 				tc.check(t, st, task)

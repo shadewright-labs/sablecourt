@@ -34,7 +34,7 @@ func BrokerHandler(opts Options) http.Handler {
 	if secName == "" {
 		secName = "a2a_bearer_token"
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return store.TrackEffectsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeRPCError(w, nil, -32600, "POST required")
 			return
@@ -101,7 +101,7 @@ func BrokerHandler(opts Options) http.Handler {
 			}
 			inBytes, _ := json.Marshal(map[string]string{"prompt": strings.Join(texts, "\n")})
 			task, err := opts.Reconciler.SubmitTask(r.Context(), p.Workload, p.ID, string(inBytes))
-			if msg, ok := store.AuditFailureText(err, "task submission"); ok {
+			if msg, ok := store.AuditFailureText(r.Context(), err, "task submission"); ok {
 				writeRPCError(w, req.ID, -32603, msg)
 				return
 			}
@@ -140,7 +140,7 @@ func BrokerHandler(opts Options) http.Handler {
 		default:
 			writeRPCError(w, req.ID, -32601, "method not found")
 		}
-	})
+	}))
 }
 
 func writeRPCResult(w http.ResponseWriter, id any, result any) {

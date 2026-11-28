@@ -2,7 +2,7 @@ package conclave
 
 import (
 	"context"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
@@ -13,8 +13,8 @@ import (
 )
 
 // An opening that fails for another reason and then cannot record the
-// cancellation of a task it already submitted says that the room was opened
-// and cancelled, not that nothing was changed (issue 107 row 3).
+// cancellation of a task it already submitted lists what the opening and its
+// cleanup changed (issue 107 row 3, issue 179).
 func TestOpenCleanupAuditFailureSaysWhatHappened(t *testing.T) {
 	ctx := context.Background()
 	st := brokerTestStore(t)
@@ -29,13 +29,33 @@ func TestOpenCleanupAuditFailureSaysWhatHappened(t *testing.T) {
 	b := NewBroker(Options{Store: faults, GetBundle: func() *config.Bundle { return bundle },
 		Reconciler: controlplane.NewReconciler(controlplane.Options{Store: faults, Bundle: bundle})})
 	faults.Fail(audittest.Action("task.cancel"))
-	_, err := b.Open(ctx, "council", "t", "")
-	msg, ok := store.AuditFailureText(err, "opening the conclave")
+	openCtx, effects := store.TrackEffects(ctx)
+	_, err := b.Open(openCtx, "council", "t", "")
+	msg, ok := store.AuditFailureText(openCtx, err, "opening the conclave")
 	if !ok {
 		t.Fatalf("got %v, want a failed audit write", err)
 	}
-	if strings.Contains(msg, "nothing was changed") || !strings.Contains(msg, "was opened and then cancelled") || !strings.Contains(msg, "was cancelled, but an audit record could not be written") {
-		t.Fatalf("text %q", msg)
+	if msg != audittest.Answer("opening the conclave", effects.List()...) {
+		t.Fatalf("answer %q does not list the recorded effects %q", msg, effects.List())
+	}
+	rooms, err := st.ListConclaves(ctx)
+	if err != nil || len(rooms) != 1 {
+		t.Fatalf("rooms %v %v", rooms, err)
+	}
+	tasks, err := st.ListTasks(ctx)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks %v %v", tasks, err)
+	}
+	want := []string{
+		"conclave " + rooms[0].ID + " was opened",
+		"task " + tasks[0].ID + " was created",
+		"a message was added to task " + tasks[0].ID,
+		"conclave " + rooms[0].ID + " moved to cancelled",
+		"task " + tasks[0].ID + " moved from submitted to cancelled",
+		"the leases of task " + tasks[0].ID + " were revoked",
+	}
+	if got := effects.List(); !slices.Equal(got, want) {
+		t.Fatalf("effects %q, want %q", got, want)
 	}
 	if len(faults.Refused()) == 0 {
 		t.Fatal("no audit write was attempted")

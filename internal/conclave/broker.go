@@ -141,21 +141,13 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 	fail := func(cause error) (domain.ConclaveSession, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		closeErr := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled)
-		done := "conclave " + session.ID + " was opened and then cancelled"
-		var err error
-		if closeErr != nil {
-			done = "conclave " + session.ID + " was opened and could not be cancelled"
-			err = errors.Join(cause, closeErr)
-		} else {
-			err = errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
+		// The store notes the session it created and every step of this
+		// cleanup that changed something, so an audit failure anywhere in
+		// the opening is answered with what is left.
+		if closeErr := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled); closeErr != nil {
+			return domain.ConclaveSession{}, errors.Join(cause, closeErr)
 		}
-		// The session exists by now, so an audit failure anywhere in the
-		// opening or its cleanup is reported as coming after it was opened.
-		if errors.Is(err, store.ErrAuditWrite) {
-			err = store.AfterEffect(done, err)
-		}
-		return domain.ConclaveSession{}, err
+		return domain.ConclaveSession{}, errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
 	}
 
 	limits := b.limits(bundle, tpl, true)
@@ -286,11 +278,6 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 	if err == nil {
 		err = b.store.FinishConclaveWake(ctx, msg.ID)
 	}
-	// The message is stored either way, so a wake refused for its audit
-	// record is reported as coming after that effect.
-	if errors.Is(err, store.ErrAuditWrite) {
-		err = store.AfterEffect(fmt.Sprintf("message %d was stored", msg.ID), err)
-	}
 	return msg, err
 }
 
@@ -402,7 +389,7 @@ func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.Concl
 		// The report and its relic are stored together above, so a record
 		// that cannot be written is reported, not undone.
 		if err := b.recordRelic(ctx, relic); err != nil {
-			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, store.AfterEffect("the report was stored", err)
+			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
 		}
 	}
 	msg.ID = id

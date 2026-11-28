@@ -83,7 +83,7 @@ func (s *replayingStore) GetTaskByIdempotencyKey(ctx context.Context, key string
 // A task.submit row written after the task was created reports the task as
 // created, not as refused.
 func TestLateSubmitRowReportsCreatedTask(t *testing.T) {
-	ctx := context.Background()
+	ctx, effects := store.TrackEffects(context.Background())
 	r, st, _, _ := regressionFixture(t)
 	faults := audittest.Wrap(st)
 	r.store = &replayingStore{Store: faults, key: "late"}
@@ -92,8 +92,12 @@ func TestLateSubmitRowReportsCreatedTask(t *testing.T) {
 	if _, getErr := st.GetTaskByIdempotencyKey(ctx, "late"); getErr != nil {
 		t.Fatalf("task not created: %v (submit error %v)", getErr, err)
 	}
-	msg, ok := store.AuditFailureText(err, "task submission")
-	if !ok || !strings.Contains(msg, "was created, but") {
-		t.Fatalf("got %q %v from %v", msg, ok, err)
+	task, getErr := st.GetTaskByIdempotencyKey(ctx, "late")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	msg, ok := store.AuditFailureText(ctx, err, "task submission")
+	if want := audittest.Answer("task submission", "task "+task.ID+" was created"); !ok || msg != want {
+		t.Fatalf("got %q %v from %v, want %q (effects %q)", msg, ok, err, want, effects.List())
 	}
 }

@@ -52,7 +52,7 @@ func TestCancelledRequestIsNotDispatched(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+tg.tokens["ops-agent"])
 		rec := httptest.NewRecorder()
 		tg.gate.ActionHandler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "approval is spent") || !strings.Contains(rec.Body.String(), "did not run") {
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "approval "+id+" is spent") || !strings.Contains(rec.Body.String(), "before the action ran") {
 			t.Fatalf("%s: want a 500 saying the approval is spent and the action did not run, got %d: %s", tc.action, rec.Code, rec.Body.String())
 		}
 		got, err := tg.st.GetApproval(context.Background(), id)
