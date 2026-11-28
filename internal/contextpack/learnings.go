@@ -105,11 +105,16 @@ func MatchLearnings(ctx context.Context, st store.Store, repoRemoteURL string, c
 	return eligible
 }
 
+// learningSectionName is the packet heading of the learnings section.
+const learningSectionName = "Scoped Learnings"
+
 // learningSection renders up to MaxPacketLearnings redacted entries, most
-// specific first, within MaxLearningSectionBytes. Overflow is omitted.
+// specific first, within MaxLearningSectionBytes. The budget covers the
+// rendered section, so the heading fitPacket writes is reserved first.
+// Overflow is omitted.
 func learningSection(learnings []domain.Learning) []packetContext {
 	var lines []packetContext
-	total := 0
+	total := len("\n## " + learningSectionName + "\n\n")
 	for _, l := range learnings {
 		if len(lines) == MaxPacketLearnings {
 			break
@@ -123,7 +128,7 @@ func learningSection(learnings []domain.Learning) []packetContext {
 			break
 		}
 		total += len(line)
-		lines = append(lines, packetContext{section: "Scoped Learnings", text: line, at: l.UpdatedAt})
+		lines = append(lines, packetContext{section: learningSectionName, text: line, at: l.UpdatedAt})
 	}
 	return lines
 }

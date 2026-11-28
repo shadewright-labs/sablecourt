@@ -1267,7 +1267,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if commit != "" && !supportsPin {
 		return errAuthorCheckoutUnavailable
 	}
-	wl, inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
+	wl, inputJSON, pinned, err := r.prepareLaunchInput(ctx, task, wl)
 	if err != nil {
 		return err
 	}
@@ -1290,7 +1290,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
-	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry)
+	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry, pinned)
 	if err != nil {
 		return err
 	}
@@ -1413,7 +1413,9 @@ func (r *Reconciler) councilDeadline(ctx context.Context, conclaveID string) (ti
 	return snap.Deadline, nil
 }
 
-func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time) (string, error) {
+// issueLaunchToken mints the launch lease. A non-nil pinned list holds the
+// providers the task's learning packet was admitted under.
+func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time, pinned []string) (string, error) {
 	r.mu.Lock()
 	reservation := r.launching[taskID]
 	r.mu.Unlock()
@@ -1440,7 +1442,7 @@ func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExp
 			expiresAt = maxExpiry
 		}
 	}
-	return model.MintTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt)
+	return model.MintPinnedTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt, pinned)
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {

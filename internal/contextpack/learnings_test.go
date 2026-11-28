@@ -185,7 +185,9 @@ func TestPacketLearningEligibility(t *testing.T) {
 }
 
 // TestLearningSectionCap checks the ten-statement and 4 KiB section limits.
+// The 4 KiB bound covers the rendered section, heading and newlines included.
 func TestLearningSectionCap(t *testing.T) {
+	heading := len("\n## Scoped Learnings\n\n")
 	entry := func(i, size int) domain.Learning {
 		return domain.Learning{ID: fmt.Sprintf("l-%02d", i), Statement: strings.Repeat("a", size)}
 	}
@@ -204,7 +206,9 @@ func TestLearningSectionCap(t *testing.T) {
 		}(), 10},
 		{"three 1500-byte statements keep two", []domain.Learning{entry(0, 1500), entry(1, 1500), entry(2, 1500)}, 2},
 		{"one statement of 4 KiB is omitted", []domain.Learning{entry(0, store.MaxLearningStatementBytes)}, 0},
-		{"exact fit is kept", []domain.Learning{entry(0, MaxLearningSectionBytes-len("- [l-00] \n"))}, 1},
+		{"exact fit is kept", []domain.Learning{entry(0, MaxLearningSectionBytes-heading-len("- [l-00] \n"))}, 1},
+		{"one byte over with the heading is omitted", []domain.Learning{entry(0, MaxLearningSectionBytes-heading-len("- [l-00] \n")+1)}, 0},
+		{"entry that fits only without the heading is omitted", []domain.Learning{entry(0, MaxLearningSectionBytes-len("- [l-00] \n"))}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := learningSection(tc.learnings)
@@ -220,6 +224,9 @@ func TestLearningSectionCap(t *testing.T) {
 			}
 			if total > MaxLearningSectionBytes {
 				t.Fatalf("section is %d bytes", total)
+			}
+			if rendered := fitPacket("", lines); len(rendered) > MaxLearningSectionBytes {
+				t.Fatalf("rendered section is %d bytes, limit %d", len(rendered), MaxLearningSectionBytes)
 			}
 		})
 	}

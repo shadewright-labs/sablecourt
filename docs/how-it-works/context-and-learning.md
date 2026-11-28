@@ -48,7 +48,9 @@ The matcher reads only the learning record of [ADR-0012](../adr/0012-learning-ev
 - The workload is a `long-lived-agent` and has no `coding` block. A CLI harness prompt goes to a remote model, and the Docker adapter places no other class, so an empty or unknown class counts as unknown.
 - `grants.modelGate` is allowed and lists exactly one provider, `local`. An empty list allows every provider, and a list with any other provider can route a request to a remote one, including through fallback.
 
-The daemon fixes the first two facts once at startup and logs them in the line "context packet learning destination fixed at startup". Every other packet gets no learnings, and the store is not read for it. Council turns use their own packet, which never carries learnings. The `local` provider is assumed to stay on this machine: its default upstream is loopback, and a local upstream configured elsewhere would break that assumption.
+The daemon fixes the first two facts once at startup and logs them in the line "context packet learning destination fixed at startup". Every other packet gets no learnings, and the store is not read for it.
+
+A reload can widen the grant of a task that is already running. So when a packet carries learnings, the reconciler pins the task's lease to the providers that packet was admitted under (`local`), and the Model Gate refuses a request from that lease to any other provider (403, `provider_not_admitted_with_learnings`), whatever the current grant says. Fallback from `local` stays inside the pinned set too. A task launched after the reload is checked against the new grant, so it gets no learnings and an unpinned lease. Council turns use their own packet, which never carries learnings. The `local` provider is assumed to stay on this machine: its default upstream is loopback, and a local upstream configured elsewhere would break that assumption.
 
 ### Matching
 
@@ -59,7 +61,7 @@ For a local destination the assembler asks the store for records that are `accep
 - A record with a repository remote URL never matches yet: the assembler derives no remote URL from the checkout, and a missing selector fails the match.
 - A record with incident selectors never matches an ordinary task, for the same reason.
 
-The most specific records come first. At most ten enter the packet, as `- [id] statement` lines under "Scoped Learnings", and the section stops before a line that would take it past 4 KiB. Each line passes through the redactor. The 32 KiB packet trim can still drop learning entries, oldest first. The injection count of a record is not updated yet.
+The most specific records come first. At most ten enter the packet, as `- [id] statement` lines under "Scoped Learnings", and the section stops before a line that would take it past 4 KiB. The 4 KiB covers the rendered section, the heading and its blank lines included. Each line passes through the redactor. The 32 KiB packet trim can still drop learning entries, oldest first. The injection count of a record is not updated yet.
 
 `GET /api/v1/learnings?repo=&path=` (operator credential) lists up to 100 such records as `domain.Learning` objects, where `repo` is a repository remote URL; an invalid `repo` gets 400. It does not apply the destination check, because it answers the operator and builds no prompt.
 
