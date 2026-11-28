@@ -3,6 +3,7 @@ package coding
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -204,6 +205,62 @@ func TestCommandArtifactInvalidUTF8StaysWithinCap(t *testing.T) {
 			}
 			if len(res.Output) > rec.MaxOutputBytes || !utf8.ValidString(out.Command.Output) || res.Output != out.Command.Output || res.OutputTruncated != tc.truncated {
 				t.Fatalf("stored output %q (%d bytes, truncated %v), want valid UTF-8 within %d bytes, truncated %v", res.Output, len(res.Output), res.OutputTruncated, rec.MaxOutputBytes, tc.truncated)
+			}
+		})
+	}
+}
+
+// TestBuildCommandProcessResultCutProperty moves the cap across finished and
+// unfinished private keys and a token in the stored command output, and
+// checks the property of the decision of 2026-11-28 on issue 134: no byte of
+// a key body appears in the stored output, nothing after an unfinished key
+// does, the output is within the cap, and the output is marked truncated
+// exactly when the runner overflowed or the redacted output is over the cap.
+func TestBuildCommandProcessResultCutProperty(t *testing.T) {
+	t.Parallel()
+	const capBytes = 160
+	begin, end := "-----BEGIN "+"PRIVATE KEY-----\n", "-----END "+"PRIVATE KEY-----"
+	body := []string{"KBfirstbodylineQ7x2Lm9", "KBsecondbodylineW4k8Zp3", "KBthirdbodylineR5n1Vt6"}
+	token := "gh" + "p_" + strings.Repeat("T", 36)
+	after := "AFTERmarkerline\n"
+	for name, tc := range map[string]struct {
+		secret     string
+		values     []string
+		key, unfin bool
+	}{
+		"finished key":   {secret: begin + strings.Join(body, "\n") + "\n" + end, values: body, key: true},
+		"unfinished key": {secret: begin + strings.Join(body, "\n"), values: body, key: true, unfin: true},
+		"token":          {secret: token, values: []string{token}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			for post := capBytes - len(tc.secret) - 40; post <= capBytes+40; post++ {
+				for _, overflow := range []bool{false, true} {
+					stdout := strings.Repeat("pre line\n", 12) + tc.secret + "\n" + after + strings.Repeat("p", max(post-len(after)-1, 0)) + "\n"
+					res := scruntime.CouncilResult{Stdout: stdout, Stderr: "warn", OutputOverflow: overflow}
+					got := buildCommandProcessResult(res, commandRecord{Name: "check", MaxOutputBytes: capBytes}).Command
+					label := fmt.Sprintf("post %d overflow %v", post, overflow)
+					if len(got.Output) > capBytes {
+						t.Fatalf("%s: output holds %d bytes", label, len(got.Output))
+					}
+					for _, v := range tc.values {
+						if !tc.key && strings.Contains(got.Output, v) {
+							t.Fatalf("%s: output shows %q: %q", label, v, got.Output)
+						}
+						for i := 0; tc.key && i+8 <= len(v); i++ {
+							if strings.Contains(got.Output, v[i:i+8]) {
+								t.Fatalf("%s: output shows key body bytes %q: %q", label, v[i:i+8], got.Output)
+							}
+						}
+					}
+					if tc.unfin && strings.Contains(got.Output, "AFTER") {
+						t.Fatalf("%s: output shows text after an unfinished key: %q", label, got.Output)
+					}
+					whole, _ := redact.Tail(strings.TrimSpace(stdout)+"\nwarn", 0, 1<<30, nil)
+					if want := overflow || len(whole) > capBytes; got.OutputTruncated != want {
+						t.Fatalf("%s: truncated = %v, want %v (redacted whole %d bytes)", label, got.OutputTruncated, want, len(whole))
+					}
+				}
 			}
 		})
 	}

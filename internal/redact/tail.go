@@ -19,7 +19,11 @@ var (
 // order is fixed in one place:
 //
 //  1. Redact the whole text, so a secret that spans a later cut is replaced
-//     whole before anything is cut.
+//     whole before anything is cut. Every redaction pass, whatever clean
+//     is, also replaces everything from the first private key BEGIN line
+//     that has no END line after it through the end with the private key
+//     marker, so a later cut cannot drop that BEGIN line and show the key
+//     body.
 //  2. Cut the redacted text to its last limit bytes.
 //  3. After any cut, drop the first line of what is left (a cut can fall
 //     inside a secret, whose rest no rule would match) and everything
@@ -39,6 +43,8 @@ func Tail(text string, from, limit int, clean func(string) string) (string, bool
 	if clean == nil {
 		clean = String
 	}
+	pass := clean
+	clean = func(s string) string { return hideUnfinishedKey(pass(hideUnfinishedKey(s))) }
 	from = min(max(from, 0), len(text))
 	limit = max(limit, 0)
 	out := clean(text)
@@ -67,6 +73,28 @@ func Tail(text string, from, limit int, clean func(string) string) (string, bool
 		out = next
 	}
 	return "", true
+}
+
+// unfinishedKeyMarker replaces a private key that has no END line. It is
+// the marker of the private key rule, so a finished and an unfinished key
+// look the same once redacted.
+const unfinishedKeyMarker = "[REDACTED:private_key]"
+
+// hideUnfinishedKey replaces everything from the first private key BEGIN
+// line that has no END line after it through the end of s with the private
+// key marker. No rule matches such a key, so without this its body would be
+// shown as soon as a cut dropped the BEGIN line. The diagnostics after it
+// are lost with it.
+func hideUnfinishedKey(s string) string {
+	rest := 0
+	if ends := privateKeyEnd.FindAllStringIndex(s, -1); len(ends) > 0 {
+		rest = ends[len(ends)-1][1]
+	}
+	start := privateKeyBegin.FindStringIndex(s[rest:])
+	if start == nil {
+		return s
+	}
+	return s[:rest+start[0]] + unfinishedKeyMarker
 }
 
 // dropPartialStart drops the first line of s and then everything through

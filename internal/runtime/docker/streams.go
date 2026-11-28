@@ -72,6 +72,11 @@ type councilOutput struct {
 	total    int64
 	overflow bool
 	keepTail bool
+	// keyOpen records that the bytes compaction dropped end inside a
+	// private key: a BEGIN line with no END line after it. The key body
+	// then runs from the start of buf to the first END line in it, and
+	// visible hides it although its BEGIN line is gone.
+	keyOpen bool
 	// limit and lookback replace maxCouncilOutput and outputLookback in
 	// tests when set.
 	limit, lookback int
@@ -99,22 +104,51 @@ func (b *councilOutput) Write(p []byte) (int, error) {
 			return n, nil
 		}
 	}
-	if len(p) >= window {
-		b.buf.Reset()
-		p = p[len(p)-window:]
-	}
 	b.buf.Write(p)
 	// Compact only past twice the window, so each byte is copied a bounded
-	// number of times and the buffer holds at most twice the window.
+	// number of times and the buffer holds at most twice the window plus
+	// one write. Compaction is the only place that drops raw bytes.
 	if b.buf.Len() > 2*window {
-		tail := bytes.Clone(b.buf.Bytes()[b.buf.Len()-window:])
-		b.buf.Reset()
-		b.buf.Write(tail)
+		b.compact(window)
 	}
 	return n, nil
 }
 
-var privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+var (
+	privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+	privateKeyEnd   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	// privateKeyStartOpen is a BEGIN line still running at the end of the
+	// buffer, too long to tell yet whether it starts a private key. It is
+	// treated as one.
+	privateKeyStartOpen = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*\z`)
+)
+
+// compact drops all but the last window bytes of the buffer and records in
+// keyOpen whether the dropped bytes end inside a private key. A BEGIN or END
+// line counts as dropped when it starts in the dropped bytes, so one split
+// by the compaction point is not lost.
+func (b *councilOutput) compact(window int) {
+	data := b.buf.Bytes()
+	drop := len(data) - window
+	last, open := -1, b.keyOpen
+	for _, m := range privateKeyStart.FindAllIndex(data, -1) {
+		if m[0] < drop && m[0] > last {
+			last, open = m[0], true
+		}
+	}
+	for _, m := range privateKeyEnd.FindAllIndex(data, -1) {
+		if m[0] < drop && m[0] > last {
+			last, open = m[0], false
+		}
+	}
+	if m := privateKeyStartOpen.FindIndex(data); m != nil && m[0] < drop && m[0] > last {
+		open = true
+	}
+	b.keyOpen = open
+	tail := bytes.Clone(data[drop:])
+	b.buf.Reset()
+	b.buf.Write(tail)
+}
 
 // visible returns the stream as it may be shown or stored: redacted, then
 // cut to the limit by redact.Tail, which owns the order of redaction and
@@ -127,6 +161,12 @@ func (b *councilOutput) visible(prompt, lease string) string {
 	}
 	limit, _ := b.limits()
 	raw := b.buf.String()
+	if b.keyOpen {
+		// The BEGIN line of the key the buffer starts in was dropped: put
+		// one back, so redact.Tail hides the body up to its END line, or
+		// everything when there is none.
+		raw = "-----BEGIN " + "PRIVATE KEY-----\n" + raw
+	}
 	from := 0
 	if b.overflow {
 		// The stream is longer than the window: its last limit bytes are
@@ -139,13 +179,7 @@ func (b *councilOutput) visible(prompt, lease string) string {
 				s = strings.ReplaceAll(s, secret, "[REDACTED]")
 			}
 		}
-		s = redact.String(s)
-		// A private key with no END line matches no rule: drop it and
-		// everything after it.
-		if start := privateKeyStart.FindStringIndex(s); start != nil {
-			s = s[:start[0]] + "[REDACTED:private_key]"
-		}
-		return s
+		return redact.String(s)
 	}
 	out, cut := redact.Tail(raw, from, limit, clean)
 	if cut {

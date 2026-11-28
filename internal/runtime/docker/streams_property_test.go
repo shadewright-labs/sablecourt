@@ -99,19 +99,25 @@ func fill(r *rand.Rand, n int) string {
 // tokens, multi-byte runes at the boundary and lines that redaction grows,
 // and checks the visible tail: within the limit, valid UTF-8 when the input
 // is, unchanged by another redaction pass, showing no secret value that
-// redaction of the whole stream hides, and flagged as overflowed whenever
-// it differs from the redacted whole.
+// redaction of the whole stream hides, and flagged as overflowed exactly
+// when the raw stream or its redacted whole is over the limit. Most streams
+// are long enough for Write to compact them.
 func TestCommandOutputTailProperty(t *testing.T) {
 	t.Parallel()
 	const limit, lookback = 1024, 512
 	r := rand.New(rand.NewPCG(134, 227))
 	// The race detector slows regular expressions about twentyfold.
-	cases := 1500
+	cases := 600
 	if raceEnabled {
-		cases = 120
+		cases = 40
 	}
+	const window = limit + lookback
+	// Totals up to six windows and writes up to twice the window, so most
+	// streams are compacted in Write, some by a single write past the
+	// window, and some fit.
+	compacted, fits := 0, 0
 	for i := range cases {
-		total := limit/2 + r.IntN(2*limit)
+		total := limit/2 + r.IntN(6*window)
 		cutAt := max(total-limit, 0)
 		var secrets []placedSecret
 		var b strings.Builder
@@ -137,11 +143,20 @@ func TestCommandOutputTailProperty(t *testing.T) {
 		input := b.String()
 		out := councilOutput{keepTail: true, limit: limit, lookback: lookback}
 		for j := 0; j < len(input); {
-			n := min(1+r.IntN(300), len(input)-j)
+			n := 1 + r.IntN(300)
+			if r.IntN(8) == 0 {
+				n = 1 + r.IntN(2*window)
+			}
+			n = min(n, len(input)-j)
 			if _, err := out.Write([]byte(input[j : j+n])); err != nil {
 				t.Fatal(err)
 			}
 			j += n
+		}
+		if out.buf.Len() < len(input) {
+			compacted++
+		} else if len(input) <= limit {
+			fits++
 		}
 		got := out.visible("", "")
 		whole := councilOutput{keepTail: true, limit: 1 << 30}
@@ -156,6 +171,9 @@ func TestCommandOutputTailProperty(t *testing.T) {
 		}
 		if utf8.ValidString(input) && !utf8.ValidString(got) {
 			fail("visible is not valid UTF-8")
+		}
+		if got != outputLimitMarker && !strings.HasSuffix(redactedWhole, got) {
+			fail("visible is not a suffix of the redacted whole: compaction kept the wrong bytes")
 		}
 		if got != outputLimitMarker {
 			again := councilOutput{keepTail: true, limit: 1 << 30}
@@ -172,5 +190,11 @@ func TestCommandOutputTailProperty(t *testing.T) {
 		if got != redactedWhole && !out.overflow {
 			fail("visible differs from the redacted whole without overflow")
 		}
+		if want := len(input) > limit || len(redactedWhole) > limit; out.overflow != want {
+			fail("overflow = %v, want %v", out.overflow, want)
+		}
+	}
+	if compacted*2 < cases || fits == 0 {
+		t.Fatalf("compacted %d and fitting %d of %d streams, want most compacted and some fitting", compacted, fits, cases)
 	}
 }

@@ -169,7 +169,9 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	result.Stdout = stdout.visible(prompt, s.TaskToken)
 	result.Stderr = stderr.visible(prompt, s.TaskToken)
-	result.OutputOverflow = stdout.overflow || stderr.overflow || result.Stdout == outputLimitMarker || result.Stderr == outputLimitMarker
+	// Overflow comes only from a recorded cut, never from the text: a command
+	// may print the marker itself.
+	result.OutputOverflow = stdout.overflow || stderr.overflow
 	return result, record(ctx, result)
 }
 
