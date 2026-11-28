@@ -116,6 +116,8 @@ When a command step fails on any path (the command's outcome, a refusal, a launc
 
 `failure_reason` is the command's `failureReason` from the manifest, so a workflow can say what to do instead, for example which other workflow to start.
 
+The halt event, its `workflow.command` audit row and the halted run registration are written in one transaction. When a command step fails on any path other than a runtime exit, the transaction that marks it failed also adds an entry for it in the reserved namespace `system:workflow-halts-pending`. If the halt write fails, that entry keeps the failed step in the reconcile set, and each later reconcile pass tries the halt again until it is recorded; the entry is then deleted. A halt already recorded is not written a second time. A step that failed at its runtime exit needs no entry: each pass processes that exit again, halt included, until it completes.
+
 ## Steps after a command step
 
 A step after a command step follows the author's task, not the command's: a verifier gets the author's artifacts in its prompt, the author's commit as its checkout, and the author's retry budget, and a `CHANGES_REQUESTED` verdict sends the author step back. A command step runs again after each author retry.

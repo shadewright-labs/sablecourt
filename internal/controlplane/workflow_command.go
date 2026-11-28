@@ -19,6 +19,13 @@ import (
 // plane wrote; a task's input can name a command but never supplies argv, and
 // a task that names one without a matching registration is refused.
 
+// pendingHaltsNamespace holds one entry per failed command step whose run
+// halt is not recorded yet. The entry is written in the transaction that
+// fails the step, so a failed step with an unrecorded halt always has one,
+// and it keeps the step in the reconcile set until the halt is recorded
+// (issues 226 and 253). Only the control plane writes system namespaces.
+const pendingHaltsNamespace = store.PendingHalts
+
 type commandStepMeta struct {
 	Workflow        string `json:"workflow"`
 	StepIndex       int    `json:"step_index"`
@@ -223,14 +230,40 @@ func commandStepPayload(workflow string, step domain.WorkflowStep, index int, in
 	}
 }
 
+// failStep moves task to failed. A command step of a workflow run gets its
+// pending halt entry in the same transaction, so a failed command step whose
+// halt is not recorded stays in the reconcile set whatever happens to the
+// halt attempts that follow (issues 226 and 253).
+func (r *Reconciler) failStep(ctx context.Context, task domain.Task, reason, facts string) error {
+	var meta commandStepMeta
+	if json.Unmarshal([]byte(task.InputJSON), &meta) != nil || meta.Workflow == "" || !r.isCommandStep(meta.Workflow, meta.StepIndex, task.WorkloadName) {
+		return r.store.UpdateTaskState(ctx, task.ID, task.State, domain.TaskStateFailed, reason, facts)
+	}
+	entry := domain.MemoryEntry{Namespace: pendingHaltsNamespace, Key: task.ID, Value: "{}", Author: "controlplane", UpdatedAt: r.now()}
+	return store.UpdateTaskStateWithEffects(ctx, r.store, task.ID, task.State, domain.TaskStateFailed, reason, facts, store.TransitionEffects{Memory: &entry})
+}
+
 // haltCommandStep records on the workflow run that a command step failed or
 // was refused, with the operator's failure reason, and stops the run. It is a
-// no-op for any other task and for a run already halted.
+// no-op for any other task and for a run already halted. Once the halt is
+// recorded, or not needed, the step's pending halt entry is deleted; until
+// then the entry keeps the step in the reconcile set, so a later pass
+// retries the halt.
 func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refusal *scruntime.CommandRefusal) error {
 	var meta commandStepMeta
 	if json.Unmarshal([]byte(task.InputJSON), &meta) != nil || meta.Workflow == "" {
 		return nil
 	}
+	if err := r.haltCommandRun(ctx, task, meta, refusal); err != nil {
+		return err
+	}
+	if err := r.store.DeleteMemory(ctx, pendingHaltsNamespace, task.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	return nil
+}
+
+func (r *Reconciler) haltCommandRun(ctx context.Context, task domain.Task, meta commandStepMeta, refusal *scruntime.CommandRefusal) error {
 	step, wl, ok := r.commandStepOf(meta.Workflow, meta.StepIndex, task.WorkloadName)
 	if !ok {
 		return nil

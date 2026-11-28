@@ -147,7 +147,8 @@ func GetTaskByIdempotencyKey(ctx context.Context, db *sql.DB, key string) (domai
 }
 
 // ListReconcileTasks includes terminal tasks with a retained handle, an
-// unrevoked lease, or a runtime exit that still needs processing.
+// unrevoked lease, a runtime exit that still needs processing, or a workflow
+// halt that is not recorded yet (PendingHalts).
 func ListReconcileTasks(ctx context.Context, db *sql.DB, handleIDs []string, handleQuery string) ([]domain.Task, error) {
 	if handleIDs == nil {
 		handleIDs = []string{}
@@ -160,6 +161,7 @@ func ListReconcileTasks(ctx context.Context, db *sql.DB, handleIDs []string, han
 		SELECT id FROM tasks WHERE state IN ('submitted', 'working', 'input-required') OR exit_pending
 		UNION ALL SELECT task_id FROM leases WHERE revoked_at IS NULL
 		UNION ALL SELECT key FROM court_memory WHERE namespace = 'system:runtime-handles'
+		UNION ALL SELECT key FROM court_memory WHERE namespace = '` + PendingHalts + `'
 		UNION ALL `
 	return queryTasks(ctx, db, candidates+handleQuery+")", string(handles))
 }
@@ -217,6 +219,11 @@ func RenewTaskLeases(ctx context.Context, db *sql.DB, taskID string, now, expire
 }
 
 const RecoveryOwners = "system:recovery-owners"
+
+// PendingHalts holds, keyed by task ID, the failed workflow steps whose run
+// halt the control plane has not recorded yet. ListReconcileTasks returns
+// them until the control plane deletes the entry.
+const PendingHalts = "system:workflow-halts-pending"
 
 // ClaimRecovery replaces only the exact owner the caller verified had exited.
 func ClaimRecovery(ctx context.Context, db *sql.DB, taskID, previous, owner string) (bool, error) {

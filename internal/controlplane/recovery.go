@@ -462,11 +462,12 @@ func (r *Reconciler) recoverTask(ctx context.Context, task domain.Task, bundle *
 // used when no verified live handle can be matched to the task.
 func (r *Reconciler) failLostTask(ctx context.Context, task domain.Task, facts string) error {
 	cleanupCtx := context.WithoutCancel(ctx)
-	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reasonLostOnRestart, facts); err != nil {
+	if err := r.failStep(cleanupCtx, task, reasonLostOnRestart, facts); err != nil {
 		return err
 	}
 	// A command step lost on restart halts its run. Until the halt is
-	// recorded the persisted handle stays, so recovery retries it.
+	// recorded its pending halt entry (failStep) and the persisted handle
+	// stay, so recovery retries it.
 	if err := r.haltCommandStep(cleanupCtx, task, nil); err != nil {
 		return err
 	}

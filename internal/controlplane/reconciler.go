@@ -1107,10 +1107,11 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 
 func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, facts string) error {
 	cleanupCtx := context.WithoutCancel(ctx)
-	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
+	if err := r.failStep(cleanupCtx, task, reason, facts); err != nil {
 		return err
 	}
-	// Every failed command step halts its workflow run; a no-op for other tasks.
+	// Every failed command step halts its workflow run; a no-op for other
+	// tasks. A failed halt is retried by a later pass (failStep).
 	cleanupErr := errors.Join(r.haltCommandStep(cleanupCtx, task, nil), r.stopTask(cleanupCtx, task.ID))
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
@@ -1752,13 +1753,17 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 			})
 		}
 		if verdict == contextpack.VerdictChangesRequested {
-			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
-				TaskID:    completedTask.ID,
-				Role:      "system",
-				Content:   "Verifier returned VERDICT: CHANGES_REQUESTED.",
-				CreatedAt: r.now(),
-			})
-			store.LogAudit(ctx, r.store, domain.AuditRecord{
+			// The decision is recorded once on the run, with its audit row,
+			// before the remediation submit: a replay after a failed submit
+			// or a failed closing write finds it and writes no second row
+			// (issue 249).
+			fact, err := json.Marshal(map[string]any{"verifier_task_id": completedTask.ID, "retry_count": meta.RetryCount, "max_retries": meta.MaxRetries})
+			if err != nil {
+				return err
+			}
+			if err := r.recordRunEvent(ctx, member.RunID, "workflow_changes_requested", string(fact), func(reason, factJSON string) bool {
+				return reason == "workflow_changes_requested" && factNames(factJSON, "verifier_task_id", completedTask.ID)
+			}, domain.AuditRecord{
 				Category:     "workflow",
 				TaskID:       completedTask.ID,
 				WorkloadName: completedTask.WorkloadName,
@@ -1766,6 +1771,14 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				Outcome:      "changes_requested",
 				DetailJSON:   fmt.Sprintf(`{"workflow":%q,"step_index":%d,"retry_count":%d,"max_retries":%d}`, meta.Workflow, meta.StepIndex, meta.RetryCount, meta.MaxRetries),
 				CreatedAt:    r.now(),
+			}, nil); err != nil {
+				return err
+			}
+			r.appendMessageOnce(ctx, domain.TaskMessage{
+				TaskID:    completedTask.ID,
+				Role:      "system",
+				Content:   "Verifier returned VERDICT: CHANGES_REQUESTED.",
+				CreatedAt: r.now(),
 			})
 			if meta.MaxRetries > 0 && meta.RetryCount < meta.MaxRetries && meta.AuthorStepIndex >= 0 && meta.AuthorStepIndex < len(wf.Spec.Steps) {
 				authorStep := wf.Spec.Steps[meta.AuthorStepIndex]
@@ -1799,7 +1812,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 					return err
 				}
 
-				_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+				r.appendMessageOnce(ctx, domain.TaskMessage{
 					TaskID:    remTask.ID,
 					Role:      "system",
 					Content:   fmt.Sprintf("Closed-loop remediation attempt %d/%d triggered by verifier %s.", meta.RetryCount+1, meta.MaxRetries, completedTask.ID),
@@ -1872,17 +1885,23 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)
 	}
 	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
-	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)
+	created := false
+	child, err := r.submitTask(WithCreatedFlag(ctx, &created), nextStep.Workload, idem, string(raw), completedTask.ID, &next)
 	if err != nil {
 		return err
 	}
 	now := r.now()
-	_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
+	r.appendMessageOnce(ctx, domain.TaskMessage{
 		TaskID:    child.ID,
 		Role:      "system",
 		Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
 		CreatedAt: now,
 	})
+	if !created {
+		// A replay (the closing write of completedTask failed after this
+		// step was submitted) found the step; its row is already written.
+		return nil
+	}
 	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "workflow",
 		TaskID:       child.ID,
@@ -1911,8 +1930,11 @@ func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task,
 	if maxR <= 0 || meta.RetryCount >= maxR {
 		return nil
 	}
-	rem, err := r.RetryTaskWithHandoff(ctx, failed.ID, true, reason)
-	if err != nil {
+	created := false
+	rem, err := r.RetryTaskWithHandoff(WithCreatedFlag(ctx, &created), failed.ID, true, reason)
+	if err != nil || !created {
+		// A replay found the retry submitted by an earlier pass, whose row
+		// is already written.
 		return err
 	}
 	store.LogAudit(ctx, r.store, domain.AuditRecord{

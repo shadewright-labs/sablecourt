@@ -82,31 +82,59 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 // transaction, writes nothing: the registration already says halted with the
 // recorded reason.
 func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string, audit domain.AuditRecord) error {
+	halted := *rootStep
+	halted.Status, halted.Reason = "halted", status
+	entry, err := r.workflowStepEntry(runID, halted)
+	if err != nil {
+		return err
+	}
+	return r.recordRunEvent(ctx, runID, event, fact, func(reason, factJSON string) bool {
+		return strings.HasPrefix(reason, "workflow_halted_") && factNames(factJSON, key, stepTaskID)
+	}, audit, &entry)
+}
+
+// recordRunEvent writes a decision of a workflow run once: event on the
+// run's root task, its audit row and, when entry is set, a memory entry, in
+// one store transaction. When recorded matches an event the root task
+// already has (checked inside the transaction), it writes nothing and
+// returns nil, so a reconcile replay of the same decision neither repeats
+// nor drops its audit row (issues 214 and 249, invariant 6).
+func (r *Reconciler) recordRunEvent(ctx context.Context, runID, event, fact string, recorded func(reason, factJSON string) bool, audit domain.AuditRecord, entry *domain.MemoryEntry) error {
 	root, err := r.store.GetTask(ctx, runID)
 	if err != nil {
 		return err
 	}
-	halted := *rootStep
-	halted.Status, halted.Reason = "halted", status
-	entry, err := r.workflowStepEntry(root.ID, halted)
-	if err != nil {
-		return err
-	}
 	err = store.UpdateTaskStateWithEffects(ctx, r.store, root.ID, root.State, root.State, event, fact, store.TransitionEffects{
-		Recorded: func(reason, factJSON string) bool {
-			if !strings.HasPrefix(reason, "workflow_halted_") {
-				return false
-			}
-			var named map[string]any
-			return json.Unmarshal([]byte(factJSON), &named) == nil && named[key] == stepTaskID
-		},
-		Audit:  &audit,
-		Memory: &entry,
+		Recorded: recorded,
+		Audit:    &audit,
+		Memory:   entry,
 	})
 	if errors.Is(err, store.ErrAlreadyRecorded) {
 		return nil
 	}
 	return err
+}
+
+// factNames reports whether factJSON names taskID under key.
+func factNames(factJSON, key, taskID string) bool {
+	var named map[string]any
+	return json.Unmarshal([]byte(factJSON), &named) == nil && named[key] == taskID
+}
+
+// appendMessageOnce appends msg unless the task already has a message with
+// the same role and content, so a reconcile replay does not repeat it.
+// Messages are best effort: a failed read or write is not returned.
+func (r *Reconciler) appendMessageOnce(ctx context.Context, msg domain.TaskMessage) {
+	msgs, err := r.store.ListTaskMessages(ctx, msg.TaskID)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		if m.Role == msg.Role && m.Content == msg.Content {
+			return
+		}
+	}
+	_ = r.store.AppendTaskMessage(ctx, msg)
 }
 
 // stepAuthorCommit is the commit a verifier following the completed step must

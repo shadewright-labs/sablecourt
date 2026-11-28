@@ -183,6 +183,16 @@ func testCandidates(t *testing.T, st store.Store) {
 		t.Fatal(err)
 	}
 	check(nil, []string{"cleanup", "queued", "remediate", "running", "waiting"})
+	// A failed step whose run halt is not recorded stays a candidate until
+	// its entry is deleted (issues 226 and 253).
+	if err := st.PutMemory(ctx, domain.MemoryEntry{Namespace: store.PendingHalts, Key: "stop", Value: "{}", Author: "controlplane"}); err != nil {
+		t.Fatal(err)
+	}
+	check(nil, []string{"cleanup", "queued", "remediate", "running", "stop", "waiting"})
+	if err := st.DeleteMemory(ctx, store.PendingHalts, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	check(nil, []string{"cleanup", "queued", "remediate", "running", "waiting"})
 }
 
 func testRenewal(t *testing.T, st store.Store, db *sql.DB) {
