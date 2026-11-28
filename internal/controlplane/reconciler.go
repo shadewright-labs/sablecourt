@@ -351,7 +351,7 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			return
 		}
 		// The row above says the task resumed; say that it did not.
-		store.LogAudit(context.WithoutCancel(ctx), r.store, domain.AuditRecord{
+		store.LogClosingAudit(ctx, r.store, domain.AuditRecord{
 			Category:     "controlplane",
 			TaskID:       taskID,
 			WorkloadName: task.WorkloadName,
@@ -631,14 +631,15 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 
 // logNotCreated records that the task a task.submit row named was not
 // created. When retry is not nil, the task.retry row written for the same
-// task gets its own not_created row.
+// task gets its own not_created row. Both rows share one closing budget.
 func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task, retry *retryRow) {
+	var closing []domain.AuditRecord
 	if retry != nil {
-		closing := retryAuditRecord(*retry, task, r.now())
-		closing.Outcome = "not_created"
-		store.LogAudit(ctx, r.store, closing)
+		row := retryAuditRecord(*retry, task, r.now())
+		row.Outcome = "not_created"
+		closing = append(closing, row)
 	}
-	store.LogAudit(ctx, r.store, domain.AuditRecord{
+	closing = append(closing, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       task.ID,
 		WorkloadName: task.WorkloadName,
@@ -646,6 +647,7 @@ func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task, retry 
 		Outcome:      "not_created",
 		CreatedAt:    r.now(),
 	})
+	store.LogClosingAudit(ctx, r.store, closing...)
 }
 
 // replayedSubmission returns the task an earlier submission with the same
@@ -936,7 +938,7 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		return domain.Task{}, err
 	}
 	if err := r.store.CreateTask(ctx, child); err != nil {
-		store.LogAudit(ctx, r.store, domain.AuditRecord{
+		store.LogClosingAudit(ctx, r.store, domain.AuditRecord{
 			Category:     "controlplane",
 			TaskID:       child.ID,
 			WorkloadName: parent.WorkloadName,

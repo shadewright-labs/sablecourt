@@ -215,7 +215,7 @@ func (q *Queue) Deny(ctx context.Context, approvalID, decidedBy, reason string) 
 // recordFailedStep follows a row written before a store change that then
 // failed, so the log does not claim a change that did not happen.
 func (q *Queue) recordFailedStep(ctx context.Context, apr domain.Approval, reason string) {
-	store.LogAudit(ctx, q.store, domain.AuditRecord{
+	store.LogClosingAudit(ctx, q.store, domain.AuditRecord{
 		Category:     "approval",
 		TaskID:       apr.TaskID,
 		WorkloadName: apr.WorkloadName,

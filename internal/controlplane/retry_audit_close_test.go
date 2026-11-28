@@ -3,7 +3,9 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -135,5 +137,49 @@ func TestNotCreatedRowsSurviveCancelledRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// stallClosingStore holds every not_created row until the write's context
+// ends, and counts the rows it held.
+type stallClosingStore struct {
+	store.Store
+	held atomic.Int32
+}
+
+func (s *stallClosingStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) error {
+	if rec.Outcome != "not_created" {
+		return s.Store.AppendAudit(ctx, rec)
+	}
+	s.held.Add(1)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(3 * time.Second):
+		return errors.New("closing row held without a deadline")
+	}
+}
+
+// A failed retry closes its task.submit and task.retry rows under one shared
+// budget: when each closing write waits for its context, the retry waits
+// about one budget, not one per row (issue 179).
+func TestClosingRowsOfOneFailureShareOneBudget(t *testing.T) {
+	saved := store.ClosingAuditBudget
+	store.ClosingAuditBudget = 300 * time.Millisecond
+	t.Cleanup(func() { store.ClosingAuditBudget = saved })
+	base, st, _, task := regressionFixture(t)
+	failTask(t, st, task.ID, domain.TaskStateSubmitted)
+	stall := &stallClosingStore{Store: &failCreateOnce{Store: st, armed: true}}
+	r := NewReconciler(Options{Store: stall, Bundle: base.bundle})
+	start := time.Now()
+	if _, err := r.RetryTaskWithHandoff(WithRetryAudit(context.Background()), task.ID, false, ""); err == nil {
+		t.Fatal("retry succeeded, want the injected create failure")
+	}
+	elapsed := time.Since(start)
+	if n := stall.held.Load(); n != 2 {
+		t.Fatalf("closing rows written = %d, want 2", n)
+	}
+	if elapsed > store.ClosingAuditBudget*3/2 {
+		t.Fatalf("retry waited %v on its closing rows, want about one budget of %v", elapsed, store.ClosingAuditBudget)
 	}
 }

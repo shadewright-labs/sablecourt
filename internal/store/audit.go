@@ -53,19 +53,30 @@ func AuditWriteError(ctx context.Context, rec domain.AuditRecord, err error) err
 	return fmt.Errorf("%w (%s %s)", ErrAuditWrite, rec.Action, rec.Outcome)
 }
 
-// logAuditTimeout bounds a LogAudit write, which does not end with ctx.
-const logAuditTimeout = 5 * time.Second
-
 // LogAudit writes rec and logs a failed write at error level. It is for
 // records that cannot change what happens next: refusals that stand either
-// way, reads, background records whose effect is recorded elsewhere, and rows
-// that close an earlier row after the step it named failed (not_created,
-// error). That step may have failed because ctx ended, so the write keeps
-// ctx's values but not its cancellation or deadline, and has its own bound.
+// way, reads, and background records whose effect is recorded elsewhere.
 func LogAudit(ctx context.Context, a AuditAppender, rec domain.AuditRecord) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), logAuditTimeout)
-	defer cancel()
 	_ = RecordAudit(ctx, a, rec)
+}
+
+// ClosingAuditBudget bounds the closing rows of one failure together. Tests
+// shorten it.
+var ClosingAuditBudget = 5 * time.Second
+
+// LogClosingAudit writes the rows that close earlier rows after the step they
+// named failed (not_created, error), in order, and logs each failed write.
+// That step may have failed because ctx ended, so the rows are written with
+// ctx's values but not its cancellation. All rows of one call share one
+// ClosingAuditBudget, so a caller passes every closing row of a failure in one
+// call and waits at most one budget. Callers write closing rows after every
+// lock they hold is released.
+func LogClosingAudit(ctx context.Context, a AuditAppender, recs ...domain.AuditRecord) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ClosingAuditBudget)
+	defer cancel()
+	for _, rec := range recs {
+		_ = RecordAudit(ctx, a, rec)
+	}
 }
 
 // AuditFailureText reports whether err is a failed audit write and returns the

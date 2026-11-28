@@ -128,7 +128,7 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 		return domain.ConclaveSession{}, err
 	}
 	if err := b.store.CreateConclave(ctx, session); err != nil {
-		store.LogAudit(ctx, b.store, domain.AuditRecord{
+		store.LogClosingAudit(ctx, b.store, domain.AuditRecord{
 			Category:   "conclave",
 			Action:     "conclave.open",
 			Outcome:    "error",
@@ -268,6 +268,13 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 		targets = mentionTargets(tpl, fromRole, redact.String(toRole))
 	}
 	if len(targets) != 0 {
+		// A refused vassal post writes its denial row before the wake lock
+		// is taken, so a slow audit store never holds up the room.
+		if fromRole != "operator" && config.ValidVassalRole(fromRole) {
+			if err := b.allowVassalPost(ctx, session, tpl, fromRole, toRole, taskID); err != nil {
+				return domain.ConclaveMessage{}, err
+			}
+		}
 		lock := &wakeLocks[maphash.String(wakeLockSeed, session.ID)%uint64(len(wakeLocks))]
 		lock.Lock()
 		defer lock.Unlock()
@@ -286,6 +293,23 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 	return msg, err
 }
 
+// allowVassalPost returns ErrMessageDenied and writes the denial row when the
+// template does not let fromRole message toRole. Callers hold no lock.
+func (b *Broker) allowVassalPost(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, fromRole, toRole, taskID string) error {
+	err := checkVassalCanMessage(tpl, fromRole, toRole)
+	if err == nil {
+		return nil
+	}
+	detail, _ := json.Marshal(map[string]string{
+		"conclave_id": session.ID, "from": redact.String(fromRole), "to": redact.String(toRole),
+	})
+	store.LogAudit(ctx, b.store, domain.AuditRecord{
+		Category: "conclave", TaskID: taskID, Action: "conclave.post",
+		Outcome: "denied", DetailJSON: string(detail), CreatedAt: b.now(),
+	})
+	return err
+}
+
 func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, hasTpl bool, limits store.ConclaveLimits, fromRole, toRole, kind, body, taskID string, wake bool) (domain.ConclaveMessage, bool, error) {
 	if session.TemplateName != "" && !hasTpl {
 		return domain.ConclaveMessage{}, false, ErrMessageDenied
@@ -300,14 +324,7 @@ func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession
 			return domain.ConclaveMessage{}, false, ErrMessageDenied
 		}
 		if hasTpl {
-			if err := checkVassalCanMessage(tpl, fromRole, toRole); err != nil {
-				detail, _ := json.Marshal(map[string]string{
-					"conclave_id": session.ID, "from": redact.String(fromRole), "to": redact.String(toRole),
-				})
-				store.LogAudit(ctx, b.store, domain.AuditRecord{
-					Category: "conclave", TaskID: taskID, Action: "conclave.post",
-					Outcome: "denied", DetailJSON: string(detail), CreatedAt: b.now(),
-				})
+			if err := b.allowVassalPost(ctx, session, tpl, fromRole, toRole, taskID); err != nil {
 				return domain.ConclaveMessage{}, false, err
 			}
 		}
@@ -513,7 +530,7 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 		return domain.ConclaveRelic{}, err
 	}
 	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
-		store.LogAudit(ctx, b.store, domain.AuditRecord{
+		store.LogClosingAudit(ctx, b.store, domain.AuditRecord{
 			Category:   "conclave",
 			Action:     "conclave.relic_put",
 			Outcome:    "error",

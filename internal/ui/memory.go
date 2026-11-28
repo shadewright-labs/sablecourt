@@ -251,7 +251,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err := d.store.PutMemory(r.Context(), entry); err != nil {
-		store.LogAudit(r.Context(), d.store, domain.AuditRecord{
+		store.LogClosingAudit(r.Context(), d.store, domain.AuditRecord{
 			Category:     "memory",
 			WorkloadName: "operator",
 			Action:       "learning.propose",

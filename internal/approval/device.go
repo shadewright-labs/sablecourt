@@ -108,7 +108,7 @@ func (pm *PairingManager) CompletePairing(ctx context.Context, code, name, platf
 		return domain.PairedDevice{}, err
 	}
 	if err := pm.store.CreateDevice(ctx, dev); err != nil {
-		store.LogAudit(ctx, pm.store, domain.AuditRecord{
+		store.LogClosingAudit(ctx, pm.store, domain.AuditRecord{
 			Category:   "device",
 			Action:     "device.paired",
 			Outcome:    "error",

@@ -774,7 +774,7 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 	}
 	if err := putGateRecord(ctx, g, prChecksNamespace, prKey(report.Owner, report.Repo, report.PRNumber), report, report.ObservedAt); err != nil {
 		// The row above names evidence that was not stored; say so.
-		store.LogAudit(ctx, g.store, g.auditRecord(taskID, workloadName, "evidence:git.pr_checks", "error", `{"reason":"store_failed"}`))
+		store.LogClosingAudit(ctx, g.store, g.auditRecord(taskID, workloadName, "evidence:git.pr_checks", "error", `{"reason":"store_failed"}`))
 		return err
 	}
 	return nil

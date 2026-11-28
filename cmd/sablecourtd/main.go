@@ -1268,7 +1268,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			if err := attachHub.ConfirmTakeover(r.Context(), id, body.Operator); err != nil {
 				// Released or closed while the row was written: the row above
 				// names a takeover that never took input.
-				store.LogAudit(r.Context(), st, domain.AuditRecord{
+				store.LogClosingAudit(r.Context(), st, domain.AuditRecord{
 					Category:   "attach",
 					TaskID:     id,
 					Action:     "task.takeover",
@@ -1855,7 +1855,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
 		if out, err := cmd.CombinedOutput(); err != nil {
-			store.LogAudit(context.WithoutCancel(r.Context()), st, domain.AuditRecord{
+			store.LogClosingAudit(r.Context(), st, domain.AuditRecord{
 				Category:     "gitops",
 				WorkloadName: name,
 				Action:       "sandbox.propose_promotion",

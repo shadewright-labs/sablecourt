@@ -9,11 +9,11 @@ import (
 )
 
 // ctxAppender refuses a write whose context has ended, as a database driver
-// does, and remembers the deadline and value it was given.
+// does, and remembers the deadlines and value it was given.
 type ctxAppender struct {
-	rows     []domain.AuditRecord
-	deadline time.Time
-	value    any
+	rows      []domain.AuditRecord
+	deadlines []time.Time
+	value     any
 }
 
 type logAuditKey struct{}
@@ -22,17 +22,17 @@ func (a *ctxAppender) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	a.deadline, _ = ctx.Deadline()
+	deadline, _ := ctx.Deadline()
+	a.deadlines = append(a.deadlines, deadline)
 	a.value = ctx.Value(logAuditKey{})
 	a.rows = append(a.rows, rec)
 	return nil
 }
 
-// A LogAudit row often closes a row written before a step that failed
-// because the request ended. Every caller gets that row written: LogAudit
-// does not share the ended context, keeps its values, and bounds the write
-// (issue 179).
-func TestLogAuditWritesAfterContextEnds(t *testing.T) {
+// The closing rows of one failure are written after the request ended,
+// keep its values, and share one ClosingAuditBudget; LogAudit keeps the
+// request's cancellation (issue 179).
+func TestLogClosingAuditSharesOneDetachedBudget(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.WithValue(context.Background(), logAuditKey{}, "v"))
 	cancel()
 	expired, cancelExpired := context.WithDeadline(context.WithValue(context.Background(), logAuditKey{}, "v"), time.Now().Add(-time.Second))
@@ -40,13 +40,22 @@ func TestLogAuditWritesAfterContextEnds(t *testing.T) {
 	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "past deadline": expired} {
 		t.Run(name, func(t *testing.T) {
 			a := &ctxAppender{}
-			before := time.Now()
-			LogAudit(ctx, a, domain.AuditRecord{Action: "task.submit", Outcome: "not_created"})
-			if len(a.rows) != 1 {
-				t.Fatalf("rows = %d, want the closing row written", len(a.rows))
+			LogAudit(ctx, a, domain.AuditRecord{Action: "conclave.post", Outcome: "denied"})
+			if len(a.rows) != 0 {
+				t.Fatalf("LogAudit wrote %d rows after its context ended, want it to keep the request's cancellation", len(a.rows))
 			}
-			if a.deadline.Before(before) || a.deadline.After(before.Add(logAuditTimeout+time.Second)) {
-				t.Fatalf("write deadline = %v, want a bound of about %v", a.deadline, logAuditTimeout)
+			before := time.Now()
+			LogClosingAudit(ctx, a,
+				domain.AuditRecord{Action: "task.retry", Outcome: "not_created"},
+				domain.AuditRecord{Action: "task.submit", Outcome: "not_created"})
+			if len(a.rows) != 2 {
+				t.Fatalf("rows = %d, want both closing rows written", len(a.rows))
+			}
+			if len(a.deadlines) != 2 || !a.deadlines[0].Equal(a.deadlines[1]) {
+				t.Fatalf("write deadlines = %v, want one shared deadline", a.deadlines)
+			}
+			if d := a.deadlines[0]; d.Before(before) || d.After(before.Add(ClosingAuditBudget+time.Second)) {
+				t.Fatalf("write deadline = %v, want a budget of about %v", d, ClosingAuditBudget)
 			}
 			if a.value != "v" {
 				t.Fatalf("context value = %v, want it kept", a.value)
