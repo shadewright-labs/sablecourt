@@ -80,7 +80,7 @@ It uses the same container spec function, and so the same guards, as a coding ta
 
 ## The result
 
-The command's standard output and standard error are each redacted by the runner, joined (output first) and redacted again, then capped. If the cap cuts the output where a redaction rule then matches, the kept tail is redacted and cut again, so storing it never changes it or grows it past the cap. The step's result is the artifact `command-result` (`application/json`); the control plane redacts it field by field, so the stored JSON always decodes:
+The runner keeps at most 1 MiB of each stream. Past that it keeps the stream's last 1 MiB, drops the first line of what is left (the cut can fall inside a secret, whose rest no rule would match) and drops everything up to a private key's `END` line when the cut fell inside the key. The command's standard output and standard error are each redacted by the runner, joined (output first), made valid UTF-8 (each run of invalid bytes becomes one U+FFFD, so encoding the result as JSON cannot grow it), redacted again, then capped. If the cap cuts the output where a redaction rule then matches, the kept tail is redacted and cut again, so storing it never changes it or grows it past the cap. The step's result is the artifact `command-result` (`application/json`); the control plane redacts it field by field, so the stored JSON always decodes:
 
 | Field | Meaning |
 | --- | --- |
@@ -88,7 +88,7 @@ The command's standard output and standard error are each redacted by the runner
 | `outcome` | `passed`, `failed` (nonzero exit, or output lost), `timeout` or `output_over_cap`. |
 | `exit_code` | The command's exit status, or `-1` when it never exited (time limit, stop). |
 | `output` | The redacted output, at most `maxOutputBytes`. |
-| `output_truncated` | Set when the output passed the cap; only its last `maxOutputBytes` bytes are kept. |
+| `output_truncated` | Set when the output passed the cap or a stream passed the runner's 1 MiB limit; only the last `maxOutputBytes` bytes of the kept output are stored. |
 
 Only `passed` completes the step. Any other outcome fails it, including `output_over_cap` with exit status 0. The step keeps no session log or final message, so no copy of the output exceeds the cap. Like every coding task it also stores `git-status` (of the read-only checkout) and `git-commit` (the pinned commit it checked).
 
@@ -111,4 +111,4 @@ A step after a command step follows the author's task, not the command's: a veri
 - The checkout's Git metadata holds only the objects reachable from the author's commit and `HEAD`, with no other branch. A command can compare the commit with its own ancestors (for example `git diff --name-only HEAD~1`), but the daemon does not tell it which commit the author started from.
 - A proxy image built before command steps existed does not know the `command` profile, and the proxy name does not change with its code. Command steps are then refused with `container_spec_refused` until `sablectl harness build` builds the proxy again.
 - If the daemon restarts while a command runs, its output is lost: the step fails with no `command-result` artifact, and the run halts with outcome `failed`.
-- Standard output and standard error are kept apart and joined after the run, so their order relative to each other is lost. A stream longer than 1 MiB is dropped by the runner, which fails the step with `output_over_cap`.
+- Standard output and standard error are kept apart and joined after the run, so their order relative to each other is lost. A stream longer than 1 MiB fails the step with `output_over_cap`, and only its last whole lines are kept. The cap then keeps the end of the joined output, so when standard error is long the stored output comes from it alone. A stream over 1 MiB with no line break in its last 1 MiB is replaced by `[REDACTED:output limit]`.

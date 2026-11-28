@@ -38,9 +38,11 @@ func (a *Adapter) validateCommandLaunch(spec scruntime.LaunchSpec, input launchI
 }
 
 // buildCommandProcessResult turns a finished command container into a task
-// result. The runner already redacted each stream; the joined output is
-// redacted again, then capped. Output over the cap fails the step even when
-// the command exited 0, and only the last cap bytes are kept.
+// result. The runner already redacted each stream; the joined output is made
+// valid UTF-8 (each run of invalid bytes becomes one U+FFFD, so JSON encoding
+// cannot grow it later), redacted again, then capped. Output over the cap, or
+// a stream over the runner's limit, fails the step even when the command
+// exited 0, and only the last cap bytes are kept.
 func buildCommandProcessResult(res scruntime.CouncilResult, rec commandRecord) *processResult {
 	var parts []string
 	for _, s := range []string{res.Stdout, res.Stderr} {
@@ -48,12 +50,9 @@ func buildCommandProcessResult(res scruntime.CouncilResult, rec commandRecord) *
 			parts = append(parts, s)
 		}
 	}
-	output := redact.String(strings.Join(parts, "\n"))
+	output := redact.String(strings.ToValidUTF8(strings.Join(parts, "\n"), "\uFFFD"))
 	result := &scruntime.CommandResult{Command: rec.Name, ExitCode: res.ExitCode, Output: output}
-	switch {
-	case res.OutputOverflow:
-		result.Output, result.OutputTruncated = "", true
-	case len(output) > rec.MaxOutputBytes:
+	if res.OutputOverflow || len(output) > rec.MaxOutputBytes {
 		result.Output, result.OutputTruncated = redactedTail(output, rec.MaxOutputBytes), true
 	}
 	out := &processResult{ExitCode: res.ExitCode, Command: result}

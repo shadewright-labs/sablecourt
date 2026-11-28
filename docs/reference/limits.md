@@ -93,7 +93,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Memory of a council container | `internal/runtime/coding.defaultCouncilMemoryBytes` | 2 GiB |
 | Processes in a council container | `internal/runtime/coding.defaultCouncilPIDs` | 256 |
 | Council container setup timeout | `internal/runtime/coding.defaultCouncilSetupTimeout` | 30 s |
-| Output kept per council container | `internal/runtime/docker.maxCouncilOutput` | 1 MiB |
+| Output kept per stream of a council or command container (a council stream past it is dropped, a command stream keeps its tail) | `internal/runtime/docker.maxCouncilOutput` | 1 MiB |
 | Gate request body | `internal/gate/councilproxy.MaxGateBodyBytes` | 2 MiB |
 | Gate connections | `internal/gate/councilproxy.MaxGateConns` | 32 |
 | Gate read header timeout | `internal/gate/councilproxy.GateReadHeaderTimeout` | 5 s |

@@ -488,6 +488,11 @@ func validateVerifierStep(bundle *Bundle, earlier []domain.WorkflowStep, step do
 		if prev.Workload == step.Workload {
 			return fmt.Errorf("verifier workload %q is also used by step %q", step.Workload, prev.Name)
 		}
+		// A command step runs no model: a verifier after one checks the
+		// author step the command checked, so only that author counts.
+		if prev.Command != "" {
+			continue
+		}
 		if pw, ok := bundle.Workloads[prev.Workload]; ok && pw.Spec.Class != domain.ClassDeterministicController {
 			modelBefore = true
 		}

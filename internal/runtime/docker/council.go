@@ -131,7 +131,9 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	if _, err = a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return result, fmt.Errorf("start council container: %w", err)
 	}
-	var stdout, stderr councilOutput
+	// A command keeps the tail of a stream past the limit (its last lines
+	// say why it failed); a council stream past the limit is dropped.
+	stdout, stderr := councilOutput{keepTail: command}, councilOutput{keepTail: command}
 	if login {
 		if s.OnStarted != nil {
 			if err = s.OnStarted(ctx, ident); err != nil {
@@ -167,7 +169,7 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	result.Stdout = stdout.visible(prompt, s.TaskToken)
 	result.Stderr = stderr.visible(prompt, s.TaskToken)
-	result.OutputOverflow = result.Stdout == outputLimitMarker || result.Stderr == outputLimitMarker
+	result.OutputOverflow = stdout.overflow || stderr.overflow || result.Stdout == outputLimitMarker || result.Stderr == outputLimitMarker
 	return result, record(ctx, result)
 }
 

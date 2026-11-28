@@ -10,7 +10,7 @@ import (
 
 // commandManifest is a coding workload with one allowed command and a
 // workflow whose second step runs it. Each case edits one part.
-func commandManifest(t *testing.T, editCmd func(map[string]any), editSteps func([]map[string]any)) string {
+func commandManifest(t *testing.T, editCmd func(map[string]any), editSteps func([]map[string]any) []map[string]any) string {
 	t.Helper()
 	cmd := map[string]any{"name": "check", "argv": []any{"/bin/sh", "-c", "make check"}, "timeoutSeconds": 60, "maxOutputBytes": 4096, "failureReason": "use coding-invariant"}
 	if editCmd != nil {
@@ -21,7 +21,7 @@ func commandManifest(t *testing.T, editCmd func(map[string]any), editSteps func(
 		{"name": "check", "workload": "coder", "command": "check"},
 	}
 	if editSteps != nil {
-		editSteps(steps)
+		steps = editSteps(steps)
 	}
 	docs := []any{
 		map[string]any{"apiVersion": domain.APIVersionV1Alpha1, "kind": "Workload", "metadata": map[string]any{"name": "coder", "zone": "runtime"},
@@ -29,6 +29,8 @@ func commandManifest(t *testing.T, editCmd func(map[string]any), editSteps func(
 				"coding": map[string]any{"harness": "claude", "repoPath": "/srv/repo", "commands": []any{cmd}}}},
 		map[string]any{"apiVersion": domain.APIVersionV1Alpha1, "kind": "Workload", "metadata": map[string]any{"name": "agent", "zone": "runtime"},
 			"spec": map[string]any{"class": "long-lived-agent", "runtime": map[string]any{"type": "docker", "image": "example/agent:1"}}},
+		map[string]any{"apiVersion": domain.APIVersionV1Alpha1, "kind": "Workload", "metadata": map[string]any{"name": "planner", "zone": "runtime"},
+			"spec": map[string]any{"class": "deterministic-controller", "runtime": map[string]any{"type": "docker", "image": "example/planner:1"}}},
 		map[string]any{"apiVersion": domain.APIVersionV1Alpha1, "kind": "Workflow", "metadata": map[string]any{"name": "checked"}, "spec": map[string]any{"steps": steps}},
 	}
 	var parts []string
@@ -46,16 +48,24 @@ func commandManifest(t *testing.T, editCmd func(map[string]any), editSteps func(
 // command or command step it cannot run safely is refused at load.
 func TestLoaderCommandRefusals(t *testing.T) {
 	setCmd := func(key string, value any) func(map[string]any) { return func(c map[string]any) { c[key] = value } }
-	setStep := func(i int, key string, value any) func([]map[string]any) {
-		return func(s []map[string]any) { s[i][key] = value }
+	setStep := func(i int, key string, value any) func([]map[string]any) []map[string]any {
+		return func(s []map[string]any) []map[string]any { s[i][key] = value; return s }
 	}
+	// review is a model verifier on its own workload, appended after the steps.
+	review := map[string]any{"name": "review", "workload": "agent", "role": "verifier", "prompt": "review"}
+	steps := func(s ...map[string]any) func([]map[string]any) []map[string]any {
+		return func([]map[string]any) []map[string]any { return s }
+	}
+	author := map[string]any{"name": "author", "workload": "coder", "role": "author", "prompt": "p"}
+	check := map[string]any{"name": "check", "workload": "coder", "command": "check"}
+	plan := map[string]any{"name": "plan", "workload": "planner"}
 	many := make([]any, domain.MaxCommandArgs+1)
 	for i := range many {
 		many[i] = "make"
 	}
 	for name, tc := range map[string]struct {
 		cmd   func(map[string]any)
-		steps func([]map[string]any)
+		steps func([]map[string]any) []map[string]any
 		want  string // empty: the manifest loads
 	}{
 		"allowed": {},
@@ -80,14 +90,18 @@ func TestLoaderCommandRefusals(t *testing.T) {
 		"multi-line reason":        {cmd: setCmd("failureReason", "a\nb"), want: "failureReason"},
 		"reason too long":          {cmd: setCmd("failureReason", strings.Repeat("r", domain.MaxCommandFailureReason+1)), want: "failureReason"},
 		"step names unknown":       {steps: setStep(1, "command", "deploy"), want: "not in the coding.commands"},
-		"command as first step":    {steps: func(s []map[string]any) { s[0], s[1] = s[1], s[0] }, want: "cannot be the first step"},
-		"command after a verifier": {steps: setStep(0, "role", "verifier"), want: "must follow an author or command step"},
-		"non-coding workload":      {steps: setStep(1, "workload", "agent"), want: "need a coding-agent workload"},
-		"step sets a prompt":       {steps: setStep(1, "prompt", "run make"), want: "cannot set role"},
-		"step sets a role":         {steps: setStep(1, "role", "verifier"), want: "cannot set role"},
-		"step sets a tier":         {steps: setStep(1, "tier", "coding"), want: "cannot set role"},
-		"step sets a model":        {steps: setStep(1, "model", "claude-x"), want: "cannot set role"},
-		"step sets maxRetries":     {steps: setStep(1, "maxRetries", 1), want: "cannot set role"},
+		"command as first step":    {steps: steps(check, author), want: "cannot be the first step"},
+		"command after a verifier": {steps: steps(author, review, check), want: "must follow an author or command step"},
+		"verifier after a command": {steps: steps(author, check, review)},
+		// The command step's coding workload runs no model there, so it does
+		// not give a model verifier anything to check.
+		"model verifier after only a command": {steps: steps(plan, check, review), want: "nothing to check"},
+		"non-coding workload":                 {steps: setStep(1, "workload", "agent"), want: "need a coding-agent workload"},
+		"step sets a prompt":                  {steps: setStep(1, "prompt", "run make"), want: "cannot set role"},
+		"step sets a role":                    {steps: setStep(1, "role", "verifier"), want: "cannot set role"},
+		"step sets a tier":                    {steps: setStep(1, "tier", "coding"), want: "cannot set role"},
+		"step sets a model":                   {steps: setStep(1, "model", "claude-x"), want: "cannot set role"},
+		"step sets maxRetries":                {steps: setStep(1, "maxRetries", 1), want: "cannot set role"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := loadDocs(t, commandManifest(t, tc.cmd, tc.steps))

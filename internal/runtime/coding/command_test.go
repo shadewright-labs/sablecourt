@@ -89,13 +89,14 @@ func TestBuildCommandProcessResult(t *testing.T) {
 		output    string
 		truncated bool
 	}{
-		"passed":          {res: scruntime.CouncilResult{Stdout: "ok\n"}, outcome: scruntime.CommandPassed, output: "ok"},
-		"stderr joined":   {res: scruntime.CouncilResult{Stdout: "out", Stderr: "warn"}, outcome: scruntime.CommandPassed, output: "out\nwarn"},
-		"failed":          {res: scruntime.CouncilResult{ExitCode: 2, Stderr: "boom"}, outcome: scruntime.CommandFailed, exit: 2, taskExit: 2, output: "boom"},
-		"redacted":        {res: scruntime.CouncilResult{ExitCode: 1, Stdout: "key " + secret}, outcome: scruntime.CommandFailed, exit: 1, taskExit: 1, output: "key [REDACTED"},
-		"over cap exit 0": {res: scruntime.CouncilResult{Stdout: strings.Repeat("a", 40) + "TAIL"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: strings.Repeat("a", 28) + "TAIL", truncated: true},
-		"over cap exit 3": {res: scruntime.CouncilResult{ExitCode: 3, Stdout: strings.Repeat("b", 64)}, outcome: scruntime.CommandOutputOverCap, exit: 3, taskExit: 3, output: strings.Repeat("b", 32), truncated: true},
-		"runner overflow": {res: scruntime.CouncilResult{Stdout: "[REDACTED:output limit]", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
+		"passed":                         {res: scruntime.CouncilResult{Stdout: "ok\n"}, outcome: scruntime.CommandPassed, output: "ok"},
+		"stderr joined":                  {res: scruntime.CouncilResult{Stdout: "out", Stderr: "warn"}, outcome: scruntime.CommandPassed, output: "out\nwarn"},
+		"failed":                         {res: scruntime.CouncilResult{ExitCode: 2, Stderr: "boom"}, outcome: scruntime.CommandFailed, exit: 2, taskExit: 2, output: "boom"},
+		"redacted":                       {res: scruntime.CouncilResult{ExitCode: 1, Stdout: "key " + secret}, outcome: scruntime.CommandFailed, exit: 1, taskExit: 1, output: "key [REDACTED"},
+		"over cap exit 0":                {res: scruntime.CouncilResult{Stdout: strings.Repeat("a", 40) + "TAIL"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: strings.Repeat("a", 28) + "TAIL", truncated: true},
+		"over cap exit 3":                {res: scruntime.CouncilResult{ExitCode: 3, Stdout: strings.Repeat("b", 64)}, outcome: scruntime.CommandOutputOverCap, exit: 3, taskExit: 3, output: strings.Repeat("b", 32), truncated: true},
+		"runner overflow":                {res: scruntime.CouncilResult{Stdout: "[REDACTED:output limit]", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
+		"runner overflow keeps the tail": {res: scruntime.CouncilResult{ExitCode: 2, Stdout: "FAIL: TestX", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, exit: 2, taskExit: 2, output: "FAIL: TestX", truncated: true},
 		"secret across streams": {
 			res:     scruntime.CouncilResult{ExitCode: 1, Stdout: "a", Stderr: secret},
 			outcome: scruntime.CommandFailed, exit: 1, taskExit: 1, output: "a\n[REDACTED",
@@ -180,6 +181,36 @@ func TestBuildCommandProcessResultTailIsRedactionStable(t *testing.T) {
 			got := out.Command.Output
 			if len(got) > tc.cap || redact.String(got) != got || (tc.gone != "" && strings.Contains(got, tc.gone)) || !out.Command.OutputTruncated {
 				t.Fatalf("output = %q (cap %d, truncated %v), want a redaction-stable tail without %q", got, tc.cap, out.Command.OutputTruncated, tc.gone)
+			}
+		})
+	}
+}
+
+// TestCommandArtifactInvalidUTF8StaysWithinCap checks that invalid UTF-8 is
+// made valid before the cap: JSON encoding would otherwise turn each invalid
+// byte into U+FFFD (three bytes) and the stored output would pass the cap.
+func TestCommandArtifactInvalidUTF8StaysWithinCap(t *testing.T) {
+	t.Parallel()
+	bad := strings.Repeat("\xff", 64)
+	for name, tc := range map[string]struct {
+		stdout    string
+		truncated bool
+	}{
+		"only invalid bytes":         {stdout: bad},
+		"invalid bytes between text": {stdout: "a" + bad + "b" + bad + "c"},
+		"invalid bytes over the cap": {stdout: strings.Repeat("z", 70) + bad, truncated: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rec := commandRecord{Name: "check", MaxOutputBytes: 64}
+			out := buildCommandProcessResult(scruntime.CouncilResult{Stdout: tc.stdout}, rec)
+			art, ok := commandArtifact(&worktreeState{Command: &rec, Result: out})
+			var res scruntime.CommandResult
+			if !ok || json.Unmarshal([]byte(art.Text), &res) != nil {
+				t.Fatalf("artifact = %+v, %v", art, ok)
+			}
+			if len(res.Output) > rec.MaxOutputBytes || !utf8.ValidString(out.Command.Output) || res.Output != out.Command.Output || res.OutputTruncated != tc.truncated {
+				t.Fatalf("stored output %q (%d bytes, truncated %v), want valid UTF-8 within %d bytes, truncated %v", res.Output, len(res.Output), res.OutputTruncated, rec.MaxOutputBytes, tc.truncated)
 			}
 		})
 	}
