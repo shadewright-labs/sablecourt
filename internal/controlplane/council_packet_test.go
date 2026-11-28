@@ -241,7 +241,7 @@ func TestOrdinaryConclaveLaunchMatchesMain(t *testing.T) {
 			if err := json.Unmarshal([]byte(task.InputJSON), &ordinaryFields); err != nil {
 				t.Fatal(err)
 			}
-			packet := contextpack.Assemble(ctx, st, task, wl).Markdown
+			packet := contextpack.Assemble(ctx, st, task, wl, contextpack.Destination{}).Markdown
 			for _, text := range []string{"ordinary-decree", "ordinary-evidence"} {
 				if !strings.Contains(packet, text) {
 					t.Fatalf("baseline packet missing %q", text)

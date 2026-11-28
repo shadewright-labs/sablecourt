@@ -38,9 +38,57 @@ type ActionFunc func(ctx context.Context, workload domain.Workload, taskID strin
 // actionDef is one entry of the closed action catalog. decode turns the
 // caller's payload into the one value that is approved, hashed, shown and
 // executed; run executes that value.
+//
+// requiresApproval makes the catalog ask for an out-of-band approval even when
+// policy allows the capability. precheck, when set, checks live state for the
+// decoded value before an approval is requested (and before run on an allowed
+// request); it does not run on a request that presents an approval. run checks
+// the live state again after the approval is spent, because state can change
+// while the approval waits.
 type actionDef struct {
-	decode func(raw json.RawMessage) (any, error)
-	run    func(ctx context.Context, workload domain.Workload, taskID string, value any) (any, error)
+	decode           func(raw json.RawMessage) (any, error)
+	precheck         func(ctx context.Context, workload domain.Workload, taskID string, value any) error
+	run              func(ctx context.Context, workload domain.Workload, taskID string, value any) (any, error)
+	requiresApproval bool
+}
+
+// actionError is a refusal with its own HTTP status and audit reason. It
+// wraps errToolRefused, so every caller that treats errToolRefused as a
+// refusal treats it the same way.
+type actionError struct {
+	status int
+	reason string
+	msg    string
+}
+
+func (e *actionError) Error() string { return e.msg }
+func (e *actionError) Unwrap() error { return errToolRefused }
+
+func newActionError(status int, reason, msg string) error {
+	return &actionError{status: status, reason: reason, msg: msg}
+}
+
+// refusalOf returns the HTTP status and audit reason of a refusal: those of an
+// actionError, or 403 and "refused" for any other errToolRefused.
+func refusalOf(err error) (int, string) {
+	var ae *actionError
+	if errors.As(err, &ae) && ae.status != 0 {
+		reason := ae.reason
+		if reason == "" {
+			reason = "refused"
+		}
+		return ae.status, reason
+	}
+	return http.StatusForbidden, "refused"
+}
+
+type approvalCtxKey struct{}
+
+// approvalFromContext returns the ID of the approval the gate consumed for the
+// running action, or "" when the action runs without one.
+func approvalFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(approvalCtxKey{}).(string)
+	return id
 }
 
 type Options struct {
@@ -60,8 +108,15 @@ type Gate struct {
 	approvals *approval.Queue
 	now       func() time.Time
 
-	mu          sync.RWMutex
+	mu sync.RWMutex
+	// tools holds the gate's own tools. upstream holds the tools proxied to
+	// upstream MCP servers, rebuilt from the bundle on every reload. The two
+	// never share a name: an upstream tool that takes a built-in name or
+	// namespace is refused, and a lookup tries tools first. upstream is
+	// replaced, never changed in place, because snapshots share it.
 	tools       map[string]ToolDef
+	upstream    map[string]ToolDef
+	bridge      *UpstreamBridge
 	actions     map[string]actionDef
 	allowedRepo string
 }
@@ -79,20 +134,38 @@ func New(opts Options) *Gate {
 		approvals: opts.Approvals,
 		now:       nowFn,
 		tools:     make(map[string]ToolDef),
+		upstream:  make(map[string]ToolDef),
 		actions:   make(map[string]actionDef),
 	}
 }
 
-func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) {
+// Reload swaps the bundle and policy. When an upstream bridge is set, it also
+// rebuilds the upstream tools from the new bundle only, so the tools of a
+// server the bundle no longer declares are gone. If any upstream tool of the
+// new bundle takes a built-in name, the whole reload is refused: the previous
+// bundle, policy and upstream tools stay as they were.
+func (g *Gate) Reload(bundle *config.Bundle, pol *policy.Engine) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.bridge != nil {
+		next, err := g.buildUpstreamLocked(bundle, g.bridge)
+		if err != nil {
+			return fmt.Errorf("reload refused: %w", err)
+		}
+		g.upstream = next
+	}
 	g.bundle = bundle
 	g.policy = pol
+	return nil
 }
 
+// gateSnapshot is the state one request uses from start to end. upstream is
+// never written after it is stored on the gate (every change builds a new
+// map), so a snapshot may read it without the lock.
 type gateSnapshot struct {
 	bundle      *config.Bundle
 	policy      *policy.Engine
+	upstream    map[string]ToolDef
 	allowedRepo string
 }
 
@@ -104,6 +177,7 @@ func (g *Gate) snapshot() gateSnapshot {
 	return gateSnapshot{
 		bundle:      g.bundle,
 		policy:      g.policy,
+		upstream:    g.upstream,
 		allowedRepo: g.allowedRepo,
 	}
 }
@@ -146,7 +220,22 @@ func (g *Gate) RegisterAction(name string, fn ActionFunc) {
 // (see decodeTyped) and passes validate. The decoded T is the value the
 // approval digest covers, the dialog shows and run receives.
 func RegisterTypedAction[T any](g *Gate, name string, validate func(T) error, run func(ctx context.Context, workload domain.Workload, taskID string, in T) (any, error)) {
-	g.registerAction(name, actionDef{
+	registerTypedActionDef(g, name, typedAction[T]{validate: validate, run: run})
+}
+
+// typedAction holds the steps of one typed action. precheck and
+// requiresApproval are described on actionDef.
+type typedAction[T any] struct {
+	validate         func(T) error
+	precheck         func(ctx context.Context, workload domain.Workload, taskID string, in T) error
+	run              func(ctx context.Context, workload domain.Workload, taskID string, in T) (any, error)
+	requiresApproval bool
+}
+
+func registerTypedActionDef[T any](g *Gate, name string, a typedAction[T]) {
+	validate, run := a.validate, a.run
+	def := actionDef{
+		requiresApproval: a.requiresApproval,
 		decode: func(raw json.RawMessage) (any, error) {
 			in, err := decodeTyped[T](raw)
 			if err != nil {
@@ -169,7 +258,18 @@ func RegisterTypedAction[T any](g *Gate, name string, validate func(T) error, ru
 			}
 			return run(ctx, wl, taskID, in)
 		},
-	})
+	}
+	if a.precheck != nil {
+		precheck := a.precheck
+		def.precheck = func(ctx context.Context, wl domain.Workload, taskID string, value any) error {
+			in, ok := value.(T)
+			if !ok {
+				return errors.New("action input has the wrong type")
+			}
+			return precheck(ctx, wl, taskID, in)
+		}
+	}
+	g.registerAction(name, def)
 }
 
 func (g *Gate) registerAction(name string, def actionDef) {
@@ -187,15 +287,21 @@ func (g *Gate) SetAllowedRepo(repo string) {
 	g.allowedRepo = repo
 }
 
-type authCtxKey struct{}
-
 type authContext struct {
 	Lease    domain.Lease
 	Workload domain.Workload
 }
 
-// NewServerForWorkload constructs an MCP Server exposing only tools granted to the workload.
+// NewServerForWorkload constructs an MCP Server exposing only tools granted to
+// the workload, using the gate's current snapshot for every call it serves.
 func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload) *mcp.Server {
+	return g.newServerForSnapshot(lease, workload, g.snapshot())
+}
+
+// newServerForSnapshot builds the per-request MCP server from snap: upstream
+// tools come from snap.upstream and each call evaluates snap.policy, so a
+// reload after snap was taken changes neither.
+func (g *Gate) newServerForSnapshot(lease domain.Lease, workload domain.Workload, snap gateSnapshot) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "sablecourt-data-gate",
 		Version: "0.1.0",
@@ -207,6 +313,9 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 	for _, toolName := range workload.Spec.Grants.MCPTools {
 		def, ok := g.tools[toolName]
 		if !ok {
+			def, ok = snap.upstream[toolName]
+		}
+		if !ok {
 			continue
 		}
 		captured := def
@@ -215,6 +324,7 @@ func (g *Gate) NewServerForWorkload(lease domain.Lease, workload domain.Workload
 			Description: captured.Description,
 			InputSchema: captured.InputSchema,
 		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ctx = context.WithValue(ctx, snapshotCtxKey{}, snap)
 			return g.invokeTool(ctx, lease, workload, captured, req.Params.Arguments)
 		})
 	}
@@ -277,23 +387,20 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 
 // MCPHandler returns an authenticated Streamable HTTP handler for MCP tool calls.
 func (g *Gate) MCPHandler() http.Handler {
-	streamHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		ac, ok := r.Context().Value(authCtxKey{}).(authContext)
-		if !ok {
-			return nil
-		}
-		return g.NewServerForWorkload(ac.Lease, ac.Workload)
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := g.snapshot()
 		ac, ok := g.authenticateWithSnapshot(w, r, snap)
 		if !ok {
 			return
 		}
-		ctx := context.WithValue(r.Context(), snapshotCtxKey{}, snap)
-		ctx = context.WithValue(ctx, authCtxKey{}, ac)
-		streamHandler.ServeHTTP(w, r.WithContext(ctx))
+		// The server is built here from the snapshot authentication used,
+		// not read back from the request, so every call it serves uses
+		// that snapshot. A stateless handler keeps no state between
+		// requests, so one per request costs only its allocation.
+		srv := g.newServerForSnapshot(ac.Lease, ac.Workload, snap)
+		mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+			return srv
+		}, &mcp.StreamableHTTPOptions{Stateless: true}).ServeHTTP(w, r)
 	})
 }
 
@@ -347,7 +454,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		req, err := decodeTyped[actionRequest](rawBody)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + redact.String(err.Error())})
 			return
 		}
 
@@ -371,6 +478,12 @@ func (g *Gate) ActionHandler() http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "policy denied: " + decision.Reason})
 			return
 		}
+		// Some actions always need a person: policy can deny them but never
+		// let them run without an out-of-band approval.
+		if decision.Effect == domain.EffectAllow && def.requiresApproval {
+			decision.Effect = domain.EffectApprove
+			decision.Reason = "catalog_requires_approval"
+		}
 
 		// One strict decode into the action's typed value. From here on the
 		// caller's bytes are not used: the digest, the dialog (through the
@@ -383,8 +496,9 @@ func (g *Gate) ActionHandler() http.Handler {
 				g.breaker.RecordFailure(capability)
 			}
 			if errors.Is(err, errToolRefused) {
-				auditAction("denied", map[string]any{"reason": "refused", "error": redact.String(err.Error())})
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
+				status, reason := refusalOf(err)
+				auditAction("denied", map[string]any{"reason": reason, "error": redact.String(err.Error())})
+				writeJSON(w, status, map[string]string{"error": redact.String(err.Error())})
 				return
 			}
 			auditAction("denied", map[string]any{"reason": "invalid_payload", "error": redact.String(err.Error())})
@@ -395,6 +509,32 @@ func (g *Gate) ActionHandler() http.Handler {
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonicalize payload failed"})
 			return
+		}
+		// Live state is checked before an approval is requested, so the
+		// operator is never asked to approve an action that would be refused
+		// now (for git.merge_pr: before its checks have passed). A request that
+		// presents an approval skips this step: the approval is spent first,
+		// and the action's run step checks the live state again right before
+		// its side effect, so drift after the approval still spends it, and an
+		// approval that does not authorize the request reads nothing.
+		precheckNow := (decision.Effect == domain.EffectApprove && req.ApprovalID == "") || decision.Effect == domain.EffectAllow
+		if def.precheck != nil && precheckNow {
+			if err := def.precheck(ctx, ac.Workload, ac.Lease.TaskID, value); err != nil {
+				// On an allowed request a target refused at the check counts on
+				// the breaker, like one refused when the action runs.
+				if decision.Effect == domain.EffectAllow && g.breaker != nil {
+					g.breaker.RecordFailure(capability)
+				}
+				if errors.Is(err, errToolRefused) {
+					status, reason := refusalOf(err)
+					auditAction("denied", map[string]any{"reason": reason, "error": redact.String(err.Error())})
+					writeJSON(w, status, map[string]string{"error": redact.String(err.Error())})
+					return
+				}
+				auditAction("error", map[string]any{"error": redact.String(err.Error())})
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
+				return
+			}
 		}
 
 		approvalUsed := ""
@@ -407,7 +547,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				}
 				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, wlName, capability, value, 15*time.Minute)
 				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": redact.String(err.Error())})
 					return
 				}
 				_ = g.store.UpdateTaskState(ctx, ac.Lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))
@@ -460,6 +600,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "recording the approval use failed; the approval is spent and the action did not run, request a new approval"})
 				return
 			}
+			ctx = context.WithValue(ctx, approvalCtxKey{}, req.ApprovalID)
 
 		case domain.EffectAllow:
 			// Permitted directly.
@@ -476,8 +617,9 @@ func (g *Gate) ActionHandler() http.Handler {
 				g.breaker.RecordFailure(capability)
 			}
 			if errors.Is(err, errToolRefused) {
-				auditAction("denied", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": redact.String(err.Error())})
+				status, reason := refusalOf(err)
+				auditAction("denied", map[string]any{"reason": reason, "error": redact.String(err.Error()), "approval_id": approvalUsed})
+				writeJSON(w, status, map[string]string{"error": redact.String(err.Error())})
 				return
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})

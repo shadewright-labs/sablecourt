@@ -32,7 +32,7 @@ func (a *Adapter) RunCouncil(ctx context.Context, s rt.CouncilLaunch, record rt.
 // RunCouncilLogin gives the caller the raw login terminal for the lifetime of
 // the session. The callback must honor cancellation. Terminal bytes stay live.
 func (a *Adapter) RunCouncilLogin(ctx context.Context, s rt.CouncilLaunch, session func(context.Context, io.Reader, io.Writer) error, record rt.CouncilRecorder) (rt.CouncilResult, error) {
-	if session == nil || s.Prompt != "" || s.TaskToken != "" || s.Checkout != (rt.CouncilCheckout{}) || s.Model != "" {
+	if session == nil || s.Prompt != "" || s.TaskToken != "" || s.Checkout != (rt.CouncilCheckout{}) || s.Model != "" || s.Command != nil {
 		return rt.CouncilResult{}, errors.New("invalid council login session")
 	}
 	return a.runCouncil(ctx, s, session, record)
@@ -41,21 +41,22 @@ func (a *Adapter) RunCouncilLogin(ctx context.Context, s rt.CouncilLaunch, sessi
 const attemptLabel = "sablecourt.io/create-attempt"
 
 func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session func(context.Context, io.Reader, io.Writer) error, record rt.CouncilRecorder) (result rt.CouncilResult, err error) {
-	engine, ok := a.Client.(councilEngineAPI)
+	engine, ok := a.engineClient().(councilEngineAPI)
 	if !ok || record == nil {
-		return result, errors.New("council requires attach, wait, volume inspect and an evidence recorder")
+		return result, a.lacks("council requires attach, wait, volume inspect and an evidence recorder")
 	}
 	ctx, cancel := context.WithTimeout(parent, s.Limits.WallTime)
 	defer cancel()
 	login := session != nil
+	command := s.Command != nil
 	var prompt string
-	if !login {
+	if !login && !command {
 		prompt, err = preparePrompt(s)
 		if err != nil {
 			return result, err
 		}
 	}
-	o, err := a.councilOptions(ctx, engine, s, login)
+	o, err := a.harnessContainerSpec(ctx, engine, s, login)
 	if err != nil {
 		return result, err
 	}
@@ -69,7 +70,7 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		result.CreateAttempt = rand.Text()
 	}
 	o.Config.Labels[attemptLabel] = result.CreateAttempt
-	created, err := a.Client.ContainerCreate(ctx, o)
+	created, err := a.engineClient().ContainerCreate(ctx, o)
 	result.ContainerID = created.ID
 	defer func() {
 		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
@@ -98,10 +99,13 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		}
 	}
 	// Revalidate once the container pins the named volume so an autocreated or replaced volume cannot start.
-	if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
-		return result, err
+	// A command container mounts neither volume.
+	if !command {
+		if err := inspectCouncilLoginVolume(ctx, engine, s.Harness, a.CouncilHarnesses[s.Harness].LoginVolume); err != nil {
+			return result, err
+		}
 	}
-	if tool := a.CouncilHarnesses[s.Harness].Tool; tool != nil {
+	if tool := a.CouncilHarnesses[s.Harness].Tool; tool != nil && !command {
 		if err := inspectCouncilToolVolume(ctx, engine, s.Harness, tool.Volume); err != nil {
 			return result, err
 		}
@@ -124,10 +128,12 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	if !login && !ok {
 		return result, errors.New("council bootstrap requires half-close support")
 	}
-	if _, err = a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err = a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return result, fmt.Errorf("start council container: %w", err)
 	}
-	var stdout, stderr councilOutput
+	// A command keeps the tail of a stream past the limit (its last lines
+	// say why it failed); a council stream past the limit is dropped.
+	stdout, stderr := councilOutput{keepTail: command}, councilOutput{keepTail: command}
 	if login {
 		if s.OnStarted != nil {
 			if err = s.OnStarted(ctx, ident); err != nil {
@@ -136,7 +142,10 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 		}
 		err = session(ctx, stream.Reader, stream.Conn)
 	} else {
-		_, err = io.WriteString(stream.Conn, s.TaskToken+"\x00"+prompt+"\x00")
+		// A command reads EOF on stdin: it never receives the task lease.
+		if !command {
+			_, err = io.WriteString(stream.Conn, s.TaskToken+"\x00"+prompt+"\x00")
+		}
 		if err == nil {
 			err = halfClose.CloseWrite()
 		}
@@ -160,6 +169,9 @@ func (a *Adapter) runCouncil(parent context.Context, s rt.CouncilLaunch, session
 	}
 	result.Stdout = stdout.visible(prompt, s.TaskToken)
 	result.Stderr = stderr.visible(prompt, s.TaskToken)
+	// Overflow comes only from a recorded cut, never from the text: a command
+	// may print the marker itself.
+	result.OutputOverflow = stdout.overflow || stderr.overflow
 	return result, record(ctx, result)
 }
 
@@ -172,7 +184,7 @@ func (a *Adapter) InspectCouncil(ctx context.Context, id rt.CouncilIdentity) (rt
 		}
 		target = id.ContainerName
 	}
-	found, err := a.Client.ContainerInspect(ctx, target, client.ContainerInspectOptions{})
+	found, err := a.engineClient().ContainerInspect(ctx, target, client.ContainerInspectOptions{})
 	if isMissing(err) {
 		return rt.CouncilInspection{Exists: false}, nil
 	}
@@ -219,7 +231,7 @@ func (a *Adapter) cleanupCouncil(ctx context.Context, r *rt.CouncilResult) error
 		if r.ContainerName == "" || r.CreateAttempt == "" {
 			return errors.New("missing council create identity")
 		}
-		found, err := a.Client.ContainerInspect(ctx, r.ContainerName, client.ContainerInspectOptions{})
+		found, err := a.engineClient().ContainerInspect(ctx, r.ContainerName, client.ContainerInspectOptions{})
 		if isMissing(err) {
 			return nil
 		}
@@ -234,7 +246,7 @@ func (a *Adapter) cleanupCouncil(ctx context.Context, r *rt.CouncilResult) error
 		}
 		r.ContainerID = found.Container.ID
 	}
-	_, err := a.Client.ContainerRemove(ctx, r.ContainerID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
+	_, err := a.engineClient().ContainerRemove(ctx, r.ContainerID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 	if isMissing(err) {
 		return nil
 	}
@@ -269,7 +281,7 @@ func (a *Adapter) councilExit(ctx context.Context, engine councilEngineAPI, resu
 		if !out.ok || out.status.Error != nil {
 			return errors.New("missing council wait status")
 		}
-		res, err := a.Client.ContainerInspect(ctx, result.ContainerID, client.ContainerInspectOptions{})
+		res, err := a.engineClient().ContainerInspect(ctx, result.ContainerID, client.ContainerInspectOptions{})
 		if err != nil {
 			return fmt.Errorf("inspect council exit: %w", err)
 		}

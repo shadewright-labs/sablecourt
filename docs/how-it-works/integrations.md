@@ -109,7 +109,7 @@ Three read-only routes accept the operator credential or the secret `observer_be
 | `GET /api/v1/observer/stream` | server-sent `observer` events, one at once and then every 3 seconds, each holding three counts `tasks:conclaves:approvals` (all tasks, all Conclaves, pending approvals) |
 | `GET /api/v1/tasks/{id}/scry` | live redacted output of one task, writes an audit row `task.scry` (present when the attach hub runs) |
 
-Sablecourt marks the workloads it starts. A host coding task runs with `SABLECOURT_MANAGED=1`, `SABLECOURT_TASK_ID` and `SABLECOURT_WORKLOAD` in its environment. Outside a council checkout, its worktree also holds `.sablecourt-session.json` with `managed_by`, `task_id`, `workload`, `zone`, `started_at` and, for Conclave tasks, `conclave_id` and `role`. Git excludes the file and cleanup removes it. Docker and Kubernetes workloads and council containers get the same three environment variables.
+Sablecourt marks the workloads it starts. A coding task runs with `SABLECOURT_MANAGED=1`, `SABLECOURT_TASK_ID` and `SABLECOURT_WORKLOAD` in its environment. Outside a council checkout, its worktree also holds `.sablecourt-session.json` with `managed_by`, `task_id`, `workload`, `zone`, `started_at` and, for Conclave tasks, `conclave_id` and `role`. Git excludes the file and cleanup removes it. Docker and Kubernetes workloads get the same three environment variables.
 
 ## Not built yet
 

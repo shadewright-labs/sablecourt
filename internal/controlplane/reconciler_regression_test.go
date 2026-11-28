@@ -15,6 +15,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
@@ -826,5 +827,122 @@ func TestCancelStopKeepsDeadlineAndAllowsSubmit(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("cancel did not finish")
+	}
+}
+
+// The launch input reaches the workload as SABLECOURT_INPUT_JSON. A value the
+// daemon holds must not travel inside it, whatever field it was submitted in.
+func TestLaunchInputRedactsRegisteredSecrets(t *testing.T) {
+	r, _, _, task := regressionFixture(t)
+	secret := "launch_input_" + strings.Repeat("z4", 12)
+	redact.Register(secret)
+	task.InputJSON = `{"prompt":"deploy with ` + secret + `","extra":"` + secret + `"}`
+	wl := r.bundle.Workloads["worker"]
+	wl.Spec.Class = domain.ClassLongLivedAgent
+	a := &fakeAdapter{}
+	if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(a.lastSpec.InputJSON, secret) {
+		t.Fatalf("launch input carries a registered secret: %s", a.lastSpec.InputJSON)
+	}
+	if !json.Valid([]byte(a.lastSpec.InputJSON)) {
+		t.Fatalf("launch input is no longer JSON: %s", a.lastSpec.InputJSON)
+	}
+}
+
+// uEsc starts a JSON unicode escape (backslash, u).
+const uEsc = "\\" + "u"
+
+// The launch input is a declared JSON record. It is decoded once, and when it
+// shows a held value (in its raw bytes, or in any decoded string or name,
+// duplicates included) it is refused whole with none of its payload. Input
+// that shows none reaches the workload byte for byte.
+func TestLaunchInputRefusedWholeOnHeldValue(t *testing.T) {
+	for i, tc := range []struct {
+		name  string
+		held  func(base string) string
+		input func(base string) string
+	}{
+		{"held value ends in a quote",
+			func(b string) string { return b + `"` },
+			func(b string) string { return `{"prompt":"` + b + `","extra":"ok"}` }},
+		{"held value ends in a backslash",
+			func(b string) string { return b + `\` },
+			func(b string) string { return `{"prompt":"` + b + `\"ok"}` }},
+		{"held value spans fields in the raw bytes",
+			func(b string) string { return b + `","extra":"2` },
+			func(b string) string { return `{"prompt":"` + b + `","extra":"2"}` }},
+		{"held value written with unicode escapes",
+			func(b string) string { return b },
+			// "l" written as a JSON unicode escape.
+			func(b string) string { return `{"prompt":"` + uEsc + `006c` + b[1:] + `","n":12345678901234567890}` }},
+		{"held value in a key",
+			func(b string) string { return b },
+			func(b string) string { return `{"` + b + `":"v","extra":"ok"}` }},
+		{"held value in a shadowed nested duplicate key",
+			func(b string) string { return b },
+			func(b string) string { return `{"prompt":"p","meta":{"k":"` + uEsc + `006c` + b[1:] + `","k":"ok"}}` }},
+	} {
+		// The default registry is process wide, so each case holds its own value.
+		base := fmt.Sprintf("launch_json_%d_", i) + strings.Repeat("q7", 12)
+		t.Run(tc.name, func(t *testing.T) {
+			r, _, _, task := regressionFixture(t)
+			held := tc.held(base)
+			redact.Register(held)
+			task.InputJSON = tc.input(base)
+			wl := r.bundle.Workloads["worker"]
+			a := &fakeAdapter{}
+			if err := launchForTest(context.Background(), r, task, wl, a); err != nil {
+				t.Fatal(err)
+			}
+			if a.lastSpec.InputJSON != redact.DefaultRegistry().RefusedJSON() {
+				t.Fatalf("launch input = %s, want it refused as a whole", a.lastSpec.InputJSON)
+			}
+		})
+	}
+	t.Run("no held value keeps every byte", func(t *testing.T) {
+		r, _, _, task := regressionFixture(t)
+		task.InputJSON = `{"prompt":"` + uEsc + `006c <x>","n":12345678901234567890,"p":"a","p":"b"}`
+		a := &fakeAdapter{}
+		if err := launchForTest(context.Background(), r, task, r.bundle.Workloads["worker"], a); err != nil {
+			t.Fatal(err)
+		}
+		if a.lastSpec.InputJSON != task.InputJSON {
+			t.Fatalf("launch input = %s, want %s", a.lastSpec.InputJSON, task.InputJSON)
+		}
+	})
+}
+
+// Input that holds no registered value reaches the workload byte for byte.
+func TestLaunchInputWithoutHeldValuesIsUnchanged(t *testing.T) {
+	r, _, _, task := regressionFixture(t)
+	task.InputJSON = `{"z":"` + uEsc + `0041 <b>","a":1.50}`
+	a := &fakeAdapter{}
+	if err := launchForTest(context.Background(), r, task, r.bundle.Workloads["worker"], a); err != nil {
+		t.Fatal(err)
+	}
+	if a.lastSpec.InputJSON != task.InputJSON {
+		t.Fatalf("launch input = %s, want it unchanged", a.lastSpec.InputJSON)
+	}
+}
+
+// Fix round 2: TaskForRead redacted the input and artifacts records but
+// returned the caller-supplied idempotency key as stored, so a key that shows
+// a held value left through the task API. The response copy is matched; the
+// stored key is not changed, so replay still finds the task.
+func TestTaskForReadRedactsIdempotencyKey(t *testing.T) {
+	secret := "idem_key_" + strings.Repeat("k7", 12)
+	redact.Register(secret)
+	stored := domain.Task{ID: "t-idem", IdempotencyKey: "retry-" + secret}
+	got := TaskForRead(stored)
+	if strings.Contains(got.IdempotencyKey, secret) || !strings.HasPrefix(got.IdempotencyKey, "retry-") {
+		t.Fatalf("read key = %q", got.IdempotencyKey)
+	}
+	if stored.IdempotencyKey != "retry-"+secret {
+		t.Fatal("stored key changed")
+	}
+	if list := TasksForRead([]domain.Task{stored}); strings.Contains(list[0].IdempotencyKey, secret) {
+		t.Fatalf("list key = %q", list[0].IdempotencyKey)
 	}
 }

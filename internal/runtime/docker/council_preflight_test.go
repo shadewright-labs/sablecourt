@@ -74,7 +74,7 @@ func (p *probeEngine) ContainerRemove(context.Context, string, client.ContainerR
 
 func probeFixture(harness string) (*Adapter, *probeEngine) {
 	p := &probeEngine{councilEngine: *newCouncilEngine(), volumes: map[string]volume.Volume{}}
-	a := NewAdapter(p, "")
+	a := testAdapter(p, "")
 	name := "sablecourt-harness-" + harness
 	p.volumes[name] = volume.Volume{Name: name, Driver: "local", Labels: CouncilLoginVolumeLabels(harness)}
 	a.CouncilHarnesses = map[string]CouncilHarness{harness: {Image: "local-image", LoginVolume: name, LoginFiles: []string{"/home/harness/.x/cred.json"}}}

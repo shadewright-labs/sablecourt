@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 const (
@@ -712,7 +713,25 @@ func newLaunchKey() (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate council gate P-256 key: %w", err)
 	}
+	registerPrivateKeyMaterial(priv)
 	return priv, nil
+}
+
+func registerPrivateKeyMaterial(priv *ecdsa.PrivateKey) {
+	if priv == nil {
+		return
+	}
+	var material [][]byte
+	if scalar, err := priv.Bytes(); err == nil {
+		material = append(material, scalar)
+	}
+	if der, err := x509.MarshalECPrivateKey(priv); err == nil {
+		material = append(material, der)
+	}
+	if pkcs8, err := x509.MarshalPKCS8PrivateKey(priv); err == nil {
+		material = append(material, pkcs8)
+	}
+	redact.RegisterBytes(material...)
 }
 
 // signLaunchCertificate issues a certificate for priv. Reissuing with the same

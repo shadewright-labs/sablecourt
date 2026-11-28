@@ -27,7 +27,13 @@ type SQLiteStore struct {
 
 var _ store.Store = (*SQLiteStore)(nil)
 
+// Open opens the database at path. A path with "?" is refused: the driver
+// reads everything after it as connection options, so it would open a
+// different file from the one the daemon resolved and created.
 func Open(path string) (*SQLiteStore, error) {
+	if strings.ContainsRune(path, '?') {
+		return nil, errors.New("sqlite database path must not contain '?'")
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
@@ -47,6 +53,31 @@ func Open(path string) (*SQLiteStore, error) {
 	}
 
 	return &SQLiteStore{db: db}, nil
+}
+
+// MainFile returns the file the connection really opened for the main
+// database, as SQLite reports it (PRAGMA database_list). The daemon compares
+// its identity with the file it created.
+func (s *SQLiteStore) MainFile(ctx context.Context) (string, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA database_list;")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return "", err
+		}
+		if name == "main" {
+			return file, rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", errors.New("sqlite reports no main database")
 }
 
 func (s *SQLiteStore) Close() error {
@@ -489,11 +520,15 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capabilit
 }
 
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
+	pinned, err := store.EncodePinnedProviders(lease.PinnedProviders)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at, pinned_providers_json)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName,
-		lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt))
+		lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt), pinned)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
@@ -506,16 +541,19 @@ func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) error
 func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error) {
 	var lease domain.Lease
 	var expires, created string
-	var revoked sql.NullString
+	var revoked, pinned sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at
+		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at, pinned_providers_json
 		FROM leases
 		WHERE token_sha256 = ?
-	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created)
+	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created, &pinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Lease{}, store.ErrNotFound
 	}
 	if err != nil {
+		return domain.Lease{}, err
+	}
+	if lease.PinnedProviders, err = store.DecodePinnedProviders(pinned); err != nil {
 		return domain.Lease{}, err
 	}
 	lease.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)

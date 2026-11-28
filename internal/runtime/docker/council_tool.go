@@ -195,9 +195,9 @@ func (a *Adapter) InstallCouncilTool(parent context.Context, harness string, bin
 	if binary == nil {
 		return errors.New("missing tool binary")
 	}
-	engine, ok := a.Client.(councilEngineAPI)
+	engine, ok := a.engineClient().(councilEngineAPI)
 	if !ok {
-		return errors.New("Docker cannot attach to the install container")
+		return a.lacks("Docker cannot attach to the install container")
 	}
 	ctx, cancel := context.WithTimeout(parent, toolInstallTimeout)
 	defer cancel()
@@ -209,7 +209,7 @@ func (a *Adapter) InstallCouncilTool(parent context.Context, harness string, bin
 		return err
 	}
 	pids := toolInstallPIDs
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.engineClient().ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sablecourt-tool-install-" + harness + "-" + strings.ToLower(rand.Text()[:10]),
 		Config: &container.Config{
 			Image:       imageID,
@@ -243,7 +243,7 @@ func (a *Adapter) InstallCouncilTool(parent context.Context, harness string, bin
 	defer func() {
 		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 		defer done()
-		if _, rerr := a.Client.ContainerRemove(cleanup, created.ID, client.ContainerRemoveOptions{Force: true}); rerr != nil && !isMissing(rerr) {
+		if _, rerr := a.engineClient().ContainerRemove(cleanup, created.ID, client.ContainerRemoveOptions{Force: true}); rerr != nil && !isMissing(rerr) {
 			err = errors.Join(err, fmt.Errorf("remove tool install container: %w", rerr))
 		}
 	}()
@@ -270,7 +270,7 @@ func (a *Adapter) InstallCouncilTool(parent context.Context, harness string, bin
 	if !ok {
 		return errors.New("tool install requires half-close support")
 	}
-	if _, err := a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return fmt.Errorf("start tool install container: %w", err)
 	}
 	var stdout, stderr councilOutput
@@ -303,9 +303,9 @@ func (a *Adapter) ensureCouncilToolVolume(ctx context.Context, engine councilEng
 		if !isMissing(err) {
 			return fmt.Errorf("inspect council tool volume: %w", err)
 		}
-		creator, ok := a.Client.(volumeCreator)
+		creator, ok := a.engineClient().(volumeCreator)
 		if !ok {
-			return errors.New("Docker cannot create volumes")
+			return a.lacks("Docker cannot create volumes")
 		}
 		if _, err := creator.VolumeCreate(ctx, client.VolumeCreateOptions{Name: name, Driver: "local", Labels: CouncilToolVolumeLabels(harness)}); err != nil {
 			return fmt.Errorf("create tool volume: %w", err)

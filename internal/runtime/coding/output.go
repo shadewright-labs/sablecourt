@@ -28,10 +28,18 @@ type sessionOutput struct {
 	tail       *diagnosticTail
 	hub        *attach.Hub
 	taskID     string
+	known      *redact.Stream
 	pending    []byte
 	lineStart  int
 	privateKey bool
 	suppressed bool
+}
+
+func (s *sessionOutput) knownStream() *redact.Stream {
+	if s.known == nil {
+		s.known = redact.NewStream()
+	}
+	return s.known
 }
 
 func hasUnfinishedPrivateKey(text string) bool {
@@ -40,7 +48,18 @@ func hasUnfinishedPrivateKey(text string) bool {
 }
 
 func (s *sessionOutput) Write(chunk []byte) (int, error) {
-	n := len(chunk)
+	origLen := len(chunk)
+	if origLen == 0 || s.suppressed {
+		return origLen, nil
+	}
+	filtered := s.knownStream().Write(chunk, false)
+	if err := s.writeFiltered(filtered); err != nil {
+		return origLen, err
+	}
+	return origLen, nil
+}
+
+func (s *sessionOutput) writeFiltered(chunk []byte) error {
 	for len(chunk) > 0 && !s.suppressed {
 		newline := bytes.IndexByte(chunk, '\n')
 		size := len(chunk)
@@ -51,7 +70,7 @@ func (s *sessionOutput) Write(chunk []byte) (int, error) {
 			// The discarded line might contain the start of a private key block.
 			s.pending = nil
 			s.suppressed = true
-			return n, s.emit("[REDACTED:output limit]\n")
+			return s.emit("[REDACTED:output limit]\n")
 		}
 		s.pending = append(s.pending, chunk[:size]...)
 		chunk = chunk[size:]
@@ -67,14 +86,28 @@ func (s *sessionOutput) Write(chunk []byte) (int, error) {
 			err := s.writeLine(string(s.pending))
 			s.pending = s.pending[:0]
 			if err != nil {
-				return n - len(chunk), err
+				return err
 			}
 		}
 	}
-	return n, nil
+	return nil
 }
 
 func (s *sessionOutput) Flush() error {
+	if !s.suppressed {
+		if tail := s.knownStream().Write(nil, true); len(tail) > 0 {
+			if err := s.writeFiltered(tail); err != nil {
+				s.pending = nil
+				s.lineStart = 0
+				return err
+			}
+		}
+	}
+	if s.suppressed {
+		s.pending = nil
+		s.lineStart = 0
+		return nil
+	}
 	err := s.writeLine(string(s.pending))
 	s.pending = nil
 	s.lineStart = 0

@@ -464,6 +464,11 @@ func (r *Reconciler) failLostTask(ctx context.Context, task domain.Task, facts s
 	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reasonLostOnRestart, facts); err != nil {
 		return err
 	}
+	// A command step lost on restart halts its run. Until the halt is
+	// recorded the persisted handle stays, so recovery retries it.
+	if err := r.haltCommandStep(cleanupCtx, task, nil); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	delete(r.handles, task.ID)
 	delete(r.handleAdapters, task.ID)

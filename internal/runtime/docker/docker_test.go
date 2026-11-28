@@ -18,6 +18,32 @@ import (
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
+// localHost is a client that reports a local engine and makes no calls.
+type localHost struct{ EngineClient }
+
+func (localHost) DaemonHost() string { return "unix:///var/run/docker.sock" }
+
+// testAdapter builds an adapter on a fake engine. A fake that reports its
+// host goes through NewAdapter as given. Most fakes report none, which
+// NewAdapter refuses, so the adapter is built on a local host and the fake
+// is swapped in afterwards through the unexported field (a test seam only
+// this package has). remote_engine_test.go covers the refusals.
+func testAdapter(cli EngineClient, networkName string) *Adapter {
+	if _, ok := cli.(interface{ DaemonHost() string }); ok {
+		a, err := NewAdapter(cli, networkName)
+		if err != nil {
+			panic(err)
+		}
+		return a
+	}
+	a, err := NewAdapter(localHost{}, networkName)
+	if err != nil {
+		panic(err)
+	}
+	a.cli = cli
+	return a
+}
+
 type fakeEngine struct {
 	networkExists  bool
 	createdNetwork client.NetworkCreateOptions
@@ -76,7 +102,7 @@ func TestDockerAdapterEnforcesInternalNetworkAndHardening(t *testing.T) {
 	eng := &fakeEngine{
 		inspectState: &container.State{Status: "exited", ExitCode: 0},
 	}
-	adapter := NewAdapter(eng, DefaultNetworkName)
+	adapter := testAdapter(eng, DefaultNetworkName)
 
 	handle, err := adapter.Start(ctx, scruntime.LaunchSpec{
 		TaskID: "task-9",
@@ -140,7 +166,7 @@ func (f *timedOutEngine) ContainerRemove(context.Context, string, client.Contain
 
 func TestStartTimeoutKeepsHandle(t *testing.T) {
 	e := &timedOutEngine{}
-	a := NewAdapter(e, "")
+	a := testAdapter(e, "")
 	var spec scruntime.LaunchSpec
 	spec.Workload.Spec.Runtime.Image = "fixture"
 	h, err := a.Start(context.Background(), spec)
@@ -154,7 +180,7 @@ func TestStartTimeoutKeepsHandle(t *testing.T) {
 
 func TestCollectPreservesExit(t *testing.T) {
 	e := &timedOutEngine{}
-	a := NewAdapter(e, "")
+	a := testAdapter(e, "")
 	if _, err := a.CollectArtifacts(context.Background(), scruntime.Handle{ExternalID: "ctr-123"}); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +207,7 @@ func TestLogCancellation(t *testing.T) {
 			start, finishStart := context.WithCancel(ctx)
 			defer finishStart()
 			e := &logEngine{observed: make(chan context.Context, 1)}
-			a := NewAdapter(e, "")
+			a := testAdapter(e, "")
 			a.AttachHub = attach.NewHub()
 			if lifetime == "daemon" {
 				a.SetAttachHub(ctx, a.AttachHub)
@@ -218,7 +244,7 @@ func TestCouncilRuntimeSelection(t *testing.T) {
 			if tc.explicit {
 				t.Setenv("DOCKER_HOST", "unix:///engine.sock")
 			}
-			a := NewAdapter(nil, "")
+			a := testAdapter(nil, "")
 			a.discoverSocket = func() string {
 				if tc.present {
 					return "/engine.sock"

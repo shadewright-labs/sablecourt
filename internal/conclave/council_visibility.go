@@ -127,6 +127,7 @@ func (b *Broker) ReadMessagesForTask(ctx context.Context, room, workload, taskID
 		}
 		for i := range msgs {
 			msgs[i].Body = redact.String(msgs[i].Body)
+			msgs[i].ToRole = redact.String(msgs[i].ToRole)
 		}
 		return msgs, nil
 	}
@@ -134,6 +135,7 @@ func (b *Broker) ReadMessagesForTask(ctx context.Context, room, workload, taskID
 	appendMessage := func(m domain.ConclaveMessage) {
 		if m.ID > since {
 			m.Body = redact.String(m.Body)
+			m.ToRole = redact.String(m.ToRole)
 			msgs = append(msgs, m)
 		}
 	}
@@ -157,8 +159,7 @@ func (b *Broker) ReadRelicForTask(ctx context.Context, room, workload, taskID, n
 		if err != nil {
 			return domain.ConclaveRelic{}, err
 		}
-		relic.Body = redact.String(relic.Body)
-		return relic, nil
+		return redactRelicForTask(relic), nil
 	}
 	for _, t := range view.peers {
 		for _, a := range view.attempts {
@@ -167,11 +168,20 @@ func (b *Broker) ReadRelicForTask(ctx context.Context, room, workload, taskID, n
 			}
 			for _, r := range a.Relics {
 				if r.Name == name && r.ConclaveID == room && r.AuthorRole == t.Role {
-					r.Body = redact.String(r.Body)
-					return r, nil
+					return redactRelicForTask(r), nil
 				}
 			}
 		}
 	}
 	return domain.ConclaveRelic{}, store.ErrNotFound
+}
+
+// redactRelicForTask redacts a Relic copy on its way to a workload, so a value
+// that became daemon-held after the Relic was stored does not leave in its
+// metadata either. The stored row is not changed.
+func redactRelicForTask(r domain.ConclaveRelic) domain.ConclaveRelic {
+	r.Name = redact.String(r.Name)
+	r.ContentType = redact.String(r.ContentType)
+	r.Body = redact.String(r.Body)
+	return r
 }

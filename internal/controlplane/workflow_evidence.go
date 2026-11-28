@@ -61,6 +61,16 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 	return &step, nil
 }
 
+// stepAuthorCommit is the commit a verifier following the completed step must
+// review. Only an author step's artifacts set a new commit; a completed verifier
+// passes on the commit it was pinned to, whatever artifacts it emitted.
+func stepAuthorCommit(completed *workflowStepRecord, completedVerifier bool, artifacts string) string {
+	if completedVerifier {
+		return completed.AuthorCommit
+	}
+	return authorCommit(artifacts)
+}
+
 func authorCommit(artifacts string) string {
 	var items []scruntime.Artifact
 	if json.Unmarshal([]byte(artifacts), &items) != nil {
@@ -103,6 +113,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 		bundle := r.bundle
 		r.mu.Unlock()
 		role := meta.Role
+		command := r.isCommandStep(meta.Workflow, meta.StepIndex, task.WorkloadName)
 		if bundle != nil {
 			steps := bundle.Workflows[meta.Workflow].Spec.Steps
 			if meta.StepIndex >= 0 && meta.StepIndex < len(steps) && steps[meta.StepIndex].Workload == task.WorkloadName && steps[meta.StepIndex].Role != "" {
@@ -113,7 +124,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 		}
 		remediation := strings.HasPrefix(task.IdempotencyKey, "wf:"+meta.Workflow+":remediate:") ||
 			((role == "author" || wl.Spec.Class == domain.ClassCodingAgent) && meta.RetryCount > 0)
-		if role == "verifier" || remediation {
+		if role == "verifier" || remediation || command {
 			member, err := r.workflowStep(ctx, task.ID)
 			if err != nil {
 				return "", false, err
@@ -121,7 +132,7 @@ func (r *Reconciler) workflowCheckout(ctx context.Context, task domain.Task, wl 
 			if member == nil || member.Workflow != meta.Workflow || member.Index != meta.StepIndex || member.AuthorCommit == "" || wl.Spec.Class != domain.ClassCodingAgent {
 				return "", false, errAuthorCheckoutUnavailable
 			}
-			return member.AuthorCommit, role == "verifier", nil
+			return member.AuthorCommit, role == "verifier" || command, nil
 		}
 	}
 	return "", false, nil
@@ -201,9 +212,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	// Rebuild from the pinned policy and seat, including reservations made
 	// before the dispatcher started writing explicit checkout fields.
 	for key := range payload {
-		if strings.EqualFold(key, "role") || strings.EqualFold(key, "checkoutMode") ||
-			strings.EqualFold(key, "checkoutRef") || strings.EqualFold(key, "checkoutWriter") ||
-			strings.EqualFold(key, "checkoutSourceId") {
+		if strings.EqualFold(key, "role") || isCheckoutField(key) {
 			delete(payload, key)
 		}
 	}
@@ -224,7 +233,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	return wl, nil
 }
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, error) {
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, []string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
 	var payload map[string]json.RawMessage
@@ -237,11 +246,11 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
-		return wl, task.InputJSON, nil
+		return wl, task.InputJSON, nil, nil
 	}
 
 	// Only the dispatcher can create a round reservation. Its immutable input
@@ -251,7 +260,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		wl, err = r.prepareCouncilCheckout(ctx, payload, assignment, wl)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
@@ -259,13 +268,17 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
 			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
 			redact.String(markdown) != markdown {
-			return wl, "", errors.New("invalid reserved council packet")
+			return wl, "", nil, errors.New("invalid reserved council packet")
 		}
 	}
-	// Typed consumers may match field names case-insensitively.
+	// Typed consumers may match field names case-insensitively. The checkout
+	// kind comes from the task type: only a council round (rebuilt above from
+	// its reservation) carries checkout fields, so an ordinary task always
+	// runs in its own task worktree whatever its submission says.
 	rebuild := false
 	for key := range payload {
-		if strings.EqualFold(key, "context_packet") || ((assigned || unreservedCouncil) && strings.EqualFold(key, "conclaveId")) {
+		if strings.EqualFold(key, "context_packet") || ((assigned || unreservedCouncil) && strings.EqualFold(key, "conclaveId")) ||
+			(!council && isCheckoutField(key)) {
 			delete(payload, key)
 			rebuild = true
 		}
@@ -278,7 +291,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
 		raw, err := json.Marshal(payload)
-		return wl, string(raw), err
+		return wl, string(raw), nil, err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -287,7 +300,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		})
 		sanitized, err := json.Marshal(precheckInput)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		task.InputJSON = string(sanitized)
 	}
@@ -295,32 +308,45 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	if raw, ok := payload["tier"]; ok {
 		var tier, provider, model string
 		if err := json.Unmarshal(raw, &tier); err != nil || tier == "" {
-			return wl, "", errors.New("invalid model tier")
+			return wl, "", nil, errors.New("invalid model tier")
 		}
 		if raw, ok := payload["provider"]; ok {
 			if err := json.Unmarshal(raw, &provider); err != nil || provider == "" {
-				return wl, "", errors.New("invalid tier provider")
+				return wl, "", nil, errors.New("invalid tier provider")
 			}
 		}
 		if raw, ok := payload["model"]; ok {
 			if err := json.Unmarshal(raw, &model); err != nil || model == "" {
-				return wl, "", errors.New("invalid tier model")
+				return wl, "", nil, errors.New("invalid tier model")
 			}
 		}
 		provider, model, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		payload["provider"], _ = json.Marshal(provider)
 		payload["model"], _ = json.Marshal(model)
 	}
 
+	// A packet with learnings pins the task's leases to the providers it was
+	// admitted under, so a later reload cannot widen where they go (ADR-0012).
+	var pinned []string
 	if !council {
-		markdown = contextpack.Assemble(ctx, r.store, task, wl).Markdown
+		packet := contextpack.Assemble(ctx, r.store, task, wl, r.packetDest)
+		markdown = packet.Markdown
+		if packet.LearningCount > 0 {
+			pinned = append([]string{}, wl.Spec.Grants.ModelGate.Providers...)
+		}
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
-	return wl, string(raw), err
+	return wl, string(raw), pinned, err
+}
+
+// isCheckoutField reports whether key selects a council checkout, in any case.
+func isCheckoutField(key string) bool {
+	return strings.EqualFold(key, "checkoutMode") || strings.EqualFold(key, "checkoutRef") ||
+		strings.EqualFold(key, "checkoutWriter") || strings.EqualFold(key, "checkoutSourceId")
 }
 
 func referencesCouncil(ctx context.Context, st store.Store, payload map[string]json.RawMessage) (bool, error) {

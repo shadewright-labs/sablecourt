@@ -44,9 +44,9 @@ func (a *Adapter) ProvisionCouncilProxy(ctx context.Context, image string, cfg c
 }
 
 func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSocketProbe) (probeErr error) {
-	engine, ok := a.Client.(councilEngineAPI)
+	engine, ok := a.engineClient().(councilEngineAPI)
 	if !ok {
-		return errors.New("Docker cannot verify socket probe exit")
+		return a.lacks("Docker cannot verify socket probe exit")
 	}
 	id, err := a.councilImageID(ctx, spec.ImageID)
 	if err != nil {
@@ -63,7 +63,7 @@ func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSoc
 			probeErr = fmt.Errorf("remove socket probe: %w", err)
 		}
 	}()
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.engineClient().ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: spec.Name,
 		Config: &container.Config{Image: spec.ImageID, User: spec.User, Cmd: spec.Args, Env: slices.Clone(councilBaseEnv),
 			Labels:      map[string]string{councilproxy.ResourceLabel: spec.Name},
@@ -79,7 +79,7 @@ func (a *Adapter) ProbeGateSocket(ctx context.Context, spec councilproxy.GateSoc
 		return errors.New("unverified socket probe creation")
 	}
 	if err == nil {
-		_, err = a.Client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{})
+		_, err = a.engineClient().ContainerStart(ctx, created.ID, client.ContainerStartOptions{})
 	}
 	if err != nil {
 		if councilproxy.IsUnshareableSocketBindError(spec.HostSocketPath, 125, err.Error()) {
@@ -106,24 +106,24 @@ func (a *Adapter) CreateInternalNetwork(ctx context.Context, spec councilproxy.I
 	if !councilName.MatchString(name) {
 		return info, errors.New("invalid council network name")
 	}
-	server, ok := a.Client.(interface {
+	server, ok := a.engineClient().(interface {
 		ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error)
 	})
 	if !ok {
-		return info, errors.New("Docker engine version unavailable")
+		return info, a.lacks("Docker engine version unavailable")
 	}
 	v, err := server.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
 		return info, err
 	}
-	created, err := a.Client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
+	created, err := a.engineClient().NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge", Internal: true, Options: spec.Options,
 		Labels: map[string]string{councilproxy.ResourceLabel: name},
 	})
 	if err != nil {
 		return info, err
 	}
-	n, err := a.Client.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+	n, err := a.engineClient().NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if err != nil {
 		return info, err
 	}
@@ -182,7 +182,7 @@ func (a *Adapter) CreateProxy(ctx context.Context, spec councilproxy.ProxyContai
 			netID: {Aliases: []string{spec.Name}},
 		},
 	}
-	created, err := a.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+	created, err := a.engineClient().ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: spec.Name,
 		Config: &container.Config{
 			Image: imageID,
@@ -211,9 +211,9 @@ func (a *Adapter) CreateProxy(ctx context.Context, spec councilproxy.ProxyContai
 }
 
 func (a *Adapter) ConnectProxyEgress(ctx context.Context, name string) error {
-	eng, ok := a.Client.(proxyEngineAPI)
+	eng, ok := a.engineClient().(proxyEngineAPI)
 	if !ok {
-		return errors.New("Docker client does not support connecting proxy egress")
+		return a.lacks("Docker client does not support connecting proxy egress")
 	}
 	_, err := eng.NetworkConnect(ctx, "bridge", client.NetworkConnectOptions{
 		Container: name,
@@ -225,17 +225,17 @@ func (a *Adapter) ConnectProxyEgress(ctx context.Context, name string) error {
 }
 
 func (a *Adapter) StartProxy(ctx context.Context, name string) error {
-	if _, err := a.Client.ContainerStart(ctx, name, client.ContainerStartOptions{}); err != nil {
+	if _, err := a.engineClient().ContainerStart(ctx, name, client.ContainerStartOptions{}); err != nil {
 		return err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	probeURL := "http://" + net.JoinHostPort(name, councilproxy.Port) + "/gate/task/messages"
-	execAPI, hasExec := a.Client.(proxyExecAPI)
+	execAPI, hasExec := a.engineClient().(proxyExecAPI)
 	if !hasExec {
-		return errors.New("Docker cannot probe council proxy readiness")
+		return a.lacks("Docker cannot probe council proxy readiness")
 	}
-	insp, err := a.Client.ContainerInspect(readyCtx, name, client.ContainerInspectOptions{})
+	insp, err := a.engineClient().ContainerInspect(readyCtx, name, client.ContainerInspectOptions{})
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func (a *Adapter) RemoveProxy(ctx context.Context, name string) error {
 	if name == "" {
 		return nil
 	}
-	found, err := a.Client.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	found, err := a.engineClient().ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 	if isMissing(err) {
 		return nil
 	}
@@ -350,7 +350,7 @@ func (a *Adapter) RemoveProxy(ctx context.Context, name string) error {
 	if found.Container.Config == nil || found.Container.Config.Labels[councilproxy.ResourceLabel] != name {
 		return errors.New("refused to remove unlabelled council proxy container")
 	}
-	_, err = a.Client.ContainerRemove(ctx, found.Container.ID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
+	_, err = a.engineClient().ContainerRemove(ctx, found.Container.ID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 	if isMissing(err) {
 		return nil
 	}
@@ -361,11 +361,11 @@ func (a *Adapter) RemoveInternalNetwork(ctx context.Context, name string) error 
 	if name == "" {
 		return nil
 	}
-	eng, ok := a.Client.(proxyEngineAPI)
+	eng, ok := a.engineClient().(proxyEngineAPI)
 	if !ok {
-		return errors.New("Docker client does not support removing networks")
+		return a.lacks("Docker client does not support removing networks")
 	}
-	found, err := a.Client.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+	found, err := a.engineClient().NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if isMissing(err) {
 		return nil
 	}

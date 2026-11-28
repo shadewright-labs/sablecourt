@@ -25,7 +25,7 @@ func (a *Adapter) recoveryState(ctx context.Context, h rt.Handle) (rt.ObservedSt
 	if h.AdapterName != "docker" || h.ExternalID == "" {
 		return rt.StateUnknown, errors.New("invalid Docker recovery handle")
 	}
-	r, err := a.Client.ContainerInspect(ctx, h.ExternalID, client.ContainerInspectOptions{})
+	r, err := a.engineClient().ContainerInspect(ctx, h.ExternalID, client.ContainerInspectOptions{})
 	if isMissing(err) {
 		return rt.StateUnknown, nil
 	}

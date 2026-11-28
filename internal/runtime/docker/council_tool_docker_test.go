@@ -34,7 +34,7 @@ func TestInstallCouncilToolDocker(t *testing.T) {
 			def, _ := harnessimages.Lookup(tc.role)
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Minute)
 			defer cancel()
-			if _, err := a.Client.ImageInspect(ctx, def.Image); err != nil {
+			if _, err := a.cli.ImageInspect(ctx, def.Image); err != nil {
 				t.Skipf("image %s is not built locally; run %s", def.Image, harnessimages.BuildCommand(tc.role))
 			}
 			id := strings.ToLower(rand.Text()[:12])

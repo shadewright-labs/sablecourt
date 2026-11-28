@@ -100,6 +100,9 @@ type CodingConfig struct {
 	Harness  string `json:"harness"`
 	RepoPath string `json:"repoPath"`
 	Sandbox  string `json:"sandbox"`
+	// Commands is the allowed set a workflow command step may run in a task's
+	// worktree. Only this operator configuration names a command's argv.
+	Commands []CodingCommand `json:"commands,omitempty"`
 }
 
 type AgentCard struct {
@@ -112,6 +115,7 @@ type GrantSet struct {
 	MCPTools   []string            `json:"mcpTools,omitempty"`
 	MCPServers []UpstreamMCPServer `json:"mcpServers,omitempty"`
 	Actions    []string            `json:"actions,omitempty"`
+	Repos      []string            `json:"repos,omitempty"`
 	DelegateTo []string            `json:"delegateTo,omitempty"`
 }
 
@@ -191,6 +195,9 @@ type WorkflowStep struct {
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model,omitempty"`
 	Prompt     string `json:"prompt,omitempty"`
+	// Command names an entry of the step workload's coding.commands. The step
+	// runs that command against the previous step's commit instead of a harness.
+	Command string `json:"command,omitempty"`
 }
 
 type Schedule struct {
@@ -255,6 +262,11 @@ type Lease struct {
 	ExpiresAt    time.Time
 	RevokedAt    *time.Time
 	CreatedAt    time.Time
+	// PinnedProviders is non-nil when the task's context packet carried
+	// learnings. The lease then reaches only these Model Gate providers, the
+	// grant the packet was admitted under, whatever a later reload grants
+	// (ADR-0012). An empty non-nil list reaches none.
+	PinnedProviders []string
 }
 
 type BudgetEntry struct {

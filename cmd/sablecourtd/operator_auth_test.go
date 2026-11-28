@@ -608,6 +608,22 @@ func TestOperatorCredentialCollisions(t *testing.T) {
 	}
 }
 
+// An observer token too short to redact is refused like a missing one, even
+// when the caller sends it.
+func TestShortObserverTokenRefused(t *testing.T) {
+	const short = "short12"
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/observer/snapshot", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	h := newOperatorAuth(testOperatorToken).requireOperatorAuth(mux, mux, secret.NewMemoryStore(map[string]string{"observer_bearer_token": short}))
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/observer/snapshot", nil)
+	r.Header.Set("Authorization", "Bearer "+short)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("short observer token: status %d, want 401", w.Code)
+	}
+}
+
 func TestLogoutRevokesSessions(t *testing.T) {
 	for _, tc := range []struct {
 		name, origin string

@@ -46,25 +46,32 @@ Source: `internal/domain/types.go` (`WorkloadSpec`), `internal/config/loader.go`
 | `spec.runtime.readOnlyRootfs` | bool | no | Run the container with a read-only root filesystem. |
 | `spec.coding.harness` | string | conditional | `claude`, `codex` or `agy`, required for a `coding-agent`; the other classes must not set `spec.coding` at all. |
 | `spec.coding.repoPath` | string | conditional | Repository the coding harness works in, required for a `coding-agent` and not checked for existence at load. |
-| `spec.coding.sandbox` | string | no | Not checked at load; at launch the coding adapter accepts only `seatbelt`, and only on macOS. This is the host path, which is unsupported for 0.1.0 ([ADR-0011 amendment of 2026-11-27](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)). |
+| `spec.coding.sandbox` | string | no | Not checked at load. Ignored when the task runs in a harness container, which is the default; `sablectl init` and the web UI write `container`. Only in forced host mode (`--unsafe-host-harnesses`, outside invariants 2 and 3) does the adapter read it, and then it accepts only `seatbelt`, on macOS. |
+| `spec.coding.commands` | list of objects | no | The allowed set of commands a workflow command step may run against this workload's repository (see [command steps](../how-it-works/command-steps.md)). Names must be unique. |
+| `spec.coding.commands[].name` | string | conditional | Name a workflow step uses in `command`: lowercase letters, digits and `-`, 1 to 63 characters, starting with a letter or digit. |
+| `spec.coding.commands[].argv` | list of strings | conditional | The program and its arguments, run as given in the workload's harness image with no shell unless the argv names one. 1 to 64 entries of valid UTF-8 without NUL, each at most 4096 bytes; the first must not be empty or start with `-`. Task input never supplies or changes it. |
+| `spec.coding.commands[].timeoutSeconds` | integer | no | Time limit of one run, from container setup to exit, 1 to 3600; 0 or unset means 600. A run over the limit fails the step with outcome `timeout`. |
+| `spec.coding.commands[].maxOutputBytes` | integer | no | Most bytes of redacted output kept, 1 to 1048576; 0 or unset means 65536. Output over the cap, or a stream over the runner's 1 MiB limit, fails the step with outcome `output_over_cap`, and only the last `maxOutputBytes` bytes of the kept output are stored. Past 1 MiB the runner keeps a stream's last whole lines within 1 MiB (see [command steps](../how-it-works/command-steps.md#the-result)). |
+| `spec.coding.commands[].failureReason` | string | no | Text recorded on the workflow run when the command fails, at most 512 bytes on one line; for example the name of the workflow to use instead. |
 | `spec.agentCard.description` | string | no | Description stored with the workload record and shown on the agent card. |
 | `spec.agentCard.skills` | list of strings | no | Tags shown on the agent card. |
 | `spec.roleCard` | string | no | Role text put into the seat's prompt by the context pack and the council. |
 | `spec.grants.modelGate.allowed` | bool | no | Lets the workload call the Model Gate; a `deterministic-controller` must leave it `false`. |
 | `spec.grants.modelGate.providers` | list of strings | no | Provider routes the workload may call; an empty list allows all of them. |
 | `spec.grants.modelGate.budgetRef` | string | conditional | Name of a declared Budget, required when `allowed` is `true`. |
-| `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load. |
+| `spec.grants.mcpTools` | list of strings | no | MCP tool names granted through the MCP gate; names are not checked at load, except on the workload of a `verifier` step (see [Workflow](#workflow)). |
 | `spec.grants.mcpServers` | list of objects | no | Upstream MCP servers whose tools the gate proxies (parked, see below). |
 | `spec.grants.actions` | list of strings | no | Typed actions granted; a `sandbox` workload must leave it empty. |
+| `spec.grants.repos` | list of strings | no | Granted repositories for GitOps actions; an entry must not be empty, have outer whitespace or contain spaces, tabs or newlines. `git.push` accepts `owner/repo`, a URL or an absolute path. `git.open_pr`, `git.pr_checks` and `git.merge_pr` compare entries, when the list is not empty, as normalized `owner/repo` (outer slashes and a `.git` suffix removed). `git.create_branch` ignores the field. In `git.push`, a plain `owner/repo` entry matches only a GitHub push URL. A `git.push` destination must match an entry unless it is `origin` at the repository pinned at start, and it must also equal the `destination` field of the approved value exactly. Both must be an accepted form: `https://host[:port]/path` with no user information, `ssh://[git@]host[:port]/path`, the scp-like `git@host:path` or an absolute local path; `::` helper syntax, `file://` and other schemes, opaque URLs and any user other than plain `git` are refused (see [tools and actions](../how-it-works/tools-and-actions.md)). |
 | `spec.grants.delegateTo` | list of strings | no | Other declared Workloads this one may delegate to; not itself, and empty for a `sandbox` workload. |
 
 ### Upstream MCP server (parked)
 
-Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/upstream.go`. Each entry exposes the tools in `allowedTools` as `<name>.<tool>`. Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks upstream MCP work. The loader does not validate these fields.
+Source: `internal/domain/types.go` (`UpstreamMCPServer`), `internal/gate/mcp/upstream.go`. Each entry exposes the tools in `allowedTools` as `<name>.<tool>`. Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks upstream MCP work. The loader checks only `name` (see below) and does not validate the other fields.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `spec.grants.mcpServers[].name` | string | no | Prefix of the proxied tool names; an entry without a name is skipped. |
+| `spec.grants.mcpServers[].name` | string | no | Prefix of the proxied tool names; an entry without a name is skipped. The loader refuses a name whose part before the first dot is a built-in tool namespace (`memory`, `conclave`, `sablecourt`, `git`, `sandbox`), compared trimmed and in lower case. |
 | `spec.grants.mcpServers[].url` | string | no | Streamable HTTP endpoint of the server; an entry without a URL is skipped. A call needs an `http` or `https` URL with a host. With `http`, the `secretName` credential crosses the network unencrypted. |
 | `spec.grants.mcpServers[].secretName` | string | no | Secret store entry sent as the credential on every call, whatever the URL scheme; with none, calls carry no credential. |
 | `spec.grants.mcpServers[].authHeader` | string | no | Header that carries the secret, `Authorization` when empty. |
@@ -77,8 +84,8 @@ Source: `internal/gate/mcp/actions.go`, `internal/gate/mcp/memory.go`, `internal
 
 | Grant list | Names the daemon registers |
 | --- | --- |
-| `mcpTools` | `sablecourt.list_workloads`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
-| `actions` | `git.create_branch`, `git.open_pr`, `sandbox.propose_promotion`. |
+| `mcpTools` | `sablecourt.list_workloads`, `git.pr_checks`, `memory.put`, `memory.delete`, `memory.get`, `memory.search`, `conclave.post`, `conclave.read`, `conclave.relic_put`, `conclave.relic_get`, and `<server>.<tool>` for each upstream tool. |
+| `actions` | `git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`, `sandbox.propose_promotion`. |
 
 ## Policy
 
@@ -117,14 +124,15 @@ Source: `internal/domain/types.go` (`WorkflowSpec`, `WorkflowStep`), `internal/c
 | `spec.steps` | list of objects | yes | The steps, at least one. |
 | `spec.steps[].name` | string | yes | Step name. |
 | `spec.steps[].workload` | string | yes | Name of the declared Workload that runs the step. |
-| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. |
+| `spec.steps[].role` | string | no | The reconciler acts on `verifier` and `author`; any other value has no effect. The loader refuses a `verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads` (an empty list such as `actions: []` holds no grant; any `modelGate` setting is refused; no upstream server can register these names, because the loader refuses an `mcpServers` name in a built-in namespace), or whose workload a non-verifier step before it also uses, and a verifier on a model workload when no earlier step runs a model. |
 | `spec.steps[].tier` | string | no | `fast`, `coding` or `critic`; the tier's model route must suit the workload. |
 | `spec.steps[].maxRetries` | integer | no | How many times a failed verifier step may send the author step back with a failure handoff. |
 | `spec.steps[].provider` | string | no | Provider for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |
 | `spec.steps[].model` | string | no | Model for the step's task, overriding the tier's route; a `deterministic-controller` step must leave it empty. |
 | `spec.steps[].prompt` | string | no | The step's task prompt. |
+| `spec.steps[].command` | string | no | Makes this a command step: the name of an entry in the step workload's `spec.coding.commands`. The workload must be a `coding-agent`, the step cannot be the first or follow a `verifier` step, and it must leave `role`, `tier`, `provider`, `model`, `prompt` and `maxRetries` unset. It runs the command on the commit of the step before it and fails the run when the command fails. |
 
-Source for the built-in tier routes: `internal/contextpack/tiers.go`. With no override saved, `fast` is `cli:agy` with `gemini-3.8-flash-high`, `coding` is `cli:claude` with `claude-sonnet-5-5`, and `critic` is `cli:claude` with `claude-opus-5-5`. `GET` and `POST /api/v1/providers/tiers` read and change them.
+Source for the built-in tier routes: `internal/contextpack/tiers.go`. With no override saved, `fast` is `cli:agy` with `gemini-3.8-flash-high`, `coding` is `cli:claude` with `claude-sonnet-5-5`, and `critic` is `cli:codex` with `gpt-6.2-astra`, a model family other than the `coding` route's (see [configuration](configuration.md#model-tiers-and-families)). `GET` and `POST /api/v1/providers/tiers` read and change them.
 
 ## Schedule
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/attach"
 	"github.com/shadewright-labs/sablecourt/internal/gate/councilproxy"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 )
 
 type CouncilProxyLauncher interface {
@@ -23,10 +25,16 @@ type CouncilProxyLauncher interface {
 	RemoveInternalNetwork(context.Context, string) error
 }
 
-// Adapter runs local coding CLIs (claude or codex) inside dedicated Git worktrees
-// with stripped environment variables, detached process groups, and OS sandboxing.
+// Adapter runs coding CLIs (claude, codex or agy) against dedicated Git
+// worktrees. Standalone tasks and council seats run in harness containers.
+// The host launcher (stripped environment, detached process group, OS
+// sandbox) runs only when HostModeUnsafe is set and no container runner is
+// configured; such a run is outside invariants 2 and 3.
 type Adapter struct {
-	WorktreeRoot       string // Directory for worktrees and their state.
+	WorktreeRoot string // Directory for worktrees and their state.
+	// Root is the worktree root handle the daemon opened at startup. Crash
+	// cleanup deletes through it. When nil, it is opened on first use.
+	Root               *mountguard.Root
 	DryRun             bool
 	AttachHub          *attach.Hub
 	BranchRetention    time.Duration     // Prune merged branches after this age on the next start.
@@ -39,11 +47,16 @@ type Adapter struct {
 	CouncilProxyImage  string
 	DaemonListen       string
 	CouncilLimits      scruntime.CouncilLimits
+	// HostModeUnsafe allows the host launcher when no container runner is
+	// configured. Off by default; the daemon sets it only from an explicit flag.
+	HostModeUnsafe bool
+	Logger         *slog.Logger // Receives the warning logged at each host launch.
 
 	allowUnconfined bool // In-process fixture only.
 	setupTimeout    time.Duration
 	beforeTaskState func(taskID string) // Test hook invoked before writing task state.
 
+	rootMu     sync.Mutex
 	mu         sync.Mutex
 	gates      map[string]*taskGate
 	running    sync.Map // Worktree path to *codingProcess.
@@ -51,12 +64,27 @@ type Adapter struct {
 }
 
 // SupportsCouncilContainers reports whether the adapter is configured to launch
-// council turns inside hardened containers.
+// coding tasks and council turns inside hardened harness containers.
 func (a *Adapter) SupportsCouncilContainers() bool {
 	return a != nil && a.CouncilRunner != nil
 }
 
 var _ scruntime.Adapter = (*Adapter)(nil)
+
+// worktreeHandle returns the worktree root handle, opening it once when the
+// daemon did not provide one.
+func (a *Adapter) worktreeHandle() (*mountguard.Root, error) {
+	a.rootMu.Lock()
+	defer a.rootMu.Unlock()
+	if a.Root == nil {
+		r, err := mountguard.OpenRoot(a.WorktreeRoot)
+		if err != nil {
+			return nil, err
+		}
+		a.Root = r
+	}
+	return a.Root, nil
+}
 
 func NewAdapter(worktreeRoot string) *Adapter {
 	return &Adapter{WorktreeRoot: worktreeRoot}
@@ -90,6 +118,11 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, errors.New("StartAtCommit cannot be combined with checkoutMode")
 	}
 	readOnly = readOnly || input.isReadOnly()
+	if spec.Command != nil {
+		if err := a.validateCommandLaunch(spec, input, commit, readOnly); err != nil {
+			return scruntime.Handle{}, err
+		}
+	}
 	limit := a.WallTime
 	if limit == 0 {
 		limit = defaultWallTime
@@ -102,8 +135,13 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 			if err := a.validateCouncilContainerLaunch(spec, input); err != nil {
 				return scruntime.Handle{}, err
 			}
-		} else if err := a.validateSandbox(cfg.Sandbox, readOnly); err != nil {
-			return scruntime.Handle{}, err
+		} else {
+			if err := a.hostLaunchAllowed(); err != nil {
+				return scruntime.Handle{}, err
+			}
+			if err := a.validateSandbox(cfg.Sandbox, readOnly); err != nil {
+				return scruntime.Handle{}, err
+			}
 		}
 	}
 
@@ -181,7 +219,20 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 	}
 
 	if spec.CouncilContainer {
-		return a.startCouncilContainer(ctx, spec, input, dir, taskBase, state, readOnly, commitJournal)
+		gitDir, err := prepareHarnessGitDir(ctx, dir, taskBase, state)
+		if err != nil {
+			return scruntime.Handle{}, err
+		}
+		if gitDir != "" {
+			prev := rollback
+			rollback = func(rbCtx context.Context) error { return errors.Join(prev(rbCtx), os.RemoveAll(gitDir)) }
+		}
+		handle, err := a.startCouncilContainer(ctx, spec, input, dir, taskBase, gitDir, state, readOnly, commitJournal)
+		if err != nil && spec.Command != nil {
+			// No host fallback: a command whose container cannot be built or started does not run.
+			err = errors.Join(&scruntime.CommandRefusal{Command: spec.Command.Name, Reason: scruntime.CommandContainerRefused}, err)
+		}
+		return handle, err
 	}
 
 	if input.checkoutMode == "" && input.context != "" {
@@ -212,6 +263,9 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		return scruntime.Handle{}, err
 	}
 
+	if a.Logger != nil {
+		a.Logger.Warn("UNSAFE: coding harness launched on the host, outside invariants 2 and 3", "task", spec.TaskID, "harness", cfg.Harness)
+	}
 	process, id, err := launchWrapper(cmd, taskBase, scratch, state.TaskID, limit, a.AttachHub)
 	if err != nil {
 		return scruntime.Handle{}, fmt.Errorf("start coding harness %q at %q: %w", cfg.Harness, sandboxTarget(cmd), err)
@@ -222,6 +276,25 @@ func (a *Adapter) start(ctx context.Context, spec scruntime.LaunchSpec, commit s
 		_ = commitJournal()
 	}
 	return handle, nil
+}
+
+// ErrHostModeOff refuses a host launch when host mode was not opted in.
+var ErrHostModeOff = fmt.Errorf("coding tasks run in harness containers only: no container runtime is configured and host mode is off (see sablectl doctor): %w", scruntime.ErrCodingRuntimeUnavailable)
+
+// errHostWithContainers refuses a host launch while containers are available.
+var errHostWithContainers = errors.New("coding host launch refused: harness containers are configured, so the task must run in a container")
+
+// hostLaunchAllowed is the one check for a launch outside a container. Host
+// mode needs the explicit opt-in and is used only when no container runner is
+// configured, so a container never silently falls back to the host.
+func (a *Adapter) hostLaunchAllowed() error {
+	if a.SupportsCouncilContainers() {
+		return errHostWithContainers
+	}
+	if !a.HostModeUnsafe && !a.allowUnconfined {
+		return ErrHostModeOff
+	}
+	return nil
 }
 
 func pinWorktree(ctx context.Context, dir string, state *worktreeState, commit string) error {

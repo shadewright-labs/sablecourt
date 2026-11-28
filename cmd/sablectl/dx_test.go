@@ -42,6 +42,52 @@ func TestDoctorReportsDaemonState(t *testing.T) {
 			notWant: []string{"chain: valid"},
 		},
 		{
+			name: "coding tasks in harness containers",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"container","hostModeOptIn":false}`),
+			want:    []string{"coding tasks: harness containers"},
+			notWant: []string{"UNSAFE", "opt-in"},
+		},
+		{
+			name: "host mode opt-in unused while containers are configured",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"container","hostModeOptIn":true}`),
+			want: []string{"coding tasks: harness containers", "opt-in is set (--unsafe-host-harnesses) but unused"},
+		},
+		{
+			name: "forced host mode is shown as outside invariants 2 and 3",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"host-unsafe","hostModeOptIn":true}`),
+			want:    []string{"UNSAFE host mode (--unsafe-host-harnesses), outside invariants 2 and 3"},
+			notWant: []string{"harness containers"},
+		},
+		{
+			name: "coding unavailable without a container runtime",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"unavailable","hostModeOptIn":false}`),
+			want: []string{"coding tasks: unavailable (no container runtime configured; host mode is off)"},
+		},
+		{
+			name: "coding unavailable although host mode was requested",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"unavailable","hostModeOptIn":true}`),
+			want:    []string{"coding tasks: unavailable (no container runtime configured; --unsafe-host-harnesses is set but host mode could not start: no working host sandbox, or Citadel mode)"},
+			notWant: []string{"host mode is off"},
+		},
+		{
+			name: "unknown coding mode is not reported as host mode off",
+			daemon: newCLIDaemon().
+				on("GET /healthz", http.StatusOK, "ok").
+				on("GET /api/v1/runtime/coding", http.StatusOK, `{"mode":"something-new","hostModeOptIn":false}`),
+			want:    []string{"coding tasks: unknown runtime mode"},
+			notWant: []string{"host mode is off"},
+		},
+		{
 			name:    "unreachable daemon",
 			daemon:  newCLIDaemon().on("GET /healthz", http.StatusServiceUnavailable, "starting"),
 			want:    []string{"unreachable (HTTP 503: starting)"},

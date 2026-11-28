@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,18 +10,72 @@ import (
 )
 
 type LaunchSpec struct {
-	TaskID           string
-	Workload         domain.Workload
-	WorkDir          string
-	InputJSON        string
-	ModelGateURL     string
-	DataGateURL      string
-	TaskToken        string
-	ModelGateToken   string
+	TaskID         string
+	Workload       domain.Workload
+	WorkDir        string
+	InputJSON      string
+	ModelGateURL   string
+	DataGateURL    string
+	TaskToken      string
+	ModelGateToken string
+	// CouncilContainer asks the coding adapter for a harness container. The
+	// reconciler sets it for every coding task (standalone or council seat)
+	// when the adapter has a container runner; the name predates standalone use.
 	CouncilContainer bool
-	CouncilDeadline  time.Time
+	CouncilDeadline  time.Time // Set only for council seats.
 	CreateAttempt    string
+	// Command, when set, runs this operator-declared command in a harness
+	// container instead of the workload's harness. The control plane resolves
+	// it from the manifest; task input never supplies it.
+	Command *CommandSpec
 }
+
+// CommandSpec is one entry of a coding workload's allowed command set.
+type CommandSpec struct {
+	Name           string
+	Argv           []string
+	Timeout        time.Duration
+	MaxOutputBytes int
+}
+
+// Reasons a command step is refused before its command runs.
+const (
+	CommandNotAllowed         = "command_not_allowed"
+	CommandNoContainerRuntime = "no_container_runtime"
+	CommandContainerRefused   = "container_spec_refused"
+)
+
+// Outcomes of a command that ran.
+const (
+	CommandPassed        = "passed"
+	CommandFailed        = "failed"
+	CommandTimedOut      = "timeout"
+	CommandOutputOverCap = "output_over_cap"
+)
+
+// CommandRefusal is the error of a command step refused before its command
+// ran. Its text names only the command and a fixed reason.
+type CommandRefusal struct {
+	Command string
+	Reason  string
+}
+
+func (e *CommandRefusal) Error() string {
+	return fmt.Sprintf("command %q refused: %s", e.Command, e.Reason)
+}
+
+// CommandResult is the durable record of a command step, stored redacted and
+// capped as the task's command-result artifact.
+type CommandResult struct {
+	Command         string `json:"command"`
+	Outcome         string `json:"outcome"`
+	ExitCode        int    `json:"exit_code"`
+	Output          string `json:"output"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+}
+
+// CommandResultArtifact names the artifact that carries a CommandResult.
+const CommandResultArtifact = "command-result"
 
 type Handle struct {
 	AdapterName      string
@@ -83,6 +138,11 @@ type Adapter interface {
 	CollectArtifacts(ctx context.Context, handle Handle) ([]Artifact, error)
 }
 
+// ErrCodingRuntimeUnavailable means no coding task can start: no container
+// runtime is configured and host mode is off. Refusals wrap it so the
+// reconciler can record why a task failed.
+var ErrCodingRuntimeUnavailable = errors.New("coding runtime unavailable")
+
 // MissingBinaryError reports that a workload executable could not be found at Path.
 type MissingBinaryError struct {
 	Path string
@@ -102,6 +162,11 @@ func (e *MissingBinaryError) Unwrap() error { return e.Err }
 type CouncilCheckout struct {
 	Path string
 	Kind CouncilCheckoutKind
+	// GitDir, when set, is a self-contained Git metadata directory built for
+	// this launch. A linked worktree's .git file points at its registration
+	// in the shared repository, which a harness container never mounts, so
+	// the container gets this directory as its Git metadata instead.
+	GitDir string
 }
 
 type CouncilCheckoutKind string
@@ -111,7 +176,15 @@ const (
 	CouncilRef    CouncilCheckoutKind = "ref"
 	CouncilReview CouncilCheckoutKind = "review"
 	CouncilWriter CouncilCheckoutKind = "assigned-writer"
+	// CouncilTask is a standalone coding task's own writable worktree. It runs
+	// in the same harness container, with the same guards, as a council seat.
+	CouncilTask CouncilCheckoutKind = "task"
 )
+
+// Writable reports whether the harness may write to the checkout.
+func (k CouncilCheckoutKind) Writable() bool {
+	return k == CouncilWriter || k == CouncilTask
+}
 
 type CouncilLimits struct {
 	NanoCPUs    int64
@@ -138,8 +211,11 @@ type CouncilLaunch struct {
 	ProxyURL          string
 	DataGateURL       string
 	CreateAttempt     string
-	OnCreated         func(context.Context, CouncilIdentity) error
-	OnStarted         func(context.Context, CouncilIdentity) error
+	// Command replaces the harness CLI with this argv. Such a container gets
+	// no login volume, no tool volume, no task lease and no prompt.
+	Command   []string
+	OnCreated func(context.Context, CouncilIdentity) error
+	OnStarted func(context.Context, CouncilIdentity) error
 }
 
 // CouncilResult identifies the exact container for evidence and cleanup retries.
@@ -149,6 +225,10 @@ type CouncilResult struct {
 	FinishedAt                   time.Time
 	ExitCode                     int
 	Stdout, Stderr               string
+	// OutputOverflow is set when a stream was cut: it passed the runner's
+	// output limit, or its redaction grew past it. A council stream is then replaced by a marker; a command stream keeps
+	// its redacted tail, starting on a whole line.
+	OutputOverflow bool
 }
 
 // CouncilInspection reports verified Docker container state for recovery and polling.
