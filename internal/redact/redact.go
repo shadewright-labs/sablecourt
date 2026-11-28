@@ -72,6 +72,24 @@ var rules = []rule{
 		post:     2,
 		marker:   "[REDACTED:secret]",
 	},
+	// A JSON secret value whose string does not end where JSON allows (its
+	// closing quote is followed by something other than a comma, a closing
+	// bracket, a line break or the end, or nothing closes it on the line) was
+	// read with the wrong quote parity: a string left open before it, or a
+	// backslash at its end, moved the quotes, so the next key and its value
+	// are not where the rule above looks (issue 238). The key needs no opening
+	// quote, since an open string may have taken it. The rest of the line is
+	// hidden with the value, which fails closed, and a closing quote ends the
+	// marker, so a second pass reads the same string and changes nothing. The
+	// value and the tail stay within one line, so each match looks at one line
+	// only and the scan stays linear.
+	{
+		category: "generic_secret_kv",
+		re:       regexp.MustCompile(`(?im)(` + sensitiveField + `"\s*:\s*")(?:[^"\\\n]|\\.)*(?:"[ \t]*[^\s,}\]]|\\?$)[^\n]*`),
+		replace:  `${1}[REDACTED:secret]"`,
+		pre:      1,
+		marker:   `[REDACTED:secret]"`,
+	},
 	{
 		category: "generic_secret_kv",
 		re:       regexp.MustCompile(`(?i)\b(` + sensitiveField + `)\b(\s*[:=]\s*["']?)([^\s"',;]{6,})`),

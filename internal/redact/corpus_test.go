@@ -52,6 +52,18 @@ func TestCorpusMustHide(t *testing.T) {
 			mustContain:    []string{"password: '"},
 		},
 		{
+			name:           "json value after an unclosed string",
+			input:          `{"password":"unclosed, "api_key":"` + gapSecret + `"}`,
+			mustNotContain: []string{gapSecret, "unclosed"},
+			mustContain:    []string{`{"password":"`},
+		},
+		{
+			name:           "json key quote escaped by an unclosed string",
+			input:          `{"password":"unclosed\"api_key":"` + gapSecret + `"}`,
+			mustNotContain: []string{gapSecret, "unclosed"},
+			mustContain:    []string{`{"password":"`},
+		},
+		{
 			name:           "M1 adversarial unclosed quote followed by second secret",
 			input:          "password=\"unclosedSecret\napi_key=\"secondSecretVal\"",
 			mustNotContain: []string{"unclosedSecret", "secondSecretVal"},

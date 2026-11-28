@@ -3,19 +3,23 @@ package redact
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // TestRedactorLinearGrowth feeds inputs shaped like each class of the corpus at
-// two sizes, 8x apart, and checks that the time Text takes grows no faster than
-// a linear bound. For 8x input, O(n) time grows by about 8x, O(n^1.5) by 22.6x
-// and O(n^2) by 64x. Small and large runs alternate and each size takes the
-// fastest of several runs, which damps scheduler and GC noise; the bound of 16
-// leaves 2x above linear and still rejects O(n^1.5). CI runs only with -race,
-// which slows Text by about 20x, so under -race the test uses smaller inputs
-// and fewer runs for every case, with the same ratio and bound.
+// two sizes, 8x apart, and checks that the CPU time Text takes grows no faster
+// than a linear bound. For 8x input, O(n) work grows by about 8x, O(n^1.5) by
+// 22.6x and O(n^2) by 64x. Small and large batches alternate and each size
+// takes the least of several batches; the bound of 16 leaves 2x above linear
+// and still rejects O(n^1.5). Time spent waiting for a CPU is not counted (see
+// growthViolation), so a loaded runner does not move the ratio. CI runs only
+// with -race, which slows Text by about 20x, so under -race the test uses
+// smaller inputs and fewer runs for every case, with the same ratio and bound.
 func TestRedactorLinearGrowth(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing ratios are not measured under -short")
@@ -305,6 +309,30 @@ func TestRedactorLinearGrowth(t *testing.T) {
 			},
 		},
 		{
+			name: "json open secret values on many lines",
+			build: func(n int) string {
+				return strings.Repeat(`{"password":"open value`+"\n", max(1, n/24))
+			},
+		},
+		{
+			name: "json secret values with text after the closing quote",
+			build: func(n int) string {
+				return strings.Repeat(`"api_key":"v"x `, max(1, n/15))
+			},
+		},
+		{
+			name: "json open string then many secret members",
+			build: func(n int) string {
+				return `{"note":"open\` + strings.Repeat(`"api_key":"v\`, max(1, n/13)) + `"}`
+			},
+		},
+		{
+			name: "json secret keys without the opening quote repeated",
+			build: func(n int) string {
+				return strings.Repeat(`password":"\`, max(1, n/12))
+			},
+		},
+		{
 			name: "N1 url credential repeated single-quoted schemes with trailing at",
 			build: func(n int) string {
 				return strings.Repeat("'a://", max(1, n/5)) + "@"
@@ -324,44 +352,97 @@ func TestRedactorLinearGrowth(t *testing.T) {
 const (
 	growthSizeFactor = 8
 	growthMaxRatio   = 16.0
+	// growthAttempts is how many times a ratio over the bound is measured
+	// again before it fails. Quadratic work exceeds the bound on every
+	// attempt; a run slowed by its machine does not.
+	growthAttempts = 3
+	// growthRetryBelow is the ratio under which a failed attempt is measured
+	// again. A ratio above it (O(n^2) gives about 64) fails at once.
+	growthRetryBelow = 2 * growthMaxRatio
+	// growthMinBatch is the least CPU time one batch of small calls takes.
+	// Each batch repeats the call until it reaches this, so the clock's
+	// resolution is small against what it measures.
+	growthMinBatch = 2 * time.Millisecond
+	growthMaxReps  = 256
 )
 
 // growthViolation builds the input at smallSize and growthSizeFactor times
-// that, times fn on both, and returns a message if the time ratio exceeds
-// growthMaxRatio, or "" if it does not. The real test and the self-test below
-// both go through it.
+// that, measures the CPU time fn takes on both, and returns a message if the
+// ratio exceeds growthMaxRatio on every attempt, or "" if one attempt stays
+// within it. The real test and the self-test below both go through it.
+//
+// The measure is CPU time, not wall time (issues 124 and 237): on Linux the
+// CPU time of the OS thread the goroutine is locked to, which does not grow
+// while the thread waits for a CPU, so other processes, other test packages
+// and other goroutines on a busy runner do not change the ratio.
 func growthViolation(fn func(string) Result, build func(int) string, smallSize, runs int) string {
 	smallInput := build(smallSize)
 	largeInput := build(growthSizeFactor * smallSize)
-	smallTime, largeTime := fastestRuns(fn, smallInput, largeInput, runs)
-	ratio := float64(largeTime) / float64(smallTime)
-	if ratio > growthMaxRatio {
-		return fmt.Sprintf("time ratio %.2f exceeded linear bound %.1f (small=%v large=%v smallLen=%d largeLen=%d)",
-			ratio, growthMaxRatio, smallTime, largeTime, len(smallInput), len(largeInput))
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var attempts []string
+	for range growthAttempts {
+		smallTime, largeTime, reps := fastestRuns(fn, smallInput, largeInput, runs)
+		ratio := float64(largeTime) / float64(smallTime)
+		if ratio <= growthMaxRatio {
+			return ""
+		}
+		attempts = append(attempts, fmt.Sprintf("ratio %.2f (small=%v large=%v for %d calls)", ratio, smallTime, largeTime, reps))
+		if ratio > growthRetryBelow {
+			break
+		}
 	}
-	return ""
+	return fmt.Sprintf("%s ratio exceeded linear bound %.1f (smallLen=%d largeLen=%d): %s",
+		workClockName, growthMaxRatio, len(smallInput), len(largeInput), strings.Join(attempts, "; "))
 }
 
-// fastestRuns calls fn on small and large in turn, after one warm-up call of
-// each, and returns the shortest wall time seen for each.
-func fastestRuns(fn func(string) Result, small, large string, runs int) (time.Duration, time.Duration) {
-	fn(small)
+// fastestRuns calls fn on small and large in turn, in batches of reps calls
+// each, after one warm-up call of each, and returns the least CPU time seen
+// for a batch of each and reps. reps is set so a batch of small calls takes at
+// least growthMinBatch.
+func fastestRuns(fn func(string) Result, small, large string, runs int) (time.Duration, time.Duration, int) {
 	fn(large)
+	// Calibrate on a doubling count of small calls until they take at least a
+	// tenth of growthMinBatch, so a clock that ticks coarsely cannot read
+	// zero and set a huge count.
+	n := 1
+	var took time.Duration
+	for {
+		start := workClock()
+		for range n {
+			fn(small)
+		}
+		took = workClock() - start
+		if took >= growthMinBatch/10 || n >= growthMaxReps {
+			break
+		}
+		n *= 2
+	}
+	once := max(took/time.Duration(n), time.Nanosecond)
+	reps := int(min(growthMaxReps, max(1, int64(growthMinBatch/once)+1)))
+	batch := func(input string) time.Duration {
+		start := workClock()
+		for range reps {
+			fn(input)
+		}
+		return workClock() - start
+	}
 	bestSmall := time.Duration(math.MaxInt64)
 	bestLarge := time.Duration(math.MaxInt64)
 	for range runs {
-		start := time.Now()
-		fn(small)
-		bestSmall = min(bestSmall, time.Since(start))
-		start = time.Now()
-		fn(large)
-		bestLarge = min(bestLarge, time.Since(start))
+		bestSmall = min(bestSmall, batch(small))
+		bestLarge = min(bestLarge, batch(large))
 	}
-	return max(bestSmall, time.Microsecond), max(bestLarge, time.Microsecond)
+	return max(bestSmall, time.Microsecond), max(bestLarge, time.Microsecond), reps
 }
 
-// growthSink keeps the quadratic wrapper's work from being optimised away.
-var growthSink int
+// wallClock is the fallback of workClock: time since the test binary started.
+func wallClock() time.Duration { return time.Since(wallStart) }
+
+var wallStart = time.Now()
+
+// busySink keeps the busy goroutines' loops from being optimised away.
+var busySink atomic.Int64
 
 // TestGrowthBoundRejectsSuperlinear runs the real bound on wrappers of Text:
 // one that adds linear work must pass, one that adds quadratic work must fail.
@@ -369,24 +450,72 @@ func TestGrowthBoundRejectsSuperlinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing ratios are not measured under -short")
 	}
-	smallSize, runs := 1<<12, 5
+	checkGrowthWrappers(t)
+}
+
+// TestGrowthBoundUnderLoad repeats the self-test while busy goroutines, two
+// per P, compete for every CPU the test may use. With wall time the busy
+// goroutines take turns with the measured one and the ratio swings either
+// way; thread CPU time leaves their share out. It runs on Linux only, where
+// workClock is per thread.
+func TestGrowthBoundUnderLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing ratios are not measured under -short")
+	}
+	if workClockName != "thread CPU time" {
+		t.Skipf("workClock measures %s here, which counts the busy goroutines", workClockName)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 2 * runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := 0
+			for {
+				select {
+				case <-stop:
+					busySink.Add(int64(n))
+					return
+				default:
+				}
+				for i := range 1 << 16 {
+					n += i
+				}
+			}
+		}()
+	}
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
+	checkGrowthWrappers(t)
+}
+
+// checkGrowthWrappers asserts the growth bound accepts linear extra work and
+// rejects quadratic extra work. The extra work is more calls of Text, so it
+// keeps its share of the total under -race, which slows Text about 20x: the
+// linear wrapper redacts one fixed prefix per step of input, the quadratic one
+// a prefix that grows by a step each time.
+func checkGrowthWrappers(t *testing.T) {
+	t.Helper()
+	smallSize, runs := 1<<10, 3
 	if raceEnabled {
-		smallSize, runs = 1<<10, 2
+		smallSize, runs = 1<<9, 2
 	}
 	build := func(n int) string {
 		return "secret:\n" + strings.Repeat("  key: value012345\n", max(1, n/19))
 	}
+	step := smallSize / 4
 	linear := func(s string) Result {
-		for i := range len(s) {
-			growthSink += int(s[i])
+		for i := step; i <= len(s); i += step {
+			Text(s[:step])
 		}
 		return Text(s)
 	}
 	quadratic := func(s string) Result {
-		for i := range len(s) {
-			for j := range len(s) {
-				growthSink += int(s[i] ^ s[j])
-			}
+		for i := step; i <= len(s); i += step {
+			Text(s[:i])
 		}
 		return Text(s)
 	}
