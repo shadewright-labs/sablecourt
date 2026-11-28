@@ -48,6 +48,9 @@ type Options struct {
 	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
+	// PacketDestination holds the startup facts that decide whether context
+	// packets may carry learnings. The zero value withholds them.
+	PacketDestination contextpack.Destination
 }
 
 type launchReservation struct {
@@ -67,6 +70,7 @@ type Reconciler struct {
 	maxConcurrent   int
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
+	packetDest      contextpack.Destination
 
 	instance          string
 	recovering        map[string]bool
@@ -441,6 +445,7 @@ func NewReconciler(opts Options) *Reconciler {
 		maxConcurrent:     opts.MaxConcurrent,
 		onTaskFailed:      opts.OnTaskFailed,
 		now:               nowFn,
+		packetDest:        opts.PacketDestination,
 		handles:           make(map[string]scruntime.Handle),
 		handleAdapters:    make(map[string]scruntime.Adapter),
 		partialStarts:     make(map[string]bool),
@@ -1363,7 +1368,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if commit != "" && !supportsPin {
 		return errAuthorCheckoutUnavailable
 	}
-	wl, inputJSON, err := r.prepareLaunchInput(ctx, task, wl)
+	wl, inputJSON, pinned, err := r.prepareLaunchInput(ctx, task, wl)
 	if err != nil {
 		return err
 	}
@@ -1386,7 +1391,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
-	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry)
+	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry, pinned)
 	if err != nil {
 		return err
 	}
@@ -1510,7 +1515,9 @@ func (r *Reconciler) councilDeadline(ctx context.Context, conclaveID string) (ti
 	return snap.Deadline, nil
 }
 
-func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time) (string, error) {
+// issueLaunchToken mints the launch lease. A non-nil pinned list holds the
+// providers the task's learning packet was admitted under.
+func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time, pinned []string) (string, error) {
 	r.mu.Lock()
 	reservation := r.launching[taskID]
 	r.mu.Unlock()
@@ -1537,7 +1544,7 @@ func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExp
 			expiresAt = maxExpiry
 		}
 	}
-	return model.MintTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt)
+	return model.MintPinnedTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt, pinned)
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {
@@ -1698,9 +1705,15 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if nextStep.Role != "" {
 		payload["role"] = nextStep.Role
 	}
+	completedVerifier := step.Role == "verifier" || meta.Role == "verifier"
 	if nextStep.Role == "verifier" {
+		// A verifier after a verifier reviews the same author step.
 		payload["author_task_id"] = completedTask.ID
 		payload["author_step_index"] = meta.StepIndex
+		if completedVerifier {
+			payload["author_task_id"] = meta.AuthorTaskID
+			payload["author_step_index"] = meta.AuthorStepIndex
+		}
 		maxR := nextStep.MaxRetries
 		if maxR == 0 {
 			maxR = meta.MaxRetries
@@ -1725,7 +1738,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	raw, _ := json.Marshal(payload)
 	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
 	if nextStep.Role == "verifier" {
-		next.AuthorCommit = authorCommit(completedTask.ArtifactsJSON)
+		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, completedTask.ArtifactsJSON)
 	}
 	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
 	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)

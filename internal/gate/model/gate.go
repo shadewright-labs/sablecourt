@@ -135,6 +135,14 @@ func MintTaskToken(ctx context.Context, st store.Store, taskID, workloadName str
 
 // MintTaskTokenUntil generates a scoped task bearer token with an explicit expiry bound.
 func MintTaskTokenUntil(ctx context.Context, st store.Store, taskID, workloadName string, now, expiresAt time.Time) (string, error) {
+	return MintPinnedTaskTokenUntil(ctx, st, taskID, workloadName, now, expiresAt, nil)
+}
+
+// MintPinnedTaskTokenUntil is MintTaskTokenUntil for a task whose context
+// packet carried learnings: a non-nil pinned list is the provider set the
+// packet was admitted under, and the lease reaches no other provider, even
+// after a reload widens the workload grant (ADR-0012).
+func MintPinnedTaskTokenUntil(ctx context.Context, st store.Store, taskID, workloadName string, now, expiresAt time.Time, pinned []string) (string, error) {
 	now = now.UTC()
 	expiresAt = expiresAt.UTC()
 	if !expiresAt.After(now) {
@@ -151,6 +159,9 @@ func MintTaskTokenUntil(ctx context.Context, st store.Store, taskID, workloadNam
 		WorkloadName: workloadName,
 		ExpiresAt:    expiresAt,
 		CreatedAt:    now,
+	}
+	if pinned != nil {
+		lease.PinnedProviders = slices.Clone(pinned)
 	}
 	if err := st.CreateLease(ctx, lease); err != nil {
 		return "", err
@@ -213,6 +224,18 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"provider_not_allowed"}`)
 		writeErr(w, http.StatusForbidden, "provider not granted to workload")
 		return
+	}
+
+	// A packet that carried learnings was admitted for one provider set. A
+	// reload can widen the grant, so this lease, including its fallbacks,
+	// stays inside the pinned set (ADR-0012).
+	if lease.PinnedProviders != nil {
+		if !slices.Contains(lease.PinnedProviders, provider) {
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"provider_not_admitted_with_learnings"}`)
+			writeErr(w, http.StatusForbidden, "provider not admitted for this task's context packet")
+			return
+		}
+		workload.Spec.Grants.ModelGate.Providers = pinnedGrant(workload.Spec.Grants.ModelGate.Providers, lease.PinnedProviders)
 	}
 
 	budget, ok := bundle.Budgets[workload.Spec.Grants.ModelGate.BudgetRef]
@@ -375,6 +398,23 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isFallbackStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+}
+
+// pinnedGrant narrows granted to the providers in pinned. An empty grant
+// allows every provider, so it narrows to pinned itself. The caller has
+// checked that the requested provider is in both, so the result is never
+// empty, which would read as every provider.
+func pinnedGrant(granted, pinned []string) []string {
+	if len(granted) == 0 {
+		return slices.Clone(pinned)
+	}
+	var out []string
+	for _, p := range granted {
+		if slices.Contains(pinned, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // fallbackProviders returns the wire-compatible fallback providers granted to wl

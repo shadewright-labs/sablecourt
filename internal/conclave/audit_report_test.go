@@ -52,7 +52,7 @@ func TestOpenCleanupAuditFailureSaysWhatHappened(t *testing.T) {
 		"a message was added to task " + tasks[0].ID,
 		"conclave " + rooms[0].ID + " moved to cancelled",
 		"task " + tasks[0].ID + " moved from submitted to cancelled",
-		"the leases of task " + tasks[0].ID + " were revoked",
+		// The task held no lease, so revoking its leases changed nothing.
 	}
 	if got := effects.List(); !slices.Equal(got, want) {
 		t.Fatalf("effects %q, want %q", got, want)

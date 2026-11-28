@@ -27,13 +27,24 @@ func RecordAudit(ctx context.Context, a AuditAppender, rec domain.AuditRecord) e
 	if a == nil {
 		return fmt.Errorf("%w: no audit store", ErrAuditWrite)
 	}
-	if err := a.AppendAudit(ctx, rec); err != nil {
-		slog.Default().ErrorContext(ctx, "audit write failed", "category", rec.Category, "action", rec.Action, "outcome", rec.Outcome, "task_id", rec.TaskID, "error", err)
-		// The store error goes to the log only, not to callers that may
-		// show it to a workload.
-		return fmt.Errorf("%w (%s %s)", ErrAuditWrite, rec.Action, rec.Outcome)
+	return AuditWriteError(ctx, rec, a.AppendAudit(ctx, rec))
+}
+
+// AuditWriteError returns nil when err is nil, and otherwise logs err and
+// returns an error wrapping ErrAuditWrite that names rec's action and outcome.
+// Every audit write goes through it, including the rows a store writes inside
+// its own transactions, so a caller always sees ErrAuditWrite and answers with
+// AuditFailureText. The store error goes to the log only, never to callers
+// that may show it to an operator or a workload.
+func AuditWriteError(ctx context.Context, rec domain.AuditRecord, err error) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(err, ErrAuditWrite) {
+		return err
+	}
+	slog.Default().ErrorContext(ctx, "audit write failed", "category", rec.Category, "action", rec.Action, "outcome", rec.Outcome, "task_id", rec.TaskID, "error", err)
+	return fmt.Errorf("%w (%s %s)", ErrAuditWrite, rec.Action, rec.Outcome)
 }
 
 // LogAudit writes rec and logs a failed write at error level. It is for

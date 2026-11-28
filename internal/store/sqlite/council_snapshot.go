@@ -46,7 +46,7 @@ func (s *SQLiteStore) CouncilSnapshot(ctx context.Context, id string) (store.Cou
 	if err != nil {
 		return store.CouncilSnapshot{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return store.CouncilSnapshot{}, err
 	}
 	return snap, nil

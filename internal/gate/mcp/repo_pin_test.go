@@ -85,7 +85,7 @@ func TestReloadNeverRepinsAndRecordsEachDriftOnce(t *testing.T) {
 	other := strings.Replace(validOpenPR, `"widgets"`, `"other"`, 1)
 	reload := func() error {
 		err := tg.binding.Recheck(context.Background()) // what every daemon reload calls
-		tg.gate.Reload(tg.bundle, tg.policy)
+		mustReload(t, tg.gate, tg.bundle, tg.policy)
 		return err
 	}
 	tg.setOrigin(t, "https://github.com/acme/other.git")

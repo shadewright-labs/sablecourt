@@ -126,7 +126,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "cancel goes ahead and reports the record", fail: audittest.Action("task.cancel"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/cancel",
-			wantCode: 500, what: "cancel", wantEffects: []string{"recovery of task task_tty was claimed", "task task_tty moved from working to cancelled", "the leases of task task_tty were revoked"},
+			wantCode: 500, what: "cancel", wantEffects: []string{"recovery of task task_tty was claimed", "task task_tty moved from working to cancelled"},
 			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
 				task, err := env.st.GetTask(ctx, "task_tty")
 				if err != nil {
@@ -140,7 +140,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "suspend goes ahead and reports the record", fail: audittest.Action("task.suspend"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/suspend",
-			wantCode: 500, what: "suspend", wantEffects: []string{"a checkpoint of task task_tty was saved", "the leases of task task_tty were revoked", "task task_tty moved from working to suspended"},
+			wantCode: 500, what: "suspend", wantEffects: []string{"a checkpoint of task task_tty was saved", "task task_tty moved from working to suspended"},
 		},
 		{
 			name: "resume is refused",

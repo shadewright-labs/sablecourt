@@ -62,19 +62,28 @@ func (s *PostgresStore) ListConclaves(ctx context.Context) ([]domain.ConclaveSes
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "conclave %s moved to %s", id, state) }()
-	_, err = store.UpdateConclaveState(ctx, s.db, nil, id, state, wardReason, time.Now().UTC(), s.appendAuditTx)
+// UpdateConclaveState notes its effect inside the transaction that makes it,
+// in store.UpdateConclaveState.
+func (s *PostgresStore) UpdateConclaveState(ctx context.Context, id string, state domain.ConclaveState, wardReason string) error {
+	_, err := store.UpdateConclaveState(ctx, s.db, nil, id, state, wardReason, time.Now().UTC(), s.appendAuditTx)
 	return err
 }
 
-func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (msgID int64, err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "message %d was stored in conclave %s", msgID, msg.ConclaveID) }()
+// AppendConclaveMessage stores a guarded post through
+// store.AppendGuardedConclavePost, which notes each change it commits, and a
+// bare message (an import) here.
+func (s *PostgresStore) AppendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
 	if handled, id, err := store.AppendGuardedConclavePost(ctx, s.db, nil, msg, s.appendAuditTx); handled {
 		return id, err
 	}
+	id, err := s.appendConclaveMessage(ctx, msg)
+	store.NoteEffectIf(ctx, err, "message %d was stored in conclave %s", id, msg.ConclaveID)
+	return id, err
+}
+
+func (s *PostgresStore) appendConclaveMessage(ctx context.Context, msg domain.ConclaveMessage) (int64, error) {
 	var id int64
-	err = s.db.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO conclave_messages (conclave_id, from_role, to_role, kind, body, task_id, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id
@@ -110,14 +119,14 @@ func (s *PostgresStore) ListConclaveMessages(ctx context.Context, conclaveID str
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) (err error) {
-	defer func() {
-		store.NoteEffectIf(ctx, err, "relic %s was written to conclave %s", relic.Name, relic.ConclaveID)
-	}()
+// PutConclaveRelic writes a report relic through
+// store.PutGuardedConclaveReportRelic, which notes it only when it inserted
+// the relic, and any other relic here.
+func (s *PostgresStore) PutConclaveRelic(ctx context.Context, relic domain.ConclaveRelic) error {
 	if handled, err := store.PutGuardedConclaveReportRelic(ctx, s.db, relic); handled {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO conclave_relics (conclave_id, name, author_role, content_type, body, sha256, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT(conclave_id, name) DO UPDATE SET
@@ -127,6 +136,7 @@ func (s *PostgresStore) PutConclaveRelic(ctx context.Context, relic domain.Concl
 			sha256 = EXCLUDED.sha256,
 			created_at = EXCLUDED.created_at
 	`, relic.ConclaveID, relic.Name, relic.AuthorRole, relic.ContentType, relic.Body, relic.SHA256, formatTime(relic.CreatedAt))
+	store.NoteEffectIf(ctx, err, "relic %s was written to conclave %s", relic.Name, relic.ConclaveID)
 	return err
 }
 
@@ -169,7 +179,8 @@ func (s *PostgresStore) ListConclaveRelics(ctx context.Context, conclaveID strin
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) FinishConclaveWake(ctx context.Context, id int64) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "the wake for message %d was finished", id) }()
-	return store.FinishConclaveWake(ctx, s.db, id)
+func (s *PostgresStore) FinishConclaveWake(ctx context.Context, id int64) error {
+	res, err := store.FinishConclaveWake(ctx, s.db, id)
+	store.NoteEffectRows(ctx, res, err, "the wake for message %d was finished", id)
+	return err
 }

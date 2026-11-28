@@ -63,9 +63,12 @@ func TestDaemonSharesOneBreakerAcrossGateAndReloads(t *testing.T) {
 			if err := st.Migrate(ctx); err != nil {
 				t.Fatal(err)
 			}
-			loader := newPolicyLoader(st, manifests)
+			loader := newPolicyLoader(manifests)
 			bundle, pol, err := loader.Load(ctx)
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := recordWorkloads(ctx, st, bundle, false); err != nil {
 				t.Fatal(err)
 			}
 			if err := st.CreateTask(ctx, domain.Task{ID: "task-b", IdempotencyKey: "b", WorkloadName: "pr-agent", State: domain.TaskStateWorking}); err != nil {
@@ -96,7 +99,9 @@ func TestDaemonSharesOneBreakerAcrossGateAndReloads(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					gate.Reload(b, p)
+					if err := gate.Reload(b, p); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			rec := openPR()

@@ -13,9 +13,10 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-// CloseCouncil renders the evidence under the same write lock as answer acceptance.
-func (s *SQLiteStore) CloseCouncil(ctx context.Context, id string, terminal domain.ConclaveState, reason string) (closedRelic domain.ConclaveRelic, err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "council %s was closed as %s", id, terminal) }()
+// CloseCouncil renders the evidence under the same write lock as answer
+// acceptance. closeCouncil notes the close inside its transaction, so closing
+// a council that is already closed notes nothing.
+func (s *SQLiteStore) CloseCouncil(ctx context.Context, id string, terminal domain.ConclaveState, reason string) (domain.ConclaveRelic, error) {
 	return s.closeCouncil(ctx, id, terminal, reason, false)
 }
 
@@ -28,6 +29,7 @@ func (s *SQLiteStore) closeCouncil(ctx context.Context, id string, terminal doma
 	if !store.ValidCouncilText(reason) {
 		return zero, errors.New("invalid redacted stop reason")
 	}
+	ctx = store.HoldEffects(ctx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return zero, err
@@ -78,6 +80,7 @@ func (s *SQLiteStore) closeCouncil(ctx context.Context, id string, terminal doma
 	if err != nil {
 		return zero, err
 	}
+	store.NoteEffect(ctx, "council %s was closed as %s", id, terminal)
 	if err := s.appendAuditTx(ctx, tx, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.close",
@@ -87,7 +90,7 @@ func (s *SQLiteStore) closeCouncil(ctx context.Context, id string, terminal doma
 	}); err != nil {
 		return zero, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return zero, err
 	}
 	return r, nil

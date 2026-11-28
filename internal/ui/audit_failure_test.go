@@ -91,10 +91,10 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 	cases = append(cases, []dashAuditCase{
 		{name: "cancel reports the task it cancelled", fail: "task.cancel",
 			post: task("task_c", domain.TaskStateWorking, "/ui/tasks/task_c/cancel"),
-			what: "cancel", wantEffects: []string{"recovery of task task_c was claimed", "task task_c moved from working to cancelled", "the leases of task task_c were revoked"}},
+			what: "cancel", wantEffects: []string{"recovery of task task_c was claimed", "task task_c moved from working to cancelled"}},
 		{name: "suspend reports the task it suspended", fail: "task.suspend",
 			post: task("task_s", domain.TaskStateWorking, "/ui/tasks/task_s/suspend"),
-			what: "suspend", wantEffects: []string{"a checkpoint of task task_s was saved", "the leases of task task_s were revoked", "task task_s moved from working to suspended"}},
+			what: "suspend", wantEffects: []string{"a checkpoint of task task_s was saved", "task task_s moved from working to suspended"}},
 		{name: "resume is refused", fail: "task.resume",
 			post: task("task_r", domain.TaskStateSuspended, "/ui/tasks/task_r/resume"),
 			what: "resume"},

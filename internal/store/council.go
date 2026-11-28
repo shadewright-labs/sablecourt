@@ -271,7 +271,8 @@ func reservedCouncilAnswer(ctx context.Context, tx *sql.Tx, room lockedConclave,
 	if err := linkCouncilFinal(ctx, tx, msg.TaskID, id, vote); err != nil {
 		return 0, err
 	}
-	return id, tx.Commit()
+	NoteEffect(ctx, "answer %d was recorded in conclave %s", id, room.ID)
+	return id, Commit(ctx, tx)
 }
 
 func linkCouncilFinal(ctx context.Context, tx *sql.Tx, task string, id int64, vote bool) error {

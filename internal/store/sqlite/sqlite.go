@@ -137,7 +137,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", version, err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := store.Commit(ctx, tx); err != nil {
 			return fmt.Errorf("commit migration %s: %w", version, err)
 		}
 	}
@@ -310,6 +310,7 @@ func (s *SQLiteStore) ListTaskMessages(ctx context.Context, taskID string) ([]do
 }
 
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "task %s moved from %s to %s", taskID, from, to) }()
 	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, readCouncilPolicy, to, reason, s.appendAuditTx)
 	if err != nil {
@@ -530,11 +531,15 @@ func (s *SQLiteStore) ConsumeApproval(ctx context.Context, id, taskID, capabilit
 
 func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) (err error) {
 	defer func() { store.NoteEffectIf(ctx, err, "a lease for task %s was minted", lease.TaskID) }()
+	pinned, err := store.EncodePinnedProviders(lease.PinnedProviders)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at, pinned_providers_json)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName,
-		lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt))
+		lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt), pinned)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
@@ -547,16 +552,19 @@ func (s *SQLiteStore) CreateLease(ctx context.Context, lease domain.Lease) (err 
 func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error) {
 	var lease domain.Lease
 	var expires, created string
-	var revoked sql.NullString
+	var revoked, pinned sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at
+		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at, pinned_providers_json
 		FROM leases
 		WHERE token_sha256 = ?
-	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created)
+	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created, &pinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Lease{}, store.ErrNotFound
 	}
 	if err != nil {
+		return domain.Lease{}, err
+	}
+	if lease.PinnedProviders, err = store.DecodePinnedProviders(pinned); err != nil {
 		return domain.Lease{}, err
 	}
 	lease.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
@@ -574,16 +582,17 @@ func (s *SQLiteStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256
 	return lease, nil
 }
 
-func (s *SQLiteStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were renewed", taskID) }()
-	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
+func (s *SQLiteStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+	res, err := store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
+	store.NoteEffectRows(ctx, res, err, "the leases of task %s were renewed", taskID)
+	return err
 }
 
-func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were revoked", taskID) }()
-	_, err = s.db.ExecContext(ctx, `
+func (s *SQLiteStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE leases SET revoked_at = ? WHERE task_id = ? AND revoked_at IS NULL
 	`, nowRFC3339(), taskID)
+	store.NoteEffectRows(ctx, res, err, "the leases of task %s were revoked", taskID)
 	return err
 }
 
@@ -599,6 +608,7 @@ func (s *SQLiteStore) RecordBudgetUsage(ctx context.Context, entry domain.Budget
 }
 
 func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (reserved store.BudgetReservationResult, err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() {
 		store.NoteEffectWhen(ctx, reserved.ReservationID != "", err, "budget was reserved for task %s", req.TaskID)
 	}()
@@ -606,6 +616,7 @@ func (s *SQLiteStore) ReserveBudget(ctx context.Context, req store.BudgetReserva
 }
 
 func (s *SQLiteStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "budget reservation %s was settled", reservationID) }()
 	return store.SettleBudgetReservationTx(ctx, s.db, nil, reservationID, actual)
 }
@@ -650,10 +661,14 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, rec domain.AuditRecord) e
 	if err := s.appendAuditTx(ctx, tx, rec); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }
 
 func (s *SQLiteStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
+	return store.AuditWriteError(ctx, rec, writeAuditTx(ctx, tx, rec))
+}
+
+func writeAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
 	prevHash := "genesis"
 	var last string
 	err := tx.QueryRowContext(ctx, `SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&last)

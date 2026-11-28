@@ -89,7 +89,7 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", version, err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := store.Commit(ctx, tx); err != nil {
 			return err
 		}
 	}
@@ -237,6 +237,7 @@ func (s *PostgresStore) ListTaskMessages(ctx context.Context, taskID string) ([]
 }
 
 func (s *PostgresStore) UpdateTaskState(ctx context.Context, taskID string, from, to domain.TaskState, reason, factJSON string) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "task %s moved from %s to %s", taskID, from, to) }()
 	tx, to, reason, err := store.BeginTaskTransition(ctx, s.db, nil, to, reason, s.appendAuditTx)
 	if err != nil {
@@ -398,6 +399,7 @@ func (s *PostgresStore) DecideApproval(ctx context.Context, id, expectedSHA256 s
 }
 
 func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capability, payloadSHA256 string) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "approval %s was spent", id) }()
 	// One read-committed transaction: lock the row first, then spend it with
 	// an UPDATE compared against the database's clock. The lock comes first
@@ -436,7 +438,7 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capabil
 		return err
 	}
 	if n == 1 {
-		return tx.Commit()
+		return store.Commit(ctx, tx)
 	}
 	if err := tx.Rollback(); err != nil {
 		return err
@@ -453,10 +455,14 @@ func (s *PostgresStore) ConsumeApproval(ctx context.Context, id, taskID, capabil
 
 func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) (err error) {
 	defer func() { store.NoteEffectIf(ctx, err, "a lease for task %s was minted", lease.TaskID) }()
+	pinned, err := store.EncodePinnedProviders(lease.PinnedProviders)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName, lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt))
+		INSERT INTO leases (token_sha256, task_id, workload_name, expires_at, created_at, pinned_providers_json)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, lease.TokenSHA256, lease.TaskID, lease.WorkloadName, lease.ExpiresAt.UTC().Format(time.RFC3339Nano), formatTime(lease.CreatedAt), pinned)
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return fmt.Errorf("%w: %v", store.ErrConflict, err)
 	}
@@ -466,15 +472,18 @@ func (s *PostgresStore) CreateLease(ctx context.Context, lease domain.Lease) (er
 func (s *PostgresStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA256 string, now time.Time) (domain.Lease, error) {
 	var lease domain.Lease
 	var expires, created string
-	var revoked sql.NullString
+	var revoked, pinned sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at
+		SELECT token_sha256, task_id, workload_name, expires_at, revoked_at, created_at, pinned_providers_json
 		FROM leases WHERE token_sha256 = $1
-	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created)
+	`, tokenSHA256).Scan(&lease.TokenSHA256, &lease.TaskID, &lease.WorkloadName, &expires, &revoked, &created, &pinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Lease{}, store.ErrNotFound
 	}
 	if err != nil {
+		return domain.Lease{}, err
+	}
+	if lease.PinnedProviders, err = store.DecodePinnedProviders(pinned); err != nil {
 		return domain.Lease{}, err
 	}
 	lease.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
@@ -485,20 +494,22 @@ func (s *PostgresStore) GetActiveLeaseByTokenHash(ctx context.Context, tokenSHA2
 	return lease, nil
 }
 
-func (s *PostgresStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were renewed", taskID) }()
-	return store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
+func (s *PostgresStore) RenewTaskLeases(ctx context.Context, taskID string, now, expiresAt time.Time) error {
+	res, err := store.RenewTaskLeases(ctx, s.db, taskID, now, expiresAt)
+	store.NoteEffectRows(ctx, res, err, "the leases of task %s were renewed", taskID)
+	return err
 }
 
-func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) (err error) {
-	defer func() { store.NoteEffectIf(ctx, err, "the leases of task %s were revoked", taskID) }()
-	_, err = s.db.ExecContext(ctx, `
+func (s *PostgresStore) RevokeTaskLeases(ctx context.Context, taskID string) error {
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE leases SET revoked_at = $1 WHERE task_id = $2 AND revoked_at IS NULL
 	`, nowRFC3339(), taskID)
+	store.NoteEffectRows(ctx, res, err, "the leases of task %s were revoked", taskID)
 	return err
 }
 
 func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.BudgetEntry) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "budget use of task %s was recorded", entry.TaskID) }()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -516,10 +527,11 @@ func (s *PostgresStore) RecordBudgetUsage(ctx context.Context, entry domain.Budg
 		entry.InputTokens, entry.CacheWriteTokens, entry.CacheReadTokens, entry.OutputTokens, entry.CostMicroUSD, formatTime(entry.CreatedAt)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }
 
 func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReservationRequest) (reserved store.BudgetReservationResult, err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() {
 		store.NoteEffectWhen(ctx, reserved.ReservationID != "", err, "budget was reserved for task %s", req.TaskID)
 	}()
@@ -527,6 +539,7 @@ func (s *PostgresStore) ReserveBudget(ctx context.Context, req store.BudgetReser
 }
 
 func (s *PostgresStore) SettleBudgetReservation(ctx context.Context, reservationID string, actual *domain.BudgetEntry) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "budget reservation %s was settled", reservationID) }()
 	return store.SettleBudgetReservationTx(ctx, s.db, lockPostgresBudgetRows, reservationID, actual)
 }
@@ -586,10 +599,14 @@ func (s *PostgresStore) AppendAudit(ctx context.Context, rec domain.AuditRecord)
 	if err := s.appendAuditTx(ctx, tx, rec); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }
 
 func (s *PostgresStore) appendAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
+	return store.AuditWriteError(ctx, rec, writeAuditTx(ctx, tx, rec))
+}
+
+func writeAuditTx(ctx context.Context, tx *sql.Tx, rec domain.AuditRecord) error {
 	if _, err := tx.ExecContext(ctx, "LOCK TABLE audit_log IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 		return err
 	}

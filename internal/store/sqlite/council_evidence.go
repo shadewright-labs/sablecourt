@@ -48,14 +48,15 @@ func lockAttempt(ctx context.Context, tx *sql.Tx, task string) (attemptEvidence,
 	return a, err
 }
 
-func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (answerID int64, answerState string, err error) {
-	defer func() {
-		store.NoteEffectIf(ctx, err, "answer %d was recorded in conclave %s", answerID, msg.ConclaveID)
-	}()
+// RecordCouncilAnswer stores the answer through
+// store.AppendReservedCouncilAnswer, which notes it inside the transaction
+// that records it, so a replay of a recorded answer notes nothing.
+func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
 	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote, store.ConclaveLimits{})
 }
 
 func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "answer %d of task %s was accepted", message, task) }()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -106,7 +107,7 @@ func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, mess
 	if n != 1 {
 		return store.ErrConflict
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }
 
 func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
@@ -122,6 +123,7 @@ func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
 }
 
 func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain.ConclaveRelic) (err error) {
+	ctx = store.HoldEffects(ctx)
 	defer func() { store.NoteEffectIf(ctx, err, "relic %s of task %s was written", r.Name, task) }()
 	if r.ContentType == "" {
 		r.ContentType = "text/plain"
@@ -176,5 +178,5 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }

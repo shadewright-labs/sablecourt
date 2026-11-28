@@ -87,7 +87,7 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 				return r.CancelTask(ctx, task.ID, "")
 			},
 			wantErr:     true,
-			wantEffects: []string{"task {id} moved from submitted to cancelled", "the leases of task {id} were revoked"},
+			wantEffects: []string{"task {id} moved from submitted to cancelled"},
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateCancelled)
 			},
