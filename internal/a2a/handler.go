@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -47,6 +48,13 @@ func BrokerHandler(opts Options) http.Handler {
 		if err != nil || strings.TrimSpace(expectedToken) == "" {
 			w.WriteHeader(http.StatusUnauthorized)
 			writeRPCError(w, nil, -32001, "A2A bearer token not configured")
+			return
+		}
+		// A token too short to redact is refused; the caller is not
+		// authenticated yet, so the reply does not say why.
+		if err := redact.RegisterSetting(secName, expectedToken); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRPCError(w, nil, -32001, "A2A bearer token refused")
 			return
 		}
 		auth := r.Header.Get("Authorization")
@@ -129,6 +137,8 @@ func BrokerHandler(opts Options) http.Handler {
 				return
 			}
 			msgs, _ := opts.Store.ListTaskMessages(r.Context(), p.ID)
+			task = controlplane.TaskForRead(task)
+			msgs = controlplane.TaskMessagesForRead(msgs)
 			writeRPCResult(w, req.ID, map[string]any{
 				"id":        task.ID,
 				"workload":  task.WorkloadName,

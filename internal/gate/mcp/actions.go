@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -105,6 +106,9 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	token, err := gh.Secrets.Get(ctx, "github_token")
 	if err != nil {
 		return "", fmt.Errorf("load github_token: %w", err)
+	}
+	if err := redact.RegisterSetting("github_token", token); err != nil {
+		return "", err
 	}
 	apiBase := gh.APIURL
 	if apiBase == "" {

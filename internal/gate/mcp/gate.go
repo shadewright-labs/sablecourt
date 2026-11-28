@@ -477,7 +477,7 @@ func (g *Gate) ActionHandler() http.Handler {
 		}
 		req, err := decodeTyped[actionRequest](rawBody)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action request: " + redact.String(err.Error())})
 			return
 		}
 
@@ -581,7 +581,7 @@ func (g *Gate) ActionHandler() http.Handler {
 					return
 				}
 				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": redact.String(err.Error())})
 					return
 				}
 				_ = g.store.UpdateTaskState(ctx, ac.Lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))

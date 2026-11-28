@@ -79,7 +79,7 @@ func TestLearningLeaseKeepsAdmittedProviders(t *testing.T) {
 			})}
 			gate := New(Options{
 				Store:   st,
-				Secrets: secret.NewMemoryStore(map[string]string{"openai_api_key": "sk-" + "test"}),
+				Secrets: secret.NewMemoryStore(map[string]string{"openai_api_key": "sk-" + "test-key"}),
 				Bundle:  bundle([]string{"local"}),
 				Client:  cli,
 			})
@@ -91,6 +91,9 @@ func TestLearningLeaseKeepsAdmittedProviders(t *testing.T) {
 			gate.Handler().ServeHTTP(rec, req)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
 			}
 			if remote.Load() != tc.wantRemote {
 				t.Fatalf("remote provider reached = %v, want %v", remote.Load(), tc.wantRemote)

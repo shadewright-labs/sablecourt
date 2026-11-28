@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -43,6 +44,12 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 		whSecret, err := opts.Secrets.Get(r.Context(), secretName)
 		if err != nil || strings.TrimSpace(whSecret) == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "webhook secret not configured"})
+			return
+		}
+		// A secret too short to redact is refused. The caller is not
+		// authenticated yet, so the reply does not say why.
+		if err := redact.RegisterSetting(secretName, whSecret); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webhook secret refused"})
 			return
 		}
 

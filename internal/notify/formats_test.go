@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
@@ -159,4 +160,24 @@ func TestNotifierConfigurationAndFailures(t *testing.T) {
 			t.Fatalf("Send = %v, calls %d", err, c.calls)
 		}
 	})
+}
+
+// Fix round: a webhook URL too short to redact was dropped without a word, so
+// the test endpoint reported "sent". Send now refuses it, naming the setting.
+func TestNotifierRefusesShortWebhookURL(t *testing.T) {
+	t.Setenv("SABLECOURT_NOTIFY_WEBHOOK_URL", "")
+	short := "h" + "://x"
+	sec := secret.NewObservingStore(secret.NewMemoryStore(map[string]string{"notify_webhook_url": short}), func(name, v string) error {
+		return redact.RegisterSetting(name, v)
+	})
+	n := New(Options{Secrets: sec})
+	err := n.Send(context.Background(), Event{Type: "notify.test", Title: "t"})
+	if err == nil || !strings.Contains(err.Error(), "notify_webhook_url") || strings.Contains(err.Error(), short) {
+		t.Fatalf("Send = %v, want a refusal naming notify_webhook_url", err)
+	}
+	t.Setenv("SABLECOURT_NOTIFY_WEBHOOK_URL", short)
+	err = New(Options{}).Send(context.Background(), Event{Type: "notify.test", Title: "t"})
+	if err == nil || !strings.Contains(err.Error(), "SABLECOURT_NOTIFY_WEBHOOK_URL") {
+		t.Fatalf("Send = %v, want a refusal naming SABLECOURT_NOTIFY_WEBHOOK_URL", err)
+	}
 }

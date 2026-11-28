@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -21,6 +22,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -153,6 +155,7 @@ func MintPinnedTaskTokenUntil(ctx context.Context, st store.Store, taskID, workl
 		return "", fmt.Errorf("generate task token: %w", err)
 	}
 	token := TokenPrefix + hex.EncodeToString(raw[:])
+	redact.RegisterOwnedUntil(taskID, expiresAt, token)
 	lease := domain.Lease{
 		TokenSHA256:  HashToken(token),
 		TaskID:       taskID,
@@ -286,12 +289,23 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	var upstreamKey string
 	if upCfg.SecretName != "" && g.secrets != nil {
 		key, err := g.secrets.Get(ctx, upCfg.SecretName)
+		var short *redact.ShortSecretError
+		if errors.As(err, &short) {
+			// The daemon's store refuses a key too short to redact.
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"upstream_secret_too_short"}`)
+			writeErr(w, http.StatusBadGateway, "upstream provider credential refused: "+err.Error())
+			return
+		}
 		if err != nil {
 			if upCfg.RequireSecret || !errors.Is(err, secret.ErrSecretNotFound) {
 				g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"missing_upstream_secret"}`)
 				writeErr(w, http.StatusBadGateway, "upstream provider credential unavailable")
 				return
 			}
+		} else if err := redact.RegisterSetting(upCfg.SecretName, key); err != nil {
+			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "error", `{"reason":"upstream_secret_too_short"}`)
+			writeErr(w, http.StatusBadGateway, "upstream provider credential refused: "+err.Error())
+			return
 		} else {
 			upstreamKey = key
 		}
@@ -335,8 +349,49 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upResp.Body.Close()
 
+	// The response reaches a workload that never held the provider key, so it
+	// goes through the exact matcher like any other output: headers here, the
+	// body as a stream below. A body the matcher cannot read (compressed
+	// without the transport undoing it) is refused. The provider already did
+	// the work of a 2xx response, so its usage, which cannot be read, settles
+	// at least the admitted reserve instead of releasing it.
+	if encodedResponse(upResp.Header) {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"encoded_upstream_response"}`)
+		if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+			releaseReservation = false
+			g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsedUsage{Outcome: usageOutcomeNone}, reserve)
+		}
+		writeErr(w, http.StatusBadGateway, "upstream response encoding not supported")
+		return
+	}
+	// Only JSON and server-sent events are relayed. The workload gets a
+	// Content-Type the gate chooses from that list, never the upstream value,
+	// and nosniff, so a browser never renders a relayed body as HTML. Any
+	// other type is refused and budgeted like an encoded response.
+	relayType, ok := relayContentType(upResp.Header)
+	if !ok {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"unsupported_upstream_content_type"}`)
+		if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+			releaseReservation = false
+			g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsedUsage{Outcome: usageOutcomeNone}, reserve)
+		}
+		writeErr(w, http.StatusBadGateway, "upstream response content type not supported")
+		return
+	}
 	copyResponseHeaders(w.Header(), upResp.Header)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	switch relayType {
+	case relayJSONUTF8:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case relaySSE:
+		w.Header().Set("Content-Type", "text/event-stream")
+	case relaySSEUTF8:
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(upResp.StatusCode)
+	known := redact.NewStream()
 
 	var captured bytes.Buffer
 	flusher, canFlush := w.(http.Flusher)
@@ -345,7 +400,9 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		n, readErr := upResp.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			_, _ = w.Write(chunk)
+			if out := known.Write(chunk, false); len(out) > 0 {
+				_, _ = w.Write(out)
+			}
 			if canFlush {
 				flusher.Flush()
 			}
@@ -364,36 +421,50 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	if out := known.Write(nil, true); len(out) > 0 {
+		_, _ = w.Write(out)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
 
 	if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
 		// Keep the reservation if actual usage cannot be recorded.
 		releaseReservation = false
 		parsed := parseUsage(activeProvider, upstreamPath, captured.Bytes(), upResp.Header.Get("Content-Type"))
-		settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
-		modelName := settled.Model
-		if modelName == "" {
-			modelName = reqModel
-		}
-		entry := domain.BudgetEntry{
-			TaskID:           lease.TaskID,
-			WorkloadName:     lease.WorkloadName,
-			Provider:         activeProvider,
-			Model:            modelName,
-			InputTokens:      settled.InputTokens,
-			CacheWriteTokens: settled.CacheWriteTokens,
-			CacheReadTokens:  settled.CacheReadTokens,
-			OutputTokens:     settled.OutputTokens,
-			CostMicroUSD:     costMicro,
-			CreatedAt:        g.now(),
-		}
-		if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
-			g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
-			return
-		}
-		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
-			fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
-				modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
+		g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsed, reserve)
 	}
+}
+
+// settleSuccess charges a 2xx upstream response against its reservation and
+// audits the settled usage. Usage it cannot read settles at least the admitted
+// reserve (see settleUsageForEntry). If settlement fails, the reservation is
+// kept.
+func (g *Gate) settleSuccess(ctx context.Context, lease domain.Lease, activeProvider, reqModel, reservationID string, parsed parsedUsage, reserve domain.BudgetTotals) {
+	settled, costMicro := settleUsageForEntry(activeProvider, reqModel, parsed, reserve, g.pricing)
+	modelName := settled.Model
+	if modelName == "" {
+		modelName = reqModel
+	}
+	entry := domain.BudgetEntry{
+		TaskID:           lease.TaskID,
+		WorkloadName:     lease.WorkloadName,
+		Provider:         activeProvider,
+		Model:            modelName,
+		InputTokens:      settled.InputTokens,
+		CacheWriteTokens: settled.CacheWriteTokens,
+		CacheReadTokens:  settled.CacheReadTokens,
+		OutputTokens:     settled.OutputTokens,
+		CostMicroUSD:     costMicro,
+		CreatedAt:        g.now(),
+	}
+	if err := g.settleReservation(ctx, reservationID, &entry); err != nil {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"budget_settlement_failed"}`)
+		return
+	}
+	g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "allowed",
+		fmt.Sprintf(`{"model":%q,"input_tokens":%d,"cache_write_tokens":%d,"cache_read_tokens":%d,"output_tokens":%d,"cost_microusd":%d}`,
+			modelName, settled.InputTokens, settled.CacheWriteTokens, settled.CacheReadTokens, settled.OutputTokens, costMicro))
 }
 
 func isFallbackStatus(code int) bool {
@@ -449,9 +520,13 @@ func (g *Gate) tryFallback(ctx context.Context, r *http.Request, failedProvider,
 		if upCfg.SecretName != "" && g.secrets != nil {
 			k, err := g.secrets.Get(ctx, upCfg.SecretName)
 			if err != nil {
-				if upCfg.RequireSecret {
+				// A key that is required, or refused for being too short
+				// to redact, rules the candidate out.
+				if upCfg.RequireSecret || !errors.Is(err, secret.ErrSecretNotFound) {
 					continue
 				}
+			} else if redact.RegisterSetting(upCfg.SecretName, k) != nil {
+				continue
 			} else {
 				key = k
 			}
@@ -645,14 +720,84 @@ func injectUpstreamAuth(h http.Header, provider, key, anthropicVer string) {
 	}
 }
 
+// encodedResponse reports whether any Content-Encoding header, or any coding
+// in a listed value, names something other than identity.
+func encodedResponse(h http.Header) bool {
+	for _, v := range h.Values("Content-Encoding") {
+		for _, enc := range strings.Split(v, ",") {
+			if enc = strings.TrimSpace(enc); enc != "" && !strings.EqualFold(enc, "identity") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relayType is a Content-Type the gate sets on a relayed response.
+type relayType int
+
+const (
+	relayJSON relayType = iota
+	relayJSONUTF8
+	relaySSE
+	relaySSEUTF8
+)
+
+// relayContentType maps the upstream Content-Type to one the gate relays.
+// It accepts exactly one value naming application/json or text/event-stream,
+// with at most a UTF-8 charset parameter (in any case or quoting). A missing,
+// repeated or unparsable value, another media type, another charset or any
+// other parameter is refused. No provider the gate serves answers with
+// application/x-ndjson (Gemini streams JSON arrays or, with alt=sse, SSE), so
+// it is not on the list.
+func relayContentType(h http.Header) (relayType, bool) {
+	vals := h.Values("Content-Type")
+	if len(vals) != 1 {
+		return 0, false
+	}
+	mediaType, params, err := mime.ParseMediaType(vals[0])
+	if err != nil {
+		return 0, false
+	}
+	utf8 := false
+	for k, v := range params {
+		if k != "charset" || !strings.EqualFold(v, "utf-8") {
+			return 0, false
+		}
+		utf8 = true
+	}
+	switch mediaType {
+	case "application/json":
+		if utf8 {
+			return relayJSONUTF8, true
+		}
+		return relayJSON, true
+	case "text/event-stream":
+		if utf8 {
+			return relaySSEUTF8, true
+		}
+		return relaySSE, true
+	}
+	return 0, false
+}
+
+// copyResponseHeaders copies upstream response headers for the workload. A
+// header whose name shows a daemon-held value is dropped, and held values in
+// header values are replaced by exact match.
 func copyResponseHeaders(dst, src http.Header) {
+	reg := redact.DefaultRegistry()
 	for k, vals := range src {
 		lower := strings.ToLower(k)
-		if lower == "content-length" || lower == "connection" || lower == "transfer-encoding" {
+		switch lower {
+		case "content-length", "connection", "transfer-encoding", "content-type", "x-content-type-options":
+			// The gate sets Content-Type and X-Content-Type-Options itself.
+			continue
+		}
+		if reg.ContainsHeld(k) {
 			continue
 		}
 		for _, v := range vals {
-			dst.Add(k, v)
+			dst.Add(k, reg.RedactExact(v))
 		}
 	}
 }
@@ -715,6 +860,7 @@ func extractRequestModel(provider, upstreamPath string, body []byte) string {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

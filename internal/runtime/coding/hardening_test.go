@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/attach"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
@@ -335,9 +336,13 @@ func TestSessionOutputRedactsAcrossWrites(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer log.Close()
-			hub := attach.NewHub()
+			// An empty registry: this test is about pattern rules across writes. Values
+			// other tests register in the process-wide registry would hold back a tail
+			// that could start one of them.
+			reg := redact.NewRegistry()
+			hub := attach.NewHubWithRegistry(reg)
 			hub.Register("task", nil)
-			output := &sessionOutput{file: log, hub: hub, taskID: "task"}
+			output := &sessionOutput{file: log, hub: hub, taskID: "task", known: reg.NewStream()}
 			for _, chunk := range tc.chunks {
 				if n, err := output.Write([]byte(chunk)); n != len(chunk) || err != nil {
 					t.Fatalf("Write = %d, %v", n, err)

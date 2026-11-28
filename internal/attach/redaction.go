@@ -18,15 +18,37 @@ const (
 )
 
 type streamRedactor struct {
+	known *redact.Stream
+	// checked scans the output of the pattern rules again, so a pattern
+	// marker next to other text cannot rebuild a held value.
+	checked   *redact.Stream
 	text      textRedactor
 	inPEM     bool
 	pemFooter []byte
 	pemTail   []byte
 }
 
-// Filter PEM blocks before parsing text credentials, since the block may span
-// lines or begin inside an assignment value.
+func newStreamRedactor(reg *redact.Registry) streamRedactor {
+	if reg == nil {
+		reg = redact.DefaultRegistry()
+	}
+	return streamRedactor{
+		known:   reg.NewStream(),
+		checked: reg.NewStream(),
+		text:    textRedactor{registry: reg},
+	}
+}
+
+// Filter exact known secrets and PEM blocks before parsing text credentials,
+// since a secret or block may span chunks or lines.
 func (r *streamRedactor) write(raw []byte, eof bool) string {
+	if r.known == nil {
+		r.known = redact.NewStream()
+	}
+	if r.checked == nil {
+		r.checked = redact.NewStream()
+	}
+	raw = r.known.Write(raw, eof)
 	var out strings.Builder
 	if len(r.pemTail) != 0 {
 		raw = append(r.pemTail, raw...)
@@ -84,7 +106,7 @@ func (r *streamRedactor) write(raw []byte, eof bool) string {
 		}
 		r.text.finish(&out)
 	}
-	return out.String()
+	return string(r.checked.Write([]byte(out.String()), eof))
 }
 
 // pemHeader finds a complete private key header or an ambiguous suffix.
@@ -172,6 +194,7 @@ var (
 )
 
 type textRedactor struct {
+	registry   *redact.Registry
 	fragment   []byte
 	kind       credentialKind
 	value      []byte
@@ -261,7 +284,11 @@ func (r *textRedactor) emitValue(out *strings.Builder, eof bool) {
 			value = ""
 		}
 	default:
-		value = redact.String(value)
+		if r.registry != nil {
+			value = r.registry.RedactString(value)
+		} else {
+			value = redact.String(value)
+		}
 		if eof && value == string(r.value) {
 			value = ""
 		}
