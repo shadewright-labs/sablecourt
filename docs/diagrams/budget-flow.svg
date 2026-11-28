@@ -40,7 +40,7 @@
   <rect class="key" x="268" y="36" width="236" height="72" rx="12"/>
   <text class="h" x="284" y="62">Reserve in store</text>
   <text class="s" x="284" y="83">per-task, daily per-workload</text>
-  <text class="s" x="284" y="100">child ceiling if delegated (15 min)</text>
+  <text class="s" x="284" y="100">child ceiling, 15 min hold</text>
 
   <rect class="box" x="584" y="36" width="208" height="72" rx="10"/>
   <text class="h" x="600" y="62">Forward call</text>

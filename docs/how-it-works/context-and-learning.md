@@ -10,6 +10,10 @@ The flow below shows how a task gets its packet: a deterministic controller outs
 
 [![Packet assembly: a deterministic controller outside a council gets no packet, a council turn gets the packet reserved for it, and any other task gets the required part and optional parts, with the oldest optional entry dropped while the packet is over 32 KiB.](../diagrams/context-packet.svg)](../diagrams/context-packet.svg "Open full size")
 
+The second picture shows where each part comes from and what stays out. The required parts are never cut, the optional ones are dropped whole, and a caller's `context_packet` and `repo_path`, learnings for a remote model, council turns and controllers are kept out of this packet.
+
+[![Where the packet parts come from: required parts (role card, task input, peer mention) and optional parts (Conclave Decrees and Relics, learnings, pre-check) feed the redacted packet, which goes in the launch input; a caller's context_packet and repo_path, learnings for a remote model, council turns and controllers are kept out.](../diagrams/context-packet-sources.svg)](../diagrams/context-packet-sources.svg "Open full size")
+
 `internal/contextpack` assembles the packet each time a task launches, apart from the two cases above. A `context_packet` field sent by a caller is deleted and the packet is rebuilt. A `repo_path` field sent by a caller is ignored by the assembler: the repository is the `coding.repoPath` of the workload. The original input is not erased, though. It stays in the task history, and Docker and Kubernetes workloads still receive it in their launch input. The built-in agent sends the task history to the Model Gate along with the rebuilt packet, and the Gate forwards the request body to the provider unchanged. So the caller's original input, including a `context_packet` or `repo_path` that was replaced, can still reach a model provider. The parts, in order:
 
 1. The role card of the workload, if it has one.
@@ -159,6 +163,8 @@ spec:
       maxRetries: 2
       prompt: Check the change for regressions and missing tests.
 ```
+
+[![The verifier loop: the author step passes its output to a verifier pinned to the author's commit; PASS moves on, a missing verdict halts with verdict_missing, and CHANGES_REQUESTED runs the author again with the findings while retries are left, otherwise the workflow stops.](../diagrams/verifier-loop.svg)](../diagrams/verifier-loop.svg "Open full size")
 
 - The verifier runs on its own workload. The manifest loader refuses a `role: verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads`: `actions`, `delegateTo`, `mcpServers`, `repos`, any other tool and any `modelGate` setting are refused, and an upstream server cannot register one of these names, because the loader refuses an `mcpServers` name in a built-in namespace. It also refuses a verifier whose workload is also used by a step before it that is not a verifier, and a verifier on a model workload when no earlier step runs a model. Here `go-reviewer` runs the `codex` harness because the default `critic` route is `cli:codex` with `gpt-6.2-astra`, a model family other than the `coding` route's.
 - The verifier gets a prompt that tells it not to trust the author, with the text of the author's artifacts (each cut at 4096 bytes). It must run on a `coding-agent` workload. Its checkout is read-only and pinned to the author's commit, recorded as a `verifier_checkout_pinned` event. If the workload is not a coding agent, the runtime cannot pin a commit, or the author recorded no commit, the launch fails with "runtime cannot guarantee the author's checkout for this step".

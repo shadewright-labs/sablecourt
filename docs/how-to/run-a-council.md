@@ -1,6 +1,6 @@
 # Run a council
 
-Status: partly built. A round is not refused up front when an image or login is missing (#79), and the end-to-end smoke test (#80) is still open.
+Status: partly built. A council is refused up front when a harness image, tool or login is missing, and the end-to-end smoke test (#80) is still open.
 
 Ask `claude`, `codex` and `agy` one question about a repository and read the answers and the digest.
 

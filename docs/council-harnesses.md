@@ -11,7 +11,7 @@ In Sanctum container mode, each council harness turn (`claude`, `codex`, `agy`) 
 
 ## What the preflight checks
 
-[![A council request passes three checks for each of claude, codex and agy: the image is present, the login volume is valid, and a credential file is found. A failed check refuses the request with the command to run; when all pass, the daemon runs a dispatch check and then creates the council.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
+[![A council request passes three checks for each of claude, codex and agy: the image is present, the login volume is valid, and the tool and a credential file are found. A failed check refuses the request with the command to run; when all pass, the daemon runs a dispatch check and then creates the council.](diagrams/council-harness-preflight.svg)](diagrams/council-harness-preflight.svg "Open full size")
 
 The preflight runs for a new council request in container mode. A repeated request with the same idempotency key and the same content returns the stored council before the preflight. For each role in the order `claude`, `codex`, `agy`:
 

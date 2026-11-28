@@ -1,6 +1,6 @@
 # Harness containers
 
-Status: partly built. Missing: the check that refuses a round when an image or a login is absent (#79). See "Not built yet".
+Status: built. The end-to-end smoke test (#80) is still open.
 
 Each coding task, whether a standalone task or a council turn, runs one harness CLI in its own container, on its own internal network, behind its own proxy. Both kinds get their container from one function (`harnessContainerSpec` in `internal/runtime/docker/council_config.go`), so every guard below applies to both, and a table test runs both through the same checks. The container can read its checkout and its own login volume. Its only network peer is the proxy, which forwards gate calls to the daemon and opens tunnels to the harness's provider hosts. The daemon mounts no host home directory, Docker socket or daemon state into it, and its network has no gateway. This page describes the Docker path, which the daemon uses when a Docker engine is configured (`DOCKER_HOST` set, or a Docker or Podman socket found in one of the usual locations). Without one, coding tasks and councils are refused unless host mode is forced (see the end).
 
@@ -47,9 +47,9 @@ Host mode is off by default. The daemon flag `--unsafe-host-harnesses` turns it 
 
 Without the flag, or with it but no working host sandbox, the daemon still registers the coding adapter, but only for recovery: it observes, stops and cleans up a host task that was running when the daemon was upgraded, and refuses every new launch. Such a refused task fails with `launch_failed` and the fact `"reason":"coding_runtime_unavailable"`, and opening a council is refused with a message that names the missing runtime.
 
-## Not built yet
+## Preflight
 
-A preflight that checks each harness image and the credential files in its login volume before a round, and a `sablectl harness login` command that creates the labelled volume and runs the login ([council](council.md#not-built-yet) has the decision). Until then, a missing image or login volume fails the launch, and a volume without a valid login is not detected by Sablecourt.
+Before it creates a council, the daemon checks each harness image, login volume, tool (`claude` and `agy`) and credential path, and refuses with the command to run when one is missing; `sablectl harness login <role>` creates the labelled login volume and runs the login through Docker from the CLI. The checks, the order and the refusals are on [council harness images and logins](../council-harnesses.md) and in the [council](council.md) page. The check makes no provider call, so a volume with an expired login passes it.
 
 ## In depth
 

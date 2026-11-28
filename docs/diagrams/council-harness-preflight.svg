@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 452" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Council harness preflight</title>
-  <desc id="d">An open-council request reaches sablecourtd, which runs a preflight for each of claude, codex and agy, in that order, before it records anything. The preflight asks three questions. Is the harness image present locally? If not, the request is refused with the command sablectl harness build. Is the login volume a valid labelled local Sablecourt volume? If it is missing, the request is refused with the command sablectl harness login. If it exists but is not valid, the refusal tells the user to remove it by hand first and then run that command. Does a short container from that image, with no network and the volume read-only, find a regular non-empty credential file at an expected path? If not, the request is refused with the command sablectl harness login. When all three roles pass, the daemon runs a dispatch check and then creates the council. Refusals are drawn in red and create no council, room or task record.</desc>
+  <desc id="d">An open-council request reaches sablecourtd, which runs a preflight for each of claude, codex and agy, in that order, before it records anything. The preflight asks three questions. Is the harness image present locally? If not, the request is refused with the command sablectl harness build. Is the login volume a valid labelled local Sablecourt volume? If it is missing, the request is refused with the command sablectl harness login. If it exists but is not valid, the refusal tells the user to remove it by hand first and then run that command. Does a short container from that image, with no network and the volume read-only, find a regular non-empty credential file at an expected path? For claude and agy the same container also checks that the installed tool is present, of the pinned version and of the pinned SHA-256, and the tool volume must be a valid labelled volume. If the tool is missing or wrong, the request is refused with the command sablectl harness install. If the credential file is missing, it is refused with sablectl harness login. When all three roles pass, the daemon runs a dispatch check and then creates the council. Refusals are drawn in red and create no council, room or task record.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -43,7 +43,7 @@
   <polygon class="box" points="440,170 520,122 600,170 520,218"/>
   <text class="s" x="520" y="175" text-anchor="middle">Volume valid?</text>
   <polygon class="box" points="650,170 730,122 810,170 730,218"/>
-  <text class="s" x="730" y="175" text-anchor="middle">Login file found?</text>
+  <text class="s" x="730" y="175" text-anchor="middle">Tool, login found?</text>
 
   <rect class="key" x="880" y="138" width="216" height="64" rx="12"/>
   <text class="h" x="896" y="164">Dispatch check</text>
@@ -59,9 +59,10 @@
   <text class="s" x="440" y="348">login &lt;role&gt; (remove an</text>
   <text class="s" x="440" y="366">invalid volume first)</text>
   <rect class="bad" x="636" y="282" width="200" height="102" rx="10"/>
-  <text class="no" x="652" y="308">Refused, no login file</text>
-  <text class="s" x="652" y="330">run sablectl harness</text>
-  <text class="s" x="652" y="348">login &lt;role&gt;</text>
+  <text class="no" x="652" y="308">Refused, tool or login</text>
+  <text class="s" x="652" y="330">login &lt;role&gt;, or install</text>
+  <text class="s" x="652" y="348">&lt;role&gt; for a missing or</text>
+  <text class="s" x="652" y="366">wrong tool (claude, agy)</text>
 
   <path class="f" d="M184 170H224" marker-end="url(#a)"/>
   <path class="f" d="M390 170H434" marker-end="url(#a)"/>

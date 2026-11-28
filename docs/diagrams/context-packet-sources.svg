@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 608" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">What feeds the context packet</title>
+  <desc id="d">What feeds a context packet and what stays out. Required parts, never cut: the role card of the workload manifest, the task input (prompt, input, failure handoff and the workflow step header), and for a Vassal woken by a peer the mention message as untrusted data. Optional parts, dropped whole and oldest first while the packet is over 32 KiB: for a task in a Conclave the last 5 Decrees and decisions and the last 4 Relics, up to 10 learnings only for a local destination, and the repository pre-check (git status and diff stat, go vet, sg scan, 10 seconds). All of it passes the redactor into the context packet, which goes in the context_packet field of the launch input. Kept out: a context_packet field from the caller is deleted and rebuilt, a repo_path from the caller is ignored in favour of the workload's coding.repoPath, learnings are not added when the model destination is remote or unknown, a council turn gets its own packet, and a deterministic controller gets none. The caller's original input still stays in the task history and can reach a provider through the built-in agent.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1280" height="608" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="420" height="250" rx="14"/>
+  <text class="lanet" x="44" y="54">REQUIRED, NEVER CUT</text>
+  <rect class="box" x="44" y="72" width="380" height="56" rx="10"/>
+  <text class="h" x="60" y="98">Workload manifest</text>
+  <text class="s" x="60" y="119">role card</text>
+  <rect class="box" x="44" y="140" width="380" height="56" rx="10"/>
+  <text class="h" x="60" y="166">Task input</text>
+  <text class="s" x="60" y="187">prompt, input, failure handoff, step header</text>
+  <rect class="box" x="44" y="208" width="380" height="56" rx="10"/>
+  <text class="h" x="60" y="234">Peer mention</text>
+  <text class="s" x="60" y="255">message that woke a Vassal, as untrusted data</text>
+  <rect class="lane" x="24" y="294" width="420" height="290" rx="14"/>
+  <text class="lanet" x="44" y="324">OPTIONAL, DROPPED OLDEST FIRST</text>
+  <rect class="box" x="44" y="342" width="380" height="62" rx="10"/>
+  <text class="h" x="60" y="368">Conclave room</text>
+  <text class="s" x="60" y="389">last 5 Decrees, last 4 Relics</text>
+  <rect class="box" x="44" y="416" width="380" height="62" rx="10"/>
+  <text class="h" x="60" y="442">Learnings</text>
+  <text class="s" x="60" y="463">up to 10, local destination only</text>
+  <rect class="box" x="44" y="490" width="380" height="62" rx="10"/>
+  <text class="h" x="60" y="516">Repository pre-check</text>
+  <text class="s" x="60" y="537">git status, go vet, sg scan, 10 seconds</text>
+  <rect class="key" x="520" y="240" width="240" height="130" rx="10"/>
+  <text class="h" x="536" y="266">Context packet</text>
+  <text class="s" x="536" y="287">redacted Markdown</text>
+  <text class="s" x="536" y="305">optional parts cut to</text>
+  <text class="s" x="536" y="323">fit 32 KiB</text>
+  <path class="f" d="M444 149H482V285H514" marker-end="url(#a)"/>
+  <text class="lbl" x="490" y="226">never cut</text>
+  <path class="f" d="M444 440H482V325H514" marker-end="url(#a)"/>
+  <text class="lbl" x="490" y="400">cut whole</text>
+  <rect class="box" x="520" y="440" width="240" height="64" rx="10"/>
+  <text class="h" x="536" y="466">Launch input</text>
+  <text class="s" x="536" y="487">context_packet field</text>
+  <path class="f" d="M640 370V434" marker-end="url(#a)"/>
+  <rect class="lane" x="860" y="24" width="396" height="560" rx="14"/>
+  <text class="lanet" x="880" y="54">KEPT OUT OF THE PACKET</text>
+  <rect class="bad" x="880" y="72" width="356" height="64" rx="10"/>
+  <text class="h" x="896" y="98">Caller's context_packet</text>
+  <text class="s" x="896" y="119">deleted, then rebuilt</text>
+  <rect class="bad" x="880" y="152" width="356" height="64" rx="10"/>
+  <text class="h" x="896" y="178">Caller's repo_path</text>
+  <text class="s" x="896" y="199">ignored: coding.repoPath is used</text>
+  <rect class="bad" x="880" y="232" width="356" height="64" rx="10"/>
+  <text class="h" x="896" y="258">Learnings for a remote model</text>
+  <text class="s" x="896" y="279">none in the packet</text>
+  <rect class="bad" x="880" y="312" width="356" height="64" rx="10"/>
+  <text class="h" x="896" y="338">Council turn</text>
+  <text class="s" x="896" y="359">gets its own packet, not this one</text>
+  <rect class="bad" x="880" y="392" width="356" height="64" rx="10"/>
+  <text class="h" x="896" y="418">Deterministic controller</text>
+  <text class="s" x="896" y="439">no packet at all</text>
+  <rect class="box" x="880" y="472" width="356" height="92" rx="10"/>
+  <text class="h" x="896" y="498">Original input</text>
+  <text class="s" x="896" y="519">stays in the task history and can</text>
+  <text class="s" x="896" y="537">still reach a provider through</text>
+  <text class="s" x="896" y="555">the built-in agent</text>
+
+</svg>

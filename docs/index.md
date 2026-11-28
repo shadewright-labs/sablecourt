@@ -59,7 +59,7 @@ Each area below carries one of four words:
 | Approvals | Partly built | Device pairing answers `503`; no single-use claim yet (ADR-0014 Stage 0, #5, #9) | [approvals](how-it-works/approvals.md) |
 | Conclaves | Built | Voice and live Takeover are parked | [Conclaves](how-it-works/conclaves.md) |
 | Council | Partly built | Final message posting (#28), subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
-| Harness containers | Partly built | The proxy and the image build are in the tree (#76, #77). Nothing checks yet that a harness volume holds a login, and no command starts the login container; both are #79 | [harness containers](how-it-works/harness-containers.md) |
+| Harness containers | Built | End-to-end smoke test (#80) | [harness containers](how-it-works/harness-containers.md) |
 | Context packets, verifier steps, failure handoff | Built | | [context and learning](how-it-works/context-and-learning.md) |
 | Learning (ADR-0012) | Partly built | The store and the packet matcher with its destination check (#99) exist. Propose, accept, matching for other workloads and outcomes are decided only (#43 to #47), so no packet carries a learning yet | [context and learning](how-it-works/context-and-learning.md) |
 | Audit chain | Built | Misses deletion of the last rows (#10); signed heads decided only | [audit](how-it-works/audit.md) |

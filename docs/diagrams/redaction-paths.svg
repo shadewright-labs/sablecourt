@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 648" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Where redaction applies</title>
-  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and the redacted text goes to the store, the UI and peer prompts. A dashed planned box, exact match of secrets the daemon holds, adds to the redactor and is not built yet. In the second zone, the two model-provider paths, no redaction applies. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the same bytes to the model providers outside Sablecourt. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject, outside systems and planned.</desc>
+  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and by exact match, which replaces each secret the daemon holds in memory by value; the redacted text goes to the store, the UI and peer prompts. Exact match is built. In the second zone, the two model-provider paths, no redaction applies. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the same bytes to the model providers outside Sablecourt. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -46,16 +46,16 @@
   <rect class="box" x="688" y="88" width="250" height="72" rx="10"/>
   <text class="h" x="704" y="114">Store, UI, peer prompts</text>
   <text class="s" x="704" y="135">where readers and peers see it</text>
-  <rect class="plan" x="366" y="208" width="250" height="72" rx="10"/>
+  <rect class="box" x="366" y="208" width="250" height="72" rx="10"/>
   <text class="h" x="382" y="234">Exact match</text>
-  <text class="s" x="382" y="255">secrets the daemon holds,</text>
-  <text class="s" x="382" y="272">planned</text>
+  <text class="s" x="382" y="255">each secret the daemon holds</text>
+  <text class="s" x="382" y="272">in memory, replaced by value</text>
   <path class="f" d="M294 124H360" marker-end="url(#a)"/>
   <text class="lbl" x="327" y="116" text-anchor="middle">filtered</text>
   <path class="f" d="M616 124H682" marker-end="url(#a)"/>
   <text class="lbl" x="649" y="116" text-anchor="middle">redacted</text>
-  <path class="r" d="M491 208V166" marker-end="url(#m)"/>
-  <text class="lbl" x="503" y="192" text-anchor="start">adds</text>
+  <path class="f" d="M491 208V166" marker-end="url(#a)"/>
+  <text class="lbl" x="503" y="192" text-anchor="start">also filters</text>
   <rect class="box" x="44" y="388" width="210" height="64" rx="10"/>
   <text class="h" x="60" y="414">Built-in agent</text>
   <text class="s" x="60" y="435">sablecourt-agent container</text>
@@ -87,6 +87,4 @@
   <text class="lbl" x="62" y="621" text-anchor="start">the subject of the ADR</text>
   <rect class="ext" x="300" y="608" width="28" height="16" rx="4"/>
   <text class="lbl" x="338" y="621" text-anchor="start">outside Sablecourt</text>
-  <rect class="plan" x="560" y="608" width="28" height="16" rx="4"/>
-  <text class="lbl" x="598" y="621" text-anchor="start">planned</text>
 </svg>

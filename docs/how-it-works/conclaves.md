@@ -15,6 +15,8 @@ A `Conclave` manifest lists Vassals. Each has a `role`, the `workload` it runs, 
 
 A Vassal posts only to roles in its own `canMessage` list (`all` and `operator` are allowed values). The loader rejects a sandbox-zone workload that lists a runtime-zone Vassal, or that lists `all` when the room holds one. On each post the broker checks only that the target is in the sender's `canMessage` list (or that the list holds `all`); it does not compare zones again. A refused post is written to the audit chain as `conclave.post` with outcome `denied`. Message bodies are redacted and capped at 64 KiB.
 
+[![Who may message whom: a Vassal posts to the broker, which allows it only if the sender's canMessage list names the target, redacts and stores it, counts it against the Wards and wakes an on-mention target; the operator steers with Decrees, and a sandbox Vassal may not message a runtime Vassal.](../diagrams/conclave-room.svg)](../diagrams/conclave-room.svg "Open full size")
+
 ## Wards
 
 A Ward is a limit that pauses the room instead of failing it. Defaults are twice the number of Vassals for `maxMessages` and `maxPingPong`, and six for `maxRuns`, which is also the largest value the loader accepts.
