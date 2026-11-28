@@ -21,7 +21,7 @@ The flow below shows how a task gets its packet: a deterministic controller outs
 
 Parts 1 to 5 are required and are not cut. Part 6 is optional: while the packet is over 32 KiB, the oldest optional entry is removed whole and the size is checked again, the pre-check going last because it is stamped with the current time. When the required part leaves room, the packet ends with a marker that older context was omitted. A packet can exceed 32 KiB if the required part does. The required part and each optional entry pass through the redactor. Council turns use another packet, described in [council](council.md).
 
-A deterministic controller outside a council gets no packet, and the controller adapter refuses a model grant for it. Every other task carries the packet in the `context_packet` field of its launch input. The host coding adapter uses it as the harness prompt and, outside a council checkout, also writes it to a session file in the worktree. The built-in `sablecourt-agent` container sends it as the first message to the Model Gate, together with the task history. Docker and Kubernetes workloads receive it in `SABLECOURT_INPUT_JSON` and use it only if their own code reads it.
+A deterministic controller outside a council gets no packet, and the controller adapter refuses a model grant for it. Every other task carries the packet in the `context_packet` field of its launch input. The coding adapter uses it as the harness prompt and, on a host run (only with `--unsafe-host-harnesses`) outside a council checkout, also writes it to a session file in the worktree; harness containers do not get that file. The built-in `sablecourt-agent` container sends it as the first message to the Model Gate, together with the task history. Docker and Kubernetes workloads receive it in `SABLECOURT_INPUT_JSON` and use it only if their own code reads it.
 
 ## The repository pre-check
 
@@ -68,7 +68,7 @@ Every line is dashed because the store enforces the transitions but no route, pa
 - Proposing, accepting, confirming and retiring through a route, page or command. ADR-0014 would give acceptance to the `approver` role; it is Proposed.
 - Proposing candidates when a run ends.
 - Matching and injecting from the record: at most ten statements in an advisory section of at most 4 KiB, most specific first. The packet today takes up to 20 entries and only the 32 KiB cap applies. The 4 KiB in the store limits one statement.
-- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, is the harness prompt of a host coding task, and the built-in agent sends it to a model provider through the Model Gate.
+- Keeping learnings out of remote model prompts, which the ADR decides. Today the packet, with any matching entry, is the harness prompt of a coding task, and the built-in agent sends it to a model provider through the Model Gate.
 - PostgreSQL has no learning table.
 
 ## Verifier steps
@@ -106,6 +106,20 @@ spec:
       budgetRef: daily
 ---
 apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: go-reviewer
+  zone: runtime
+spec:
+  class: coding-agent
+  runtime:
+    type: worktree-cli
+  coding:
+    harness: codex
+    repoPath: .
+    sandbox: seatbelt
+---
+apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
   name: fix-and-verify
@@ -119,14 +133,16 @@ spec:
       tier: coding
       prompt: Fix the bug described in the task input and run the tests.
     - name: check
-      workload: go-coder
+      workload: go-reviewer
       role: verifier
       tier: critic
       maxRetries: 2
       prompt: Check the change for regressions and missing tests.
 ```
 
+- The verifier runs on its own workload. The manifest loader refuses a `role: verifier` step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads`: `actions`, `delegateTo`, `mcpServers`, `repos`, any other tool and any `modelGate` setting are refused, and an upstream server cannot register one of these names, because the loader refuses an `mcpServers` name in a built-in namespace. It also refuses a verifier whose workload is also used by a step before it that is not a verifier, and a verifier on a model workload when no earlier step runs a model. Here `go-reviewer` runs the `codex` harness because the default `critic` route is `cli:codex` with `gpt-6.2-astra`, a model family other than the `coding` route's.
 - The verifier gets a prompt that tells it not to trust the author, with the text of the author's artifacts (each cut at 4096 bytes). It must run on a `coding-agent` workload. Its checkout is read-only and pinned to the author's commit, recorded as a `verifier_checkout_pinned` event. If the workload is not a coding agent, the runtime cannot pin a commit, or the author recorded no commit, the launch fails with "runtime cannot guarantee the author's checkout for this step".
+- Only an author step sets the commit a verifier reviews. A verifier that follows another verifier (for example review, then security) is pinned to the same commit as the first one, even if the first verifier recorded a commit of its own, and its `CHANGES_REQUESTED` runs that same author step again. Its prompt carries the artifacts of the step before it, the first verifier. After a remediation run of the author, the next verifier is pinned to the commit that run recorded.
 - The verdict is the last line of the single `final-message` artifact (plain text, at most 64 KiB), exactly `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. A message that repeats the prompt does not count.
 - `PASS` moves the workflow to the next step. With no valid verdict, the workflow halts with reason `verdict_missing` and an audit row `workflow.verify`. `CHANGES_REQUESTED` writes a `workflow.verify` audit row and runs the author step again with the redacted findings as its handoff while `retry_count` is below `maxRetries`; at the limit no further step starts. The `maxRetries` that counts is the one on the verifier step, or the author step's own when the verifier step sets none.
 - A task of a step that has `maxRetries` set, or a task whose input sets `auto_remediate`, is retried with a handoff when it fails, up to that number (one retry if only `auto_remediate` is set). The retry happens only when the daemon saw the runtime exit (`runtime_exit_observed`). A task that fails to launch, is lost on restart, or fails because a runtime output log could not close or finalize (`log_close: true` or exit code `-2`) is not retried. In the example above `maxRetries` is on the `check` step, so it limits the verdict loop and the `check` run itself, not a failure of the `fix` step. See [retry with handoff](../how-to/retry-with-handoff.md).
@@ -137,7 +153,7 @@ spec:
 
 ## Model tiers
 
-A step may name a tier, `fast`, `coding` or `critic`, as shorthand for a provider and model. A provider or model set on the step itself replaces the route of the tier. The loader checks the tier name and route against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:claude` with `claude-opus-5-5`. A route must suit the workload: a deterministic controller cannot use a tier, and a `coding-agent` workload needs a `cli:` provider of its own harness and a model that harness accepts. Other classes get no further check.
+A step may name a tier, `fast`, `coding` or `critic`, as shorthand for a provider and model. A provider or model set on the step itself replaces the route of the tier. The loader checks the tier name and route against the defaults, and the daemon resolves it at dispatch from Court Memory (`system:model-tiers`), which `GET` and `POST /api/v1/providers/tiers` and the `/providers` page edit. The defaults are `cli:agy` with `gemini-3.8-flash-high`, `cli:claude` with `claude-sonnet-5-5` and `cli:codex` with `gpt-6.2-astra`; [configuration](../reference/configuration.md#model-tiers-and-families) lists their model families. A route must suit the workload: a deterministic controller cannot use a tier, and a `coding-agent` workload needs a `cli:` provider of its own harness and a model that harness accepts. Other classes get no further check.
 
 ## In depth
 
