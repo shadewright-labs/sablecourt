@@ -225,8 +225,8 @@ type CouncilResult struct {
 	FinishedAt                   time.Time
 	ExitCode                     int
 	Stdout, Stderr               string
-	// OutputOverflow is set when a stream passed the runner's output limit.
-	// A council stream is then replaced by a marker; a command stream keeps
+	// OutputOverflow is set when a stream was cut: it passed the runner's
+	// output limit, or its redaction grew past it. A council stream is then replaced by a marker; a command stream keeps
 	// its redacted tail, starting on a whole line.
 	OutputOverflow bool
 }

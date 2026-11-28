@@ -89,6 +89,7 @@ var limitConstants = []string{
 	"internal/runtime/coding.maxSessionLog",
 	"internal/runtime/coding.processGracePeriod",
 	"internal/runtime/docker.maxCouncilOutput",
+	"internal/runtime/docker.outputLookback",
 	"internal/store.ConclaveWallTime",
 	"internal/store.defaultBudgetReservationTTL",
 	"internal/store.DefaultLearningListLimit",

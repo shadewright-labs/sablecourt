@@ -33,6 +33,19 @@ spec:
         failureReason: "make check failed: fix the change before review"
 ---
 apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata:
+  name: reviewer
+  zone: runtime
+spec:
+  class: coding-agent
+  runtime:
+    type: worktree-cli
+  coding:
+    harness: codex
+    repoPath: /srv/repo
+---
+apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
   name: coding
@@ -46,12 +59,12 @@ spec:
       workload: builder
       command: check
     - name: review
-      workload: builder
+      workload: reviewer
       role: verifier
       prompt: Review the change.
 ```
 
-The manifest loader refuses a command step that is the first step, that follows a `verifier` step, whose workload is not a `coding-agent` or does not list the command, or that sets `role`, `tier`, `provider`, `model`, `prompt` or `maxRetries`. It refuses a command whose name, argv, time limit, output cap or failure reason is outside the limits on the [limits page](../reference/limits.md#command-steps).
+The verifier runs on its own workload: the loader refuses a verifier whose workload an earlier author or command step also uses. The manifest loader refuses a command step that is the first step, that follows a `verifier` step, whose workload is not a `coding-agent` or does not list the command, or that sets `role`, `tier`, `provider`, `model`, `prompt` or `maxRetries`. It refuses a command whose name, argv, time limit, output cap or failure reason is outside the limits on the [limits page](../reference/limits.md#command-steps).
 
 ## What runs, and what is refused
 
@@ -80,7 +93,9 @@ It uses the same container spec function, and so the same guards, as a coding ta
 
 ## The result
 
-The runner keeps at most 1 MiB of each stream. Past that it keeps the stream's last 1 MiB, drops the first line of what is left (the cut can fall inside a secret, whose rest no rule would match) and drops everything up to a private key's `END` line when the cut fell inside the key. The command's standard output and standard error are each redacted by the runner, joined (output first), made valid UTF-8 (each run of invalid bytes becomes one U+FFFD, so encoding the result as JSON cannot grow it), redacted again, then capped. If the cap cuts the output where a redaction rule then matches, the kept tail is redacted and cut again, so storing it never changes it or grows it past the cap. The step's result is the artifact `command-result` (`application/json`); the control plane redacts it field by field, so the stored JSON always decodes:
+Each stream and the joined output are bounded by one function, `redact.Tail`, in the same order. It redacts the whole text first, so a secret that spans the cut is replaced whole. It then cuts the redacted text to the limit, drops the first line of what is left (a cut can fall inside a secret, whose rest no rule would match) and everything up to a private key's `END` line when the cut fell inside the key, and redacts the cut text again until it stops changing; if that grows it past the limit, it cuts again. Any cut, whether the text was too long or redaction made it longer, counts as an overflow, so a step never passes with `output_truncated` false after a cut.
+
+The runner keeps at most 1 MiB of each stream. Past that it keeps the stream's last 1 MiB and the 64 KiB before it: the 64 KiB is redacted together with the tail, so a key name or header just before the cut is seen with its value, but none of it is shown. The command's standard output and standard error are each bounded this way by the runner, joined (output first), made valid UTF-8 (each run of invalid bytes becomes one U+FFFD, so encoding the result as JSON cannot grow it), then bounded again to `maxOutputBytes`, so storing the output never changes it or grows it past the cap. The step's result is the artifact `command-result` (`application/json`); the control plane redacts it field by field, so the stored JSON always decodes:
 
 | Field | Meaning |
 | --- | --- |
@@ -111,4 +126,5 @@ A step after a command step follows the author's task, not the command's: a veri
 - The checkout's Git metadata holds only the objects reachable from the author's commit and `HEAD`, with no other branch. A command can compare the commit with its own ancestors (for example `git diff --name-only HEAD~1`), but the daemon does not tell it which commit the author started from.
 - A proxy image built before command steps existed does not know the `command` profile, and the proxy name does not change with its code. Command steps are then refused with `container_spec_refused` until `sablectl harness build` builds the proxy again.
 - If the daemon restarts while a command runs, its output is lost: the step fails with no `command-result` artifact, and the run halts with outcome `failed`.
-- Standard output and standard error are kept apart and joined after the run, so their order relative to each other is lost. A stream longer than 1 MiB fails the step with `output_over_cap`, and only its last whole lines are kept. The cap then keeps the end of the joined output, so when standard error is long the stored output comes from it alone. A stream over 1 MiB with no line break in its last 1 MiB is replaced by `[REDACTED:output limit]`.
+- Standard output and standard error are kept apart and joined after the run, so their order relative to each other is lost. A stream longer than 1 MiB fails the step with `output_over_cap`, and only its last whole lines are kept. The cap then keeps the end of the joined output, so when standard error is long the stored output comes from it alone. A stream with no line break in its last 1 MiB after the cut is replaced by `[REDACTED:output limit]`, and output over `maxOutputBytes` with no line break left after the cut is stored empty.
+- A secret whose key or header lies more than 64 KiB before the runner's cut, with only whitespace or a long quoted value in between, is not seen whole: its value can stay in the kept tail. Pattern rules are best effort (invariant 3).

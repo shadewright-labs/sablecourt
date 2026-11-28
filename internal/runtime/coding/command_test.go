@@ -89,12 +89,16 @@ func TestBuildCommandProcessResult(t *testing.T) {
 		output    string
 		truncated bool
 	}{
-		"passed":                         {res: scruntime.CouncilResult{Stdout: "ok\n"}, outcome: scruntime.CommandPassed, output: "ok"},
-		"stderr joined":                  {res: scruntime.CouncilResult{Stdout: "out", Stderr: "warn"}, outcome: scruntime.CommandPassed, output: "out\nwarn"},
-		"failed":                         {res: scruntime.CouncilResult{ExitCode: 2, Stderr: "boom"}, outcome: scruntime.CommandFailed, exit: 2, taskExit: 2, output: "boom"},
-		"redacted":                       {res: scruntime.CouncilResult{ExitCode: 1, Stdout: "key " + secret}, outcome: scruntime.CommandFailed, exit: 1, taskExit: 1, output: "key [REDACTED"},
-		"over cap exit 0":                {res: scruntime.CouncilResult{Stdout: strings.Repeat("a", 40) + "TAIL"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: strings.Repeat("a", 28) + "TAIL", truncated: true},
-		"over cap exit 3":                {res: scruntime.CouncilResult{ExitCode: 3, Stdout: strings.Repeat("b", 64)}, outcome: scruntime.CommandOutputOverCap, exit: 3, taskExit: 3, output: strings.Repeat("b", 32), truncated: true},
+		"passed":        {res: scruntime.CouncilResult{Stdout: "ok\n"}, outcome: scruntime.CommandPassed, output: "ok"},
+		"stderr joined": {res: scruntime.CouncilResult{Stdout: "out", Stderr: "warn"}, outcome: scruntime.CommandPassed, output: "out\nwarn"},
+		"failed":        {res: scruntime.CouncilResult{ExitCode: 2, Stderr: "boom"}, outcome: scruntime.CommandFailed, exit: 2, taskExit: 2, output: "boom"},
+		"redacted":      {res: scruntime.CouncilResult{ExitCode: 1, Stdout: "key " + secret}, outcome: scruntime.CommandFailed, exit: 1, taskExit: 1, output: "key [REDACTED"},
+		// The cap keeps the last whole lines: the cut line is dropped.
+		"over cap exit 0":             {res: scruntime.CouncilResult{Stdout: strings.Repeat("a", 40) + "\nTAIL"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: "TAIL", truncated: true},
+		"over cap exit 3":             {res: scruntime.CouncilResult{ExitCode: 3, Stdout: strings.Repeat("b", 64) + "\nlast"}, outcome: scruntime.CommandOutputOverCap, exit: 3, taskExit: 3, output: "last", truncated: true},
+		"over cap with no whole line": {res: scruntime.CouncilResult{Stdout: strings.Repeat("c", 64)}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
+		// Redaction grows the output past the cap: that is a cut too.
+		"redaction grows past cap":       {res: scruntime.CouncilResult{Stdout: strings.Repeat("api"+"_key=abcdef\n", 2) + "ok"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: "api_key=[REDACTED:secret]\nok", truncated: true},
 		"runner overflow":                {res: scruntime.CouncilResult{Stdout: "[REDACTED:output limit]", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
 		"runner overflow keeps the tail": {res: scruntime.CouncilResult{ExitCode: 2, Stdout: "FAIL: TestX", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, exit: 2, taskExit: 2, output: "FAIL: TestX", truncated: true},
 		"secret across streams": {
@@ -143,17 +147,6 @@ func TestCommandArtifactWithoutRunnerOutput(t *testing.T) {
 	}
 	if _, ok := commandArtifact(&worktreeState{Result: &processResult{}}); ok {
 		t.Fatal("a harness task got a command artifact")
-	}
-}
-
-func TestUTF8Tail(t *testing.T) {
-	t.Parallel()
-	s := "ab" + strings.Repeat("é", 4) // 2 + 8 bytes
-	for n := 0; n <= len(s)+1; n++ {
-		got := utf8Tail(s, n)
-		if len(got) > n || !utf8.ValidString(got) || !strings.HasSuffix(s, got) {
-			t.Fatalf("utf8Tail(%q, %d) = %q", s, n, got)
-		}
 	}
 }
 

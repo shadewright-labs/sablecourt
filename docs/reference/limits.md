@@ -151,6 +151,7 @@ See [command steps](../how-it-works/command-steps.md).
 | Highest `timeoutSeconds` | `internal/domain.MaxCommandTimeout` | 1 h |
 | Redacted output kept when `maxOutputBytes` is unset; more fails the step | `internal/domain.DefaultCommandOutputBytes` | 64 KiB |
 | Highest `maxOutputBytes` | `internal/domain.MaxCommandOutputBytes` | 1 MiB |
+| Bytes before a command stream's kept tail redacted with it as context, never shown | `internal/runtime/docker.outputLookback` | 64 KiB |
 | Entries in a command's `argv` | `internal/domain.MaxCommandArgs` | 64 |
 | Bytes in one `argv` entry | `internal/domain.MaxCommandArgBytes` | 4 KiB |
 | Bytes in a command's `failureReason` | `internal/domain.MaxCommandFailureReason` | 512 B |

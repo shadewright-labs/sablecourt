@@ -7,7 +7,6 @@ import (
 	"io"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
@@ -56,15 +55,34 @@ func copyDockerStreams(r io.Reader, stdout, stderr io.Writer) error {
 const maxCouncilOutput = 1 << 20
 const outputLimitMarker = "[REDACTED:output limit]"
 
+// outputLookback is how much of a command stream the runner keeps before
+// its last maxCouncilOutput bytes. It is redacted together with the tail, so
+// a secret that starts before the cut (a key name, a header, the start of a
+// token) is replaced whole, but none of it is shown.
+const outputLookback = 64 << 10
+
 // councilOutput captures one stream of a council or command container, at
 // most maxCouncilOutput bytes of it. Past that limit a council stream is
 // dropped whole and replaced by outputLimitMarker. A command stream sets
-// keepTail: it keeps its last maxCouncilOutput bytes instead, so the final
-// diagnostic of a command survives, and still reports the overflow.
+// keepTail: it keeps its last maxCouncilOutput bytes, plus outputLookback
+// bytes of context before them, so the final diagnostic of a command
+// survives, and still reports the overflow.
 type councilOutput struct {
 	buf      bytes.Buffer
+	total    int64
 	overflow bool
 	keepTail bool
+	// limit and lookback replace maxCouncilOutput and outputLookback in
+	// tests when set.
+	limit, lookback int
+}
+
+func (b *councilOutput) limits() (limit, window int) {
+	limit, lookback := maxCouncilOutput, outputLookback
+	if b.limit > 0 {
+		limit, lookback = b.limit, b.lookback
+	}
+	return limit, limit + lookback
 }
 
 func (b *councilOutput) Write(p []byte) (int, error) {
@@ -72,96 +90,69 @@ func (b *councilOutput) Write(p []byte) (int, error) {
 	if b.overflow && !b.keepTail {
 		return n, nil
 	}
-	if len(p) > maxCouncilOutput-b.buf.Len() {
+	limit, window := b.limits()
+	b.total += int64(n)
+	if b.total > int64(limit) {
 		b.overflow = true
 		if !b.keepTail {
 			b.buf.Reset()
 			return n, nil
 		}
 	}
-	if b.keepTail && len(p) >= maxCouncilOutput {
+	if len(p) >= window {
 		b.buf.Reset()
-		p = p[len(p)-maxCouncilOutput:]
+		p = p[len(p)-window:]
 	}
 	b.buf.Write(p)
-	// Compact only past twice the limit, so each byte is copied a bounded
-	// number of times and the buffer never holds more than 2 MiB.
-	if b.keepTail && b.buf.Len() > 2*maxCouncilOutput {
-		tail := bytes.Clone(b.buf.Bytes()[b.buf.Len()-maxCouncilOutput:])
+	// Compact only past twice the window, so each byte is copied a bounded
+	// number of times and the buffer holds at most twice the window.
+	if b.buf.Len() > 2*window {
+		tail := bytes.Clone(b.buf.Bytes()[b.buf.Len()-window:])
 		b.buf.Reset()
 		b.buf.Write(tail)
 	}
 	return n, nil
 }
 
-var (
-	privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
-	privateKeyEnd   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
-)
+var privateKeyStart = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
 
+// visible returns the stream as it may be shown or stored: redacted, then
+// cut to the limit by redact.Tail, which owns the order of redaction and
+// cuts. Any cut, by the stream's size or by redaction growth, sets overflow.
+// A council stream that was cut is replaced by outputLimitMarker; so is a
+// command stream with no whole line left after its cut.
 func (b *councilOutput) visible(prompt, lease string) string {
+	if b.overflow && !b.keepTail {
+		return outputLimitMarker
+	}
+	limit, _ := b.limits()
 	raw := b.buf.String()
+	from := 0
 	if b.overflow {
-		if !b.keepTail {
-			return outputLimitMarker
+		// The stream is longer than the window: its last limit bytes are
+		// kept, the bytes before them are context only.
+		from = max(len(raw)-limit, 1)
+	}
+	clean := func(s string) string {
+		for _, secret := range []string{lease, prompt} {
+			if secret != "" {
+				s = strings.ReplaceAll(s, secret, "[REDACTED]")
+			}
 		}
-		var ok bool
-		if raw, ok = overflowTail(raw); !ok {
-			return outputLimitMarker
+		s = redact.String(s)
+		// A private key with no END line matches no rule: drop it and
+		// everything after it.
+		if start := privateKeyStart.FindStringIndex(s); start != nil {
+			s = s[:start[0]] + "[REDACTED:private_key]"
 		}
-	}
-	for _, secret := range []string{lease, prompt} {
-		if secret != "" {
-			raw = strings.ReplaceAll(raw, secret, "[REDACTED]")
-		}
-	}
-	clean := redact.String(raw)
-	if start := privateKeyStart.FindStringIndex(clean); start != nil {
-		clean = clean[:start[0]] + "[REDACTED:private_key]"
-	}
-	if len(clean) > maxCouncilOutput {
-		if !b.keepTail {
-			return outputLimitMarker
-		}
-		// Redaction ran before this cut, so the cut cannot expose a secret.
-		clean = utf8Suffix(clean, maxCouncilOutput)
-	}
-	return clean
-}
-
-// overflowTail trims the kept tail of an overflowed stream before redaction:
-// it keeps its last maxCouncilOutput bytes, then drops the first, partial
-// line, since a secret cut in half there would match no rule and no exact
-// value. A tail that starts inside a private key is dropped through the last
-// END line before the first BEGIN line. It reports false when no whole line
-// is left.
-func overflowTail(raw string) (string, bool) {
-	if len(raw) > maxCouncilOutput {
-		raw = raw[len(raw)-maxCouncilOutput:]
-	}
-	nl := strings.IndexByte(raw, '\n')
-	if nl < 0 {
-		return "", false
-	}
-	raw = raw[nl+1:]
-	head := raw
-	if start := privateKeyStart.FindStringIndex(raw); start != nil {
-		head = raw[:start[0]]
-	}
-	if ends := privateKeyEnd.FindAllStringIndex(head, -1); len(ends) > 0 {
-		raw = raw[ends[len(ends)-1][1]:]
-	}
-	return raw, true
-}
-
-// utf8Suffix returns at most n bytes from the end of s, starting on a rune.
-func utf8Suffix(s string, n int) string {
-	if len(s) <= n {
 		return s
 	}
-	cut := len(s) - n
-	for cut < len(s) && !utf8.RuneStart(s[cut]) {
-		cut++
+	out, cut := redact.Tail(raw, from, limit, clean)
+	if cut {
+		b.overflow = true
+		if !b.keepTail || out == "" {
+			return outputLimitMarker
+		}
 	}
-	return s[cut:]
+	return out
 }
