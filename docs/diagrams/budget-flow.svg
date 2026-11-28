@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 344" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Model Gate budget flow</title>
-  <desc id="d">Flow of budget accounting for one Model Gate call. The gate estimates tokens and cost from the request body and reserves them in one store transaction, checked against the per-task limits, the daily cost limit of the workload and, for a task with a parent, the child ceiling. If a limit would be exceeded, the gate refuses the call with 429; if the child ceiling is missing or invalid, with 403. Both stop before forwarding. Within limits, the gate forwards the request to the configured upstream and streams the response back. On a 2xx response it settles the reservation into the budget ledger, at the reported usage or at least the reserve when usage cannot be read, and writes an audit row. On a non-2xx response or an upstream error it releases the reservation and charges nothing. A note states that harness traffic to provider hosts goes through the council proxy tunnels, not the Model Gate, and is not counted here.</desc>
+  <desc id="d">Flow of budget accounting for one Model Gate call. The gate estimates tokens and cost from the request body and reserves them in one store transaction, which checks the per-task limits, then the daily cost limit of the workload, then, for a task with a parent, the child ceiling, and stops at the first that fails. An exceeded limit refuses the call with 429, so a per-task or daily refusal comes before the child ceiling is read; a missing or invalid child ceiling refuses it with 403. Both stop before forwarding. Within limits, the gate forwards the request to the configured upstream. For an openai or local call whose request fails or returns 429, 502, 503 or 504, it tries the other of those two providers when the workload is granted it and it is configured, and uses that answer if it is 2xx. It relays a JSON or event-stream response to the workload and answers any other with an error. When the final response is 2xx, even one it cannot relay or read in full, it settles the reservation into the budget ledger, at the reported usage, or at least the reserve when usage is unreadable, all zero or partial, and writes an audit row. When the final response is not 2xx, or no response arrives, it releases the reservation and charges nothing. A note states that harness traffic to provider hosts goes through the council proxy tunnels, not the Model Gate, and is not counted here.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -45,7 +45,7 @@
   <rect class="box" x="584" y="36" width="208" height="72" rx="10"/>
   <text class="h" x="600" y="62">Forward call</text>
   <text class="s" x="600" y="83">to configured upstream</text>
-  <text class="s" x="600" y="100">stream back to workload</text>
+  <text class="s" x="600" y="100">relays reply, else an error</text>
 
   <rect class="box" x="864" y="36" width="232" height="72" rx="10"/>
   <text class="h" x="880" y="62">Settle to ledger</text>
@@ -70,7 +70,7 @@
   <path class="deny" d="M386 108V206" marker-end="url(#x)"/>
   <text class="no" x="398" y="162">over limit / bad ceiling</text>
   <path class="f" d="M688 108V206" marker-end="url(#a)"/>
-  <text class="lbl" x="700" y="162">non-2xx / error</text>
+  <text class="lbl" x="700" y="162">final non-2xx, or no response</text>
 
   <text class="cap" x="24" y="320">Harness traffic to provider hosts goes through council proxy tunnels, not the Model Gate, and is not counted here.</text>
 </svg>
