@@ -18,7 +18,9 @@ import (
 
 var _ store.LearningStore = (*SQLiteStore)(nil)
 
-func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (domain.Learning, error) {
+func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (proposed domain.Learning, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "learning %s was proposed", proposed.ID) }()
 	if !store.ValidLearningID(in.ID, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
@@ -127,7 +129,7 @@ func (s *SQLiteStore) ProposeLearning(ctx context.Context, in domain.Learning) (
 	if err := insertLearningTx(ctx, tx, rec, "proposed", rec.Author, rec.ReviewReason); err != nil {
 		return domain.Learning{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return domain.Learning{}, err
 	}
 	return rec, nil
@@ -140,7 +142,9 @@ func (s *SQLiteStore) GetLearning(ctx context.Context, id string) (domain.Learni
 	return getLearningRow(ctx, s.db, id)
 }
 
-func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest string, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest string, now time.Time) (accepted domain.Learning, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "learning %s was accepted", id) }()
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
@@ -265,13 +269,15 @@ func (s *SQLiteStore) AcceptLearning(ctx context.Context, id, expectedDigest str
 	if err != nil {
 		return domain.Learning{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return domain.Learning{}, err
 	}
 	return updated, nil
 }
 
-func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID int64, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID int64, now time.Time) (confirmed domain.Learning, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "learning %s was confirmed", id) }()
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
@@ -388,13 +394,15 @@ func (s *SQLiteStore) ConfirmLearning(ctx context.Context, id string, outcomeID 
 	if err != nil {
 		return domain.Learning{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return domain.Learning{}, err
 	}
 	return updated, nil
 }
 
-func (s *SQLiteStore) RetireLearning(ctx context.Context, id, reason string, now time.Time) (domain.Learning, error) {
+func (s *SQLiteStore) RetireLearning(ctx context.Context, id, reason string, now time.Time) (retired domain.Learning, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "learning %s was retired", id) }()
 	if !store.ValidLearningID(id, store.MaxLearningFieldBytes) {
 		return domain.Learning{}, errors.New("invalid learning id")
 	}
@@ -461,13 +469,17 @@ func (s *SQLiteStore) RetireLearning(ctx context.Context, id, reason string, now
 	if err != nil {
 		return domain.Learning{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return domain.Learning{}, err
 	}
 	return updated, nil
 }
 
-func (s *SQLiteStore) RecordLearningInjection(ctx context.Context, learningID, packetID, taskID string, at time.Time) (bool, error) {
+func (s *SQLiteStore) RecordLearningInjection(ctx context.Context, learningID, packetID, taskID string, at time.Time) (injected bool, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() {
+		store.NoteEffectWhen(ctx, injected, err, "learning %s was injected into task %s", learningID, taskID)
+	}()
 	if !store.ValidLearningID(learningID, store.MaxLearningFieldBytes) {
 		return false, errors.New("invalid learning id")
 	}
@@ -534,13 +546,15 @@ func (s *SQLiteStore) RecordLearningInjection(ctx context.Context, learningID, p
 	if n, _ := res.RowsAffected(); n != 1 {
 		return false, store.ErrNotFound
 	}
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.LearningOutcome) (domain.LearningOutcome, error) {
+func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.LearningOutcome) (outcome domain.LearningOutcome, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "an outcome of learning %s was recorded", in.LearningID) }()
 	if !store.ValidLearningID(in.LearningID, store.MaxLearningFieldBytes) {
 		return domain.LearningOutcome{}, errors.New("invalid learning id")
 	}
@@ -656,7 +670,7 @@ func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.Learn
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return domain.LearningOutcome{}, err
 	}
 	return domain.LearningOutcome{
@@ -672,7 +686,9 @@ func (s *SQLiteStore) RecordLearningOutcome(ctx context.Context, in domain.Learn
 	}, nil
 }
 
-func (s *SQLiteStore) ExpireLearnings(ctx context.Context, now time.Time) (int, error) {
+func (s *SQLiteStore) ExpireLearnings(ctx context.Context, now time.Time) (expired int, err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectWhen(ctx, expired > 0, err, "%d learnings expired", expired) }()
 	if now.IsZero() {
 		now = time.Now().UTC()
 	} else {
@@ -730,7 +746,7 @@ func (s *SQLiteStore) ExpireLearnings(ctx context.Context, now time.Time) (int, 
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := store.Commit(ctx, tx); err != nil {
 		return 0, err
 	}
 	return len(ids), nil

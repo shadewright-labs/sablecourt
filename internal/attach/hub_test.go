@@ -2,13 +2,16 @@ package attach
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 type nopWriteCloser struct {
@@ -45,11 +48,30 @@ func TestHubScryRedactionAndTakeoverExclusivity(t *testing.T) {
 	}
 
 	// 2. Exclusive Takeover: alice acquires, bob is blocked, alice writes stdin, then detaches.
-	if err := hub.AcquireTakeover("task-1", "alice"); err != nil {
-		t.Fatalf("alice AcquireTakeover: %v", err)
+	ctx, effects := store.TrackEffects(context.Background())
+	if reserved, err := hub.AcquireTakeover("task-1", "alice"); err != nil || !reserved {
+		t.Fatalf("alice AcquireTakeover: %v %v", reserved, err)
 	}
-	if err := hub.AcquireTakeover("task-1", "bob"); !errors.Is(err, ErrTakeoverHeld) {
+	if _, err := hub.AcquireTakeover("task-1", "bob"); !errors.Is(err, ErrTakeoverHeld) {
 		t.Fatalf("expected ErrTakeoverHeld for bob, got %v", err)
+	}
+	if _, err := hub.SendInput("task-1", "alice", []byte("early\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input before ConfirmTakeover: %v", err)
+	}
+	if err := hub.ConfirmTakeover(ctx, "task-1", "bob"); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("bob confirmed alice's takeover: %v", err)
+	}
+	if err := hub.ConfirmTakeover(ctx, "task-1", "alice"); err != nil {
+		t.Fatalf("alice ConfirmTakeover: %v", err)
+	}
+	// A repeat by the holder reserves nothing, and dropping that nothing
+	// keeps the confirmed takeover.
+	if reserved, err := hub.AcquireTakeover("task-1", "alice"); err != nil || reserved {
+		t.Fatalf("alice repeat AcquireTakeover: %v %v", reserved, err)
+	}
+	hub.AbandonTakeover("task-1", "alice")
+	if err := hub.ConfirmTakeover(ctx, "task-1", "alice"); err != nil {
+		t.Fatalf("alice repeat ConfirmTakeover: %v", err)
 	}
 	if _, err := hub.SendInput("task-1", "alice", []byte("continue\n")); err != nil {
 		t.Fatalf("alice SendInput: %v", err)
@@ -58,9 +80,25 @@ func TestHubScryRedactionAndTakeoverExclusivity(t *testing.T) {
 		t.Fatalf("expected stdin to receive 'continue\\n', got %q", stdin.String())
 	}
 
-	hub.ReleaseTakeover("task-1", "alice")
-	if err := hub.AcquireTakeover("task-1", "bob"); err != nil {
+	hub.ReleaseTakeover(ctx, "task-1", "alice")
+	if got, want := effects.List(), []string{"operator alice took over task task-1", "the takeover of task task-1 by alice was released"}; !slices.Equal(got, want) {
+		t.Fatalf("effects %q, want %q", got, want)
+	}
+	if _, err := hub.SendInput("task-1", "alice", []byte("late\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input after release: %v", err)
+	}
+	if _, err := hub.SendInput("task-1", "carol", []byte("implicit\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input without a takeover: %v", err)
+	}
+	if _, err := hub.AcquireTakeover("task-1", "bob"); err != nil {
 		t.Fatalf("bob AcquireTakeover after release: %v", err)
+	}
+	hub.AbandonTakeover("task-1", "bob")
+	if _, err := hub.AcquireTakeover("task-1", "carol"); err != nil {
+		t.Fatalf("carol AcquireTakeover after bob abandoned: %v", err)
+	}
+	if stdin.String() != "continue\n" {
+		t.Fatalf("stdin received %q", stdin.String())
 	}
 
 	// 3. Close terminates subscribers cleanly.

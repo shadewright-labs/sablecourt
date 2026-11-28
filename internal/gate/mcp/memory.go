@@ -29,7 +29,10 @@ func isReservedReadNamespace(ns string) bool {
 	return store.IsLearningNamespace(ns) || strings.HasPrefix(lower, "system:")
 }
 
-func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, workloadName, action, outcome string, detail map[string]string) {
+// auditMemory writes a memory record and returns an error wrapping
+// store.ErrAuditWrite when the write fails. Refusals ignore the error (it is
+// logged); a write or delete that already happened reports it.
+func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, workloadName, action, outcome string, detail map[string]string) error {
 	for field, value := range detail {
 		detail[field] = redact.String(value)
 	}
@@ -38,7 +41,7 @@ func auditMemory(ctx context.Context, gate *Gate, st store.Store, taskID, worklo
 	if gate != nil && gate.now != nil {
 		now = gate.now()
 	}
-	_ = st.AppendAudit(ctx, domain.AuditRecord{
+	return store.RecordAudit(ctx, st, domain.AuditRecord{
 		Category:     "memory",
 		TaskID:       taskID,
 		WorkloadName: workloadName,
@@ -74,7 +77,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				ns = "default"
 			}
 			if isReservedWriteNamespace(ns) {
-				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "denied", map[string]string{
+				_ = auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "denied", map[string]string{
 					"namespace": ns,
 					"key":       in.Key,
 					"reason":    "reserved_namespace",
@@ -94,10 +97,12 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			if err := st.PutMemory(ctx, entry); err != nil {
 				return "", err
 			}
-			auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "stored", map[string]string{
+			if err := auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.put", "stored", map[string]string{
 				"namespace": entry.Namespace,
 				"key":       entry.Key,
-			})
+			}); err != nil {
+				return "", err
+			}
 			out, _ := json.Marshal(entry)
 			return string(out), nil
 		},
@@ -120,7 +125,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 				ns = "default"
 			}
 			if isReservedWriteNamespace(ns) {
-				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "denied", map[string]string{
+				_ = auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "denied", map[string]string{
 					"namespace": ns,
 					"key":       key,
 					"reason":    "reserved_namespace",
@@ -133,10 +138,12 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			if err := st.DeleteMemory(ctx, ns, key); err != nil {
 				return "", err
 			}
-			auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "deleted", map[string]string{
+			if err := auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.delete", "deleted", map[string]string{
 				"namespace": ns,
 				"key":       key,
-			})
+			}); err != nil {
+				return "", err
+			}
 			out, _ := json.Marshal(map[string]string{
 				"namespace": ns,
 				"key":       key,
@@ -160,7 +167,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			ns := strings.TrimSpace(in.Namespace)
 			key := strings.TrimSpace(in.Key)
 			if isReservedReadNamespace(ns) {
-				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.get", "denied", map[string]string{
+				_ = auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.get", "denied", map[string]string{
 					"namespace": ns,
 					"key":       key,
 					"reason":    "reserved_namespace",
@@ -192,7 +199,7 @@ func RegisterBuiltinMemory(gate *Gate, st store.Store) {
 			}
 			ns := strings.TrimSpace(in.Namespace)
 			if isReservedReadNamespace(ns) {
-				auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.search", "denied", map[string]string{
+				_ = auditMemory(ctx, gate, st, taskID, wl.Metadata.Name, "memory.search", "denied", map[string]string{
 					"namespace": ns,
 					"query":     in.Query,
 					"reason":    "reserved_namespace",

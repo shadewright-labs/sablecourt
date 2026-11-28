@@ -116,25 +116,40 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if err := b.store.CreateConclave(ctx, session); err != nil {
-		return domain.ConclaveSession{}, err
-	}
-
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
+	// The opening is recorded before the session exists: a record that
+	// cannot be written refuses it and creates no session.
+	if err := store.RecordAudit(ctx, b.store, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.open",
 		Outcome:    "active",
 		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"template":%q,"vassals":%d}`, session.ID, templateName, len(tpl.Spec.Vassals)),
 		CreatedAt:  now,
-	})
+	}); err != nil {
+		return domain.ConclaveSession{}, err
+	}
+	if err := b.store.CreateConclave(ctx, session); err != nil {
+		store.LogClosingAudit(ctx, b.store, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.open",
+			Outcome:    "error",
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"reason":"create_failed"}`, session.ID),
+			CreatedAt:  b.now(),
+		})
+		return domain.ConclaveSession{}, err
+	}
 
 	fail := func(cause error) (domain.ConclaveSession, error) {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled); err != nil {
-			return domain.ConclaveSession{}, errors.Join(cause, err)
-		}
-		return domain.ConclaveSession{}, errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
+		// The store notes the session it created and every step of this
+		// cleanup that changed something, so an audit failure anywhere in
+		// the opening is answered with what is left. Both steps run whatever
+		// the other returns, each with its own deadline, so a room that
+		// cannot be closed in time still has its started turns cancelled.
+		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), openCleanupTimeout)
+		closeErr := b.Close(closeCtx, session.ID, domain.ConclaveStateCancelled)
+		cancelClose()
+		turnsCtx, cancelTurns := context.WithTimeout(context.WithoutCancel(ctx), openCleanupTimeout)
+		defer cancelTurns()
+		return domain.ConclaveSession{}, errors.Join(cause, closeErr, b.cancelOpeningTurns(turnsCtx, session.ID))
 	}
 
 	limits := b.limits(bundle, tpl, true)
@@ -159,6 +174,9 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 	}
 	return session, nil
 }
+
+// openCleanupTimeout bounds each cleanup step of a failed opening.
+var openCleanupTimeout = 5 * time.Second
 
 func (b *Broker) cancelOpeningTurns(ctx context.Context, roomID string) error {
 	if b.reconciler == nil {
@@ -250,6 +268,13 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 		targets = mentionTargets(tpl, fromRole, redact.String(toRole))
 	}
 	if len(targets) != 0 {
+		// A refused vassal post writes its denial row before the wake lock
+		// is taken, so a slow audit store never holds up the room.
+		if fromRole != "operator" && config.ValidVassalRole(fromRole) {
+			if err := b.allowVassalPost(ctx, session, tpl, fromRole, toRole, taskID); err != nil {
+				return domain.ConclaveMessage{}, err
+			}
+		}
 		lock := &wakeLocks[maphash.String(wakeLockSeed, session.ID)%uint64(len(wakeLocks))]
 		lock.Lock()
 		defer lock.Unlock()
@@ -268,6 +293,23 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 	return msg, err
 }
 
+// allowVassalPost returns ErrMessageDenied and writes the denial row when the
+// template does not let fromRole message toRole. Callers hold no lock.
+func (b *Broker) allowVassalPost(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, fromRole, toRole, taskID string) error {
+	err := checkVassalCanMessage(tpl, fromRole, toRole)
+	if err == nil {
+		return nil
+	}
+	detail, _ := json.Marshal(map[string]string{
+		"conclave_id": session.ID, "from": redact.String(fromRole), "to": redact.String(toRole),
+	})
+	store.LogAudit(ctx, b.store, domain.AuditRecord{
+		Category: "conclave", TaskID: taskID, Action: "conclave.post",
+		Outcome: "denied", DetailJSON: string(detail), CreatedAt: b.now(),
+	})
+	return err
+}
+
 func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession, tpl domain.Conclave, hasTpl bool, limits store.ConclaveLimits, fromRole, toRole, kind, body, taskID string, wake bool) (domain.ConclaveMessage, bool, error) {
 	if session.TemplateName != "" && !hasTpl {
 		return domain.ConclaveMessage{}, false, ErrMessageDenied
@@ -282,14 +324,7 @@ func (b *Broker) persistPost(ctx context.Context, session domain.ConclaveSession
 			return domain.ConclaveMessage{}, false, ErrMessageDenied
 		}
 		if hasTpl {
-			if err := checkVassalCanMessage(tpl, fromRole, toRole); err != nil {
-				detail, _ := json.Marshal(map[string]string{
-					"conclave_id": session.ID, "from": redact.String(fromRole), "to": redact.String(toRole),
-				})
-				_ = b.store.AppendAudit(ctx, domain.AuditRecord{
-					Category: "conclave", TaskID: taskID, Action: "conclave.post",
-					Outcome: "denied", DetailJSON: string(detail), CreatedAt: b.now(),
-				})
+			if err := b.allowVassalPost(ctx, session, tpl, fromRole, toRole, taskID); err != nil {
 				return domain.ConclaveMessage{}, false, err
 			}
 		}
@@ -373,7 +408,11 @@ func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.Concl
 		return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
 	}
 	if newRelic != nil {
-		b.recordRelic(ctx, relic)
+		// The report and its relic are stored together above, so a record
+		// that cannot be written is reported, not undone.
+		if err := b.recordRelic(ctx, relic); err != nil {
+			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, err
+		}
 	}
 	msg.ID = id
 	return msg, relic, nil
@@ -485,10 +524,21 @@ func (b *Broker) PutRelic(ctx context.Context, conclaveID, authorRole, name, con
 	if err != nil {
 		return domain.ConclaveRelic{}, err
 	}
-	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
+	// Recorded before it is stored: a record that cannot be written refuses
+	// the relic.
+	if err := b.recordRelic(ctx, relic); err != nil {
 		return domain.ConclaveRelic{}, err
 	}
-	b.recordRelic(ctx, relic)
+	if err := b.store.PutConclaveRelic(ctx, relic); err != nil {
+		store.LogClosingAudit(ctx, b.store, domain.AuditRecord{
+			Category:   "conclave",
+			Action:     "conclave.relic_put",
+			Outcome:    "error",
+			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"name":%q,"reason":"store_failed"}`, relic.ConclaveID, relic.Name),
+			CreatedAt:  b.now(),
+		})
+		return domain.ConclaveRelic{}, err
+	}
 	return relic, nil
 }
 
@@ -519,8 +569,8 @@ func (b *Broker) prepareRelic(conclaveID, authorRole, name, contentType, body st
 	}, nil
 }
 
-func (b *Broker) recordRelic(ctx context.Context, relic domain.ConclaveRelic) {
-	_ = b.store.AppendAudit(ctx, domain.AuditRecord{
+func (b *Broker) recordRelic(ctx context.Context, relic domain.ConclaveRelic) error {
+	return store.RecordAudit(ctx, b.store, domain.AuditRecord{
 		Category:   "conclave",
 		Action:     "conclave.relic_put",
 		Outcome:    "stored",

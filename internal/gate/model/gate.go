@@ -598,8 +598,15 @@ func (g *Gate) settleReservation(ctx context.Context, reservationID string, actu
 	return err
 }
 
+// audit writes a Model Gate record and logs a failed write. Each record here
+// follows either a refusal that stands or an upstream call that already ran.
+// Some of the latter are written before the client gets its answer:
+// model.fallback before the fallback provider's answer is relayed, and the
+// error and settlement rows of an upstream answer the gate refuses to relay.
+// No record is written before an upstream call, so a failed write never stops
+// one, and the client gets the same answer whether the write succeeds or not.
 func (g *Gate) audit(ctx context.Context, taskID, workload, action, outcome, detailJSON string) {
-	_ = g.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, g.store, domain.AuditRecord{
 		Category:     "model_gate",
 		TaskID:       taskID,
 		WorkloadName: workload,

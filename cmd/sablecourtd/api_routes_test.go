@@ -48,6 +48,7 @@ type apiEnv struct {
 	h         http.Handler
 	approvals *approval.Queue
 	hub       *attach.Hub
+	bundle    *config.Bundle
 }
 
 func newAPIEnv(t *testing.T, cfg apiEnvConfig) apiEnv {
@@ -90,7 +91,7 @@ func newAPIEnv(t *testing.T, cfg apiEnvConfig) apiEnv {
 	hub := attach.NewHub()
 	h := newHandler(st, defaultIntegrationSecrets(), getBundle, cfg.reload, nil, nil, approvals, reconciler, scheduler, broker, hub, nil, nil,
 		handlerConfig{operatorToken: testOperatorToken})
-	return apiEnv{st: raw, h: h, approvals: approvals, hub: hub}
+	return apiEnv{st: raw, h: h, approvals: approvals, hub: hub, bundle: bundle}
 }
 
 func apiCall(h http.Handler, method, path, body string) *httptest.ResponseRecorder {

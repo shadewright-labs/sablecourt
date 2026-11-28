@@ -381,6 +381,7 @@ func (r *Reconciler) cleanupContainerHandle(ctx context.Context, taskID string, 
 		stopErr = callCtx.Err()
 	}
 	cancel()
+	store.NoteEffectIf(ctx, stopErr, "the runtime of task %s was stopped", taskID)
 	if stopErr != nil {
 		return errors.New("runtime container cleanup failed")
 	}

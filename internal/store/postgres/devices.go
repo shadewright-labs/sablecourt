@@ -10,8 +10,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-func (s *PostgresStore) CreateDevice(ctx context.Context, d domain.PairedDevice) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) CreateDevice(ctx context.Context, d domain.PairedDevice) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "device %s was paired", d.ID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO paired_devices (id, name, platform, public_key_pem, created_at)
 		VALUES ($1, $2, $3, $4, $5)
 	`, d.ID, d.Name, d.Platform, d.PublicKeyPEM, formatTime(d.CreatedAt))
@@ -67,7 +68,8 @@ func (s *PostgresStore) ListDevices(ctx context.Context) ([]domain.PairedDevice,
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) RevokeDevice(ctx context.Context, id string) error {
+func (s *PostgresStore) RevokeDevice(ctx context.Context, id string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "device %s was revoked", id) }()
 	res, err := s.db.ExecContext(ctx, `UPDATE paired_devices SET revoked_at = $1 WHERE id = $2`, nowRFC3339(), id)
 	if err != nil {
 		return err

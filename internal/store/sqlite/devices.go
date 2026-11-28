@@ -10,8 +10,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-func (s *SQLiteStore) CreateDevice(ctx context.Context, d domain.PairedDevice) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *SQLiteStore) CreateDevice(ctx context.Context, d domain.PairedDevice) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "device %s was paired", d.ID) }()
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO paired_devices (id, name, platform, public_key_pem, created_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, d.ID, d.Name, d.Platform, d.PublicKeyPEM, formatTime(d.CreatedAt))
@@ -67,7 +68,8 @@ func (s *SQLiteStore) ListDevices(ctx context.Context) ([]domain.PairedDevice, e
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) RevokeDevice(ctx context.Context, id string) error {
+func (s *SQLiteStore) RevokeDevice(ctx context.Context, id string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "device %s was revoked", id) }()
 	res, err := s.db.ExecContext(ctx, `UPDATE paired_devices SET revoked_at = ? WHERE id = ?`, nowRFC3339(), id)
 	if err != nil {
 		return err

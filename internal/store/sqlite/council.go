@@ -100,7 +100,9 @@ func councilPolicy(created time.Time, spec store.CouncilSpec) (store.CouncilPoli
 	return p, validPolicy(&p)
 }
 
-func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSession, spec store.CouncilSpec) error {
+func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSession, spec store.CouncilSpec) (err error) {
+	ctx = store.HoldEffects(ctx)
+	defer func() { store.NoteEffectIf(ctx, err, "council %s was opened", room.ID) }()
 	if !store.ValidCouncilText(room.ID) || room.State != domain.ConclaveStateActive || room.WardReason != "" {
 		return errors.New("invalid opening council state")
 	}
@@ -146,7 +148,7 @@ func (s *SQLiteStore) CreateCouncil(ctx context.Context, room domain.ConclaveSes
 		}
 		return err
 	}
-	return tx.Commit()
+	return store.Commit(ctx, tx)
 }
 
 func (s *SQLiteStore) CouncilByIdempotencyKey(ctx context.Context, key string) (domain.ConclaveSession, string, error) {
@@ -176,7 +178,8 @@ func (s *SQLiteStore) CouncilByIdempotencyKey(ctx context.Context, key string) (
 }
 
 func (s *SQLiteStore) MarkCouncilCleanedUp(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE councils SET cleanup_pending = 0 WHERE id = ?", id)
+	res, err := s.db.ExecContext(ctx, "UPDATE councils SET cleanup_pending = 0 WHERE id = ? AND cleanup_pending <> 0", id)
+	store.NoteEffectRows(ctx, res, err, "council %s was cleaned up", id)
 	return err
 }
 

@@ -135,6 +135,7 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 	expiresStr := now.Add(ttl).Format(time.RFC3339Nano)
 	dayStartStr := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
 
+	ctx = HoldEffects(ctx)
 	tx, err := beginBudgetTx(ctx, db, lockRows)
 	if err != nil {
 		return BudgetReservationResult{}, err
@@ -235,7 +236,7 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 		return BudgetReservationResult{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := Commit(ctx, tx); err != nil {
 		return BudgetReservationResult{}, err
 	}
 	return BudgetReservationResult{ReservationID: resID}, nil
@@ -244,6 +245,7 @@ func ReserveBudgetTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, 
 // SettleBudgetReservationTx atomically removes a reservation and, when actual is non-nil,
 // records settled usage into budget_ledger in the same transaction.
 func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetRowLocker, reservationID string, actual *domain.BudgetEntry) error {
+	ctx = HoldEffects(ctx)
 	tx, err := beginBudgetTx(ctx, db, lockRows)
 	if err != nil {
 		return err
@@ -283,7 +285,7 @@ func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetR
 		return err
 	}
 	if actual == nil {
-		return tx.Commit()
+		return Commit(ctx, tx)
 	}
 	if actual.TaskID != taskID || actual.WorkloadName != workloadName {
 		return ErrConflict
@@ -306,5 +308,5 @@ func SettleBudgetReservationTx(ctx context.Context, db *sql.DB, lockRows BudgetR
 		in, cacheWrite, cacheRead, out, cost, created.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return Commit(ctx, tx)
 }

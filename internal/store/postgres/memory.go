@@ -11,14 +11,15 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
-func (s *PostgresStore) PutMemory(ctx context.Context, entry domain.MemoryEntry) error {
+func (s *PostgresStore) PutMemory(ctx context.Context, entry domain.MemoryEntry) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "memory entry %s/%s was stored", entry.Namespace, entry.Key) }()
 	if entry.Namespace == "" {
 		entry.Namespace = "default"
 	}
 	if entry.Author == "" {
 		entry.Author = "operator"
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO court_memory (namespace, key, value, author, updated_at)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT(namespace, key) DO UPDATE SET
@@ -88,7 +89,8 @@ func (s *PostgresStore) SearchMemory(ctx context.Context, namespace, query strin
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) DeleteMemory(ctx context.Context, namespace, key string) error {
+func (s *PostgresStore) DeleteMemory(ctx context.Context, namespace, key string) (err error) {
+	defer func() { store.NoteEffectIf(ctx, err, "memory entry %s/%s was deleted", namespace, key) }()
 	if namespace == "" {
 		namespace = "default"
 	}

@@ -751,12 +751,10 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 		return nil
 	}
 	// The evidence is not a typed boundary (ADR-0015): held values in the
-	// GitHub strings are replaced in place, and putGateRecord refuses the
-	// whole record only if one still shows after that.
+	// GitHub strings are replaced in place before the audit row and the
+	// stored evidence are built from them, and putGateRecord stores the
+	// refusal in place of the whole record if one still shows after that.
 	report = redactPRCheckReport(report)
-	if err := putGateRecord(ctx, g, prChecksNamespace, prKey(report.Owner, report.Repo, report.PRNumber), report, report.ObservedAt); err != nil {
-		return err
-	}
 	detail, _ := json.Marshal(map[string]any{
 		"owner":             report.Owner,
 		"repo":              report.Repo,
@@ -768,7 +766,27 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 		"observed_at":       report.ObservedAt.Format(time.RFC3339Nano),
 	})
 	auditDetail, _ := redact.DefaultRegistry().RedactJSONRecord(string(detail))
-	g.audit(ctx, taskID, workloadName, "evidence:git.pr_checks", redact.String(report.Summary), auditDetail)
+	// The evidence row is written before the evidence is stored, so no
+	// evidence stays that the audit log does not show: a row that cannot be
+	// written fails the check call with nothing stored.
+	if err := g.record(ctx, taskID, workloadName, "evidence:git.pr_checks", redact.String(report.Summary), auditDetail); err != nil {
+		return err
+	}
+	if err := putGateRecord(ctx, g, prChecksNamespace, prKey(report.Owner, report.Repo, report.PRNumber), report, report.ObservedAt); err != nil {
+		// The row above names evidence that was not stored; say so, and name
+		// the pull request, so a reader can match it to its evidence row when
+		// checks of several pull requests under one task interleave.
+		closing, _ := json.Marshal(map[string]any{
+			"reason":    "store_failed",
+			"owner":     report.Owner,
+			"repo":      report.Repo,
+			"pr_number": report.PRNumber,
+			"head_sha":  report.HeadSHA,
+		})
+		closingDetail, _ := redact.DefaultRegistry().RedactJSONRecord(string(closing))
+		store.LogClosingAudit(ctx, g.store, g.auditRecord(taskID, workloadName, "evidence:git.pr_checks", "error", closingDetail))
+		return err
+	}
 	return nil
 }
 

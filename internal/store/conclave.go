@@ -221,6 +221,7 @@ func isTerminalConclaveState(state domain.ConclaveState) bool {
 // UpdateConclaveState transitions a Conclave and audits close and pause changes in the same transaction.
 // It returns handled=false when a council moves to a terminal state so the caller can close it with a digest.
 func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, id string, state domain.ConclaveState, wardReason string, now time.Time, audit AuditTxFunc) (bool, error) {
+	ctx = HoldEffects(ctx)
 	tx, room, err := lockConclave(ctx, db, policy, id)
 	if err != nil {
 		return true, err
@@ -250,10 +251,11 @@ func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyRe
 	`, string(state), wardReason, now.Format(time.RFC3339Nano), id); err != nil {
 		return true, err
 	}
+	NoteEffect(ctx, "conclave %s moved to %s", id, state)
 	switch {
 	case terminal:
 		if audit == nil {
-			return true, errors.New("conclave close audit writer unavailable")
+			return true, fmt.Errorf("%w: conclave close audit writer unavailable", ErrAuditWrite)
 		}
 		if err := audit(ctx, tx, domain.AuditRecord{
 			Category:   "conclave",
@@ -266,7 +268,7 @@ func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyRe
 		}
 	case state == domain.ConclaveStateInputRequired:
 		if audit == nil {
-			return true, errors.New("conclave ward audit writer unavailable")
+			return true, fmt.Errorf("%w: conclave ward audit writer unavailable", ErrAuditWrite)
 		}
 		if err := audit(ctx, tx, domain.AuditRecord{
 			Category:   "conclave",
@@ -278,7 +280,7 @@ func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyRe
 			return true, err
 		}
 	}
-	return true, tx.Commit()
+	return true, Commit(ctx, tx)
 }
 
 // AppendGuardedConclavePost handles broker writes. Bare Store appends are also
@@ -294,6 +296,7 @@ func AppendGuardedConclavePost(ctx context.Context, db *sql.DB, policy CouncilPo
 }
 
 func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, msg domain.ConclaveMessage, post *conclavePost, audit AuditTxFunc) (int64, error) {
+	ctx = HoldEffects(ctx)
 	tx, room, err := lockConclave(ctx, db, policy, msg.ConclaveID)
 	if err != nil {
 		return 0, err
@@ -415,6 +418,9 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 			if err := linkCouncilFinal(ctx, tx, msg.TaskID, id, *post.answerVote); err != nil {
 				return 0, err
 			}
+			NoteEffect(ctx, "answer %d was recorded in conclave %s", id, msg.ConclaveID)
+		} else {
+			NoteEffect(ctx, "message %d was stored in conclave %s", id, msg.ConclaveID)
 		}
 
 		if reason == "" && !post.report {
@@ -450,6 +456,10 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 		`, string(domain.ConclaveStateActive), now.Format(time.RFC3339Nano), runs, room.ID); err != nil {
 			return 0, err
 		}
+		NoteEffect(ctx, "conclave %s moved to %s", room.ID, domain.ConclaveStateActive)
+		if audit == nil {
+			return 0, fmt.Errorf("%w: conclave run window audit writer unavailable", ErrAuditWrite)
+		}
 		if err := audit(ctx, tx, domain.AuditRecord{
 			Category: "conclave", Action: "conclave.run_window_reset", Outcome: "active", CreatedAt: now,
 			DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"decree_id":%d,"previous_runs":%d,"max_runs":%d}`, room.ID, id, runs, limits.MaxRuns),
@@ -461,7 +471,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 			return 0, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := Commit(ctx, tx); err != nil {
 		return 0, err
 	}
 	post.reason = reason
@@ -510,7 +520,9 @@ func PutGuardedConclaveReportRelic(ctx context.Context, db *sql.DB, relic domain
 	if err != nil {
 		return true, err
 	}
-	if inserted == 0 {
+	if inserted > 0 {
+		NoteEffect(ctx, "relic %s was written to conclave %s", relic.Name, relic.ConclaveID)
+	} else {
 		var saved domain.ConclaveRelic
 		if err := write.tx.QueryRowContext(ctx, `
 			SELECT author_role, content_type, body, sha256 FROM conclave_relics WHERE conclave_id = $1 AND name = $2
@@ -540,9 +552,8 @@ func admittedConclaveReply(ctx context.Context, tx *sql.Tx, msg domain.ConclaveM
 	return ok && a.ConclaveID == msg.ConclaveID && a.Role == msg.FromRole, nil
 }
 
-func FinishConclaveWake(ctx context.Context, db *sql.DB, id int64) error {
-	_, err := db.ExecContext(ctx, "UPDATE conclave_messages SET wake_pending = 0 WHERE id = $1", id)
-	return err
+func FinishConclaveWake(ctx context.Context, db *sql.DB, id int64) (sql.Result, error) {
+	return db.ExecContext(ctx, "UPDATE conclave_messages SET wake_pending = 0 WHERE id = $1 AND wake_pending <> 0", id)
 }
 
 func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID, reason string, now time.Time, audit AuditTxFunc) error {
@@ -550,7 +561,7 @@ func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID,
 		return nil
 	}
 	if audit == nil {
-		return errors.New("conclave ward audit writer unavailable")
+		return fmt.Errorf("%w: conclave ward audit writer unavailable", ErrAuditWrite)
 	}
 	if _, err := insertConclaveMessage(ctx, tx, domain.ConclaveMessage{
 		ConclaveID: room.ID, FromRole: "system", ToRole: "operator", Kind: "system",
@@ -563,6 +574,7 @@ func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID,
 	`, string(domain.ConclaveStateInputRequired), reason, now.Format(time.RFC3339Nano), room.ID); err != nil {
 		return err
 	}
+	NoteEffect(ctx, "conclave %s moved to %s (%s)", room.ID, domain.ConclaveStateInputRequired, reason)
 	return audit(ctx, tx, domain.AuditRecord{
 		Category:   "conclave",
 		TaskID:     taskID,
@@ -614,6 +626,7 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 		return insert(db)
 	}
 	turn.applied = true
+	ctx = HoldEffects(ctx)
 	a, assigned := TaskConclaveAssignment(task)
 	if !assigned || a.ConclaveID != turn.id || task.IdempotencyKey != turn.key {
 		return errors.New("task does not match the conclave turn reservation")
@@ -687,14 +700,14 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 			return err
 		}
 	}
-	return tx.Commit()
+	return Commit(ctx, tx)
 }
 
 func refuseTurn(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time, refusal error, audit AuditTxFunc) error {
 	if err := pauseConclave(ctx, tx, room, "", reason, now, audit); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := Commit(ctx, tx); err != nil {
 		return err
 	}
 	return refusal
@@ -744,6 +757,9 @@ func ClaimConclaveTask(ctx context.Context, st Store, taskID, roomID string, now
 }
 
 func BeginTaskTransition(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, to domain.TaskState, reason string, audit AuditTxFunc) (*sql.Tx, domain.TaskState, string, error) {
+	if !holdsEffects(ctx) {
+		return nil, to, reason, errors.New("task transition must hold its effects until commit")
+	}
 	claim, guarded := ctx.Value(conclaveClaimKey{}).(*conclaveClaim)
 	if !guarded {
 		tx, err := db.BeginTx(ctx, nil)

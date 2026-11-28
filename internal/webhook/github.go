@@ -14,6 +14,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 type GitHubOptions struct {
@@ -31,7 +32,7 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 	if secretName == "" {
 		secretName = "github_webhook_secret" // #nosec G101 -- GitHubHandler passes this lookup name to Secrets.Get for the signing key.
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return store.TrackEffectsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 			return
@@ -94,6 +95,10 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 		var taskID string
 		if opts.TargetWorkflow != "" {
 			t, err := opts.Reconciler.StartWorkflow(r.Context(), opts.TargetWorkflow, summary)
+			if msg, ok := store.AuditFailureText(r.Context(), err, "workflow dispatch"); ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -106,6 +111,10 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 			}
 			inBytes, _ := json.Marshal(map[string]any{"prompt": summary, "issue": payload.Issue.Number, "repo": payload.Repository.FullName})
 			t, err := opts.Reconciler.SubmitTask(r.Context(), wl, idemKey, string(inBytes))
+			if msg, ok := store.AuditFailureText(r.Context(), err, "task dispatch"); ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -114,7 +123,7 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 		}
 
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "dispatched", "taskId": taskID})
-	})
+	}))
 }
 
 func VerifyGitHubSignature(body []byte, sigHeader, secretKey string) bool {

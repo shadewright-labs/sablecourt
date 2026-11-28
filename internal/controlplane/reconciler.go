@@ -132,11 +132,14 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 		reservation.tokenMu.Unlock()
 	}
 	cleanupErr := errors.Join(leaseErr, r.stopTask(cleanupCtx, taskID))
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// Cancelling stops execution, so it is never refused for a missing
+	// record; a record that cannot be written is returned to the caller,
+	// whose answer lists the effects the store and runtime noted.
+	auditErr := store.RecordAudit(cleanupCtx, r.store, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
 		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
 	})
-	return cleanupErr
+	return errors.Join(cleanupErr, auditErr)
 }
 
 func terminalTaskState(state domain.TaskState) bool {
@@ -203,6 +206,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 			stopErr = callCtx.Err()
 		}
 		cancel()
+		store.NoteEffectIf(ctx, stopErr, "the runtime of task %s was stopped", taskID)
 		if stopErr != nil {
 			// Retain the verified handle in memory so the next reconcile pass retries cleanup
 			// and RetryTaskWithHandoff waits until the live process stops.
@@ -225,6 +229,7 @@ func (r *Reconciler) stopTask(ctx context.Context, taskID string) error {
 	callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 	err := adapter.Stop(callCtx, handle)
 	cancel()
+	store.NoteEffectIf(ctx, err, "the runtime of task %s was stopped", taskID)
 	r.mu.Lock()
 	delete(r.stopping, taskID)
 	close(done)
@@ -265,11 +270,12 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		c, err := adapter.Suspend(callCtx, handle)
 		cancel()
+		store.NoteEffectIf(ctx, err, "the runtime of task %s was suspended", taskID)
 		if err == nil {
 			cp = c
 		}
 		callCtx, cancel = context.WithTimeout(ctx, adapterCallTimeout)
-		_ = adapter.Stop(callCtx, handle)
+		store.NoteEffectIf(ctx, adapter.Stop(callCtx, handle), "the runtime of task %s was stopped", taskID)
 		cancel()
 	}
 	if raw, err := json.Marshal(cp); err == nil {
@@ -283,7 +289,10 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateWorking, domain.TaskStateSuspended, reason, fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
 		return err
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// Suspending stops execution, so it is never refused for a missing
+	// record; a record that cannot be written is returned to the caller,
+	// whose answer lists the effects the store and runtime noted.
+	return store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       taskID,
 		WorkloadName: task.WorkloadName,
@@ -292,7 +301,6 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, reason),
 		CreatedAt:    r.now(),
 	})
-	return nil
 }
 
 // ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.
@@ -312,10 +320,55 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 		r.mu.Unlock()
 	}()
 
-	attempt.tokenMu.Lock()
 	task, err := r.store.GetTask(ctx, taskID)
 	if err == nil && task.State != domain.TaskStateSuspended {
 		err = fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, task.State)
+	}
+	if err != nil {
+		return err
+	}
+	var cp scruntime.CheckpointRef
+	if refJSON, err := r.store.LatestCheckpoint(ctx, taskID); err == nil {
+		_ = json.Unmarshal([]byte(refJSON), &cp)
+	}
+	// Resuming restarts execution, so it is recorded before anything
+	// changes: a record that cannot be written refuses the resume with no
+	// lease minted and the runtime untouched. The task stays suspended.
+	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.resume",
+		Outcome:      "working",
+		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
+		CreatedAt:    r.now(),
+	}); err != nil {
+		return err
+	}
+	failedStep := "lease_failed"
+	defer func() {
+		if resumeErr == nil {
+			return
+		}
+		// The row above says the task resumed; say that it did not.
+		store.LogClosingAudit(ctx, r.store, domain.AuditRecord{
+			Category:     "controlplane",
+			TaskID:       taskID,
+			WorkloadName: task.WorkloadName,
+			Action:       "task.resume",
+			Outcome:      "error",
+			DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, failedStep),
+			CreatedAt:    r.now(),
+		})
+	}()
+
+	attempt.tokenMu.Lock()
+	// Cancellation may have run while the row was written.
+	if current, getErr := r.store.GetTask(ctx, taskID); getErr != nil {
+		err = getErr
+	} else if current.State != domain.TaskStateSuspended {
+		failedStep = "not_suspended"
+		err = fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, current.State)
 	}
 	if err == nil {
 		_, err = model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, taskLeaseTTL)
@@ -323,11 +376,6 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 	attempt.tokenMu.Unlock()
 	if err != nil {
 		return err
-	}
-
-	var cp scruntime.CheckpointRef
-	if refJSON, err := r.store.LatestCheckpoint(ctx, taskID); err == nil {
-		_ = json.Unmarshal([]byte(refJSON), &cp)
 	}
 
 	r.mu.Lock()
@@ -345,11 +393,14 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			// Cancellation may already have removed the handle before Resume returned.
 			stopCtx, cancel := context.WithTimeout(cleanupCtx, adapterCallTimeout)
 			defer cancel()
-			if err := adapter.Stop(stopCtx, handle); err != nil {
+			err := adapter.Stop(stopCtx, handle)
+			store.NoteEffectIf(ctx, err, "the runtime of task %s was stopped", taskID)
+			if err != nil {
 				resumeErr = errors.Join(resumeErr, errors.New("runtime stop failed"))
 			}
 		}
 	}()
+	failedStep = "runtime_resume_failed"
 	if hasHandle && adapter != nil {
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		err := adapter.Resume(callCtx, handle, cp)
@@ -357,24 +408,17 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			err = callCtx.Err()
 		}
 		cancel()
+		store.NoteEffectIf(ctx, err, "the runtime of task %s was resumed", taskID)
 		if err != nil {
 			return errors.New("runtime resume failed")
 		}
 	}
 
+	failedStep = "state_update_failed"
 	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateSuspended, domain.TaskStateWorking, "operator_resumed", fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
 		return err
 	}
 	_ = r.store.RecordHeartbeat(ctx, taskID, r.now())
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-		Category:     "controlplane",
-		TaskID:       taskID,
-		WorkloadName: task.WorkloadName,
-		Action:       "task.resume",
-		Outcome:      "working",
-		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
-		CreatedAt:    r.now(),
-	})
 	return nil
 }
 
@@ -417,6 +461,36 @@ type createdKey struct{}
 // when they insert a new task. An idempotent replay leaves it false.
 func WithCreatedFlag(ctx context.Context, created *bool) context.Context {
 	return context.WithValue(ctx, createdKey{}, created)
+}
+
+type retryAuditKey struct{}
+
+// retryRow names the task a retry was made from. A zero value asks
+// RetryTaskWithHandoff to fill it in.
+type retryRow struct {
+	from    string
+	handoff bool
+}
+
+// WithRetryAudit returns ctx on which RetryTaskWithHandoff writes a task.retry
+// row for the task it creates, right after that task's task.submit row and
+// before the task exists. A failed write refuses the retry and creates
+// nothing, so repeating it creates the task and writes the row; a replay that
+// returns a task an earlier call created writes no row.
+func WithRetryAudit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryAuditKey{}, retryRow{})
+}
+
+func retryAuditRecord(row retryRow, task domain.Task, now time.Time) domain.AuditRecord {
+	return domain.AuditRecord{
+		Category:     "task",
+		TaskID:       task.ID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.retry",
+		Outcome:      "submitted",
+		DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, row.from, row.handoff),
+		CreatedAt:    now,
+	}
 }
 
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
@@ -466,31 +540,77 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+	var entry domain.MemoryEntry
 	if step != nil {
-		entry, encodeErr := r.workflowStepEntry(id, *step)
+		var encodeErr error
+		entry, encodeErr = r.workflowStepEntry(id, *step)
 		if encodeErr != nil {
 			return domain.Task{}, encodeErr
 		}
+	}
+	submitted := domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       task.ID,
+		WorkloadName: workloadName,
+		Action:       "task.submit",
+		Outcome:      "submitted",
+		CreatedAt:    now,
+	}
+	// The submission is recorded before the task exists, so no task runs
+	// without its task.submit row, and a failed write refuses it. A replay
+	// of an earlier submission writes no row; it still goes through
+	// CreateTask, whose guards decide what the replay returns.
+	_, replay := r.replayedSubmission(ctx, id, idempotencyKey, workloadName, parentID, step != nil)
+	retry, isRetry := ctx.Value(retryAuditKey{}).(retryRow)
+	isRetry = isRetry && retry.from != ""
+	if !replay {
+		if err := store.RecordAudit(ctx, r.store, submitted); err != nil {
+			return domain.Task{}, err
+		}
+		if isRetry {
+			if err := store.RecordAudit(ctx, r.store, retryAuditRecord(retry, task, now)); err != nil {
+				r.logNotCreated(ctx, task, nil)
+				return domain.Task{}, err
+			}
+		}
+	}
+	if step != nil {
 		err = store.CreateTaskWithMemory(ctx, r.store, task, entry)
 	} else {
 		err = r.store.CreateTask(ctx, task)
 	}
-	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			if step != nil {
-				existing, getErr := r.store.GetTask(ctx, id)
-				if getErr == nil && existing.IdempotencyKey == idempotencyKey && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
-					return existing, nil
-				}
-				return domain.Task{}, err
+	if err == nil && replay {
+		// The earlier task was not found by CreateTask after all. The task
+		// now exists, so the row is written late and a failure is returned.
+		if auditErr := store.RecordAudit(ctx, r.store, submitted); auditErr != nil {
+			return domain.Task{}, auditErr
+		}
+		if isRetry {
+			if auditErr := store.RecordAudit(ctx, r.store, retryAuditRecord(retry, task, now)); auditErr != nil {
+				return domain.Task{}, auditErr
 			}
+		}
+	}
+	if err != nil {
+		if !replay {
+			// The rows above name a task that was not created; say so for
+			// each of them, so a repeat that creates a different task leaves
+			// no task.retry row naming one that never existed.
+			var retried *retryRow
+			if isRetry {
+				retried = &retry
+			}
+			r.logNotCreated(ctx, task, retried)
+		}
+		if errors.Is(err, store.ErrConflict) {
 			// The unique key selects the winner even when submissions race.
-			existing, lookupErr := r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey)
-			if lookupErr == nil && existing.WorkloadName == workloadName && existing.ParentTaskID == parentID {
+			if existing, ok := r.replayedSubmission(ctx, id, idempotencyKey, workloadName, parentID, step != nil); ok {
 				return existing, nil
 			}
-			if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
-				return domain.Task{}, lookupErr
+			if step == nil {
+				if _, lookupErr := r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey); lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+					return domain.Task{}, lookupErr
+				}
 			}
 		}
 		return domain.Task{}, err
@@ -506,15 +626,45 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 			CreatedAt: now,
 		})
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	return task, nil
+}
+
+// logNotCreated records that the task a task.submit row named was not
+// created. When retry is not nil, the task.retry row written for the same
+// task gets its own not_created row. Both rows share one closing budget.
+func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task, retry *retryRow) {
+	var closing []domain.AuditRecord
+	if retry != nil {
+		row := retryAuditRecord(*retry, task, r.now())
+		row.Outcome = "not_created"
+		closing = append(closing, row)
+	}
+	closing = append(closing, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       task.ID,
-		WorkloadName: workloadName,
+		WorkloadName: task.WorkloadName,
 		Action:       "task.submit",
-		Outcome:      "submitted",
-		CreatedAt:    now,
+		Outcome:      "not_created",
+		CreatedAt:    r.now(),
 	})
-	return task, nil
+	store.LogClosingAudit(ctx, r.store, closing...)
+}
+
+// replayedSubmission returns the task an earlier submission with the same
+// idempotency key created, when it matches this one. A workflow step's task ID
+// is derived from its key, so it is looked up by ID.
+func (r *Reconciler) replayedSubmission(ctx context.Context, id, idempotencyKey, workloadName, parentID string, byID bool) (domain.Task, bool) {
+	var existing domain.Task
+	var err error
+	if byID {
+		existing, err = r.store.GetTask(ctx, id)
+	} else {
+		existing, err = r.store.GetTaskByIdempotencyKey(ctx, idempotencyKey)
+	}
+	if err != nil || existing.IdempotencyKey != idempotencyKey || existing.WorkloadName != workloadName || existing.ParentTaskID != parentID {
+		return domain.Task{}, false
+	}
+	return existing, true
 }
 
 // StartWorkflow dispatches the first step of a declared Workflow and records workflow metadata
@@ -637,6 +787,9 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	if !terminalTaskState(orig.State) {
 		return domain.Task{}, fmt.Errorf("%w: retry requires a terminal task", store.ErrConflict)
 	}
+	if _, ok := ctx.Value(retryAuditKey{}).(retryRow); ok {
+		ctx = context.WithValue(ctx, retryAuditKey{}, retryRow{from: orig.ID, handoff: withHandoff})
+	}
 	r.mu.Lock()
 	_, hasHandle := r.handles[orig.ID]
 	launching := r.launching[orig.ID]
@@ -746,7 +899,8 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 	capability := "delegate:" + targetWorkload
 	decision := pol.Evaluate(parentWL, capability)
 	if decision.Effect != domain.EffectAllow {
-		_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+		// The delegation is refused either way; a failed record is logged.
+		store.LogAudit(ctx, r.store, domain.AuditRecord{
 			Category:     "controlplane",
 			TaskID:       parentTaskID,
 			WorkloadName: parent.WorkloadName,
@@ -777,10 +931,9 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	if err := r.store.CreateTask(ctx, child); err != nil {
-		return domain.Task{}, err
-	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	// The delegation is recorded before the child task exists; a record that
+	// cannot be written refuses it.
+	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       child.ID,
 		WorkloadName: parent.WorkloadName,
@@ -788,7 +941,21 @@ func (r *Reconciler) ProposeChildTask(ctx context.Context, parentTaskID, targetW
 		Outcome:      "allowed",
 		DetailJSON:   fmt.Sprintf(`{"parent_task_id":%q,"child_task_id":%q}`, parentTaskID, child.ID),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	if err := r.store.CreateTask(ctx, child); err != nil {
+		store.LogClosingAudit(ctx, r.store, domain.AuditRecord{
+			Category:     "controlplane",
+			TaskID:       child.ID,
+			WorkloadName: parent.WorkloadName,
+			Action:       capability,
+			Outcome:      "not_created",
+			DetailJSON:   fmt.Sprintf(`{"parent_task_id":%q,"child_task_id":%q}`, parentTaskID, child.ID),
+			CreatedAt:    r.now(),
+		})
+		return domain.Task{}, err
+	}
 	return child, nil
 }
 
@@ -1400,6 +1567,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		startErr = callCtx.Err()
 	}
 	cancel()
+	store.NoteEffectIf(ctx, startErr, "the runtime of task %s was started", task.ID)
 	startFailed = startErr != nil
 	if startFailed {
 		launchFacts = launchFailureFacts(startErr)
@@ -1590,7 +1758,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				Content:   "Verifier returned VERDICT: CHANGES_REQUESTED.",
 				CreatedAt: r.now(),
 			})
-			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+			store.LogAudit(ctx, r.store, domain.AuditRecord{
 				Category:     "workflow",
 				TaskID:       completedTask.ID,
 				WorkloadName: completedTask.WorkloadName,
@@ -1715,7 +1883,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		Content:   fmt.Sprintf("Workflow %s advanced to step %d (%s): %s", meta.Workflow, nextIdx+1, nextStep.Name, nextStep.Prompt),
 		CreatedAt: now,
 	})
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "workflow",
 		TaskID:       child.ID,
 		WorkloadName: nextStep.Workload,
@@ -1747,7 +1915,7 @@ func (r *Reconciler) maybeAutoRemediate(ctx context.Context, failed domain.Task,
 	if err != nil {
 		return err
 	}
-	_ = r.store.AppendAudit(ctx, domain.AuditRecord{
+	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       rem.ID,
 		WorkloadName: rem.WorkloadName,

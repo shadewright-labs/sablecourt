@@ -101,6 +101,8 @@
     </div>
   </header>
   <div class="wrap sc-enter">
+    {{if .Notice}}<div class="sc-banner sc-banner-ok">{{.Notice}}</div>{{end}}
+    {{if .ErrMsg}}<div class="sc-banner sc-banner-err">{{.ErrMsg}}</div>{{end}}
 
     <div class="top-row">
       <h1>Task <span class="mono">{{.Task.ID}}</span></h1>

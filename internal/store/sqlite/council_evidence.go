@@ -48,11 +48,17 @@ func lockAttempt(ctx context.Context, tx *sql.Tx, task string) (attemptEvidence,
 	return a, err
 }
 
+// RecordCouncilAnswer stores the answer through
+// store.AppendReservedCouncilAnswer, which notes it inside the transaction
+// that records it, so a replay of a recorded answer notes nothing.
 func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.ConclaveMessage, vote bool) (int64, string, error) {
 	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote, store.ConclaveLimits{})
 }
 
+// AcceptCouncilAnswer notes the acceptance only after it commits, so a replay
+// of an accepted answer notes nothing.
 func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) error {
+	ctx = store.HoldEffects(ctx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -102,7 +108,11 @@ func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, mess
 	if n != 1 {
 		return store.ErrConflict
 	}
-	return tx.Commit()
+	if err := store.Commit(ctx, tx); err != nil {
+		return err
+	}
+	store.NoteEffect(ctx, "answer %d of task %s was accepted", message, task)
+	return nil
 }
 
 func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
@@ -117,7 +127,10 @@ func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
 	return known && (slices.Contains(routes, to) || slices.Contains(routes, "all"))
 }
 
+// PutCouncilRelic notes the relic only after it commits, so a replay of a
+// written relic notes nothing.
 func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain.ConclaveRelic) error {
+	ctx = store.HoldEffects(ctx)
 	if r.ContentType == "" {
 		r.ContentType = "text/plain"
 	}
@@ -171,5 +184,9 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := store.Commit(ctx, tx); err != nil {
+		return err
+	}
+	store.NoteEffect(ctx, "relic %s of task %s was written", r.Name, task)
+	return nil
 }

@@ -94,10 +94,9 @@ func (q *Queue) Request(ctx context.Context, taskID, workloadName, capability st
 		ExpiresAt:            now.Add(ttl),
 		CreatedAt:            now,
 	}
-	if err := q.store.CreateApproval(ctx, apr); err != nil {
-		return domain.Approval{}, err
-	}
-	_ = q.store.AppendAudit(ctx, domain.AuditRecord{
+	// The request is recorded before the approval exists: a record that
+	// cannot be written refuses the request and creates no approval.
+	if err := store.RecordAudit(ctx, q.store, domain.AuditRecord{
 		Category:     "approval",
 		TaskID:       taskID,
 		WorkloadName: workloadName,
@@ -105,7 +104,13 @@ func (q *Queue) Request(ctx context.Context, taskID, workloadName, capability st
 		Outcome:      "pending",
 		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"payload_sha256":%q}`, apr.ID, apr.PayloadSHA256),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		return domain.Approval{}, err
+	}
+	if err := q.store.CreateApproval(ctx, apr); err != nil {
+		q.recordFailedStep(ctx, apr, "create_failed")
+		return domain.Approval{}, err
+	}
 	if q.onRequested != nil {
 		q.onRequested(apr)
 	}
@@ -154,10 +159,9 @@ func (q *Queue) Approve(ctx context.Context, approvalID, expectedSHA256, decided
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalApproved, decidedBy, string(proofBytes)); err != nil {
-		return domain.Approval{}, err
-	}
-	_ = q.store.AppendAudit(ctx, domain.AuditRecord{
+	// The decision is recorded before it is stored: a record that cannot be
+	// written refuses the approval and leaves it pending.
+	if err := store.RecordAudit(ctx, q.store, domain.AuditRecord{
 		Category:     "approval",
 		TaskID:       apr.TaskID,
 		WorkloadName: apr.WorkloadName,
@@ -165,7 +169,13 @@ func (q *Queue) Approve(ctx context.Context, approvalID, expectedSHA256, decided
 		Outcome:      "approved",
 		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"decided_by":%q,"method":%q}`, apr.ID, decidedBy, proof.Method),
 		CreatedAt:    q.now(),
-	})
+	}); err != nil {
+		return domain.Approval{}, err
+	}
+	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalApproved, decidedBy, string(proofBytes)); err != nil {
+		q.recordFailedStep(ctx, apr, "approve_failed")
+		return domain.Approval{}, err
+	}
 	return q.store.GetApproval(ctx, apr.ID)
 }
 
@@ -175,11 +185,16 @@ func (q *Queue) Deny(ctx context.Context, approvalID, decidedBy, reason string) 
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	proofJSON, _ := json.Marshal(map[string]string{"method": "operator_deny", "reason": reason})
-	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalDenied, decidedBy, string(proofJSON)); err != nil {
-		return domain.Approval{}, err
+	// A decided approval is a conflict before any row is written, as in
+	// Approve, so the log never shows a denial that cannot happen.
+	if apr.Status != domain.ApprovalPending {
+		return domain.Approval{}, store.ErrConflict
 	}
-	_ = q.store.AppendAudit(ctx, domain.AuditRecord{
+	proofJSON, _ := json.Marshal(map[string]string{"method": "operator_deny", "reason": reason})
+	// Recorded before it is stored, like an approval: a record that cannot
+	// be written refuses the denial and leaves the approval pending, where it
+	// cannot be used and expires.
+	if err := store.RecordAudit(ctx, q.store, domain.AuditRecord{
 		Category:     "approval",
 		TaskID:       apr.TaskID,
 		WorkloadName: apr.WorkloadName,
@@ -187,8 +202,28 @@ func (q *Queue) Deny(ctx context.Context, approvalID, decidedBy, reason string) 
 		Outcome:      "denied",
 		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"decided_by":%q,"reason":%q}`, apr.ID, decidedBy, reason),
 		CreatedAt:    q.now(),
-	})
+	}); err != nil {
+		return domain.Approval{}, err
+	}
+	if err := q.store.DecideApproval(ctx, apr.ID, apr.PayloadSHA256, domain.ApprovalDenied, decidedBy, string(proofJSON)); err != nil {
+		q.recordFailedStep(ctx, apr, "deny_failed")
+		return domain.Approval{}, err
+	}
 	return q.store.GetApproval(ctx, apr.ID)
+}
+
+// recordFailedStep follows a row written before a store change that then
+// failed, so the log does not claim a change that did not happen.
+func (q *Queue) recordFailedStep(ctx context.Context, apr domain.Approval, reason string) {
+	store.LogClosingAudit(ctx, q.store, domain.AuditRecord{
+		Category:     "approval",
+		TaskID:       apr.TaskID,
+		WorkloadName: apr.WorkloadName,
+		Action:       apr.Capability,
+		Outcome:      "error",
+		DetailJSON:   fmt.Sprintf(`{"approval_id":%q,"reason":%q}`, apr.ID, reason),
+		CreatedAt:    q.now(),
+	})
 }
 
 func newApprovalID() (string, error) {

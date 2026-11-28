@@ -21,6 +21,7 @@ func CreateTaskWithMemory(ctx context.Context, st Store, task domain.Task, entry
 }
 
 func insertRegisteredTask(ctx context.Context, db *sql.DB, entry domain.MemoryEntry, insert func(TaskInserter) error) error {
+	ctx = HoldEffects(ctx)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -32,7 +33,8 @@ func insertRegisteredTask(ctx context.Context, db *sql.DB, entry domain.MemoryEn
 	if err := putMemoryTx(ctx, tx, entry); err != nil {
 		return err
 	}
-	return tx.Commit()
+	NoteEffect(ctx, "memory entry %s/%s was stored", entry.Namespace, entry.Key)
+	return Commit(ctx, tx)
 }
 
 func putMemoryTx(ctx context.Context, tx TaskInserter, entry domain.MemoryEntry) error {
@@ -120,6 +122,7 @@ func ApplyTransitionEffects(ctx context.Context, tx *sql.Tx, taskID string, audi
 		if err := putMemoryTx(ctx, tx, *effects.Memory); err != nil {
 			return err
 		}
+		NoteEffect(ctx, "memory entry %s/%s was stored", effects.Memory.Namespace, effects.Memory.Key)
 	}
 	effects.applied = true
 	return nil
@@ -201,17 +204,16 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	return task, nil
 }
 
-func RenewTaskLeases(ctx context.Context, db *sql.DB, taskID string, now, expiresAt time.Time) error {
+func RenewTaskLeases(ctx context.Context, db *sql.DB, taskID string, now, expiresAt time.Time) (sql.Result, error) {
 	// Both stores write UTC RFC3339Nano. Strip Z so a whole second sorts before
 	// a fractional second and a shorter fraction sorts before its extensions.
-	_, err := db.ExecContext(ctx, `
+	return db.ExecContext(ctx, `
 		UPDATE leases SET expires_at = $1
 		WHERE task_id = $2 AND revoked_at IS NULL
 		  AND rtrim(expires_at, 'Z') > rtrim($3, 'Z')
 		  AND rtrim(expires_at, 'Z') < rtrim($1, 'Z')
 		  AND EXISTS (SELECT 1 FROM tasks WHERE id = $2 AND state IN ('working', 'input-required'))
 	`, expiresAt.UTC().Format(time.RFC3339Nano), taskID, now.UTC().Format(time.RFC3339Nano))
-	return err
 }
 
 const RecoveryOwners = "system:recovery-owners"
@@ -238,5 +240,5 @@ func CommitTaskTransition(ctx context.Context, tx *sql.Tx, taskID string, to dom
 			return err
 		}
 	}
-	return tx.Commit()
+	return Commit(ctx, tx)
 }

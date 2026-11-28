@@ -1,12 +1,14 @@
 package attach
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 const defaultRingSize = 64 * 1024
@@ -20,6 +22,9 @@ var (
 	ErrSessionNotFound     = errors.New("live attach session not found")
 	ErrTakeoverHeld        = errors.New("takeover already held by another operator")
 	ErrTakeoverUnsupported = errors.New("process does not accept stdin takeover")
+	// ErrTakeoverNotHeld refuses input from an operator who does not hold a
+	// confirmed takeover.
+	ErrTakeoverNotHeld = errors.New("operator does not hold the takeover")
 )
 
 type session struct {
@@ -29,10 +34,14 @@ type session struct {
 	output        streamRedactor
 	stdin         io.WriteCloser
 	takeoverOwner string
-	closed        bool
-	subs          map[int]*subscriber
-	nextSubID     int
-	registry      *redact.Registry
+	// takeoverPending is set from AcquireTakeover until ConfirmTakeover:
+	// the owner holds the takeover against other operators but may not
+	// write input yet.
+	takeoverPending bool
+	closed          bool
+	subs            map[int]*subscriber
+	nextSubID       int
+	registry        *redact.Registry
 }
 
 // subscriber is one Scry observer. dropped is set when a chunk could not be
@@ -181,8 +190,66 @@ func (h *Hub) Subscribe(taskID string) (string, <-chan string, bool, func(), err
 	return history, ch, false, unsub, nil
 }
 
-// AcquireTakeover grants exclusive write access to stdin for operatorID.
-func (h *Hub) AcquireTakeover(taskID, operatorID string) error {
+// AcquireTakeover reserves exclusive stdin control for operatorID and
+// reports whether this call made the reservation. The reservation refuses
+// other operators but allows no input until ConfirmTakeover, so the caller
+// can record the takeover first and drop the reservation with
+// AbandonTakeover when the record cannot be written. An operator who already
+// holds the takeover, pending or confirmed, keeps it as it is, and the call
+// reports no reservation, so the caller has nothing to drop.
+func (h *Hub) AcquireTakeover(taskID, operatorID string) (bool, error) {
+	h.mu.RLock()
+	s, ok := h.sessions[taskID]
+	h.mu.RUnlock()
+	if !ok {
+		return false, ErrSessionNotFound
+	}
+	if operatorID == "" {
+		operatorID = "operator"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrSessionNotFound
+	}
+	if s.stdin == nil {
+		return false, ErrTakeoverUnsupported
+	}
+	if s.takeoverOwner != "" && s.takeoverOwner != operatorID {
+		return false, ErrTakeoverHeld
+	}
+	if s.takeoverOwner == operatorID {
+		return false, nil
+	}
+	s.takeoverOwner = operatorID
+	s.takeoverPending = true
+	return true, nil
+}
+
+// AbandonTakeover drops a reservation operatorID made with AcquireTakeover
+// while it is still pending. A confirmed takeover is kept.
+func (h *Hub) AbandonTakeover(taskID, operatorID string) {
+	h.mu.RLock()
+	s, ok := h.sessions[taskID]
+	h.mu.RUnlock()
+	if !ok {
+		return
+	}
+	if operatorID == "" {
+		operatorID = "operator"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.takeoverOwner == operatorID && s.takeoverPending {
+		s.takeoverOwner = ""
+		s.takeoverPending = false
+	}
+}
+
+// ConfirmTakeover lets operatorID, who reserved the takeover with
+// AcquireTakeover, write input, and notes the takeover on ctx
+// (store.NoteEffect). It fails when the reservation is gone.
+func (h *Hub) ConfirmTakeover(ctx context.Context, taskID, operatorID string) error {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
 	h.mu.RUnlock()
@@ -197,18 +264,19 @@ func (h *Hub) AcquireTakeover(taskID, operatorID string) error {
 	if s.closed {
 		return ErrSessionNotFound
 	}
-	if s.stdin == nil {
-		return ErrTakeoverUnsupported
+	if s.takeoverOwner != operatorID {
+		return ErrTakeoverNotHeld
 	}
-	if s.takeoverOwner != "" && s.takeoverOwner != operatorID {
-		return ErrTakeoverHeld
+	if s.takeoverPending {
+		s.takeoverPending = false
+		store.NoteEffect(ctx, "operator %s took over task %s", operatorID, taskID)
 	}
-	s.takeoverOwner = operatorID
 	return nil
 }
 
-// ReleaseTakeover relinquishes exclusive stdin control.
-func (h *Hub) ReleaseTakeover(taskID, operatorID string) {
+// ReleaseTakeover relinquishes exclusive stdin control and notes a released
+// takeover on ctx (store.NoteEffect).
+func (h *Hub) ReleaseTakeover(ctx context.Context, taskID, operatorID string) {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
 	h.mu.RUnlock()
@@ -217,13 +285,20 @@ func (h *Hub) ReleaseTakeover(taskID, operatorID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if operatorID == "" || s.takeoverOwner == operatorID {
+	if s.takeoverOwner != "" && (operatorID == "" || s.takeoverOwner == operatorID) {
+		if s.takeoverPending {
+			store.NoteEffect(ctx, "the pending takeover of task %s by %s was dropped", taskID, s.takeoverOwner)
+		} else {
+			store.NoteEffect(ctx, "the takeover of task %s by %s was released", taskID, s.takeoverOwner)
+		}
 		s.takeoverOwner = ""
+		s.takeoverPending = false
 	}
 }
 
-// SendInput writes operator input to the running process stdin.
-// If no operator holds Takeover yet, it automatically acquires it for operatorID.
+// SendInput writes operator input to the running process stdin. operatorID
+// must hold a confirmed takeover: input never takes over implicitly, so no
+// input reaches a task without a recorded takeover.
 func (h *Hub) SendInput(taskID, operatorID string, data []byte) (int, error) {
 	h.mu.RLock()
 	s, ok := h.sessions[taskID]
@@ -247,7 +322,10 @@ func (h *Hub) SendInput(taskID, operatorID string, data []byte) (int, error) {
 		s.mu.Unlock()
 		return 0, ErrTakeoverHeld
 	}
-	s.takeoverOwner = operatorID
+	if s.takeoverOwner != operatorID || s.takeoverPending {
+		s.mu.Unlock()
+		return 0, ErrTakeoverNotHeld
+	}
 	stdin := s.stdin
 	s.mu.Unlock()
 
@@ -296,6 +374,7 @@ func (s *session) closeLocked() {
 	s.output = streamRedactor{}
 	s.closed = true
 	s.takeoverOwner = ""
+	s.takeoverPending = false
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 	}

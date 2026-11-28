@@ -10,6 +10,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/store/audittest"
 )
 
 const validOpenPR = `{"owner":"acme","repo":"widgets","head":"sablecourt/fix-1","base":"main","title":"Fix"}`
@@ -81,8 +82,8 @@ func TestFailedConsumptionAuditStopsTheActionAndSpendsTheApproval(t *testing.T) 
 		t.Fatal(err)
 	}
 	rec := tg.post("ops-agent", "git.open_pr", `{"approvalId":"`+id+`","payload":`+validOpenPR+`}`)
-	if rec.Code < 500 || !strings.Contains(rec.Body.String(), "approval is spent") || !strings.Contains(rec.Body.String(), "did not run") {
-		t.Fatalf("want a 5xx saying the approval is spent and the action did not run, got %d: %s", rec.Code, rec.Body.String())
+	if want := audittest.Answer("the action", "approval "+id+" was spent"); rec.Code != 500 || errorText(t, rec) != want {
+		t.Fatalf("want a 500 saying %q, got %d: %s", want, rec.Code, rec.Body.String())
 	}
 	if n := len(tg.pr.calls()); n != 0 {
 		t.Fatalf("action ran %d times", n)

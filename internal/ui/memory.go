@@ -111,24 +111,12 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_ = r.ParseForm()
 	withHandoff := r.FormValue("handoff") == "1" || r.URL.Query().Get("handoff") == "1"
-	var created bool
-	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "operator_ui_retry")
+	// Same task.retry row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd,
+	// written before the retried task exists and not on an idempotent replay.
+	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithRetryAudit(r.Context()), id, withHandoff, "operator_ui_retry")
 	if err != nil {
-		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(errText(r.Context(), err, "retry", "")), http.StatusSeeOther)
 		return
-	}
-	// Same row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd, written
-	// only when this call created the task, not on an idempotent replay.
-	if created {
-		_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
-			Category:     "task",
-			TaskID:       retried.ID,
-			WorkloadName: retried.WorkloadName,
-			Action:       "task.retry",
-			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
-			CreatedAt:    time.Now().UTC(),
-		})
 	}
 	msg := "Retried from " + id
 	if withHandoff {
@@ -242,10 +230,6 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		Author:    "operator",
 		UpdatedAt: now,
 	}
-	if err := d.store.PutMemory(r.Context(), entry); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
-		return
-	}
 	detailBytes, _ := json.Marshal(map[string]any{
 		"namespace":        entry.Namespace,
 		"target_namespace": targetNS,
@@ -253,14 +237,31 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		"conclave_id":      id,
 		"message_id":       msgID,
 	})
-	_ = d.store.AppendAudit(r.Context(), domain.AuditRecord{
+	// Recorded before it is stored: a record that cannot be written refuses
+	// the proposal.
+	if err := store.RecordAudit(r.Context(), d.store, domain.AuditRecord{
 		Category:     "memory",
 		WorkloadName: "operator",
 		Action:       "learning.propose",
 		Outcome:      "proposed",
 		DetailJSON:   string(detailBytes),
 		CreatedAt:    now,
-	})
+	}); err != nil {
+		redirectConclaveErr(w, r, id, errText(r.Context(), err, "proposal", ""))
+		return
+	}
+	if err := d.store.PutMemory(r.Context(), entry); err != nil {
+		store.LogClosingAudit(r.Context(), d.store, domain.AuditRecord{
+			Category:     "memory",
+			WorkloadName: "operator",
+			Action:       "learning.propose",
+			Outcome:      "error",
+			DetailJSON:   string(detailBytes),
+			CreatedAt:    time.Now().UTC(),
+		})
+		redirectConclaveErr(w, r, id, err.Error())
+		return
+	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Proposed learning saved (pending review): "+entry.Namespace+"/"+entry.Key), http.StatusSeeOther)
 }
 
@@ -310,7 +311,7 @@ func (d *Dashboard) handleConclaveUploadRelic(w http.ResponseWriter, r *http.Req
 	}
 
 	if _, err := d.conclave.PutRelic(r.Context(), id, "operator", name, contentType, content); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
+		redirectConclaveErr(w, r, id, errText(r.Context(), err, "storing the relic", ""))
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Relic "+name+" added"), http.StatusSeeOther)
