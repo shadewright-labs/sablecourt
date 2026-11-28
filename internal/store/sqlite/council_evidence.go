@@ -55,9 +55,10 @@ func (s *SQLiteStore) RecordCouncilAnswer(ctx context.Context, msg domain.Concla
 	return store.AppendReservedCouncilAnswer(ctx, s, msg, vote, store.ConclaveLimits{})
 }
 
-func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) (err error) {
+// AcceptCouncilAnswer notes the acceptance only after it commits, so a replay
+// of an accepted answer notes nothing.
+func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, message int64, vote bool) error {
 	ctx = store.HoldEffects(ctx)
-	defer func() { store.NoteEffectIf(ctx, err, "answer %d of task %s was accepted", message, task) }()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -107,7 +108,11 @@ func (s *SQLiteStore) AcceptCouncilAnswer(ctx context.Context, task string, mess
 	if n != 1 {
 		return store.ErrConflict
 	}
-	return store.Commit(ctx, tx)
+	if err := store.Commit(ctx, tx); err != nil {
+		return err
+	}
+	store.NoteEffect(ctx, "answer %d of task %s was accepted", message, task)
+	return nil
 }
 
 func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
@@ -122,9 +127,10 @@ func permittedRecipient(p *store.CouncilPolicy, role, to string) bool {
 	return known && (slices.Contains(routes, to) || slices.Contains(routes, "all"))
 }
 
-func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain.ConclaveRelic) (err error) {
+// PutCouncilRelic notes the relic only after it commits, so a replay of a
+// written relic notes nothing.
+func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain.ConclaveRelic) error {
 	ctx = store.HoldEffects(ctx)
-	defer func() { store.NoteEffectIf(ctx, err, "relic %s of task %s was written", r.Name, task) }()
 	if r.ContentType == "" {
 		r.ContentType = "text/plain"
 	}
@@ -178,5 +184,9 @@ func (s *SQLiteStore) PutCouncilRelic(ctx context.Context, task string, r domain
 	if err != nil {
 		return err
 	}
-	return store.Commit(ctx, tx)
+	if err := store.Commit(ctx, tx); err != nil {
+		return err
+	}
+	store.NoteEffect(ctx, "relic %s of task %s was written", r.Name, task)
+	return nil
 }

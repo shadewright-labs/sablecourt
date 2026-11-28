@@ -635,7 +635,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 				return
 			} else if ctx.Err() != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "request cancelled before the action ran; approval " + req.ApprovalID + " is spent, request a new one"})
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": withSpentApproval("request cancelled before the action ran", req.ApprovalID)})
 				return
 			}
 			ctx = context.WithValue(ctx, approvalCtxKey{}, req.ApprovalID)
@@ -673,7 +673,7 @@ func (g *Gate) ActionHandler() http.Handler {
 			if errors.Is(err, errToolRefused) {
 				status, reason := refusalOf(err)
 				auditAction("denied", map[string]any{"reason": reason, "error": redact.String(err.Error()), "approval_id": approvalUsed})
-				writeJSON(w, status, map[string]string{"error": redact.String(err.Error())})
+				writeJSON(w, status, map[string]string{"error": withSpentApproval(redact.String(err.Error()), approvalUsed)})
 				return
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
@@ -684,7 +684,7 @@ func (g *Gate) ActionHandler() http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 				return
 			}
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": withSpentApproval(redact.String(err.Error()), approvalUsed)})
 			return
 		}
 		if g.breaker != nil {
@@ -745,6 +745,19 @@ func (g *Gate) authenticateWithSnapshot(w http.ResponseWriter, r *http.Request, 
 		return authContext{}, false
 	}
 	return authContext{Lease: lease, Workload: wl}, true
+}
+
+// withSpentApproval returns msg, followed, when approvalID names an approval
+// the request has spent, by a note that it is spent. Every error answer after
+// the approval is consumed goes through it, so a caller whose action did not
+// complete knows to request a new approval. A failed audit write is answered
+// by store.AuditFailureText instead, which lists the spent approval among the
+// recorded effects.
+func withSpentApproval(msg, approvalID string) string {
+	if approvalID == "" {
+		return msg
+	}
+	return msg + "; approval " + approvalID + " is spent, request a new one"
 }
 
 // audit writes a record that cannot change what happens next, a refusal or

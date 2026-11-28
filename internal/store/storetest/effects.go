@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,12 +83,23 @@ func CheckEffectsFollowCommit(t *testing.T, d *FaultDriver, open func(t *testing
 					t.Fatalf("setup: %v", err)
 				}
 			}
+			if err := seedTask(ctx, st, flushTask, domain.TaskStateSubmitted); err != nil {
+				t.Fatalf("seed flush task: %v", err)
+			}
 			before := d.Failed()
 			fctx, faulted := store.TrackEffects(ctx)
+			// The run starts inside effects a caller already holds, as a
+			// guarded path or a caller with several writes does. A write that
+			// fails must leave nothing in them, so the flush below, which
+			// commits on the same context, must release no line of the run.
+			fctx = store.HoldEffects(fctx)
 			d.Fail(true)
 			err := sc.Run(fctx, st)
 			d.Fail(false)
-			effects := faulted.List()
+			effects, ferr := flushEffects(fctx, st, faulted)
+			if ferr != nil {
+				t.Fatalf("flush: %v", ferr)
+			}
 			if failed := d.Failed() - before; failed > 0 {
 				if err == nil {
 					t.Errorf("succeeded although %d commits failed", failed)
@@ -113,6 +125,31 @@ func CheckEffectsFollowCommit(t *testing.T, d *FaultDriver, open func(t *testing
 }
 
 const worker = "worker"
+
+// flushTask is the task whose transition commits on the run's context after
+// the run, so that effects the run left held are released and seen.
+const flushTask = "effects-flush"
+
+// flushEffects commits a transition of flushTask on ctx and returns the
+// effects of rec other than the flush's own.
+func flushEffects(ctx context.Context, st store.Store, rec *store.Effects) ([]string, error) {
+	if err := st.UpdateTaskState(ctx, flushTask, domain.TaskStateSubmitted, domain.TaskStateWorking, "test", "{}"); err != nil {
+		return nil, err
+	}
+	var out []string
+	flushed := false
+	for _, e := range rec.List() {
+		if !flushed && strings.Contains(e, flushTask) {
+			flushed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !flushed {
+		return nil, errors.New("the flush transition recorded no effect")
+	}
+	return out, nil
+}
 
 func seedTask(ctx context.Context, st store.Store, id string, state domain.TaskState) error {
 	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: worker, Zone: domain.ZoneSandbox}); err != nil {
@@ -194,7 +231,9 @@ func StoreScenarios() []Scenario {
 		if err := seedTask(ctx, st, "t1", domain.TaskStateWorking); err != nil {
 			return err
 		}
-		return st.CreateLease(ctx, domain.Lease{TokenSHA256: "lease-sum", TaskID: "t1", WorkloadName: worker, ExpiresAt: now.Add(time.Minute)})
+		// The expiry is read when the setup runs, not from now, so a slow run
+		// cannot leave a lease that has expired before the renewal.
+		return st.CreateLease(ctx, domain.Lease{TokenSHA256: "lease-sum", TaskID: "t1", WorkloadName: worker, ExpiresAt: time.Now().UTC().Add(time.Minute)})
 	}
 	reservation := ""
 	var wake int64

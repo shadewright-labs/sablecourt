@@ -111,28 +111,12 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_ = r.ParseForm()
 	withHandoff := r.FormValue("handoff") == "1" || r.URL.Query().Get("handoff") == "1"
-	var created bool
-	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "operator_ui_retry")
+	// Same task.retry row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd,
+	// written before the retried task exists and not on an idempotent replay.
+	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithRetryAudit(r.Context()), id, withHandoff, "operator_ui_retry")
 	if err != nil {
 		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(errText(r.Context(), err, "retry", "")), http.StatusSeeOther)
 		return
-	}
-	// Same row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd, written
-	// only when this call created the task, not on an idempotent replay.
-	if created {
-		if err := store.RecordAudit(r.Context(), d.store, domain.AuditRecord{
-			Category:     "task",
-			TaskID:       retried.ID,
-			WorkloadName: retried.WorkloadName,
-			Action:       "task.retry",
-			Outcome:      "submitted",
-			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
-			CreatedAt:    time.Now().UTC(),
-		}); err != nil {
-			msg := errText(r.Context(), err, "retry", "")
-			http.Redirect(w, r, "/tasks/"+url.PathEscape(retried.ID)+"?err="+url.QueryEscape(msg), http.StatusSeeOther)
-			return
-		}
 	}
 	msg := "Retried from " + id
 	if withHandoff {

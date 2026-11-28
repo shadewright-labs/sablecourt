@@ -87,8 +87,12 @@ func noteLine(ctx context.Context, text string) {
 // commits (a rollback, a refusal, or a replay that changed nothing), they are
 // dropped with it.
 type heldEffects struct {
-	mu       sync.Mutex
-	parent   context.Context
+	mu     sync.Mutex
+	parent context.Context
+	// outer is the holder that was open on parent when this one was made, or
+	// nil. Commit releases it too: a holder is made inside an outer one only
+	// by a store path that runs in the outer path's transaction or after it.
+	outer    *heldEffects
 	lines    []string
 	released bool
 }
@@ -107,40 +111,50 @@ func (h *heldEffects) hold(text string) bool {
 	return true
 }
 
-// HoldEffects returns ctx on which effects are held until a transaction is
-// committed with Commit. Every store method that writes in a transaction
-// calls it before the transaction begins and commits with Commit, so an
-// effect is recorded only once the change is durable, and never for a
-// transaction that rolls back or a replay that commits nothing. When ctx
-// already holds effects that were not released, ctx is returned as it is:
-// the guarded store paths pass one transaction through several methods, and
-// all of them commit together.
-func HoldEffects(ctx context.Context) context.Context {
-	if h, ok := ctx.Value(heldKey{}).(*heldEffects); ok {
-		h.mu.Lock()
-		open := !h.released
-		h.mu.Unlock()
-		if open {
-			return ctx
-		}
-	}
-	return context.WithValue(ctx, heldKey{}, &heldEffects{parent: ctx})
-}
-
-// holdsEffects reports whether ctx holds effects that were not released.
-func holdsEffects(ctx context.Context) bool {
-	h, ok := ctx.Value(heldKey{}).(*heldEffects)
-	if !ok {
-		return false
-	}
+func (h *heldEffects) open() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return !h.released
 }
 
+// release marks h released and returns the lines it held.
+func (h *heldEffects) release() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	lines := h.lines
+	h.lines = nil
+	h.released = true
+	return lines
+}
+
+// HoldEffects returns ctx on which effects are held until a transaction is
+// committed with Commit. Every store method that writes in a transaction
+// calls it before the transaction begins and commits with Commit, so an
+// effect is recorded only once the change is durable, and never for a
+// transaction that rolls back or a replay that commits nothing. Each call
+// makes a new holder, also when ctx already holds effects: what a method
+// notes is dropped with its holder when the method returns without a commit,
+// so a failed or unchanged write inside an outer holder leaves nothing in it
+// for a later commit to release. A commit releases the holder of its ctx and
+// every open holder around it, since the guarded store paths pass one
+// transaction through several methods and all of them commit together.
+func HoldEffects(ctx context.Context) context.Context {
+	h := &heldEffects{parent: ctx}
+	if outer, ok := ctx.Value(heldKey{}).(*heldEffects); ok && outer.open() {
+		h.outer = outer
+	}
+	return context.WithValue(ctx, heldKey{}, h)
+}
+
+// holdsEffects reports whether ctx holds effects that were not released.
+func holdsEffects(ctx context.Context) bool {
+	h, ok := ctx.Value(heldKey{}).(*heldEffects)
+	return ok && h.open()
+}
+
 // Commit commits tx and, when that succeeds, releases the effects ctx holds
-// (see HoldEffects) to the recorder. It is the only place a store
-// transaction is committed.
+// (see HoldEffects), outer holders first, to the recorder. It is the only
+// place a store transaction is committed.
 func Commit(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.Commit(); err != nil {
 		return err
@@ -149,13 +163,22 @@ func Commit(ctx context.Context, tx *sql.Tx) error {
 	if !ok {
 		return nil
 	}
-	h.mu.Lock()
-	lines := h.lines
-	h.lines = nil
-	h.released = true
-	h.mu.Unlock()
+	var chain []*heldEffects
+	for ; h != nil; h = h.outer {
+		if h.open() {
+			chain = append(chain, h)
+		}
+	}
+	if len(chain) == 0 {
+		return nil
+	}
+	var lines []string
+	for i := len(chain) - 1; i >= 0; i-- {
+		lines = append(lines, chain[i].release()...)
+	}
+	root := chain[len(chain)-1].parent
 	for _, line := range lines {
-		noteLine(h.parent, line)
+		noteLine(root, line)
 	}
 	return nil
 }

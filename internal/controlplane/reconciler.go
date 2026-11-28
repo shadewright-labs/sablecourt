@@ -463,6 +463,36 @@ func WithCreatedFlag(ctx context.Context, created *bool) context.Context {
 	return context.WithValue(ctx, createdKey{}, created)
 }
 
+type retryAuditKey struct{}
+
+// retryRow names the task a retry was made from. A zero value asks
+// RetryTaskWithHandoff to fill it in.
+type retryRow struct {
+	from    string
+	handoff bool
+}
+
+// WithRetryAudit returns ctx on which RetryTaskWithHandoff writes a task.retry
+// row for the task it creates, right after that task's task.submit row and
+// before the task exists. A failed write refuses the retry and creates
+// nothing, so repeating it creates the task and writes the row; a replay that
+// returns a task an earlier call created writes no row.
+func WithRetryAudit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryAuditKey{}, retryRow{})
+}
+
+func retryAuditRecord(row retryRow, task domain.Task, now time.Time) domain.AuditRecord {
+	return domain.AuditRecord{
+		Category:     "task",
+		TaskID:       task.ID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.retry",
+		Outcome:      "submitted",
+		DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, row.from, row.handoff),
+		CreatedAt:    now,
+	}
+}
+
 func (r *Reconciler) SubmitTask(ctx context.Context, workloadName, idempotencyKey, inputJSON string) (domain.Task, error) {
 	return r.submitTask(ctx, workloadName, idempotencyKey, inputJSON, "", nil)
 }
@@ -531,9 +561,17 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 	// of an earlier submission writes no row; it still goes through
 	// CreateTask, whose guards decide what the replay returns.
 	_, replay := r.replayedSubmission(ctx, id, idempotencyKey, workloadName, parentID, step != nil)
+	retry, isRetry := ctx.Value(retryAuditKey{}).(retryRow)
+	isRetry = isRetry && retry.from != ""
 	if !replay {
 		if err := store.RecordAudit(ctx, r.store, submitted); err != nil {
 			return domain.Task{}, err
+		}
+		if isRetry {
+			if err := store.RecordAudit(ctx, r.store, retryAuditRecord(retry, task, now)); err != nil {
+				r.logNotCreated(ctx, task)
+				return domain.Task{}, err
+			}
 		}
 	}
 	if step != nil {
@@ -547,18 +585,16 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		if auditErr := store.RecordAudit(ctx, r.store, submitted); auditErr != nil {
 			return domain.Task{}, auditErr
 		}
+		if isRetry {
+			if auditErr := store.RecordAudit(ctx, r.store, retryAuditRecord(retry, task, now)); auditErr != nil {
+				return domain.Task{}, auditErr
+			}
+		}
 	}
 	if err != nil {
 		if !replay {
 			// The row above names a task that was not created; say so.
-			store.LogAudit(ctx, r.store, domain.AuditRecord{
-				Category:     "controlplane",
-				TaskID:       task.ID,
-				WorkloadName: workloadName,
-				Action:       "task.submit",
-				Outcome:      "not_created",
-				CreatedAt:    r.now(),
-			})
+			r.logNotCreated(ctx, task)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			// The unique key selects the winner even when submissions race.
@@ -585,6 +621,19 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		})
 	}
 	return task, nil
+}
+
+// logNotCreated records that the task a task.submit row named was not
+// created.
+func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task) {
+	store.LogAudit(ctx, r.store, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       task.ID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.submit",
+		Outcome:      "not_created",
+		CreatedAt:    r.now(),
+	})
 }
 
 // replayedSubmission returns the task an earlier submission with the same
@@ -721,6 +770,9 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 	}
 	if !terminalTaskState(orig.State) {
 		return domain.Task{}, fmt.Errorf("%w: retry requires a terminal task", store.ErrConflict)
+	}
+	if _, ok := ctx.Value(retryAuditKey{}).(retryRow); ok {
+		ctx = context.WithValue(ctx, retryAuditKey{}, retryRow{from: orig.ID, handoff: withHandoff})
 	}
 	r.mu.Lock()
 	_, hasHandle := r.handles[orig.ID]

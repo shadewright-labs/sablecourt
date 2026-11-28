@@ -232,3 +232,52 @@ func learningScenarios() []storetest.Scenario {
 			}},
 	}
 }
+
+// A replay that changes nothing notes nothing, also when it runs inside
+// effects a caller already holds: a later commit on the same context must not
+// release an effect for it.
+func TestReplayInsideHeldEffectsNotesNothing(t *testing.T) {
+	replays := map[string]bool{"accept council answer": true, "council relic": true, "close council": true, "learning injection": true}
+	scenarios := append(councilScenarios(), learningScenarios()...)
+	found := 0
+	for _, sc := range scenarios {
+		if !replays[sc.Name] {
+			continue
+		}
+		found++
+		t.Run(sc.Name, func(t *testing.T) {
+			ctx := t.Context()
+			st := openFaultStore(t)
+			if err := sc.Setup(ctx, st); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			if err := sc.Run(ctx, st); err != nil {
+				t.Fatalf("first run: %v", err)
+			}
+			if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneSandbox}); err != nil {
+				t.Fatalf("flush workload: %v", err)
+			}
+			if err := st.CreateTask(ctx, domain.Task{ID: "flush", IdempotencyKey: "flush", WorkloadName: "worker", State: domain.TaskStateSubmitted}); err != nil {
+				t.Fatalf("flush task: %v", err)
+			}
+			rctx, rec := store.TrackEffects(ctx)
+			rctx = store.HoldEffects(rctx)
+			err := sc.Run(rctx, st)
+			if sc.Name == "learning injection" && err != nil && err.Error() == "not injected" {
+				err = nil
+			}
+			if err != nil {
+				t.Fatalf("replay: %v", err)
+			}
+			if err := st.UpdateTaskState(rctx, "flush", domain.TaskStateSubmitted, domain.TaskStateWorking, "test", "{}"); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			if got := rec.List(); len(got) != 1 {
+				t.Errorf("replay recorded %q, want only the flush", got)
+			}
+		})
+	}
+	if found != len(replays) {
+		t.Fatalf("found %d of %d replay scenarios", found, len(replays))
+	}
+}

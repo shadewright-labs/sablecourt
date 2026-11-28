@@ -153,14 +153,19 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			wantCode: 500, what: "resume",
 		},
 		{
-			name: "retry reports the task it created",
+			name: "retry is refused and creates nothing",
 			prepare: func(t *testing.T, env apiEnv) string {
 				env.seedTask(t, "task_old", domain.TaskStateFailed)
 				return ""
 			},
 			fail:   audittest.Action("task.retry"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_old/retry",
-			wantCode: 500, what: "retry", wantEffects: []string{"task {new} was created", "a message was added to task {new}"},
+			wantCode: 500, what: "retry",
+			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
+				if _, err := env.st.GetTaskByIdempotencyKey(ctx, "retry-task_old-1"); err == nil {
+					t.Fatal("retried task created without its task.retry row")
+				}
+			},
 		},
 		{
 			name: "denial is refused and stays pending",

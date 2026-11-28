@@ -208,3 +208,58 @@ func TestStoreCommitsOnlyThroughCommit(t *testing.T) {
 type failingAppender struct{}
 
 func (failingAppender) AppendAudit(context.Context, domain.AuditRecord) error { return ErrConflict }
+
+// A store function that commits a transaction and notes its effect in a
+// deferred call returns success only after the commit: a nil error returned
+// before it (a replay that changed nothing) would note an effect for a write
+// that did not happen.
+func TestDeferredEffectsFollowCommit(t *testing.T) {
+	for _, dir := range []string{".", "sqlite", "postgres"} {
+		for _, fn := range parseFuncs(t, dir) {
+			deferred := false
+			commit := token.NoPos
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.DeferStmt:
+					ast.Inspect(n, func(m ast.Node) bool {
+						if call, ok := m.(*ast.CallExpr); ok && calleeName(call) == "NoteEffectIf" {
+							deferred = true
+						}
+						return true
+					})
+				case *ast.CallExpr:
+					if calleeName(n) == "Commit" && len(n.Args) == 2 && (commit == token.NoPos || n.Pos() < commit) {
+						commit = n.Pos()
+					}
+				}
+				return true
+			})
+			if !deferred || commit == token.NoPos {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if _, ok := n.(*ast.FuncLit); ok {
+					return false
+				}
+				ret, ok := n.(*ast.ReturnStmt)
+				if !ok || len(ret.Results) == 0 || ret.Pos() > commit {
+					return true
+				}
+				if id, ok := ret.Results[len(ret.Results)-1].(*ast.Ident); ok && id.Name == "nil" {
+					t.Errorf("%s: %s returns success before its commit while a deferred call notes an effect", dir, fn.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+}
+
+func calleeName(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}

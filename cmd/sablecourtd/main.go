@@ -437,10 +437,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	logger := cfg.logger
 	if logger == nil {
 		logger = telemetry.NewLogger()
-		// Packages without a logger of their own, such as the failed audit
-		// writes store.RecordAudit logs, write through the daemon's logger.
-		slog.SetDefault(logger)
 	}
+	// Packages without a logger of their own, such as the failed audit writes
+	// store.RecordAudit logs, write through the daemon's logger, whether it was
+	// supplied or made here. The previous default comes back on return.
+	previousLogger := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(previousLogger)
 
 	var gitSyncer *config.GitSyncer
 	if cfg.manifestsGitRepo != "" {
@@ -1116,8 +1119,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		withHandoff := r.URL.Query().Get("handoff") == "true" || r.URL.Query().Get("handoff") == "1"
-		var created bool
-		retried, err := reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "api_retry")
+		// The task.retry row is written before the retried task exists, so a
+		// failed row refuses the retry and a repeat creates the task.
+		retried, err := reconciler.RetryTaskWithHandoff(controlplane.WithRetryAudit(r.Context()), id, withHandoff, "api_retry")
 		if writeAuditError(w, r, err, "retry") {
 			return
 		}
@@ -1128,23 +1132,6 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
-		}
-		if created {
-			// The retried task exists once RetryTaskWithHandoff returns (its
-			// task.submit row was written first), so a failed row here is
-			// reported, not undone.
-			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
-				Category:     "task",
-				TaskID:       retried.ID,
-				WorkloadName: retried.WorkloadName,
-				Action:       "task.retry",
-				Outcome:      "submitted",
-				DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
-				CreatedAt:    time.Now().UTC(),
-			}); err != nil {
-				writeAuditError(w, r, err, "retry")
-				return
-			}
 		}
 		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(retried))
 	})

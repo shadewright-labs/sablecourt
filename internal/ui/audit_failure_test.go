@@ -65,7 +65,7 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 			},
 		},
 		{
-			name: "retry reports the record of a task it created",
+			name: "retry is refused and creates nothing",
 			fail: "task.retry",
 			post: func(t *testing.T, st store.Store) (string, url.Values) {
 				now := time.Now().UTC()
@@ -74,11 +74,10 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 				}
 				return "/ui/tasks/task_failed/retry", url.Values{}
 			},
-			what:        "retry",
-			wantEffects: []string{"task {new} was created", "a message was added to task {new}"},
-			check: func(t *testing.T, st store.Store, path string) {
-				if _, err := st.GetTask(ctx, strings.TrimPrefix(path, "/tasks/")); err != nil {
-					t.Fatalf("retry task missing: %v", err)
+			what: "retry",
+			check: func(t *testing.T, st store.Store, _ string) {
+				if _, err := st.GetTaskByIdempotencyKey(ctx, "retry-task_failed-1"); err == nil {
+					t.Fatal("retried task created without its task.retry row")
 				}
 			},
 		},
