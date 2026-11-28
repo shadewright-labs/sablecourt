@@ -609,6 +609,12 @@ func (g *Gate) ActionHandler() http.Handler {
 				return
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
+			// A failed audit write inside the executor is a local failure,
+			// answered with HTTP 500 like every other failed audit write.
+			if msg, ok := store.AuditFailureText(err, "the action"); ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			}
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 			return
 		}

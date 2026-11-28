@@ -311,10 +311,55 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 		r.mu.Unlock()
 	}()
 
-	attempt.tokenMu.Lock()
 	task, err := r.store.GetTask(ctx, taskID)
 	if err == nil && task.State != domain.TaskStateSuspended {
 		err = fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, task.State)
+	}
+	if err != nil {
+		return err
+	}
+	var cp scruntime.CheckpointRef
+	if refJSON, err := r.store.LatestCheckpoint(ctx, taskID); err == nil {
+		_ = json.Unmarshal([]byte(refJSON), &cp)
+	}
+	// Resuming restarts execution, so it is recorded before anything
+	// changes: a record that cannot be written refuses the resume with no
+	// lease minted and the runtime untouched. The task stays suspended.
+	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
+		Category:     "controlplane",
+		TaskID:       taskID,
+		WorkloadName: task.WorkloadName,
+		Action:       "task.resume",
+		Outcome:      "working",
+		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
+		CreatedAt:    r.now(),
+	}); err != nil {
+		return err
+	}
+	failedStep := "lease_failed"
+	defer func() {
+		if resumeErr == nil {
+			return
+		}
+		// The row above says the task resumed; say that it did not.
+		store.LogAudit(context.WithoutCancel(ctx), r.store, domain.AuditRecord{
+			Category:     "controlplane",
+			TaskID:       taskID,
+			WorkloadName: task.WorkloadName,
+			Action:       "task.resume",
+			Outcome:      "error",
+			DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, failedStep),
+			CreatedAt:    r.now(),
+		})
+	}()
+
+	attempt.tokenMu.Lock()
+	// Cancellation may have run while the row was written.
+	if current, getErr := r.store.GetTask(ctx, taskID); getErr != nil {
+		err = getErr
+	} else if current.State != domain.TaskStateSuspended {
+		failedStep = "not_suspended"
+		err = fmt.Errorf("%w: task %s is in state %s (must be suspended)", store.ErrConflict, taskID, current.State)
 	}
 	if err == nil {
 		_, err = model.MintTaskToken(ctx, r.store, taskID, task.WorkloadName, taskLeaseTTL)
@@ -322,11 +367,6 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 	attempt.tokenMu.Unlock()
 	if err != nil {
 		return err
-	}
-
-	var cp scruntime.CheckpointRef
-	if refJSON, err := r.store.LatestCheckpoint(ctx, taskID); err == nil {
-		_ = json.Unmarshal([]byte(refJSON), &cp)
 	}
 
 	r.mu.Lock()
@@ -349,20 +389,7 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 			}
 		}
 	}()
-	// Resuming restarts execution, so it is recorded first: a record that
-	// cannot be written refuses the resume, and the deferred cleanup revokes
-	// the lease minted above. The task stays suspended.
-	if err := store.RecordAudit(ctx, r.store, domain.AuditRecord{
-		Category:     "controlplane",
-		TaskID:       taskID,
-		WorkloadName: task.WorkloadName,
-		Action:       "task.resume",
-		Outcome:      "working",
-		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID),
-		CreatedAt:    r.now(),
-	}); err != nil {
-		return err
-	}
+	failedStep = "runtime_resume_failed"
 	if hasHandle && adapter != nil {
 		callCtx, cancel := context.WithTimeout(ctx, adapterCallTimeout)
 		err := adapter.Resume(callCtx, handle, cp)
@@ -375,6 +402,7 @@ func (r *Reconciler) ResumeTask(ctx context.Context, taskID string) (resumeErr e
 		}
 	}
 
+	failedStep = "state_update_failed"
 	if err := r.store.UpdateTaskState(ctx, taskID, domain.TaskStateSuspended, domain.TaskStateWorking, "operator_resumed", fmt.Sprintf(`{"checkpoint_id":%q}`, cp.ID)); err != nil {
 		return err
 	}
@@ -504,7 +532,7 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		// The earlier task was not found by CreateTask after all. The task
 		// now exists, so the row is written late and a failure is returned.
 		if auditErr := store.RecordAudit(ctx, r.store, submitted); auditErr != nil {
-			return domain.Task{}, fmt.Errorf("task %s was created, but %w", task.ID, auditErr)
+			return domain.Task{}, store.AfterEffect("task "+task.ID+" was created", auditErr)
 		}
 	}
 	if err != nil {

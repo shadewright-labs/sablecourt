@@ -41,3 +41,40 @@ func RecordAudit(ctx context.Context, a AuditAppender, rec domain.AuditRecord) e
 func LogAudit(ctx context.Context, a AuditAppender, rec domain.AuditRecord) {
 	_ = RecordAudit(ctx, a, rec)
 }
+
+// AfterEffectError is a failed audit write whose effect had already happened
+// when the write failed. It matches ErrAuditWrite with errors.Is.
+type AfterEffectError struct {
+	// Done names the effect that happened, for example "task t1 was created".
+	Done string
+	err  error
+}
+
+func (e *AfterEffectError) Error() string { return e.Done + ", but " + e.err.Error() }
+
+func (e *AfterEffectError) Unwrap() error { return e.err }
+
+// AfterEffect marks err, a failed audit write, as one that came after the
+// effect done names, so a caller does not report that nothing changed. It
+// returns nil for a nil err.
+func AfterEffect(done string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &AfterEffectError{Done: done, err: err}
+}
+
+// AuditFailureText reports whether err is a failed audit write and returns the
+// text a caller answers with (HTTP 500). For an AfterEffectError the text says
+// what already happened; otherwise it says that the request, named by what,
+// was refused and nothing was changed.
+func AuditFailureText(err error, what string) (string, bool) {
+	if !errors.Is(err, ErrAuditWrite) {
+		return "", false
+	}
+	var after *AfterEffectError
+	if errors.As(err, &after) {
+		return after.Done + ", but an audit record could not be written", true
+	}
+	return what + " refused: its audit record could not be written, nothing was changed", true
+}

@@ -3,6 +3,7 @@ package mcpgate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -153,5 +154,28 @@ func TestMemoryToolAuditWriteFailures(t *testing.T) {
 				t.Fatalf("got %v, want an error containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// git.pr_checks records its evidence row before it stores the evidence, so a
+// row that cannot be written leaves no evidence the audit log does not show,
+// and the caller gets HTTP 500 (issue 107 row 3).
+func TestPRChecksEvidenceNotStoredWithoutItsRow(t *testing.T) {
+	ctx := context.Background()
+	var faults *audittest.Store
+	backend := &fakePRBackend{openNumber: 42, report: passingReport(strings.Repeat("a1", 20))}
+	gate, st, _, token := setupPRGateWithStore(t, backend, domain.EffectAllow, []string{"shadewright-labs/sablecourt"}, func(in store.Store) store.Store {
+		faults = audittest.Wrap(in)
+		return faults
+	})
+	h := gate.ActionHandler()
+	openTestPR(t, h, token)
+	faults.Fail(audittest.Action("evidence:git.pr_checks"))
+	rec := postAction(t, h, "POST", "/git.pr_checks", token, `{"payload":{"owner":"shadewright-labs","repo":"sablecourt","pr_number":42}}`)
+	if rec.Code != 500 || !strings.Contains(rec.Body.String(), "audit record could not be written") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.GetMemory(ctx, prChecksNamespace, "shadewright-labs/sablecourt#42"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("evidence stored without its row: %v", err)
 	}
 }

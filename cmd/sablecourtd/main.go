@@ -1065,6 +1065,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		withHandoff := r.URL.Query().Get("handoff") == "true" || r.URL.Query().Get("handoff") == "1"
 		var created bool
 		retried, err := reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "api_retry")
+		if writeAuditError(w, err, "retry") {
+			return
+		}
 		if err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, store.ErrNotFound) {
@@ -1117,8 +1120,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.ResumeTask(r.Context(), id); err != nil {
-			if errors.Is(err, store.ErrAuditWrite) {
-				writeAuditRefused(w, "resume")
+			if writeAuditError(w, err, "resume") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1196,8 +1198,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			// Taking over is not evidence that the task's process is alive, so
-			// it records no heartbeat. A takeover whose record cannot be
-			// written is handed back before any input reaches the task.
+			// it records no heartbeat. The takeover is only reserved until its
+			// record is written: a reserved takeover refuses other operators
+			// but takes no input, and one whose record cannot be written is
+			// handed back.
 			if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 				Category:   "attach",
 				TaskID:     id,
@@ -1208,6 +1212,20 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}); err != nil {
 				attachHub.ReleaseTakeover(id, body.Operator)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "takeover refused: its audit record could not be written"})
+				return
+			}
+			if err := attachHub.ConfirmTakeover(id, body.Operator); err != nil {
+				// Released or closed while the row was written: the row above
+				// names a takeover that never took input.
+				store.LogAudit(r.Context(), st, domain.AuditRecord{
+					Category:   "attach",
+					TaskID:     id,
+					Action:     "task.takeover",
+					Outcome:    "error",
+					DetailJSON: fmt.Sprintf(`{"operator":%q,"reason":"released_before_confirm"}`, body.Operator),
+					CreatedAt:  time.Now().UTC(),
+				})
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "takeover", "id": id, "operator": body.Operator})
@@ -1378,6 +1396,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				to = "all"
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), id, "operator", to, "decree", text, "")
+			if writeAuditError(w, err, "posting the message") {
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -1542,8 +1563,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		task, err := reconciler.SubmitTask(r.Context(), body.Workload, body.IdempotencyKey, body.InputJSON)
-		if errors.Is(err, store.ErrAuditWrite) {
-			writeAuditRefused(w, "task submission")
+		if writeAuditError(w, err, "task submission") {
 			return
 		}
 		if err != nil {
@@ -1609,6 +1629,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := scheduler.TriggerNow(r.Context(), sc); err != nil {
+			if writeAuditError(w, err, "schedule run") {
+				return
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
@@ -1637,8 +1660,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		}
 		if body.DeviceID != "" && body.Signature != "" {
 			apr, err := approvals.ApproveWithSignature(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DeviceID, body.Signature)
-			if errors.Is(err, store.ErrAuditWrite) {
-				writeAuditRefused(w, "approval")
+			if writeAuditError(w, err, "approval") {
 				return
 			}
 			if err != nil {
@@ -1652,8 +1674,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Approve(r.Context(), r.PathValue("id"), body.ExpectedSHA256, body.DecidedBy)
-		if errors.Is(err, store.ErrAuditWrite) {
-			writeAuditRefused(w, "approval")
+		if writeAuditError(w, err, "approval") {
 			return
 		}
 		if err != nil {
@@ -1692,8 +1713,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			body.DecidedBy = "operator"
 		}
 		apr, err := approvals.Deny(r.Context(), r.PathValue("id"), body.DecidedBy, body.Reason)
-		if errors.Is(err, store.ErrAuditWrite) {
-			writeAuditRefused(w, "denial")
+		if writeAuditError(w, err, "denial") {
 			return
 		}
 		if err != nil {
@@ -1762,11 +1782,10 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		branch := "sablecourt/promote-" + name
-		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
-		if out, err := cmd.CombinedOutput(); err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
-			return
-		}
+		// The promotion is recorded before the branch exists, so no branch
+		// stays unrecorded, even after a crash: a row that cannot be written
+		// refuses it, and a branch that then cannot be created gets an error
+		// row.
 		if err := store.RecordAudit(r.Context(), st, domain.AuditRecord{
 			Category:     "gitops",
 			WorkloadName: name,
@@ -1775,13 +1794,20 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DetailJSON:   fmt.Sprintf(`{"branch":%q}`, branch),
 			CreatedAt:    time.Now().UTC(),
 		}); err != nil {
-			// The branch is removed again so that no unrecorded branch stays.
-			undo := exec.CommandContext(context.WithoutCancel(r.Context()), "git", "branch", "-D", "--", branch) // #nosec G702 -- same single argument after -- as the git branch call above, without a shell.
-			if out, undoErr := undo.CombinedOutput(); undoErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the promotion branch " + branch + " was created but its audit record could not be written, and removing the branch failed: " + strings.TrimSpace(string(out))})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "promotion refused: its audit record could not be written; the branch was removed"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "promotion refused: its audit record could not be written, no branch was created"})
+			return
+		}
+		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
+		if out, err := cmd.CombinedOutput(); err != nil {
+			store.LogAudit(context.WithoutCancel(r.Context()), st, domain.AuditRecord{
+				Category:     "gitops",
+				WorkloadName: name,
+				Action:       "sandbox.propose_promotion",
+				Outcome:      "error",
+				DetailJSON:   fmt.Sprintf(`{"branch":%q,"reason":"git_branch_failed"}`, branch),
+				CreatedAt:    time.Now().UTC(),
+			})
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "git branch failed: " + strings.TrimSpace(string(out))})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -1819,6 +1845,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			sess, err := conclaveBroker.Open(r.Context(), body.Template, body.Title, body.Decree)
+			if writeAuditError(w, err, "opening the conclave") {
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
@@ -1893,6 +1922,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), "operator", body.To, "decree", body.Body, "")
+			if writeAuditError(w, err, "posting the message") {
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -1921,6 +1953,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), "operator", body.Name, body.ContentType, body.Body)
+			if writeAuditError(w, err, "storing the relic") {
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
@@ -1954,6 +1989,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			msg, err := conclaveBroker.PostMessage(r.Context(), r.PathValue("id"), role, body.To, "proposal", body.Body, lease.TaskID)
+			if writeAuditError(w, err, "posting the message") {
+				return
+			}
 			if err != nil {
 				code := http.StatusConflict
 				if errors.Is(err, conclave.ErrMessageDenied) {
@@ -2009,6 +2047,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				return
 			}
 			relic, err := conclaveBroker.PutRelic(r.Context(), r.PathValue("id"), role, body.Name, body.ContentType, body.Body)
+			if writeAuditError(w, err, "storing the relic") {
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
@@ -2139,10 +2180,17 @@ func writeAuditFailed(w http.ResponseWriter, done string) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": done + ", but its audit record could not be written"})
 }
 
-// writeAuditRefused reports a request refused because the audit record that
-// must precede its effect could not be written. Nothing was changed.
-func writeAuditRefused(w http.ResponseWriter, what string) {
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": what + " refused: its audit record could not be written, nothing was changed"})
+// writeAuditError answers HTTP 500 when err is a failed audit write and
+// reports whether it did. The text comes from store.AuditFailureText: it says
+// what already happened when the write failed after an effect, and that the
+// request named by what was refused otherwise. Every route that can meet a
+// failed audit write checks it before mapping other errors.
+func writeAuditError(w http.ResponseWriter, err error, what string) bool {
+	msg, ok := store.AuditFailureText(err, what)
+	if ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+	}
+	return ok
 }
 
 func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {

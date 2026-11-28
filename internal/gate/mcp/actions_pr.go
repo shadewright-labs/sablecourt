@@ -710,15 +710,6 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 	if err != nil {
 		return err
 	}
-	if err := g.store.PutMemory(ctx, domain.MemoryEntry{
-		Namespace: prChecksNamespace,
-		Key:       prKey(report.Owner, report.Repo, report.PRNumber),
-		Value:     string(raw),
-		Author:    "gate",
-		UpdatedAt: report.ObservedAt,
-	}); err != nil {
-		return err
-	}
 	detail, _ := json.Marshal(map[string]any{
 		"owner":             report.Owner,
 		"repo":              report.Repo,
@@ -729,9 +720,24 @@ func recordPRChecksEvidence(ctx context.Context, g *Gate, taskID, workloadName s
 		"last_result_at":    report.LastResultAt.Format(time.RFC3339Nano),
 		"observed_at":       report.ObservedAt.Format(time.RFC3339Nano),
 	})
-	// A failed audit write fails the check call, as a failed evidence write
-	// above does, instead of leaving evidence the audit log does not show.
-	return g.record(ctx, taskID, workloadName, "evidence:git.pr_checks", report.Summary, string(detail))
+	// The evidence row is written before the evidence is stored, so no
+	// evidence stays that the audit log does not show: a row that cannot be
+	// written fails the check call with nothing stored.
+	if err := g.record(ctx, taskID, workloadName, "evidence:git.pr_checks", report.Summary, string(detail)); err != nil {
+		return err
+	}
+	if err := g.store.PutMemory(ctx, domain.MemoryEntry{
+		Namespace: prChecksNamespace,
+		Key:       prKey(report.Owner, report.Repo, report.PRNumber),
+		Value:     string(raw),
+		Author:    "gate",
+		UpdatedAt: report.ObservedAt,
+	}); err != nil {
+		// The row above names evidence that was not stored; say so.
+		store.LogAudit(ctx, g.store, g.auditRecord(taskID, workloadName, "evidence:git.pr_checks", "error", `{"reason":"store_failed"}`))
+		return err
+	}
+	return nil
 }
 
 func checkOwnerRepoGrant(wl domain.Workload, owner, repo string) error {

@@ -185,6 +185,11 @@ func (q *Queue) Deny(ctx context.Context, approvalID, decidedBy, reason string) 
 	if err != nil {
 		return domain.Approval{}, err
 	}
+	// A decided approval is a conflict before any row is written, as in
+	// Approve, so the log never shows a denial that cannot happen.
+	if apr.Status != domain.ApprovalPending {
+		return domain.Approval{}, store.ErrConflict
+	}
 	proofJSON, _ := json.Marshal(map[string]string{"method": "operator_deny", "reason": reason})
 	// Recorded before it is stored, like an approval: a record that cannot
 	// be written refuses the denial and leaves the approval pending, where it

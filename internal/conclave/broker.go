@@ -141,8 +141,18 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 	fail := func(cause error) (domain.ConclaveSession, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if err := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled); err != nil {
-			return domain.ConclaveSession{}, errors.Join(cause, err)
+		closeErr := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled)
+		// The session exists by now, so an audit failure is reported as
+		// coming after it was opened.
+		if errors.Is(cause, store.ErrAuditWrite) {
+			done := "conclave " + session.ID + " was opened and then cancelled"
+			if closeErr != nil {
+				done = "conclave " + session.ID + " was opened and could not be cancelled"
+			}
+			cause = store.AfterEffect(done, cause)
+		}
+		if closeErr != nil {
+			return domain.ConclaveSession{}, errors.Join(cause, closeErr)
 		}
 		return domain.ConclaveSession{}, errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
 	}
@@ -275,6 +285,11 @@ func (b *Broker) postMessage(ctx context.Context, session domain.ConclaveSession
 	if err == nil {
 		err = b.store.FinishConclaveWake(ctx, msg.ID)
 	}
+	// The message is stored either way, so a wake refused for its audit
+	// record is reported as coming after that effect.
+	if errors.Is(err, store.ErrAuditWrite) {
+		err = store.AfterEffect(fmt.Sprintf("message %d was stored", msg.ID), err)
+	}
 	return msg, err
 }
 
@@ -386,7 +401,7 @@ func (b *Broker) PostIntegrationReport(ctx context.Context, session domain.Concl
 		// The report and its relic are stored together above, so a record
 		// that cannot be written is reported, not undone.
 		if err := b.recordRelic(ctx, relic); err != nil {
-			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, fmt.Errorf("report stored, but %w", err)
+			return domain.ConclaveMessage{}, domain.ConclaveRelic{}, store.AfterEffect("the report was stored", err)
 		}
 	}
 	msg.ID = id

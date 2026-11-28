@@ -13,6 +13,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 type GitHubOptions struct {
@@ -87,6 +88,10 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 		var taskID string
 		if opts.TargetWorkflow != "" {
 			t, err := opts.Reconciler.StartWorkflow(r.Context(), opts.TargetWorkflow, summary)
+			if msg, ok := store.AuditFailureText(err, "workflow dispatch"); ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
@@ -99,6 +104,10 @@ func GitHubHandler(opts GitHubOptions) http.Handler {
 			}
 			inBytes, _ := json.Marshal(map[string]any{"prompt": summary, "issue": payload.Issue.Number, "repo": payload.Repository.FullName})
 			t, err := opts.Reconciler.SubmitTask(r.Context(), wl, idemKey, string(inBytes))
+			if msg, ok := store.AuditFailureText(err, "task dispatch"); ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return

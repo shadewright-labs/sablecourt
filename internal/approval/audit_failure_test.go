@@ -111,3 +111,38 @@ func TestDevicePairingFailsClosedOnAuditWrite(t *testing.T) {
 		t.Fatalf("%d devices stored", len(devs))
 	}
 }
+
+// Denying a decided approval is refused as a conflict before any row is
+// written, as approving one is, whether or not audit writes work.
+func TestDenyOfDecidedApprovalWritesNoRow(t *testing.T) {
+	ctx := context.Background()
+	for _, failing := range []bool{false, true} {
+		st := setupApprovalStore(t)
+		faults := audittest.Wrap(st)
+		q := NewQueue(faults, &countingApprover{})
+		apr := requestOne(t, q)
+		if _, err := q.Approve(ctx, apr.ID, apr.PayloadSHA256, "operator"); err != nil {
+			t.Fatal(err)
+		}
+		before, err := st.ListAudit(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failing {
+			faults.Fail(nil)
+		}
+		if _, err := q.Deny(ctx, apr.ID, "operator", "late"); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("failing=%v: got %v, want ErrConflict", failing, err)
+		}
+		after, err := st.ListAudit(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != len(before) || len(faults.Refused()) != 0 {
+			t.Fatalf("failing=%v: deny of a decided approval wrote %d rows and attempted %d", failing, len(after)-len(before), len(faults.Refused()))
+		}
+		if s := approvalStatus(t, st, apr.ID); s != domain.ApprovalApproved {
+			t.Fatalf("status %s, want approved", s)
+		}
+	}
+}

@@ -47,6 +47,15 @@ func TestHubScryRedactionAndTakeoverExclusivity(t *testing.T) {
 	if err := hub.AcquireTakeover("task-1", "bob"); !errors.Is(err, ErrTakeoverHeld) {
 		t.Fatalf("expected ErrTakeoverHeld for bob, got %v", err)
 	}
+	if _, err := hub.SendInput("task-1", "alice", []byte("early\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input before ConfirmTakeover: %v", err)
+	}
+	if err := hub.ConfirmTakeover("task-1", "bob"); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("bob confirmed alice's takeover: %v", err)
+	}
+	if err := hub.ConfirmTakeover("task-1", "alice"); err != nil {
+		t.Fatalf("alice ConfirmTakeover: %v", err)
+	}
 	if _, err := hub.SendInput("task-1", "alice", []byte("continue\n")); err != nil {
 		t.Fatalf("alice SendInput: %v", err)
 	}
@@ -55,8 +64,17 @@ func TestHubScryRedactionAndTakeoverExclusivity(t *testing.T) {
 	}
 
 	hub.ReleaseTakeover("task-1", "alice")
+	if _, err := hub.SendInput("task-1", "alice", []byte("late\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input after release: %v", err)
+	}
+	if _, err := hub.SendInput("task-1", "carol", []byte("implicit\n")); !errors.Is(err, ErrTakeoverNotHeld) {
+		t.Fatalf("input without a takeover: %v", err)
+	}
 	if err := hub.AcquireTakeover("task-1", "bob"); err != nil {
 		t.Fatalf("bob AcquireTakeover after release: %v", err)
+	}
+	if stdin.String() != "continue\n" {
+		t.Fatalf("stdin received %q", stdin.String())
 	}
 
 	// 3. Close terminates subscribers cleanly.

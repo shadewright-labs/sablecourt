@@ -69,7 +69,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `POST /api/v1/tasks/{id}/resume` | Resume a suspended task. |
 | `GET /api/v1/tasks/{id}/scry` | Server-sent stream of redacted task output (Scry). Observer credential accepted. |
 | `POST /api/v1/tasks/{id}/takeover` | Take exclusive stdin control of a live task session that has a writable stdin; refused while another operator holds it. Body `{"operator"}`. |
-| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding the takeover. Body `{"operator","data"}`. |
+| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding the takeover; without a takeover of your own the write is refused (409). Body `{"operator","data"}`. |
 | `POST /api/v1/tasks/{id}/detach` | Release the takeover. Body `{"operator"}`. |
 | `GET /api/v1/stream` | Server-sent `state` events with a fingerprint of tasks, pending approvals and the newest audit row, sent at once and every 3 seconds, for the dashboard. |
 | `GET /api/v1/budget` | Token and micro-USD totals over all tasks. |
@@ -103,7 +103,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `GET /api/v1/schedules` | List declared Schedules. |
 | `POST /api/v1/schedules/{name}/run` | Run a Schedule now. |
 | `POST /api/v1/reload` | Reload the manifests. |
-| `POST /api/v1/promote/{name}` | For a `sandbox` workload, run `git branch` to create the branch `sablecourt/promote-<name>` in the daemon's working directory. It does not change the zone; a workload already in the `runtime` zone gets 409. |
+| `POST /api/v1/promote/{name}` | For a `sandbox` workload, run `git branch` to create the branch `sablecourt/promote-<name>` in the daemon's working directory. It does not change the zone; a workload already in the `runtime` zone gets 409. The `sandbox.propose_promotion` audit row is written first: when it cannot be written no branch is created (500), and when `git branch` then fails an `error` row follows (409). |
 | `GET /api/v1/runtime/coding` | How coding tasks and council seats run: `{"mode","hostModeOptIn"}`, where `mode` is `container`, `host-unsafe` (host mode forced on with `--unsafe-host-harnesses`, outside invariants 2 and 3) or `unavailable`. `sablectl doctor` prints it. |
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |

@@ -176,8 +176,8 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 	}
 }
 
-// A promotion branch whose record cannot be written is removed again.
-func TestPromotionBranchRemovedWhenAuditWriteFails(t *testing.T) {
+// A promotion whose record cannot be written creates no branch.
+func TestPromotionBranchNotCreatedWhenAuditWriteFails(t *testing.T) {
 	repo := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-q"},
@@ -195,7 +195,7 @@ func TestPromotionBranchRemovedWhenAuditWriteFails(t *testing.T) {
 	}})
 	faults.Fail(audittest.Action("sandbox.propose_promotion"))
 	rec := apiCall(env.h, http.MethodPost, "/api/v1/promote/trial", "")
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "the branch was removed") {
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "no branch was created") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 	out, err := exec.Command("git", "-C", repo, "branch", "--list", "sablecourt/promote-trial").CombinedOutput()
