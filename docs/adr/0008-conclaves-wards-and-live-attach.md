@@ -21,6 +21,15 @@ Single-agent tasks cannot coordinate specialist roles (for example, a `@coder` i
 
 Figure: the states of a Conclave on main, where a tripped Ward pauses the room and a Decree resumes it.
 
+
+[![Vassals in the runtime zone message each other through the Conclave broker, which counts every message against the Wards, while a sandbox-zone vassal is refused at manifest load.](../diagrams/conclave-room.svg)](../diagrams/conclave-room.svg "Open full size")
+
+Figure: who may message whom in a Conclave, and what the broker checks, on main. Only the manifest-load refusal of sandbox-zone senders is drawn; the council's own routing is not.
+
+[![Scry streams redacted task output read-only to any operator while Takeover gives one operator at a time the task's stdin, and a second operator is refused with 409.](../diagrams/live-attach.svg)](../diagrams/live-attach.svg "Open full size")
+
+Figure: live attach on main, where the hub keeps a 64 KiB ring of redacted output and records attach and takeover rows in the audit log.
+
 ## Consequences
 
 - Multi-agent coordination stays bounded by deterministic message, ping-pong, and cost limits.

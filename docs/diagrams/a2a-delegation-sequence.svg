@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 616" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Delegation through the hub</title>
+  <desc id="d">Sequence of one delegation among a parent workload, the control plane and a child workload. The parent proposes a child task to the control plane, a planned step because no gate tool or route calls the proposal yet. The control plane runs a policy check on whether the parent holds the delegate grant for the child workload. If not, the control plane refuses, writes an audit row and creates no child, drawn as a red refused line. If it allows, the control plane creates the child task in state submitted with a sub-budget ceiling and a link to the parent, also planned. The control plane then starts the child, which is the built reconcile loop. The child returns its result and artifacts to the control plane and the control plane passes them back to the parent, both planned. A red box says the parent and child workload never connect directly. A legend marks built, planned and refused.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="616" rx="18" fill="#08060e"/>
+  <rect class="box" x="60" y="24" width="220" height="56" rx="10"/>
+  <text class="h" x="170" y="57" text-anchor="middle">Parent workload</text>
+  <rect class="key" x="450" y="24" width="220" height="56" rx="12"/>
+  <text class="h" x="560" y="57" text-anchor="middle">Control plane</text>
+  <rect class="box" x="840" y="24" width="220" height="56" rx="10"/>
+  <text class="h" x="950" y="57" text-anchor="middle">Child workload</text>
+  <path class="life" d="M170 80V500"/>
+  <path class="life" d="M560 80V500"/>
+  <path class="life" d="M950 80V500"/>
+  <path class="r" d="M170 124H554" marker-end="url(#m)"/>
+  <text class="lbl" x="365" y="116" text-anchor="middle">proposes a child task</text>
+  <rect class="plan" x="410" y="148" width="300" height="52" rx="10"/>
+  <text class="h" x="560" y="170" text-anchor="middle">policy check</text>
+  <text class="s" x="560" y="189" text-anchor="middle">does the parent hold delegate:child?</text>
+  <path class="deny" d="M554 256H176" marker-end="url(#x)"/>
+  <text class="no" x="365" y="248" text-anchor="middle">denied, audit row, no child</text>
+  <rect class="plan" x="410" y="284" width="300" height="52" rx="10"/>
+  <text class="h" x="560" y="306" text-anchor="middle">child task, state submitted</text>
+  <text class="s" x="560" y="325" text-anchor="middle">sub-budget ceiling and parent link</text>
+  <path class="f" d="M566 372H944" marker-end="url(#a)"/>
+  <text class="lbl" x="755" y="364" text-anchor="middle">starts the child</text>
+  <path class="r" d="M944 420H566" marker-end="url(#m)"/>
+  <text class="lbl" x="755" y="412" text-anchor="middle">result and artifacts</text>
+  <path class="r" d="M554 468H176" marker-end="url(#m)"/>
+  <text class="lbl" x="365" y="460" text-anchor="middle">result passed back</text>
+  <rect class="bad" x="170" y="520" width="780" height="40" rx="10"/>
+  <text class="no" x="560" y="545" text-anchor="middle">parent and child workload never connect directly</text>
+  <path class="f" d="M24 588H64" marker-end="url(#a)"/>
+  <text class="lbl" x="74" y="592" text-anchor="start">built</text>
+  <path class="r" d="M200 588H240" marker-end="url(#m)"/>
+  <text class="lbl" x="250" y="592" text-anchor="start">planned, no caller yet</text>
+  <path class="deny" d="M500 588H540" marker-end="url(#x)"/>
+  <text class="lbl" x="550" y="592" text-anchor="start">refused</text>
+</svg>

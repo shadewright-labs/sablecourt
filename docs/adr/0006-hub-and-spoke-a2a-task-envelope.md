@@ -21,7 +21,15 @@ Represent every unit of work using an A2A-compatible task envelope:
 - Explicit task states (`submitted`, `working`, `input-required`, `suspended`, `completed`, `failed`, `cancelled`).
 - Typed artifacts, parent task reference, deterministic idempotency key, and explicit budget ceiling.
 
+[![The task envelope fields grouped by who fills them: the proposing workload supplies the target, input, key and sub-budget, the control plane sets the ID, state, parent link and artifacts, and the agent card comes from the manifest.](../diagrams/a2a-task-envelope.svg)](../diagrams/a2a-task-envelope.svg "Open full size")
+
+Figure: the task envelope as `domain.Task` holds it and who fills each field. A workload supplies the target, the input, an optional idempotency key and a sub-budget ceiling; the control plane sets the task ID, the state, the parent link and the artifacts; the agent card comes from the manifest. The sub-budget is stored as given and is not yet checked against the parent cap, so it is drawn dashed.
+
 When one agent needs work from another in v0.1, it proposes a child task to the Control Plane; deterministic policy checks whether the caller is allowed to spawn that target workload and allocates a sub-budget from the parent cap before dispatching.
+
+[![A parent workload proposes a child task to the control plane, which checks the delegate grant, creates the child and starts it, and the result returns through the control plane; the two workloads never connect directly.](../diagrams/a2a-delegation-sequence.svg)](../diagrams/a2a-delegation-sequence.svg "Open full size")
+
+Figure: one delegation as a sequence. Only the start of the child is built; the proposal, the policy check, the child task with its sub-budget and the return of the result are dashed because no gate tool or route calls the proposal yet.
 
 ## Alternatives considered
 

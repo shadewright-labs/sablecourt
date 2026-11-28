@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 616" role="img" aria-labelledby="t d" data-diagram="sequence" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Approval proof</title>
+  <desc id="d">Sequence of an approval proof among the approver, the Approval Queue and the MCP Gate. The gate asks the queue for an approval with the payload digest pinned. A session alone never approves, drawn as a red refused line from the approver. The approver proves the approval with a paired device signature over the approval ID and the payload digest, which is built, or with a passkey proof over the same two values, which is planned and drawn dashed. The queue checks that the approval is pending, unexpired and that the digest matches. A planned self-approval check, a rule option, refuses an approval by the task initiator. The queue answers approved and appends an audit row. Later the gate spends the approval once, moving it from approved to consumed. A legend marks built, planned and refused.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="616" rx="18" fill="#08060e"/>
+  <rect class="box" x="60" y="24" width="220" height="56" rx="10"/>
+  <text class="h" x="170" y="57" text-anchor="middle">Approver</text>
+  <rect class="key" x="450" y="24" width="220" height="56" rx="12"/>
+  <text class="h" x="560" y="57" text-anchor="middle">Approval Queue</text>
+  <rect class="box" x="840" y="24" width="220" height="56" rx="10"/>
+  <text class="h" x="950" y="57" text-anchor="middle">MCP Gate</text>
+  <path class="life" d="M170 80V560"/>
+  <path class="life" d="M560 80V560"/>
+  <path class="life" d="M950 80V560"/>
+  <path class="f" d="M944 124H566" marker-end="url(#a)"/>
+  <text class="lbl" x="755" y="116" text-anchor="middle">asks, digest pinned</text>
+  <path class="deny" d="M176 172H554" marker-end="url(#x)"/>
+  <text class="no" x="365" y="164" text-anchor="middle">session alone: never</text>
+  <path class="f" d="M176 220H554" marker-end="url(#a)"/>
+  <text class="lbl" x="365" y="212" text-anchor="middle">device signature over id and digest</text>
+  <path class="r" d="M176 268H554" marker-end="url(#m)"/>
+  <text class="lbl" x="365" y="260" text-anchor="middle">passkey proof over id and digest</text>
+  <rect class="box" x="390" y="292" width="340" height="52" rx="10"/>
+  <text class="h" x="560" y="314" text-anchor="middle">checks</text>
+  <text class="s" x="560" y="333" text-anchor="middle">pending, unexpired, digest matches</text>
+  <rect class="plan" x="390" y="360" width="340" height="52" rx="10"/>
+  <text class="h" x="560" y="382" text-anchor="middle">self-approval check</text>
+  <text class="s" x="560" y="401" text-anchor="middle">rule option: initiator may not approve</text>
+  <path class="f" d="M554 444H176" marker-end="url(#a)"/>
+  <text class="lbl" x="365" y="436" text-anchor="middle">approved, audit row</text>
+  <path class="f" d="M944 500H566" marker-end="url(#a)"/>
+  <text class="lbl" x="755" y="492" text-anchor="middle">spends it once</text>
+  <text class="cap" x="755" y="520" text-anchor="middle">approved to consumed</text>
+  <path class="f" d="M24 588H64" marker-end="url(#a)"/>
+  <text class="lbl" x="74" y="592" text-anchor="start">built</text>
+  <path class="r" d="M200 588H240" marker-end="url(#m)"/>
+  <text class="lbl" x="250" y="592" text-anchor="start">planned</text>
+  <path class="deny" d="M400 588H440" marker-end="url(#x)"/>
+  <text class="lbl" x="450" y="592" text-anchor="start">refused</text>
+</svg>

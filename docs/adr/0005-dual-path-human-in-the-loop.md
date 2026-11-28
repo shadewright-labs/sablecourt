@@ -22,6 +22,10 @@ Timeouts, disconnects, and unrecognized fields fail closed (deny or leave undeci
 
 Figure: the runtime approval path, the second of the two paths; the GitOps pull request path is not drawn.
 
+[![An approval is pending, then approved, denied or expired, and an approved one is consumed once by a matching call.](../diagrams/approval-states.svg)](../diagrams/approval-states.svg "Open full size")
+
+Figure: the states of one approval; a refused use changes nothing.
+
 ## Alternatives considered
 
 - GitOps-only approvals for every action. Rejected because interactive runtime tool approvals would require synthetic PRs for transient operations.
