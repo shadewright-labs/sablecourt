@@ -35,7 +35,7 @@ Source: `cmd/sablecourtd/operator_auth.go`, `cmd/sablecourtd/host.go`. Each rule
 | Host check | The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` with the listen port, or an entry from `--allow-host`. `/gate/` paths are also accepted on the `--gate-host` authority. |
 | Path form | A path that is not in canonical form (dot segments, doubled slashes) is refused. |
 | Cross-origin | A write (any method but `GET`, `HEAD` and `OPTIONS`) that carries `Origin` or `Sec-Fetch-Site` must be same-origin. `/gate/`, `POST /api/v1/hooks/github` and `POST /a2a` skip this check. A write that authenticates with the session cookie must also be same-origin, whether or not it carries those headers. |
-| Body size | A write outside `/gate/model/` and `POST /api/v1/voice/transcribe` is cut off at 2 MiB. The voice route has its own cap, and the Model Gate reads at most 16 MiB of a request body. The values are on the [limits](limits.md#http-server) page. |
+| Body size | A write outside `/gate/model/` and `POST /api/v1/voice/transcribe` is cut off at 2 MiB. The voice route has its own cap, and the Model Gate refuses a request body over 16 MiB with 413. The values are on the [limits](limits.md#http-server) page. |
 
 ## Public routes
 

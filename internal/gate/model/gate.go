@@ -248,13 +248,25 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqBody, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
-	if err != nil {
+	reqBody, err := readRequestBody(r.Body)
+	if errors.Is(err, errRequestBodyTooLarge) {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"request_body_too_large"}`)
+		writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	} else if err != nil {
 		writeErr(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	// The reserve is estimated from the body the workload sent, as before;
+	// the upstream gets the redacted body (issue 265).
 	reqModel := extractRequestModel(provider, upstreamPath, reqBody)
 	reserve := estimateRequestReserve(provider, reqModel, reqBody, g.pricing, g.fallbackProviders(provider, workload)...)
+	upBody, err := redactRequestBody(reqBody)
+	if err != nil {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+provider, "denied", `{"reason":"request_body_not_json"}`)
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Take a fresh timestamp: the body read above is not bounded by time, and the
 	// reservation lifetime must start when the reservation is inserted.
@@ -320,7 +332,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(reqBody))
+	upReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(upBody))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to build upstream request")
 		return
@@ -331,7 +343,7 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	upResp, err := g.client.Do(upReq) // #nosec G704 -- joinUpstreamURL pins the configured provider host and scheme, and gatehttp.NewClient refuses redirects.
 	activeProvider := provider
 	if err != nil || isFallbackStatus(upResp.StatusCode) {
-		if fbProv, fbResp, fbErr := g.tryFallback(ctx, r, provider, upstreamPath, reqBody, workload); fbErr == nil && fbResp != nil {
+		if fbProv, fbResp, fbErr := g.tryFallback(ctx, r, provider, upstreamPath, upBody, workload); fbErr == nil && fbResp != nil {
 			if upResp != nil && upResp.Body != nil {
 				_ = upResp.Body.Close()
 			}
@@ -391,17 +403,30 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.WriteHeader(upResp.StatusCode)
-	known := redact.NewStream()
-
+	// The body goes through the exact matcher and the pattern rules
+	// (responseRedactor). Past maxRelayedResponseBytes read, or
+	// maxResponsePendingBytes held for want of a line end, the relay stops:
+	// the status is already sent, so the workload gets a cut body, and
+	// nothing held is sent.
+	clean := newResponseRedactor()
 	var captured bytes.Buffer
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, upstreamReadChunkBytes)
+	relayed := 0
+	stopReason := ""
 	for {
 		n, readErr := upResp.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			if out := known.Write(chunk, false); len(out) > 0 {
+			relayed += n
+			if relayed > relayResponseLimit {
+				clean.Stop()
+				stopReason = "upstream_response_too_large"
+			} else if out := clean.Write(chunk, false); len(out) > 0 {
 				_, _ = w.Write(out)
+			}
+			if clean.overflow && stopReason == "" {
+				stopReason = "upstream_response_line_too_long"
 			}
 			if canFlush {
 				flusher.Flush()
@@ -417,11 +442,20 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if readErr != nil {
+		if readErr != nil && !errors.Is(readErr, io.EOF) && stopReason == "" {
+			// A body cut mid-line could end in the first bytes of a
+			// secret too short for any rule to match, so nothing held
+			// is sent.
+			clean.Stop()
+			stopReason = "upstream_response_read_failed"
+		}
+		if readErr != nil || stopReason != "" {
 			break
 		}
 	}
-	if out := known.Write(nil, true); len(out) > 0 {
+	if stopReason != "" {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", fmt.Sprintf(`{"reason":%q}`, stopReason))
+	} else if out := clean.Write(nil, true); len(out) > 0 {
 		_, _ = w.Write(out)
 		if canFlush {
 			flusher.Flush()
@@ -446,6 +480,9 @@ func (g *Gate) settleSuccess(ctx context.Context, lease domain.Lease, activeProv
 	if modelName == "" {
 		modelName = reqModel
 	}
+	// Both names come from bodies the gate does not trust; the ledger and the
+	// audit log get them redacted.
+	modelName = redact.String(modelName)
 	entry := domain.BudgetEntry{
 		TaskID:           lease.TaskID,
 		WorkloadName:     lease.WorkloadName,

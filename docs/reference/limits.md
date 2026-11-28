@@ -48,7 +48,9 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 
 | Limit | Constant | Value |
 | --- | --- | --- |
-| Request body read by the Model Gate | `internal/gate/model.maxRequestBodyBytes` | 16 MiB |
+| Request body read by the Model Gate; a longer one is refused with 413 | `internal/gate/model.maxRequestBodyBytes` | 16 MiB |
+| Upstream response body read and relayed by the Model Gate | `internal/gate/model.maxRelayedResponseBytes` | 64 MiB |
+| Response bytes held while waiting for a line end before the pattern rules | `internal/gate/model.maxResponsePendingBytes` | 8 MiB |
 | Upstream response parsed for token usage (one extra sentinel byte is retained to detect responses past the limit) | `internal/gate/model.maxCapturedResponseBytes` | 8 MiB |
 | Single SSE line or joined event data parsed for token usage | `internal/gate/model.maxUsageLineBytes` | 4 MiB |
 | Size of one read from the upstream response | `internal/gate/model.upstreamReadChunkBytes` | 32 KiB |

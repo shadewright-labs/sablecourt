@@ -67,6 +67,8 @@ var limitConstants = []string{
 	"internal/gate/councilproxy.tunnelLifetime",
 	"internal/gate/model.maxCapturedResponseBytes",
 	"internal/gate/model.maxRequestBodyBytes",
+	"internal/gate/model.maxRelayedResponseBytes",
+	"internal/gate/model.maxResponsePendingBytes",
 	"internal/gate/model.maxReservedTokens",
 	"internal/gate/model.maxUsageLineBytes",
 	"internal/gate/model.settleReservationAttempts",
