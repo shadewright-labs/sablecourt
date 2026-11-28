@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +47,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/runtime/coding"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/controller"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/docker"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/hostpath"
 	k8sruntime "github.com/shadewright-labs/sablecourt/internal/runtime/k8s"
+	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 	"github.com/shadewright-labs/sablecourt/internal/store/postgres"
@@ -92,6 +97,7 @@ func newRootCmd() *cobra.Command {
 		allowedHosts         []string
 		incidentTemplate     string
 		branchRetention      time.Duration
+		unsafeHostHarnesses  bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -120,6 +126,7 @@ func newRootCmd() *cobra.Command {
 				allowedHosts:         allowedHosts,
 				incidentTemplate:     incidentTemplate,
 				branchRetention:      branchRetention,
+				unsafeHostHarnesses:  unsafeHostHarnesses,
 			})
 		},
 	}
@@ -138,13 +145,14 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().StringSliceVar(&allowedHosts, "allow-host", nil, "Additional allowed HTTP host or host:port (repeatable, bare hosts use the listen port)")
 	rootCmd.Flags().StringVar(&incidentTemplate, "incident-conclave-template", "", "Default Conclave template for new Shadewright incidents")
 	rootCmd.Flags().StringVar(&socketPath, "socket", "", "Optional Unix domain socket path for local CLI access (0600)")
-	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to --listen)")
+	rootCmd.Flags().StringVar(&gateHost, "gate-host", "", "Optional host:port injected into containers for gates (defaults to host.docker.internal:<port> when --listen is 127.0.0.1, otherwise --listen; required for a wildcard listener)")
 	rootCmd.Flags().StringVar(&secretFile, "secret-file", "", "Optional 0600 JSON secret file fallback path")
 	rootCmd.Flags().StringVar(&repoRoot, "repo-root", ".", "Git repository root for GitOps typed actions")
 	rootCmd.Flags().StringVar(&runtimeBackend, "runtime", "docker", "Container runtime backend: docker or k8s")
 	rootCmd.Flags().StringVar(&k8sNamespace, "k8s-namespace", "default", "Kubernetes namespace when --runtime=k8s")
 	rootCmd.Flags().StringVar(&k8sRuntimeClass, "k8s-runtime-class", "", "Optional Kubernetes RuntimeClassName (e.g. gvisor, kata)")
 	rootCmd.Flags().StringVar(&kubeconfigPath, "kubeconfig", "", "Optional kubeconfig path when --runtime=k8s")
+	rootCmd.Flags().BoolVar(&unsafeHostHarnesses, unsafeHostHarnessesFlag, false, "UNSAFE: run coding harnesses on the host when no container runtime is configured; such runs are outside invariants 2 and 3")
 	rootCmd.Flags().Bool("operator-auth-required", true, "Require operator authentication")
 	_ = rootCmd.Flags().MarkDeprecated("operator-auth-required", "operator authentication is always required")
 	return rootCmd
@@ -172,34 +180,144 @@ type daemonConfig struct {
 	allowedHosts         []string
 	incidentTemplate     string
 	branchRetention      time.Duration
+	unsafeHostHarnesses  bool
 	openStore            func() (store.Store, error)
 	logger               *slog.Logger
 }
 
+// wireK8sRuntime installs the Kubernetes runtime adapter when --runtime=k8s.
+// A missing or unreadable configuration leaves the other adapters in place. A
+// credential in it too short to redact stops the start, like every other
+// credential the daemon loads.
+func wireK8sRuntime(ctx context.Context, cfg daemonConfig, adapters map[domain.WorkloadClass]scruntime.Adapter, hub *attach.Hub, logger *slog.Logger) error {
+	if cfg.runtimeBackend != "k8s" {
+		return nil
+	}
+	k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass)
+	if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+		return err
+	}
+	if err != nil {
+		logger.Warn("kubernetes runtime unavailable", "error", err)
+		return nil
+	}
+	k8sAdapter.SetAttachHub(ctx, hub)
+	adapters[domain.ClassLongLivedAgent] = k8sAdapter
+	adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
+	logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
+	return nil
+}
+
+// worktreeRootPath is the directory that holds every checkout the daemon
+// makes: worktrees beside the database.
+func worktreeRootPath(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "worktrees")
+}
+
+// sameDatabaseFile checks that the file SQLite opened for the main database
+// is the file the daemon created, by identity.
+func sameDatabaseFile(ctx context.Context, sq *sqlite.SQLiteStore, created fs.FileInfo) error {
+	file, err := sq.MainFile(ctx)
+	if err != nil {
+		return fmt.Errorf("read the database file: %w", err)
+	}
+	opened, err := os.Stat(file)
+	if err != nil || !os.SameFile(opened, created) {
+		return errors.New("the database opened is not the file the daemon created")
+	}
+	return nil
+}
+
 func newCodingAdapter(hub *attach.Hub, dbPath string, retention time.Duration) *coding.Adapter {
-	adapter := coding.NewAdapter(filepath.Join(filepath.Dir(dbPath), "worktrees"))
+	adapter := coding.NewAdapter(worktreeRootPath(dbPath))
 	adapter.BranchRetention = retention
 	adapter.AttachHub = hub
 	return adapter
 }
 
-func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, hub *attach.Hub, dbPath string, retention time.Duration, checkSandbox func() error, logger *slog.Logger) {
+// unsafeHostHarnessesFlag is the only way to turn host mode on. Its name says
+// it is unsafe: a host run is outside invariants 2 and 3 (ADR-0011 amendment
+// of 2026-11-27).
+const unsafeHostHarnessesFlag = "unsafe-host-harnesses"
+
+// registerCodingAdapter registers the coding adapter outside Citadel. By
+// default it is recovery only: it observes, stops and cleans up a host worker
+// started before an upgrade, and refuses every new launch (ErrHostModeOff).
+// Host launches are allowed only with --unsafe-host-harnesses and a working
+// host sandbox. wireCouncilContainers later gives the same adapter a
+// container runner, which then runs every coding task.
+func registerCodingAdapter(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, hub *attach.Hub, dbPath string, retention time.Duration, unsafeHost bool, checkSandbox func() error, logger *slog.Logger) {
 	if isCitadel {
+		return
+	}
+	adapter := newCodingAdapter(hub, dbPath, retention)
+	adapter.Logger = logger
+	adapters[domain.ClassCodingAgent] = adapter
+	if !unsafeHost {
 		return
 	}
 	if checkSandbox == nil {
 		if logger != nil {
-			logger.Warn("host coding adapter disabled: sandbox availability check unavailable")
+			logger.Warn("host mode stays off: sandbox availability check unavailable")
 		}
 		return
 	}
 	if err := checkSandbox(); err != nil {
 		if logger != nil {
-			logger.Warn("host coding adapter disabled: no working sandbox on this platform", "error", err)
+			logger.Warn("host mode stays off: no working sandbox on this platform", "error", err)
 		}
 		return
 	}
-	adapters[domain.ClassCodingAgent] = newCodingAdapter(hub, dbPath, retention)
+	adapter.HostModeUnsafe = true
+	if logger != nil {
+		logger.Warn("UNSAFE: host mode is on (--" + unsafeHostHarnessesFlag + "); host launches are allowed only when no container runtime is configured, and such runs are outside invariants 2 and 3")
+	}
+}
+
+// daemonPrivatePaths lists the daemon's own files and directories: the state
+// directory, the database and its directory, the worktree root and the secret file. dbPath and
+// secretFile must come from hostpath.ResolveFile, so the list names the files
+// the daemon opens.
+func daemonPrivatePaths(stateDir, dbPath, secretFile string) []string {
+	out := []string{stateDir}
+	if dbPath != "" {
+		// The directory too: SQLite keeps its write-ahead files beside the database.
+		out = append(out, dbPath, filepath.Dir(dbPath), worktreeRootPath(dbPath))
+	}
+	if secretFile != "" {
+		out = append(out, secretFile)
+	}
+	return out
+}
+
+// codingRuntimeStatus is what GET /api/v1/runtime/coding reports and
+// sablectl doctor prints.
+type codingRuntimeStatus struct {
+	// Mode is container, host-unsafe or unavailable.
+	Mode string `json:"mode"`
+	// HostModeOptIn reports whether --unsafe-host-harnesses was passed.
+	HostModeOptIn bool `json:"hostModeOptIn"`
+}
+
+// unavailableReason says why coding tasks cannot start, for refusals.
+func (st codingRuntimeStatus) unavailableReason() string {
+	if st.HostModeOptIn {
+		return "no container runtime is configured, and --" + unsafeHostHarnessesFlag + " is set but host mode could not start: no working host sandbox, or Citadel mode (see sablectl doctor)"
+	}
+	return "no container runtime is configured and host mode is off (see sablectl doctor)"
+}
+
+func codingRuntime(adapters map[domain.WorkloadClass]scruntime.Adapter, optIn bool) codingRuntimeStatus {
+	st := codingRuntimeStatus{Mode: "unavailable", HostModeOptIn: optIn}
+	ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter)
+	switch {
+	case !ok || ca == nil:
+	case ca.SupportsCouncilContainers():
+		st.Mode = "container"
+	case ca.HostModeUnsafe:
+		st.Mode = "host-unsafe"
+	}
+	return st
 }
 
 func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, isCitadel bool, dockerAdapter *docker.Adapter, hub *attach.Hub, dbPath string, retention time.Duration, listenAddr string) {
@@ -235,6 +353,14 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
+// packetLearningDestination fixes the facts that decide whether a context
+// packet may carry learnings (ADR-0012): long-lived agents run in the Docker
+// adapter, and no model gateway receives the requests.
+func packetLearningDestination(adapters map[domain.WorkloadClass]scruntime.Adapter, modelGatewayURL string) contextpack.Destination {
+	da, ok := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	return contextpack.Destination{DockerAgents: ok && da != nil, ModelGateway: modelGatewayURL != ""}
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -267,6 +393,42 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve operator state directory: %w", err)
 	}
+	// Resolve once: the store, the secret store and the checkout guard all use
+	// these exact paths. A secret file that does not exist yet is created now,
+	// at the resolved path, so nothing can later place a symlink there.
+	// The SQLite driver reads anything after "?" as options, so such a path
+	// would open a different file from the one resolved here.
+	if strings.ContainsRune(dbPath, '?') {
+		return errors.New("database path must not contain '?'")
+	}
+	if dbPath, err = hostpath.ResolveFile(dbPath); err != nil {
+		return fmt.Errorf("resolve database path: %w", err)
+	}
+	if secretFile, err = hostpath.ResolveFile(secretFile); err != nil {
+		return fmt.Errorf("resolve secret file path: %w", err)
+	}
+	privateDirs := daemonPrivatePaths(dir, dbPath, secretFile)
+	// The worktree root is opened once. Checkouts the daemon makes are
+	// mounted only when reached through this handle, so none of the daemon's
+	// own files may lie under it.
+	var worktrees *mountguard.Root
+	if !isCitadel {
+		if worktrees, err = mountguard.OpenRoot(worktreeRootPath(dbPath)); err != nil {
+			return err
+		}
+		defer worktrees.Close() //nolint:errcheck // directory handle; closing it finalizes no write
+		if err := worktrees.RefuseInside(dbPath, secretFile, dir); err != nil {
+			return fmt.Errorf("daemon files under the worktree root: %w", err)
+		}
+	}
+	// The secret file is created only after the refusal above, so a refused
+	// start leaves no file inside the worktree root.
+	if secretFile != "" {
+		if _, err := hostpath.CreateFile(secretFile, []byte("{}\n")); err != nil {
+			return fmt.Errorf("create secret file: %w", err)
+		}
+	}
+	mounts := &mountguard.Guard{Root: worktrees, Protected: privateDirs}
 	operatorToken, stateLock, err := initDaemonState(dir)
 	if err != nil {
 		return err
@@ -300,6 +462,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if pgDSN == "" {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
 	}
+	if err := registerDSN(pgDSN); err != nil {
+		return err
+	}
 	var st store.Store
 	if cfg.openStore != nil {
 		st, err = cfg.openStore()
@@ -309,7 +474,24 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Info("using postgres store")
 		}
 	} else {
-		st, err = sqlite.Open(dbPath)
+		// SQLite takes an empty file as an empty database, and creating it
+		// here puts it exactly at the resolved path.
+		var created fs.FileInfo
+		if dbPath != "" {
+			created, err = hostpath.CreateFile(dbPath, nil)
+		}
+		if err == nil {
+			var sq *sqlite.SQLiteStore
+			if sq, err = sqlite.Open(dbPath); err == nil {
+				st = sq
+				if created != nil {
+					if err = sameDatabaseFile(ctx, sq, created); err != nil {
+						_ = sq.Close()
+						st = nil
+					}
+				}
+			}
+		}
 	}
 	if err != nil {
 		return err
@@ -332,13 +514,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 
 	attachHub := attach.NewHub()
 	adapters := map[domain.WorkloadClass]scruntime.Adapter{}
-	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, func() error {
+	registerCodingAdapter(adapters, isCitadel, attachHub, dbPath, cfg.branchRetention, cfg.unsafeHostHarnesses, func() error {
 		return coding.CheckSandbox(ctx)
 	}, logger)
 	var councilDocker *docker.Adapter
 	if cfg.runtimeBackend != "k8s" {
 		if da, err := docker.NewFromEnv(); err == nil {
 			da.SetAttachHub(ctx, attachHub)
+			// No harness checkout may equal or contain these daemon paths.
+			da.Mounts = mounts
 			adapters[domain.ClassLongLivedAgent] = da
 			adapters[domain.ClassDeterministicController] = controller.NewAdapter(da)
 			if da.CouncilRuntimeConfigured() {
@@ -351,30 +535,43 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			return fmt.Errorf("configure Docker runtime: %w", err)
 		}
 	}
+	if ca, ok := adapters[domain.ClassCodingAgent].(*coding.Adapter); ok && ca != nil && worktrees != nil {
+		// Crash cleanup deletes through the same handle the mount rule uses.
+		ca.Root = worktrees
+	}
 
 	var (
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
-	policies := newPolicyLoader(st, manifestsPath)
+	policies := newPolicyLoader(manifestsPath)
+	councilPanelOn := !isCitadel && adapters[domain.ClassCodingAgent] != nil
+	// loadAndSync reads the manifests and writes nothing; recordBundle writes
+	// the workloads to the store once every check has accepted the bundle.
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
 		b, pol, err := policies.Load(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
+		if councilPanelOn {
 			var err error
-			b, err = ensureCouncilPanelWorkloads(ctx, st, b, councilSandbox(councilDocker != nil))
+			b, err = addCouncilPanelWorkloads(b, councilSandbox(councilDocker != nil))
 			if err != nil {
 				return nil, nil, fmt.Errorf("register council panel workloads: %w", err)
 			}
 		}
 		return b, pol, nil
 	}
+	recordBundle := func(b *config.Bundle) error {
+		return recordWorkloads(ctx, st, b, councilPanelOn)
+	}
 
 	var policyEng *policy.Engine
 	bundle, policyEng, err = loadAndSync()
 	if err != nil {
+		return err
+	}
+	if err := recordBundle(bundle); err != nil {
 		return err
 	}
 	if manifestsPath != "" && bundle != nil {
@@ -384,10 +581,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	}
 
 	stores := []secret.SecretStore{secret.NewKeyringStore("sablecourt")}
+	var fileSecretStore *secret.FileStore
 	if secretFile != "" {
-		stores = append(stores, secret.NewFileStore(secretFile))
+		fileSecretStore = secret.NewFileStore(secretFile)
+		stores = append(stores, fileSecretStore)
 	}
-	secretStore := &secret.ChainStore{Stores: stores}
+	secretStore := secret.NewObservingStore(&secret.ChainStore{Stores: stores}, registerDaemonSecret)
+	if err := preloadDaemonSecrets(ctx, secretStore, fileSecretStore, bundle); err != nil {
+		return err
+	}
 
 	modelGate := model.New(model.Options{
 		Store:      gateLeaseStore{st},
@@ -433,43 +635,33 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
 	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
-	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
-	registerUpstreamMCP := func(b *config.Bundle) {
-		if b == nil {
-			return
-		}
-		for _, w := range b.Workloads {
-			if len(w.Spec.Grants.MCPServers) > 0 {
-				dataActionGate.RegisterUpstreamTools(w.Spec.Grants.MCPServers, mcpBridge)
-			}
-		}
+	// Upstream MCP tools live apart from the built-in ones; every reload
+	// rebuilds them from the new bundle (gate.Reload).
+	if err := dataActionGate.SetUpstreamBridge(mcpgate.NewUpstreamBridge(secretStore, nil)); err != nil {
+		logger.Warn("upstream MCP tools refused at start-up; no upstream tools registered", "error", err)
 	}
-	registerUpstreamMCP(bundle)
 
 	if isCitadel {
-		logger.Info("citadel mode active: host coding-agent disabled, fail-closed operator auth enforced")
+		logger.Info("citadel mode active: coding agents and council seats disabled, fail-closed operator auth enforced")
 		if pgDSN == "" {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
-	if cfg.runtimeBackend == "k8s" {
-		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
-			k8sAdapter.SetAttachHub(ctx, attachHub)
-			adapters[domain.ClassLongLivedAgent] = k8sAdapter
-			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
-			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
-		} else {
-			logger.Warn("kubernetes runtime unavailable", "error", err)
-		}
+	if err := wireK8sRuntime(ctx, cfg, adapters, attachHub, logger); err != nil {
+		return err
 	}
+	packetDest := packetLearningDestination(adapters, cfg.modelGatewayURL)
+	logger.Info("context packet learning destination fixed at startup",
+		"dockerAgents", packetDest.DockerAgents, "modelGateway", packetDest.ModelGateway)
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:        st,
-		Bundle:       bundle,
-		Policy:       policyEng,
-		Adapters:     adapters,
-		ModelGateURL: "http://" + gateHost + "/gate/model",
-		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		PacketDestination: packetDest,
+		Store:             st,
+		Bundle:            bundle,
+		Policy:            policyEng,
+		Adapters:          adapters,
+		ModelGateURL:      "http://" + gateHost + "/gate/model",
+		DataGateURL:       "http://" + gateHost + "/gate/mcp",
 		// Host coding agents reach the gate over loopback, not a container alias.
 		HostDataGateURL: cfg.hostGateURL(),
 		MaxConcurrent:   cfg.maxConcurrent,
@@ -502,24 +694,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// One reload at a time: the reload route, the dashboard and the manifests
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
-	reloadFn := serialized(func() error {
-		b, pol, err := loadAndSync()
-		if err != nil {
-			return err
-		}
-		bundleMu.Lock()
-		bundle = b
-		bundleMu.Unlock()
-		modelGate.SetBundle(b)
-		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
-		registerUpstreamMCP(b)
-		reconciler.Reload(b, pol)
-		_ = scheduler.Reload(ctx, b)
-		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
-		}
-		return nil
-	})
+	reloadFn := serialized(daemonReloadSteps(ctx, logger, loadAndSync, recordBundle, secretStore, dataActionGate, repoBinding,
+		func(b *config.Bundle, pol *policy.Engine) {
+			bundleMu.Lock()
+			bundle = b
+			bundleMu.Unlock()
+			modelGate.SetBundle(b)
+			reconciler.Reload(b, pol)
+			reloadSchedules(ctx, logger, scheduler, b)
+			if b != nil {
+				logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
+			}
+		}).run)
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -541,25 +727,16 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		return fmt.Errorf("init web ui: %w", err)
 	}
 
-	privateDirs := []string{dir}
-	if dbPath != "" {
-		if absDB, err := filepath.Abs(dbPath); err == nil {
-			privateDirs = append(privateDirs, absDB, filepath.Join(filepath.Dir(absDB), "worktrees"))
-		}
-	}
-	if secretFile != "" {
-		if absSecret, err := filepath.Abs(secretFile); err == nil {
-			privateDirs = append(privateDirs, absSecret)
-		}
-	}
-
 	hc :=
 		handlerConfig{
 			incidentTemplate:    cfg.incidentTemplate,
 			operatorToken:       operatorToken,
 			councilsDisabled:    isCitadel,
-			councilPrivateDirs:  privateDirs,
+			councilMounts:       mounts,
 			checkCouncilRuntime: councilRuntimeChecker(getBundle, adapters, councilSandbox(councilDocker != nil)),
+			codingRuntime: func() codingRuntimeStatus {
+				return codingRuntime(adapters, cfg.unsafeHostHarnesses)
+			},
 		}
 	if councilDocker != nil {
 		hc.preflightCouncilHarness = councilDocker.CheckCouncilHarness
@@ -770,7 +947,7 @@ type handlerConfig struct {
 	incidentTemplate    string
 	operatorToken       string
 	councilsDisabled    bool
-	councilPrivateDirs  []string
+	councilMounts       *mountguard.Guard
 	checkCouncilSandbox func(context.Context) error
 	checkCouncilRuntime func(context.Context, store.CouncilCheckout) error
 	// routeSink, when set, is told every route pattern the handler registers.
@@ -779,6 +956,8 @@ type handlerConfig struct {
 	// preflightCouncilHarness is set in container mode. It replaces the host
 	// executable and sandbox checks with image, volume and login checks.
 	preflightCouncilHarness func(context.Context, string) error
+	// codingRuntime reports how coding tasks run; nil reports unavailable.
+	codingRuntime func() codingRuntimeStatus
 	// onCouncilCheckout is a test hook that runs once the checkout is verified.
 	onCouncilCheckout func(expire context.CancelFunc)
 }
@@ -807,6 +986,13 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		Reconciler: reconciler,
 		Secrets:    secrets,
 	}))
+	mux.HandleFunc("GET /api/v1/runtime/coding", func(w http.ResponseWriter, r *http.Request) {
+		st := codingRuntimeStatus{Mode: "unavailable"}
+		if cfg.codingRuntime != nil {
+			st = cfg.codingRuntime()
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
 	mux.HandleFunc("GET /api/v1/providers", func(w http.ResponseWriter, r *http.Request) {
 		if provReg == nil {
 			writeJSON(w, http.StatusOK, []any{})
@@ -824,18 +1010,38 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := contextpack.SaveModelTiers(r.Context(), st, routes); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			status := http.StatusInternalServerError
+			if contextpack.IsRouteRefusal(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, contextpack.GetModelTiers(r.Context(), st))
 	})
 	mux.HandleFunc("GET /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
-		var paths []string
-		if p := strings.TrimSpace(r.URL.Query().Get("path")); p != "" {
-			paths = strings.Split(p, ",")
+		if repo != "" {
+			// MatchLearnings yields none on a store error, so reject a bad
+			// remote URL here instead of answering with an empty list.
+			normalized, err := store.NormalizeRepoRemoteURL(repo)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo: " + err.Error()})
+				return
+			}
+			repo = normalized
 		}
-		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
+		var paths []string
+		for p := range strings.SplitSeq(r.URL.Query().Get("path"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		learnings := contextpack.MatchLearnings(r.Context(), st, repo, paths, 100)
+		if learnings == nil {
+			learnings = []domain.Learning{}
+		}
+		writeJSON(w, http.StatusOK, learnings)
 	})
 	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "legacy learning publication is disabled"})
@@ -888,7 +1094,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		events, _ := st.ListTaskEvents(r.Context(), id)
 		budget, _ := st.TaskBudgetTotals(r.Context(), id)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"task":   task,
+			"task":   controlplane.TaskForRead(task),
 			"events": events,
 			"budget": budget,
 		})
@@ -925,7 +1131,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				CreatedAt:    time.Now().UTC(),
 			})
 		}
-		writeJSON(w, http.StatusCreated, retried)
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(retried))
 	})
 	if conclaveBroker != nil {
 		integrations.NewShadewright(integrations.ShadewrightOptions{
@@ -1344,7 +1550,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(w, http.StatusOK, controlplane.TasksForRead(items))
 	})
 	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -1361,7 +1567,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusCreated, task)
+		// An idempotent replay returns the stored task.
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(task))
 	})
 	mux.HandleFunc("GET /api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListAudit(r.Context(), 50)
@@ -1511,7 +1718,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, msgs)
+		// A message stored before its text became a daemon-held secret is
+		// still refused on the way out. The first message is the task input,
+		// a declared JSON record, so it follows the same rule as the launch
+		// input and the other task read paths.
+		writeJSON(w, http.StatusOK, controlplane.TaskMessagesForRead(msgs))
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
 		lease, ok := authenticateGateLease(w, r, st)
@@ -1948,16 +2159,15 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
 }
 
-// policyLoader reads the manifests, records the declared workloads and builds
-// the policy engine for each load.
+// policyLoader reads the manifests and builds the policy engine for each load.
+// It writes nothing; recordWorkloads stores the workloads of an accepted bundle.
 type policyLoader struct {
-	st            store.Store
 	manifestsPath string
 	gateBreaker   *policy.CircuitBreaker
 }
 
-func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
-	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+func newPolicyLoader(manifestsPath string) *policyLoader {
+	return &policyLoader{manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
 }
 
 // Breaker returns the circuit breaker the action gate records outcomes on.
@@ -1974,17 +2184,9 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 		return nil, nil, fmt.Errorf("load manifests: %w", err)
 	}
 	for _, w := range loaded.Workloads {
-		cardBytes, err := json.Marshal(w.Spec.AgentCard)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := l.st.UpsertWorkload(ctx, domain.WorkloadRecord{
-			Name:           w.Metadata.Name,
-			Zone:           w.Metadata.Zone,
-			Class:          w.Spec.Class,
-			ManifestDigest: loaded.ManifestDigest,
-			AgentCardJSON:  string(cardBytes),
-		}); err != nil {
+		// Refuse an agent card that cannot be recorded now, before any
+		// check accepts the bundle and recordWorkloads writes it.
+		if _, err := json.Marshal(w.Spec.AgentCard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1994,6 +2196,32 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// recordWorkloads writes every workload of b to the store. With councilPanel
+// set, the built-in council panel workloads (whose names a manifest may then
+// not use) are written without a manifest digest or agent card, as they come
+// from no manifest.
+func recordWorkloads(ctx context.Context, st store.Store, b *config.Bundle, councilPanel bool) error {
+	if b == nil {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(b.Workloads)) {
+		w := b.Workloads[name]
+		rec := domain.WorkloadRecord{Name: w.Metadata.Name, Zone: w.Metadata.Zone, Class: w.Spec.Class}
+		if !councilPanel || !isCouncilPanelRole(name) {
+			cardBytes, err := json.Marshal(w.Spec.AgentCard)
+			if err != nil {
+				return err
+			}
+			rec.ManifestDigest = b.ManifestDigest
+			rec.AgentCardJSON = string(cardBytes)
+		}
+		if err := st.UpsertWorkload(ctx, rec); err != nil {
+			return fmt.Errorf("record workload %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // serialized returns fn guarded by one mutex, so calls never overlap and
@@ -2013,9 +2241,109 @@ func serialized(fn func() error) func() error {
 // sync) runs it through the daemon's one reload function. It never re-pins: a
 // changed or unreadable origin keeps git.open_pr refused, is logged here, and
 // Recheck writes it to the audit log once per change of the observed origin.
-func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
-	gate.Reload(b, pol)
+// reloadGitOps reloads the Data and Action Gate and rechecks the git.open_pr
+// target. A gate refusal is returned with nothing changed in the gate.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) error {
+	if err := gate.Reload(b, pol); err != nil {
+		return err
+	}
 	if err := binding.Recheck(ctx); err != nil {
 		logger.Warn("git.open_pr refused after reload", "error", err)
 	}
+	return nil
+}
+
+// daemonReloadSteps wires the daemon's manifest reload: load reads the
+// manifests, persist records the workloads, and apply swaps the bundle into
+// the rest of the daemon. check asks the gate whether it accepts the bundle,
+// then registers the bundle's MCP server secrets for exact redaction and
+// refuses the reload when one is too short to redact. So a refused secret
+// stops the reload before anything is written or swapped, and an accepted
+// bundle's secrets are registered before the store, the gate or apply sees
+// its grants. Registration only adds values: a refused reload may leave the
+// secrets it read registered, which widens redaction and grants nothing.
+func daemonReloadSteps(ctx context.Context, logger *slog.Logger, load func() (*config.Bundle, *policy.Engine, error), persist func(*config.Bundle) error, secrets secret.SecretStore, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, apply func(*config.Bundle, *policy.Engine)) reloadSteps {
+	return reloadSteps{
+		load: load,
+		check: func(b *config.Bundle) error {
+			if err := gate.CheckReload(b); err != nil {
+				return err
+			}
+			if err := preloadBundleSecrets(ctx, secrets, b); err != nil {
+				return fmt.Errorf("reload refused: MCP server credentials: %w", err)
+			}
+			return nil
+		},
+		persist: persist,
+		gate: func(b *config.Bundle, pol *policy.Engine) error {
+			return reloadGitOps(ctx, logger, gate, binding, b, pol)
+		},
+		apply:  apply,
+		logger: logger,
+	}
+}
+
+// reloadSchedules swaps the scheduler to b's schedules. It runs in apply,
+// after the gate swap, so it cannot refuse the reload; a failure is logged.
+// The loader refuses an invalid cron expression, so it fails only for a
+// bundle that skipped the loader, and then no schedule fires until the next
+// accepted reload.
+func reloadSchedules(ctx context.Context, logger *slog.Logger, s *controlplane.Scheduler, b *config.Bundle) {
+	if err := s.Reload(ctx, b); err != nil {
+		logger.Error("schedules not reloaded; no schedule fires until the next accepted reload", "error", err)
+	}
+}
+
+// reloadSteps is the order of a manifest reload, and a refused reload changes
+// nothing. load reads the manifests and writes nothing. check runs every test
+// that can refuse the bundle (the gate's CheckReload and, in the daemon, the
+// MCP server secret registration of daemonReloadSteps) before anything is
+// written or swapped. Only then does persist write the workloads to the store,
+// gate swap the gate's bundle, policy and upstream tools, and apply swap the
+// rest. When load fails or check refuses, nothing is written or swapped; a
+// refusal is returned and logged as "reload refused". When persist fails (a
+// store error, which may leave some rows written), the gate and apply steps
+// never run. gate refuses only what check refuses, since reloads are
+// serialized and built-in tools are registered at start. check and persist
+// may be nil.
+type reloadSteps struct {
+	load    func() (*config.Bundle, *policy.Engine, error)
+	check   func(*config.Bundle) error
+	persist func(*config.Bundle) error
+	gate    func(*config.Bundle, *policy.Engine) error
+	apply   func(*config.Bundle, *policy.Engine)
+	logger  *slog.Logger
+}
+
+func (s reloadSteps) run() error {
+	b, pol, err := s.load()
+	if err != nil {
+		return err
+	}
+	if s.check != nil {
+		if err := s.check(b); err != nil {
+			return s.refused(err)
+		}
+	}
+	if s.persist != nil {
+		if err := s.persist(b); err != nil {
+			return err
+		}
+	}
+	if err := s.gate(b, pol); err != nil {
+		return s.refused(err)
+	}
+	s.apply(b, pol)
+	return nil
+}
+
+// refused returns err as a refused reload and logs it.
+func (s reloadSteps) refused(err error) error {
+	if !strings.HasPrefix(err.Error(), "reload refused") {
+		err = fmt.Errorf("reload refused: %w", err)
+	}
+	if s.logger != nil {
+		s.logger.Warn("manifest reload refused; previous bundle, policy, upstream tools and stored workloads kept", "error", err)
+	}
+	return err
 }

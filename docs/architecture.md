@@ -19,11 +19,11 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | `internal/policy` | Deterministic `allow` / `approve` / `deny` evaluator (fail-closed default `deny`) and failure `CircuitBreaker` |
 | `internal/redact` | Linear-time RE2 pattern redactor that masks some known secret shapes before storage or broadcast; best effort, defence in depth ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md)) |
 | `internal/gate/model` | HTTP/SSE proxy for OpenAI, Anthropic, Gemini, local endpoints, and upstream `agentgateway`; enforces `sc_task_` leases, budgets, SSRF protection, and `openai <-> local` fallback |
-| `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.open_pr`), and proxied upstream MCP servers |
+| `internal/gate/mcp` | MCP Streamable HTTP server for allowlisted built-in tools (`conclave.*`, `memory.*`, `sablecourt.*`), closed GitOps actions (`git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`), and proxied upstream MCP servers |
 | `internal/approval` | Pinned SHA-256 approval queue, macOS native `osascript` out-of-band prompt, and ECDSA P-256 device signature verification |
 | `internal/conclave` | Multi-agent room broker enforcing `canMessage` graphs, one-time-on-open `always-on` and `on-mention` activation, `Wards` (`maxMessages`, `maxPingPong`), `spec.budgetRef`, operator `Decrees`, and shared `Relics` |
 | `internal/attach` | 64 KiB redacted ring buffer (`Scry` SSE streaming) and exclusive operator `stdin` lock (`Takeover`) |
-| `internal/runtime/*` | Execution adapters: `coding` (Git worktrees + macOS Seatbelt; no Bubblewrap exists, and host runs are unsupported for 0.1.0 per the [ADR-0011 amendment](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)), `docker` (Docker/Podman/OrbStack/Colima/Rancher), `k8s` (hardened Jobs and Deployments), `controller` (zero-LLM) |
+| `internal/runtime/*` | Execution adapters: `coding` (Git worktrees, harness container launch, and a macOS Seatbelt host path; no Bubblewrap exists, and host runs are off by default and unsupported for 0.1.0 per the [ADR-0011 amendment](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010)), `docker` (Docker/Podman/OrbStack/Colima/Rancher), `k8s` (hardened Jobs and Deployments), `controller` (zero-LLM) |
 | `internal/notify` | Outbound alerts to Slack, Discord, ntfy, or generic webhooks on approvals, Ward pauses, and task failures |
 | `internal/voice` | Local-first OpenAI-compatible Whisper STT and Kokoro/Piper/macOS `say` TTS for voice Decrees and Conclave readback |
 | `internal/ui` | Server-rendered HTML/HTMX cockpit (`/` dashboard, `/tasks/{id}`, `/conclaves`, `/conclaves/{id}`, `/schedules`, `/audit`, `/memory`, `/providers`, `/studio`) |
@@ -46,7 +46,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | :--- | :--- |
 | 1. Manifest load | `sablecourtd` loads local YAML files or syncs a GitOps repository (`--manifests-git-repo`). `validateBundle` rejects any `sandbox`-zone workload that requests mutating GitOps actions, runtime-zone Conclave messaging, or external Agent Card advertisement. |
 | 2. Task creation | An operator (UI, CLI, webhook, Schedule, A2A, or Shadewright Escalation API) submits a task with an idempotency key. `sablecourtd` persists the task in `submitted` state. |
-| 3. Lease minting | The control plane reconciler mints a scoped task bearer token (`sc_task_<64 hex>`) and stores only its SHA-256 hash in `leases`. Raw provider keys never enter the workload environment. |
+| 3. Lease minting | The control plane reconciler mints a scoped task bearer token (`sc_task_<64 hex>`) and stores only its SHA-256 hash in `leases`. When the context packet carried learnings, the lease also stores the providers the packet was admitted under, and the Model Gate holds it to them after a reload. Raw provider keys never enter the workload environment. |
 | 4. Isolated launch | The matching runtime adapter starts the workload. Local `coding-agent` runs write a read-only `.sablecourt-session.json` marker so Nightloom recognizes the session as Sablecourt-managed. |
 | 5. Capability mediation | Model requests hit `/gate/model/{provider}/...` with `Authorization: Bearer sc_task_...` (checked against leases, grants, and budgets). Tool and action requests hit `/gate/mcp` or `/gate/action/{name}` and pass through deterministic policy (`allow`, `approve`, `deny`) and the Approval Queue. |
 | 6. Observation and steering | Operators watch live redacted output via `Scry`, claim exclusive `stdin` via `Takeover`, or steer multi-agent rooms via `Decree` (text or voice). |
@@ -55,10 +55,10 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 
 ## Agentic context, learnings, and verification pipeline (ADR-0010)
 
-Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Matching scoped learnings are currently attached automatically to CLI coding tasks. The packet combines:
+Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Learnings enter the packet only when its model destination is local (see [context and learning](how-it-works/context-and-learning.md#destination-check)). The packet combines:
 
 1. Task intent (`prompt`, `input`, workflow step metadata, and any failure handoff).
-2. Scoped learnings matched from `Court Memory` under `learning:global`, `learning:repo:<name>`, and `learning:path:<glob>` namespaces.
+2. For a local destination only, up to ten accepted, unexpired learnings from the ADR-0012 learning record, in a section of at most 4 KiB. Legacy `learning:*` rows in Court Memory are not read.
 3. Recent Conclave Decrees and Relics when the task runs inside a Conclave.
 4. A read-only repository pre-check (10-second timeout, 16 KiB cap) running `git status --short`, `git diff --stat`, `go vet ./...` for Go modules, and `sg scan` when `sgconfig.yml` is present.
 
@@ -70,6 +70,6 @@ The SQLite and PostgreSQL verifiers recalculate hashes and previous-row links fo
 
 The description above corrects the implementation claim in ADR-0009. That accepted ADR was outside this documentation work package and remains unchanged; this amendment records the limit without changing the decision text.
 
-Workflows can pair an authoring step with an independent `role: verifier` step running on a separate model or CLI harness. The reconciler wraps the verifier prompt with author artifacts and expects `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. On verifier rejection or runtime failure, opt-in remediation (`maxRetries` on `WorkflowStep`, or manual `Fix from failure` / `sablectl task retry --handoff`) packages redacted artifacts and events into `failure-handoff.md` for the next attempt.
+Workflows can pair an authoring step with an independent `role: verifier` step running on a separate model or CLI harness. The reconciler wraps the verifier prompt with author artifacts and expects `VERDICT: PASS` or `VERDICT: CHANGES_REQUESTED`. On verifier rejection or runtime failure, opt-in remediation (`maxRetries` on `WorkflowStep`, or manual `Fix from failure` / `sablectl task retry --handoff`) packages redacted artifacts and events into `failure-handoff.md` for the next attempt. The manifest loader refuses a verifier step whose workload holds any grant other than the read-only `mcpTools` `memory.get`, `memory.search`, `conclave.read`, `conclave.relic_get` and `sablecourt.list_workloads` (so no `actions`, `delegateTo`, `mcpServers`, `repos` or `modelGate`), or is also used by a non-verifier step before it, and a verifier step on a model workload with no earlier step that runs a model.
 
 Role-based model tiering (`fast`, `coding`, `critic`) is stored in `system:model-tiers` and editable in `/providers` or via `/api/v1/providers/tiers`. Workflow steps declaring `tier` without explicit `provider`/`model` fields resolve from this table at dispatch time.

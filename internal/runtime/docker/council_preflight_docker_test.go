@@ -49,7 +49,7 @@ func TestCheckCouncilHarnessDocker(t *testing.T) {
 					t.Fatalf("got %v, want fault %s", err, want)
 				}
 			}
-			if _, err := a.Client.ImageInspect(ctx, def.Image); err != nil {
+			if _, err := a.cli.ImageInspect(ctx, def.Image); err != nil {
 				wantFault(FaultImageMissing)
 				t.Skipf("image %s is not built locally; run %s", def.Image, harnessimages.BuildCommand(role))
 			}
@@ -83,7 +83,7 @@ func TestCheckCouncilHarnessDocker(t *testing.T) {
 			if err := a.CheckCouncilHarness(ctx, role); err != nil {
 				t.Fatal(err)
 			}
-			list, err := a.Client.(interface {
+			list, err := a.cli.(interface {
 				ContainerList(context.Context, client.ContainerListOptions) (client.ContainerListResult, error)
 			}).ContainerList(ctx, client.ContainerListOptions{All: true, Filters: make(client.Filters).Add("label", "sablecourt.io/login-probe")})
 			if err != nil || len(list.Items) != 0 {

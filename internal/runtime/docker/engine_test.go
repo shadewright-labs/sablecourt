@@ -106,7 +106,7 @@ func TestStartResolvesLocalResources(t *testing.T) {
 			}
 			spec := rt.LaunchSpec{TaskID: "task"}
 			spec.Workload.Spec.Runtime.Image = "fixture"
-			_, err := NewAdapter(f, "").Start(t.Context(), spec)
+			_, err := testAdapter(f, "").Start(t.Context(), spec)
 			if tc == "pinned" {
 				if err != nil || f.createdOpts.Config.Image != f.imageID || string(f.createdOpts.HostConfig.NetworkMode) != f.net.ID {
 					t.Fatal("did not create by inspected IDs", err)
@@ -156,7 +156,7 @@ func TestDockerRecoveryEvidence(t *testing.T) {
 			case "wrong identity":
 				f.id = "other"
 			}
-			a := NewAdapter(f, "")
+			a := testAdapter(f, "")
 			probes, ok := any(a).(interface {
 				rt.HandleLivenessProber
 				rt.HandleExitProber

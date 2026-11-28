@@ -24,9 +24,10 @@ Each refusal returns an error; the audit rows are listed below.
 1. A bearer token with the `sc_task_` prefix must be present, in `Authorization`, `x-api-key` or `x-goog-api-key`, and match an active lease (not revoked, not expired): 401.
 2. The workload must be declared (403), must not be a deterministic controller and must hold `modelGate.allowed` (403, `no_model_gate_grant`).
 3. If `providers` is listed it must include the route's provider (403, `provider_not_allowed`). An empty list allows all four.
-4. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
-5. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
-6. The provider key must be available (502 otherwise).
+4. If the lease is pinned, because the task's context packet carried learnings, the route's provider must be in the pinned set (403, `provider_not_admitted_with_learnings`). Fallback candidates are narrowed to that set as well ([destination check](context-and-learning.md#destination-check)).
+5. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
+6. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
+7. The provider key must be available (502 otherwise). A key shorter than 8 bytes is refused with 502 and an error that names its secret, never the value, and is not sent upstream.
 
 ## Reserve, forward, settle
 
@@ -55,7 +56,11 @@ Three extra billing rules keep the gate fail-closed on provider usage fields:
 
 When a stream reaches its final event and trailing bytes follow, the exact final counts are settled. When a stream yields partial usage before breaking or contradicting itself, the gate settles at least the reserved estimate and at least the reported totals with no cache-read discount. When a response reports no usage, omits output counts (for example, count-only embeddings-style replies if such routes are added later; today the gate only serves chat, responses, messages and Gemini `generateContent` routes), carries a non-terminal Responses status (such as `in_progress`), is malformed, has out-of-range counts (including an OpenAI `total_tokens` below the sum of its parts) or exceeds the 8 MiB capture limit, the reserved estimate is charged, so a call is never free. A non-2xx response, or a failed upstream call, releases the reservation and charges nothing. If settlement itself fails after three tries the reservation stays until it expires, so the budget errs high for those 15 minutes. No ledger entry is written for that call, so once the reservation expires its usage no longer counts against any budget.
 
-Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting.
+Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting. Each chunk first passes through the exact matcher of `internal/redact`, on the primary and the fallback path. The stream matcher keeps the raw body it has not sent yet and sends only what the batch matcher returns for the part up to the last byte that occurs in no registered spelling (and is not CR, LF, a backslash, `r` or `n`), so the bytes sent equal the batch result for the whole body. The rest waits for the next chunk or the end of the body. Output can therefore arrive in larger pieces than upstream sent. If 64 KiB pile up with no such byte, the stream sends the marker and stops. Response headers are matched the same way, and a header whose name shows a held value is dropped. A response that still carries a `Content-Encoding` after the transport is refused with 502, because the matcher cannot read it.
+
+The gate relays only JSON and server-sent events. The upstream response must carry exactly one `Content-Type` naming `application/json` or `text/event-stream`, with no parameter other than a UTF-8 `charset`. The gate does not copy the upstream value: it sets `application/json` or `text/event-stream` itself, adding `; charset=utf-8` when the upstream named that charset. Any other value (HTML, plain text, `application/x-ndjson`, a `+json` suffix type, another charset, a missing or repeated header) is refused with 502 `upstream response content type not supported`, on any status and on the fallback path, and the upstream body is not sent. No provider the gate serves answers with NDJSON: Gemini's `streamGenerateContent` returns a JSON array, or SSE with `alt=sse`. Every response the gate writes, relayed or refused, carries `X-Content-Type-Options: nosniff`; an upstream value of that header is dropped.
+
+A refused encoding or content type is charged like an unreadable usage report: after a 2xx the admitted reserve is settled, because the provider already did the work, and after a non-2xx the reservation is released.
 
 ## Fallback
 
@@ -69,13 +74,14 @@ A task with a parent, such as a workflow step after the first, must carry a ceil
 
 ## What goes into the audit chain
 
-The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a fallback, a settlement failure and each successful call (model, uncached input, cache write, cache read, output tokens and cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller.
+The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a refused response encoding (`encoded_upstream_response`) or content type (`unsupported_upstream_content_type`), a fallback, a settlement failure and each successful call (model, uncached input, cache write, cache read, output tokens and cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller when its content type is allowed.
 
 ## Known gaps
 
 What the code does today, where it falls short of the design.
 
 - Workflow steps after the first have a parent task but are created without a budget ceiling, so a Model Gate call from such a step is refused with `invalid_child_budget_ceiling`. This follows from the code and its tests; it has not been run end to end.
+- The gate does not check model families. A workload with `grants.modelGate.allowed: true` picks its model per request and may fall back to another provider, so the manifest loader refuses any workflow that uses such a workload as a `role: verifier` step ([ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), amendment of 2026-11-27).
 - Pre-call reserve estimation sizes input from prompt and schema bytes in the request body at one token per four bytes and reserves one output token per choice when no output limit is requested. It cannot upper-bound server-side stored context (`previous_response_id`, `conversation`, `cachedContent`) or fields outside the counted list, so a fallback charge to the reserve is not a strict upper bound for requests that rely on stored context or omit output limits.
 - Anthropic `advisor_message` iteration tokens are priced at the request model's rate (using the single built-in per-provider Anthropic rate), so calls whose advisor model is dearer than the request model can be undercharged until per-model pricing is built.
 

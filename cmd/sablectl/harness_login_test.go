@@ -265,6 +265,25 @@ func TestTerminalSessionForwardsBothWays(t *testing.T) {
 	}
 }
 
+// TestLoginRuntimeRefusesRemoteEngine checks that sablectl harness login and
+// harness install, which share newLoginRuntime, get no Docker runtime on a
+// remote engine, so neither creates a volume, network or container there.
+func TestLoginRuntimeRefusesRemoteEngine(t *testing.T) {
+	def, err := harnessimages.Lookup("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"tcp://engine.invalid:2376", "ssh://engine.invalid"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", host)
+			r, err := newLoginRuntime(def)
+			if r != nil || err == nil || !strings.Contains(err.Error(), "remote engine") {
+				t.Fatalf("newLoginRuntime() = %v, %v, want the remote engine refusal", r, err)
+			}
+		})
+	}
+}
+
 // TestHarnessInstallArtWaitsForTheMessageLine checks that the animation does
 // not start when the "Downloading" line was cut short or failed.
 func TestHarnessInstallArtWaitsForTheMessageLine(t *testing.T) {

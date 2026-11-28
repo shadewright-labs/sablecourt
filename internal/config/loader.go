@@ -267,6 +267,12 @@ func validateBundle(bundle *Bundle) error {
 			if !ok {
 				return fmt.Errorf("workflow %q step %q: workload %q not found", name, step.Name, step.Workload)
 			}
+			if step.Command != "" {
+				if err := validateCommandStep(wf.Spec.Steps, i, wl); err != nil {
+					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
+				}
+				continue
+			}
 			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
 				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
 			}
@@ -280,6 +286,11 @@ func validateBundle(bundle *Bundle) error {
 					provider, model = defaultProvider, defaultModel
 				}
 				if err := ValidateTierRoute(wl, provider, model); err != nil {
+					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
+				}
+			}
+			if step.Role == "verifier" {
+				if err := validateVerifierStep(bundle, wf.Spec.Steps[:i], step, wl); err != nil {
 					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
 				}
 			}
@@ -395,6 +406,9 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		if strings.TrimSpace(w.Spec.Coding.RepoPath) == "" {
 			return fmt.Errorf("workload %q: coding.repoPath is required", name)
 		}
+		if err := validateCommands(w.Spec.Coding.Commands); err != nil {
+			return fmt.Errorf("workload %q: %w", name, err)
+		}
 	case domain.ClassLongLivedAgent:
 		if w.Spec.Coding != nil {
 			return fmt.Errorf("workload %q: coding config is only valid for class %q", name, domain.ClassCodingAgent)
@@ -416,6 +430,11 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 	if w.Spec.Runtime.Type == "docker" && strings.TrimSpace(w.Spec.Runtime.Image) == "" {
 		return fmt.Errorf("workload %q: runtime.image is required for docker runtime", name)
 	}
+	for i, repo := range w.Spec.Grants.Repos {
+		if strings.TrimSpace(repo) == "" || repo != strings.TrimSpace(repo) || strings.ContainsAny(repo, " \t\r\n\x00") {
+			return fmt.Errorf("workload %q: grants.repos[%d] is invalid", name, i)
+		}
+	}
 
 	if w.Metadata.Zone == domain.ZoneSandbox {
 		if len(w.Spec.Grants.Actions) > 0 || len(w.Spec.Grants.DelegateTo) > 0 {
@@ -433,6 +452,14 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		}
 	}
 
+	serverNames := make([]string, 0, len(w.Spec.Grants.MCPServers))
+	for _, srv := range w.Spec.Grants.MCPServers {
+		serverNames = append(serverNames, srv.Name)
+	}
+	if err := validateUpstreamServerNames(name, serverNames); err != nil {
+		return err
+	}
+
 	for _, target := range w.Spec.Grants.DelegateTo {
 		if target == name {
 			return fmt.Errorf("workload %q: cannot delegate to itself", name)
@@ -442,6 +469,37 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		}
 	}
 
+	return nil
+}
+
+// validateVerifierStep refuses a verifier step whose workload holds any
+// grant outside the read-only allow-list in verifier_grants.go, or that
+// shares an identity with a step before it (ADR-0010 amendment of 2026-11-27, invariant 4). The family check itself
+// runs at dispatch; the loader refuses only what is fixed in the manifest.
+func validateVerifierStep(bundle *Bundle, earlier []domain.WorkflowStep, step domain.WorkflowStep, wl domain.Workload) error {
+	if err := validateVerifierGrants(bundle, step.Workload, wl.Spec.Grants); err != nil {
+		return err
+	}
+	modelBefore := false
+	for _, prev := range earlier {
+		if prev.Role == "verifier" {
+			continue
+		}
+		if prev.Workload == step.Workload {
+			return fmt.Errorf("verifier workload %q is also used by step %q", step.Workload, prev.Name)
+		}
+		// A command step runs no model: a verifier after one checks the
+		// author step the command checked, so only that author counts.
+		if prev.Command != "" {
+			continue
+		}
+		if pw, ok := bundle.Workloads[prev.Workload]; ok && pw.Spec.Class != domain.ClassDeterministicController {
+			modelBefore = true
+		}
+	}
+	if wl.Spec.Class != domain.ClassDeterministicController && !modelBefore {
+		return errors.New("model verifier step has nothing to check: no earlier step ran a model")
+	}
 	return nil
 }
 

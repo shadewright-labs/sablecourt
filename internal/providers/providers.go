@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -224,8 +225,14 @@ func (r *Registry) List(ctx context.Context) []ProviderStatus {
 		if def.Kind == "api_key" {
 			if r.secrets != nil {
 				if val, err := r.secrets.Get(ctx, def.SecretName); err == nil && strings.TrimSpace(val) != "" {
-					st.Connected = true
-					st.Detail = "key stored in SecretStore"
+					if err := redact.RegisterSetting(def.SecretName, val); err != nil {
+						st.Detail = err.Error()
+					} else {
+						st.Connected = true
+						st.Detail = "key stored in SecretStore"
+					}
+				} else if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+					st.Detail = err.Error()
 				} else {
 					st.Detail = "API key not configured"
 				}
@@ -335,6 +342,9 @@ func (r *Registry) Connect(ctx context.Context, providerID, apiKey string) error
 	if r.secrets == nil {
 		return errors.New("secret store unavailable")
 	}
+	if err := redact.RegisterSetting(def.SecretName, key); err != nil {
+		return err
+	}
 	if err := r.secrets.Set(ctx, def.SecretName, key); err != nil {
 		return fmt.Errorf("store %s: %w", def.SecretName, err)
 	}
@@ -392,12 +402,25 @@ func (r *Registry) SyncModels(ctx context.Context, providerID string) ([]ModelIn
 			return nil, errors.New("secret store unavailable")
 		}
 		val, err := r.secrets.Get(ctx, def.SecretName)
+		if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+			return nil, err
+		}
 		if err != nil || strings.TrimSpace(val) == "" {
 			return nil, fmt.Errorf("%s not configured in SecretStore", def.SecretName)
 		}
+		if err := redact.RegisterSetting(def.SecretName, val); err != nil {
+			return nil, err
+		}
 		apiKey = strings.TrimSpace(val)
 	} else if r.secrets != nil {
-		if val, err := r.secrets.Get(ctx, def.SecretName); err == nil {
+		val, err := r.secrets.Get(ctx, def.SecretName)
+		if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+			return nil, err
+		}
+		if err == nil {
+			if err := redact.RegisterSetting(def.SecretName, val); err != nil {
+				return nil, err
+			}
 			apiKey = strings.TrimSpace(val)
 		}
 	}
@@ -612,7 +635,8 @@ func (r *Registry) syncCLIModels(ctx context.Context, def cliDef) ([]ModelInfo, 
 		}
 		// If Anthropic API key is configured, also pull live Anthropic model IDs.
 		if r.secrets != nil {
-			if key, err := r.secrets.Get(ctx, "anthropic_api_key"); err == nil && strings.TrimSpace(key) != "" {
+			if key, err := r.secrets.Get(ctx, "anthropic_api_key"); err == nil && strings.TrimSpace(key) != "" &&
+				redact.RegisterSetting("anthropic_api_key", key) == nil {
 				if apiModels, err := r.fetchAnthropicModels(ctx, r.baseMap["anthropic"], strings.TrimSpace(key)); err == nil {
 					for _, m := range apiModels {
 						add(m.ID)

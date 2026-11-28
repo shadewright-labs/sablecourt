@@ -23,7 +23,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
+| `sablecourt.db` | `sablecourtd` | SQLite database. Path is `--db`, relative to the working directory by default. Its directory must exist, the file must not be a symlink and the path must not contain `?`; the daemon creates a missing file at startup and refuses to start if the file, the secret file or the state directory lies under the worktree root (`worktrees` beside the database). `sablectl service install` sets it to `sablecourt.db` in `.local/share/sablecourt` under the home directory, which is also the default state directory (the command ignores `SABLECOURT_STATE_DIR`). |
 | `worktrees/` next to the database | Coding adapter | Per task: `<task>/` (the Git worktree), `<task>.state.json`, `<task>.log`, `<task>.run/`, `<task>.exclude-config`, plus a `.councils/` directory and `.coding-scratch-*` directories. |
 | `.sablecourt-session.json`, `.sablecourt-context.md` | Coding adapter | Written into the task worktree. |
 | `sablecourtd.out.log`, `sablecourtd.err.log` | The launchd job (macOS only) | Standard output and error of the job, in `.local/share/sablecourt` under the home directory. The Linux systemd unit sets no log files. |
@@ -33,7 +33,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablectl/ops.go`, `cmd/sablectl/dx.go`, 
 
 ## Secrets
 
-Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values.
+Source: `internal/secret`. The daemon reads a secret from the OS keyring (service name `sablecourt`), then from the file given by `--secret-file`. That file's directory must exist and the file must not be a symlink; the daemon creates a missing one at startup as an empty JSON map with mode 0600. `sablectl secret set <name>` writes the keyring, or the file when `--secret-file` is given. Workloads never see these values. Each value must be at least 8 bytes after trimming whitespace, so exact-match redaction can hold it: the daemon refuses to start with a shorter one, a manifest reload that names a shorter MCP server secret is refused with nothing changed, and the error names the secret but not its value. The same rule applies to `SABLECOURT_NOTIFY_WEBHOOK_URL` and to a PostgreSQL DSN password, taken as the driver parses it (quoted values, escapes, percent encoding, and `PGPASSWORD` or the password file when the DSN has none).
 
 | Name | Used by | Required for |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ Source: `internal/secret`. The daemon reads a secret from the OS keyring (servic
 | `observer_bearer_token` | Observer routes | `GET /api/v1/observer/*` and the Scry stream for that credential. |
 | `github_webhook_secret` | `POST /api/v1/hooks/github` | Parked: [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) parks GitHub integrations. |
 | `a2a_bearer_token` | `POST /a2a` | Parked. |
-| `github_token` | `git.open_pr` action, `sablectl auth github` | Parked. |
+| `github_token` | `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr`, `sablectl auth github` | GitHub HTTPS pushes and pull request API calls. |
 | `notify_webhook_url` | Chat alerts | Parked. Also read from `SABLECOURT_NOTIFY_WEBHOOK_URL`. |
 | `secretName` of an upstream MCP server | Upstream MCP calls | Parked. The name comes from the manifest. |
 
@@ -89,7 +89,7 @@ The tables in this section and the Environment variable column of the voice tabl
 | `TERM` | `sablectl` | `dumb` turns off the wait animation. |
 | `COLORTERM` | `sablectl` | `truecolor` or `24bit` draws the wait animation in 24-bit colour; any other value uses the 256-colour palette. |
 | `SABLECOURT_PUBLIC_URL` | `sablecourtd` | Base URL placed in chat alerts (parked). |
-| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login` | Docker endpoint, as for the Docker client. |
+| `DOCKER_HOST` | `sablecourtd`, `sablectl harness login`, `sablectl harness install`, `sablectl harness build` | Docker endpoint, as for the Docker client. It must be a local `unix://` socket or a Windows named pipe on the same machine (`npipe:////./pipe/<name>`). On a remote engine (`tcp://`, `ssh://`, a named pipe on another machine such as `npipe:////server/pipe/<name>`, or any other host), `sablecourtd` with the Docker backend, `sablectl harness login` and `sablectl harness install` refuse to start. The check reads only the host string, so a local socket that forwards to a remote engine is not detected. `sablectl harness build` does not make this check: it passes the variable to `docker` (see below), so an image build can run on a remote engine, with no bind mount and no login volume. |
 | `SABLECOURT_NOTIFY_WEBHOOK_URL` | `sablecourtd` | Chat alert webhook, used when the `notify_webhook_url` secret is not set (parked). |
 
 Some names are read only to copy them into the environment of a program the daemon or `sablectl` starts. Writable Git commands in `internal/runtime/coding/git.go` get the whole environment without the `GIT_*` variables. The table lists only names copied one by one; a child process started without an explicit environment inherits the whole one, and that is not listed.
@@ -107,7 +107,7 @@ Some names are read only to copy them into the environment of a program the daem
 
 Source: `internal/runtime/docker`, `internal/runtime/k8s`, `internal/runtime/coding`.
 
-| Variable | Docker and Kubernetes | Host coding runtime (unsupported) | Council container |
+| Variable | Docker and Kubernetes | Host coding runtime (unsupported, forced only) | Harness container (coding task or council turn) |
 | --- | --- | --- | --- |
 | `SABLECOURT_MANAGED` | `1` | `1` | `1` |
 | `SABLECOURT_TASK_ID` | task ID | task ID | task ID |
@@ -133,6 +133,32 @@ The `claude` and `agy` images carry no vendor tool; `sablectl harness install <r
 | `agy` | 1.5.17 | `agy` | `sablecourt-harness-agy` |
 
 Image tags are `sablecourt-harness-<role>:<version>-<rev>` and `sablecourt-harness-proxy:<rev>` for the proxy image.
+
+## Model tiers and families
+
+Source: `internal/contextpack/tiers.go` and `internal/modelfamily/family.go`. A workflow step that names a tier and no `provider` or `model` resolves to one of these routes. `GET` and `POST /api/v1/providers/tiers` and the `/providers` page read and change them, and a saved route replaces the default for its tier.
+
+| Tier | Default provider | Default model | Family |
+| --- | --- | --- | --- |
+| `fast` | `cli:agy` | `gemini-3.8-flash-high` | `google` |
+| `coding` | `cli:claude` | `claude-sonnet-5-5` | `anthropic` |
+| `critic` | `cli:codex` | `gpt-6.2-astra` | `openai` |
+
+The default `critic` route runs a family other than the default `coding` route's, so a verifier step on the `critic` tier can check an author on the `coding` tier. A `coding-agent` workload runs one harness, so a verifier workload that uses the default `critic` route sets `coding.harness: codex`.
+
+The daemon assigns a family from the model name, never from the harness, because `agy` runs both Gemini and Claude models:
+
+| Model name | Family |
+| --- | --- |
+| starts with `claude-`, or is exactly `opus`, `sonnet` or `haiku` | `anthropic` |
+| starts with `gpt-`, `chatgpt-` or `codex-`, or is `o1`, `o3` or `o4` alone or followed by `-` and more | `openai` |
+| starts with `gemini-` | `google` |
+| `anthropic/claude-...` | `anthropic` |
+| `openai/gpt-...`, `openai/chatgpt-...`, or `openai/o` and one digit, alone or followed by `-` and more | `openai` |
+| `google/gemini-...` or `models/gemini-...` | `google` |
+| anything else, including any other path | unknown |
+
+Matching ignores case and surrounding spaces. Something must follow a prefix that ends in `-`, so `o10`, `o1x` and `claude-` stay unknown, and so does a name with a space, a character outside ASCII or a second `/`. A saved route may carry a `family` field for a model no rule matches, such as a local model or a gateway's model name. It must be one of `anthropic`, `openai`, `google`, `meta`, `mistral`, `deepseek`, `qwen`, `xai`, `cohere`, `microsoft` or `amazon`; `unknown` and any other label are refused. The built-in rules always win for the names they match, so `POST /api/v1/providers/tiers` refuses the whole request with 400, writing none of its routes, when a route's `family` disagrees with its model's built-in family (`model_family_override_conflict`) or is malformed (`model_family_override_invalid`). The `/providers` page shows and posts the family of each route. A model with no family stays unknown. Under the amendment of 2026-11-27 to [ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), an unknown family, or a family already in the run's chain, refuses a verifier step at dispatch; that dispatch check is not wired into the daemon yet ([issue 206](https://github.com/shadewright-labs/sablecourt/issues/206)).
 
 ## In depth
 

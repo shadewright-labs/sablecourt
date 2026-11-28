@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -50,22 +51,40 @@ func New(opts Options) *Notifier {
 	}
 }
 
-func (n *Notifier) webhookURL(ctx context.Context) string {
+// webhookURL returns the configured webhook URL, or "" when none is set. A URL
+// too short to redact is refused with an error naming its setting, and no
+// webhook is sent.
+func (n *Notifier) webhookURL(ctx context.Context) (string, error) {
 	if n.secrets != nil {
-		if u, err := n.secrets.Get(ctx, "notify_webhook_url"); err == nil && strings.TrimSpace(u) != "" {
-			return strings.TrimSpace(u)
+		u, err := n.secrets.Get(ctx, "notify_webhook_url")
+		if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+			return "", err
+		}
+		if err == nil && strings.TrimSpace(u) != "" {
+			if err := redact.RegisterSetting("notify_webhook_url", u); err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(u), nil
 		}
 	}
-	return strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL"))
+	u := strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL"))
+	if err := redact.RegisterSetting("SABLECOURT_NOTIFY_WEBHOOK_URL", u); err != nil {
+		return "", err
+	}
+	return u, nil
 }
 
 // Send dispatches a redacted notification if notify_webhook_url is configured.
-// Returns nil when no webhook URL is configured so local setups stay silent.
+// Returns nil when no webhook URL is configured so local setups stay silent,
+// and an error naming the setting when the URL is too short to redact.
 func (n *Notifier) Send(ctx context.Context, ev Event) error {
 	if n == nil {
 		return nil
 	}
-	target := n.webhookURL(ctx)
+	target, err := n.webhookURL(ctx)
+	if err != nil {
+		return err
+	}
 	if target == "" {
 		return nil
 	}
@@ -77,7 +96,6 @@ func (n *Notifier) Send(ctx context.Context, ev Event) error {
 	}
 
 	var req *http.Request
-	var err error
 	lower := strings.ToLower(target)
 
 	switch {

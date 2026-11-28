@@ -142,7 +142,7 @@ func TestCouncilPanelWorkloadsFollowMode(t *testing.T) {
 			if councilSandbox(tc.container) != tc.kind {
 				t.Fatalf("councilSandbox(%v) = %q", tc.container, councilSandbox(tc.container))
 			}
-			bundle, err := ensureCouncilPanelWorkloads(t.Context(), daemonTestStore(t), nil, tc.kind)
+			bundle, err := addCouncilPanelWorkloads(nil, tc.kind)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,5 +171,42 @@ func TestCouncilOpenAdmissionOutlivesCheckoutDeadline(t *testing.T) {
 	resp := councilTestRequest(councilTestHandler(st, nil, opts), http.MethodPost, "/api/v1/councils", token, body)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("POST = %d %s", resp.Code, resp.Body)
+	}
+}
+
+// TestCouncilOpenRefusedWhenCodingUnavailable checks that with no container
+// runtime and host mode off, opening a council is refused with a reason that
+// names the missing runtime, before any host executable or sandbox check and
+// before anything is reserved.
+func TestCouncilOpenRefusedWhenCodingUnavailable(t *testing.T) {
+	repo, _, token := councilTestInputs(t)
+	body := fmt.Sprintf(`{"question":"Review this","repo":%s,"ref":"HEAD"}`, strconv.Quote(repo))
+	for _, tc := range []struct {
+		name    string
+		optIn   bool
+		message string
+	}{
+		{name: "host mode off", message: "no container runtime is configured and host mode is off"},
+		{name: "host mode requested but unavailable", optIn: true, message: "--unsafe-host-harnesses is set but host mode could not start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := daemonTestStore(t)
+			opts := councilTestOptions(token)
+			opts.codingRuntime = func() codingRuntimeStatus { return codingRuntimeStatus{Mode: "unavailable", HostModeOptIn: tc.optIn} }
+			opts.checkCouncilSandbox = func(context.Context) error {
+				t.Error("host sandbox check ran with coding unavailable")
+				return nil
+			}
+			opts.checkCouncilRuntime = func(context.Context, store.CouncilCheckout) error {
+				t.Error("refused request reached runtime admission")
+				return nil
+			}
+			h := councilTestHandler(st, nil, opts)
+			resp := councilTestRequest(h, http.MethodPost, "/api/v1/councils", token, body)
+			if resp.Code != http.StatusServiceUnavailable || !strings.Contains(resp.Body.String(), tc.message) {
+				t.Fatalf("POST = %d %s, want 503 containing %q", resp.Code, resp.Body, tc.message)
+			}
+			councilAssertEmpty(t, st)
+		})
 	}
 }

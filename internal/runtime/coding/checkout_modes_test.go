@@ -273,7 +273,7 @@ printf 'live-ro-verified\n'
 			testWrite(t, harnessDir, tc.harness, script, 0o700)
 
 			worktreeRoot := filepath.Join(tempState, "worktrees")
-			adapter := NewAdapter(worktreeRoot)
+			adapter := newHostModeAdapter(worktreeRoot)
 			adapter.HarnessPaths = map[string]string{tc.harness: harnessPath}
 			spec := scruntime.LaunchSpec{
 				TaskID: "live-" + tc.harness,
@@ -409,7 +409,7 @@ printf 'ref-verified:%s\n' "$(git rev-parse HEAD)"
 	}
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.HarnessPaths = map[string]string{
 		"claude": filepath.Join(harnessDir, "claude"),
 		"codex":  filepath.Join(harnessDir, "codex"),
@@ -506,7 +506,7 @@ printf 'ref-verified:%s\n' "$(git rev-parse HEAD)"
 
 	for _, h := range []scruntime.Handle{h1, h2, h3} {
 		waitUntil(t, func() bool { return outputClosed(adapter.processForHandle(h).done) })
-		fresh := NewAdapter(worktreeRoot)
+		fresh := newHostModeAdapter(worktreeRoot)
 		if exited, err := fresh.HandleExited(ctx, h); err != nil || !exited {
 			t.Fatalf("HandleExited(%s) = %t, %v", h.ExternalID, exited, err)
 		}
@@ -633,7 +633,7 @@ printf 'reviewer-verified\n'
 	testWrite(t, harnessDir, "agy", reviewerScript, 0o700)
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.HarnessPaths = map[string]string{
 		"claude": filepath.Join(harnessDir, "claude"),
 		"codex":  filepath.Join(harnessDir, "codex"),
@@ -847,7 +847,7 @@ func TestCheckoutModeRollbackAndRetry(t *testing.T) {
 			ctx := context.Background()
 			repo := initTempGitRepo(t)
 			worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-			adapter := NewAdapter(worktreeRoot)
+			adapter := newHostModeAdapter(worktreeRoot)
 
 			badDir := t.TempDir()
 			badBin := filepath.Join(badDir, "missing-claude")
@@ -1049,7 +1049,7 @@ printf 'writer-done\n'
 	testWrite(t, harnessDir, "claude", writerScript, 0o700)
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.HarnessPaths = map[string]string{
 		"claude": filepath.Join(harnessDir, "claude"),
 	}
@@ -1200,7 +1200,7 @@ printf 'reviewer-clean\n'
 `, baseCommit), 0o700)
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.HarnessPaths = map[string]string{
 		"claude": filepath.Join(harnessDir, "claude"),
 		"codex":  filepath.Join(harnessDir, "codex"),
@@ -1283,9 +1283,9 @@ func TestWriterModeSingleWriterAcrossAdapterInstances(t *testing.T) {
 	ctx := context.Background()
 	repo := initTempGitRepo(t)
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	a1 := NewAdapter(worktreeRoot)
+	a1 := newHostModeAdapter(worktreeRoot)
 	a1.DryRun = true
-	a2 := NewAdapter(worktreeRoot)
+	a2 := newHostModeAdapter(worktreeRoot)
 	a2.DryRun = true
 
 	makeSpec := func(taskID string) scruntime.LaunchSpec {
@@ -1493,7 +1493,7 @@ func TestLiveModeNarrowsGitExposure(t *testing.T) {
 	testGit(t, repo, "add", "staged.txt")
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	siblingAdapter := NewAdapter(worktreeRoot)
+	siblingAdapter := newHostModeAdapter(worktreeRoot)
 	siblingAdapter.DryRun = true
 	siblingHandle := startTestTask(t, siblingAdapter, scruntime.LaunchSpec{
 		TaskID: "sibling-live-exposure",
@@ -1593,7 +1593,7 @@ printf 'live-git-narrowed-ok\n'
 `, siblingIndexPath, siblingLooseObjPath, siblingRefPath, logsHeadPath, siblingStagedOID, siblingHandle.Branch)
 	testWrite(t, harnessDir, "claude", script, 0o700)
 
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.HarnessPaths = map[string]string{"claude": filepath.Join(harnessDir, "claude")}
 	h, err := adapter.Start(ctx, scruntime.LaunchSpec{
 		TaskID: "live-narrow-git",
@@ -1655,7 +1655,7 @@ exec %q "$@"
 	t.Cleanup(func() { _ = os.WriteFile(releaseMarker, []byte("go"), 0o600) })
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	adapter := NewAdapter(worktreeRoot)
+	adapter := newHostModeAdapter(worktreeRoot)
 	adapter.DryRun = true
 	spec := scruntime.LaunchSpec{
 		TaskID: "slow-ref-1",
@@ -1746,7 +1746,7 @@ func TestCouncilInterruptedReservationReconciled(t *testing.T) {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			t.Fatal(err)
 		}
-		a := NewAdapter(payload.Root)
+		a := newHostModeAdapter(payload.Root)
 		a.DryRun = true
 		a.beforeTaskState = func(_ string) {
 			// Simulate abrupt process crash between council reservation and writing task state.
@@ -1836,7 +1836,7 @@ func TestCouncilInterruptedReservationReconciled(t *testing.T) {
 			// First crash: verify retry from a fresh adapter reconciles the journal and succeeds.
 			runCrash("crash-task-1", tc.conclaveID)
 
-			fresh := NewAdapter(worktreeRoot)
+			fresh := newHostModeAdapter(worktreeRoot)
 			fresh.DryRun = true
 			h, err := fresh.Start(ctx, spec)
 			if err != nil {
@@ -1852,7 +1852,7 @@ func TestCouncilInterruptedReservationReconciled(t *testing.T) {
 			// Second crash on a separate council: verify CleanupCouncil alone reconciles the journal.
 			cleanupID := tc.conclaveID + "-cleanup"
 			runCrash("crash-task-2", cleanupID)
-			fresh2 := NewAdapter(worktreeRoot)
+			fresh2 := newHostModeAdapter(worktreeRoot)
 			if err := fresh2.CleanupCouncil(ctx, cleanupID); err != nil {
 				t.Fatalf("CleanupCouncil after interrupted reservation failed: %v", err)
 			}
@@ -1871,7 +1871,7 @@ func TestLiveModeWithoutGitInfoExclude(t *testing.T) {
 		t.Fatalf("expected no .git/info/exclude with --template=, got err=%v", err)
 	}
 
-	a := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
+	a := newHostModeAdapter(filepath.Join(t.TempDir(), "worktrees"))
 	a.DryRun = true
 	spec := scruntime.LaunchSpec{
 		TaskID: "live-no-exclude",
@@ -1923,7 +1923,7 @@ func TestWriterRetryRecreatesCleanWorktreeFromLastTip(t *testing.T) {
 			baseCommit := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
 			harnessDir := t.TempDir()
 			worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-			adapter := NewAdapter(worktreeRoot)
+			adapter := newHostModeAdapter(worktreeRoot)
 			adapter.HarnessPaths = map[string]string{
 				"claude": filepath.Join(harnessDir, "claude"),
 			}

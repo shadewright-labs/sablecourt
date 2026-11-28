@@ -3,7 +3,7 @@
 Short definitions, with the spelling used in code, manifests and commands. Longer explanations are in [concepts](concepts.md). Terms from the court vocabulary are glossed in plain words.
 
 Action
-:   One entry of the closed catalog of typed changes the MCP Gate can run: `git.create_branch`, `git.open_pr` and `sandbox.propose_promotion`. There is no free-form command. See [tools and actions](how-it-works/tools-and-actions.md).
+:   One entry of the closed catalog of typed changes the MCP Gate can run: `git.create_branch`, `git.push`, `git.open_pr`, `git.pr_checks`, `git.merge_pr` and `sandbox.propose_promotion`. There is no free-form command. See [tools and actions](how-it-works/tools-and-actions.md).
 
 Approval
 :   A pending request to run an action whose policy effect is `approve`. Its payload is pinned by a SHA-256 digest and its status is `pending`, `approved`, `denied`, `expired` or `consumed` (used once, never usable again). See [approvals](how-it-works/approvals.md).
@@ -60,7 +60,7 @@ Lease
 :   The scoped, short-lived credential of a task: `sc_task_` plus 64 hex characters, stored only as a hash. See [identity and access](how-it-works/identity-and-access.md).
 
 Learning
-:   A rule for future runs. Today a `learning:*` entry in Court Memory; the ADR-0012 record is partly built. See [context and learning](how-it-works/context-and-learning.md).
+:   A rule for future runs, kept as an ADR-0012 learning record. Legacy `learning:*` entries in Court Memory reach no packet. See [context and learning](how-it-works/context-and-learning.md).
 
 Manifest
 :   A YAML document of `apiVersion: sablecourt.io/v1alpha1`. See [manifests](reference/manifests.md).
@@ -90,7 +90,7 @@ Reconciler
 :   The loop in the daemon that observes tasks, launches `submitted` ones and records the outcome. See [tasks](how-it-works/tasks.md).
 
 Redaction
-:   Removal of secret-shaped text at a boundary, done by `internal/redact` in linear time. The Model Gate does not redact request or response bodies.
+:   Removal of secrets at a boundary, done by `internal/redact` in linear time: exact match of the secrets the daemon holds (literal bytes and a fixed list of spellings) and best-effort pattern rules, both matched on the same text and merged before anything is replaced, so neither leaves a fragment of the other. The Model Gate forwards request bodies unchanged and runs exact match on response headers and bodies.
 
 Relic
 :   A named, redacted file shared in a Conclave, put with `sablectl conclave relic put`.
