@@ -79,10 +79,12 @@ func (r *Reconciler) workflowCommand(ctx context.Context, task domain.Task, wl d
 	if !ok || domain.ValidCommandArgv(cmd.Argv) != nil {
 		return nil, refuse
 	}
-	// A run whose first author base is unknown, no recorded author base, or
-	// one that cannot name a commit of the same object format as the pinned
-	// commit, fails the step: no comparison is skipped (issue 214).
-	if member.AuthorBaseUnknown || len(member.AuthorBase) != len(member.AuthorCommit) || !validCommitID(member.AuthorBase) {
+	// Only a first author base recorded with its provenance, naming a commit
+	// of the same object format as the pinned commit, is compared from; a
+	// pending, unknown or pre-guard registration fails the step: no
+	// comparison is skipped (issue 214).
+	base, recorded := recordedAuthorBase(member)
+	if !recorded || len(base) != len(member.AuthorCommit) {
 		return nil, &scruntime.CommandRefusal{Command: meta.Command, Reason: scruntime.CommandAuthorBaseUnavailable}
 	}
 	return &scruntime.CommandSpec{
@@ -90,7 +92,7 @@ func (r *Reconciler) workflowCommand(ctx context.Context, task domain.Task, wl d
 		Argv:           slices.Clone(cmd.Argv),
 		Timeout:        cmd.Timeout(),
 		MaxOutputBytes: cmd.OutputCap(),
-		AuthorBase:     member.AuthorBase,
+		AuthorBase:     base,
 	}, nil
 }
 
@@ -108,20 +110,6 @@ func (r *Reconciler) commandStepOf(workflow string, index int, workload string) 
 		return domain.WorkflowStep{}, domain.Workload{}, false
 	}
 	return steps[index], bundle.Workloads[workload], true
-}
-
-// earlierAuthorStep reports whether the loaded bundle declares an author step
-// of this workflow before index; with no bundle or workflow it reports true,
-// so the run's author base fails closed.
-func (r *Reconciler) earlierAuthorStep(workflow string, index int) bool {
-	r.mu.Lock()
-	bundle := r.bundle
-	r.mu.Unlock()
-	if bundle == nil {
-		return true
-	}
-	wf, ok := bundle.Workflows[workflow]
-	return !ok || earlierAuthorStep(wf.Spec.Steps, index)
 }
 
 // isCommandStep reports whether the bundle declares this workflow step as a command step.
@@ -158,7 +146,7 @@ func commandRefusalFacts(refusal *scruntime.CommandRefusal) string {
 		scruntime.CommandNotAllowed:            "the command is not in the allowed set of the step's workload, or the task is not a registered command step",
 		scruntime.CommandNoContainerRuntime:    "commands run only in harness containers and no container runtime is configured; there is no host fallback",
 		scruntime.CommandContainerRefused:      "the command's harness container could not be built or started; there is no host fallback",
-		scruntime.CommandAuthorBaseUnavailable: "the run has no recorded author base, or it is not an ancestor of the commit the step checks",
+		scruntime.CommandAuthorBaseUnavailable: "the run has no recorded first author base (unknown, or the run started before the daemon recorded it), or it is not an ancestor of the commit the step checks",
 	}[refusal.Reason]
 	raw, _ := json.Marshal(struct {
 		Reason  string `json:"reason"`

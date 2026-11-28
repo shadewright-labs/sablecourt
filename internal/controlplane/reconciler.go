@@ -577,7 +577,9 @@ func (r *Reconciler) startWorkflow(ctx context.Context, workflowName, idempotenc
 		payload["model"] = mod
 	}
 	raw, _ := json.Marshal(payload)
-	return r.submitTask(ctx, step.Workload, idempotencyKey, string(raw), "", &workflowStepRecord{Workflow: workflowName})
+	// The run starts with no author base recorded; a daemon from before
+	// issue 214 never wrote this state, so its runs stay unknown.
+	return r.submitTask(ctx, step.Workload, idempotencyKey, string(raw), "", &workflowStepRecord{Workflow: workflowName, AuthorBaseState: authorBasePending})
 }
 
 type councilCleaner interface {
@@ -681,11 +683,11 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 			return domain.Task{}, err
 		}
 		if member != nil && payload["role"] != "verifier" {
-			// A retried author keeps the run's first author base or its
-			// unknown state; if the failed attempt was the first, its own
-			// base, or the unknown state when it has none, becomes it. Read
+			// A retried author keeps the run's first author base and its
+			// state; if the failed attempt was the run's first, its own base
+			// becomes it. Read from the run's recorded history (issue 214),
 			// before the pin below changes.
-			setRunAuthorBase(member, member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), r.earlierAuthorStep(member.Workflow, member.Index), orig.ArtifactsJSON)
+			setRunAuthorBase(member, member, orig)
 			if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
 				member.AuthorCommit = commit
 			}
@@ -1624,7 +1626,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase, AuthorBaseUnknown: member.AuthorBaseUnknown})
+				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase, AuthorBaseState: member.AuthorBaseState})
 				if err != nil {
 					return err
 				}
@@ -1697,7 +1699,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	}
 	raw, _ := json.Marshal(payload)
 	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
-	setRunAuthorBase(&next, member, !completedVerifier && step.Command == "", earlierAuthorStep(wf.Spec.Steps, meta.StepIndex), completedTask.ArtifactsJSON)
+	setRunAuthorBase(&next, member, completedTask)
 	if nextStep.Role == "verifier" || nextStep.Command != "" {
 		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)
 	}

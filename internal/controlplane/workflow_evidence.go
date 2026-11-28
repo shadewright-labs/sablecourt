@@ -37,14 +37,16 @@ type workflowStepRecord struct {
 	// AuthorBase is the commit the run's first author step started from
 	// (issue 214), carried from step to step and never replaced once set.
 	AuthorBase string `json:",omitempty"`
-	// AuthorBaseUnknown records that the run's first author attempt
-	// completed or failed without a recorded base (it started before issue
-	// 214, or its git-base artifact was missing or invalid). It is carried
-	// from step to step like AuthorBase, no later author's base replaces
-	// it, and a command step of the run is refused (issue 214).
-	AuthorBaseUnknown bool   `json:",omitempty"`
-	Status            string `json:",omitempty"`
-	Reason            string `json:",omitempty"`
+	// AuthorBaseState says where AuthorBase comes from (issue 214):
+	// authorBasePending (no author attempt of the run has recorded a base
+	// yet), authorBaseRecorded (AuthorBase is the run's first author base)
+	// or authorBaseUnknown. A daemon from before this rule never writes it,
+	// so a registration without it, whatever AuthorBase it holds, has an
+	// unknown first author base. A command step of the run is refused unless
+	// the state is authorBaseRecorded.
+	AuthorBaseState string `json:",omitempty"`
+	Status          string `json:",omitempty"`
+	Reason          string `json:",omitempty"`
 }
 
 func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
@@ -121,50 +123,104 @@ func authorCommit(artifacts string) string {
 	return commitArtifact(artifacts, "git-commit")
 }
 
-// setRunAuthorBase sets the author base and its unknown state that next, the
-// registration of the step after completed, carries (issue 214):
-//
-//   - a run whose first author base is unknown stays unknown, and a recorded
-//     base is carried unchanged; no later author replaces either;
-//   - a verifier or command step before any author sets neither;
-//   - the run's first author attempt that hands on a commit sets the commit
-//     its checkout started from, or the unknown state when it has no valid
-//     git-base artifact; an attempt that hands on no commit (a failed run)
-//     sets neither, so its retry, checked out afresh, is the first attempt;
-//   - an author that cannot be the first attempt (pinned to an earlier
-//     attempt's commit, or at a later workflow step than the first author
-//     step) finding neither recorded comes from a registration written
-//     before issue 214, so it sets the unknown state.
-//
-// A command step of a run in the unknown state is refused. next and completed
-// may be the same record (a retried attempt keeps its registration).
-func setRunAuthorBase(next, completed *workflowStepRecord, authorStep, earlierAuthor bool, artifacts string) {
-	base, unknown := "", false
-	switch {
-	case completed.AuthorBaseUnknown:
-		unknown = true
-	case completed.AuthorBase != "":
-		base = completed.AuthorBase
-	case !authorStep:
-	case completed.AuthorCommit != "" || earlierAuthor:
-		unknown = true
-	case authorCommit(artifacts) == "":
-	default:
-		base = commitArtifact(artifacts, scruntime.GitBaseArtifact)
-		unknown = base == ""
+// The states of a run's first author base (workflowStepRecord.AuthorBaseState).
+const (
+	authorBasePending  = "pending"
+	authorBaseRecorded = "recorded"
+	authorBaseUnknown  = "unknown"
+)
+
+// recordedAuthorBase reports the run's first author base that a command step
+// registration may compare from: only a base recorded by a daemon that keeps
+// its provenance (issue 214).
+func recordedAuthorBase(step *workflowStepRecord) (string, bool) {
+	if step.AuthorBaseState != authorBaseRecorded || !validCommitID(step.AuthorBase) {
+		return "", false
 	}
-	next.AuthorBase, next.AuthorBaseUnknown = base, unknown
+	return step.AuthorBase, true
 }
 
-// earlierAuthorStep reports whether steps declare an author step (neither a
-// verifier nor a command step) before index. An index outside steps reports
-// true, so a registration that does not match the workflow fails closed.
-func earlierAuthorStep(steps []domain.WorkflowStep, index int) bool {
-	if index < 0 || index > len(steps) {
+// setRunAuthorBase sets the author base and its state that next, the
+// registration of the step after completed, carries (issue 214). The rule
+// reads only the run's recorded history (completed's registration, and the
+// completed task's own input and artifacts), never the loaded bundle:
+//
+//   - a recorded base is carried unchanged; no later author replaces it;
+//   - any state other than pending or recorded (a registration written
+//     before this rule, which may hold a later author's base, or the
+//     unknown state) gives the unknown state, and so does a recorded state
+//     without a valid base;
+//   - while pending, a verifier or command step changes nothing, and a
+//     step whose input does not parse gives the unknown state;
+//   - while pending, an author attempt that names its checkout's start in a
+//     valid git-base artifact records it; an attempt that did not complete
+//     (failed or cancelled) and left neither a git-base nor a git-commit
+//     artifact keeps the state pending, so its retry, checked out afresh,
+//     is the first attempt; any other author outcome (a commit without a
+//     base, an invalid or repeated base, a completed attempt with no
+//     artifacts, an attempt pinned to an earlier commit) gives the unknown
+//     state.
+//
+// next and completed may be the same record (a retried attempt keeps its
+// registration).
+func setRunAuthorBase(next, completed *workflowStepRecord, completedTask domain.Task) {
+	base, state := "", authorBaseUnknown
+	switch {
+	case completed.AuthorBaseState == authorBaseRecorded:
+		if recorded, ok := recordedAuthorBase(completed); ok {
+			base, state = recorded, authorBaseRecorded
+		}
+	case completed.AuthorBaseState != authorBasePending:
+	case !validStepInput(completedTask.InputJSON):
+	case !recordedAuthorStep(completedTask.InputJSON):
+		state = authorBasePending
+	case completed.AuthorCommit != "":
+	default:
+		artifacts := completedTask.ArtifactsJSON
+		if recorded := commitArtifact(artifacts, scruntime.GitBaseArtifact); recorded != "" {
+			base, state = recorded, authorBaseRecorded
+		} else if completedTask.State != domain.TaskStateCompleted && !hasArtifact(artifacts, scruntime.GitBaseArtifact) && !hasArtifact(artifacts, "git-commit") {
+			state = authorBasePending
+		}
+	}
+	next.AuthorBase, next.AuthorBaseState = base, state
+}
+
+// stepKind is the part of a workflow step task's input, as the control plane
+// wrote it, that says which kind of step it is.
+type stepKind struct {
+	Role    string `json:"role"`
+	Command string `json:"command"`
+}
+
+// validStepInput reports whether a step task's input parses as a JSON object.
+func validStepInput(input string) bool {
+	var kind *stepKind
+	return json.Unmarshal([]byte(input), &kind) == nil && kind != nil
+}
+
+// recordedAuthorStep reports whether a workflow step task's own input makes
+// it an author step: neither a verifier nor a command step.
+func recordedAuthorStep(input string) bool {
+	var kind stepKind
+	if json.Unmarshal([]byte(input), &kind) != nil {
+		return false
+	}
+	return kind.Role != "verifier" && kind.Command == ""
+}
+
+// hasArtifact reports whether artifacts name an artifact called name, valid
+// or not. Artifacts that do not parse count as present, so they fail closed.
+func hasArtifact(artifacts, name string) bool {
+	if artifacts == "" {
+		return false
+	}
+	var items []scruntime.Artifact
+	if json.Unmarshal([]byte(artifacts), &items) != nil {
 		return true
 	}
-	for _, step := range steps[:index] {
-		if step.Role != "verifier" && step.Command == "" {
+	for _, item := range items {
+		if item.Name == name {
 			return true
 		}
 	}

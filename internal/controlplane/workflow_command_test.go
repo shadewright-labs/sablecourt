@@ -476,10 +476,13 @@ func TestWorkflowCommandResolvesArgvOnlyFromManifest(t *testing.T) {
 		}
 	}
 	base := strings.Repeat("b", 40)
-	register("task_registered", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base})
+	register("task_registered", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base, AuthorBaseState: authorBaseRecorded})
+	register("task_pending", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBaseState: authorBasePending})
+	register("task_unknown", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base, AuthorBaseState: authorBaseUnknown})
+	register("task_pre_guard_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base})
 	register("task_no_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit})
-	register("task_bad_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: "HEAD~1"})
-	register("task_other_format", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: strings.Repeat("b", 64)})
+	register("task_bad_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: "HEAD~1", AuthorBaseState: authorBaseRecorded})
+	register("task_other_format", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: strings.Repeat("b", 64), AuthorBaseState: authorBaseRecorded})
 	register("task_no_commit", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1})
 	register("task_wrong_index", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 2, AuthorCommit: commit})
 	stepInput := func(extra string) string {
@@ -500,6 +503,9 @@ func TestWorkflowCommandResolvesArgvOnlyFromManifest(t *testing.T) {
 		"registration without author base": {id: "task_no_base", input: stepInput(""), wl: wl, noBase: true},
 		"author base not a commit ID":      {id: "task_bad_base", input: stepInput(""), wl: wl, noBase: true},
 		"author base of another format":    {id: "task_other_format", input: stepInput(""), wl: wl, noBase: true},
+		"author base still pending":        {id: "task_pending", input: stepInput(""), wl: wl, noBase: true},
+		"author base unknown":              {id: "task_unknown", input: stepInput(""), wl: wl, noBase: true},
+		"pre-guard registration with base": {id: "task_pre_guard_base", input: stepInput(""), wl: wl, noBase: true},
 		"ordinary task":                    {id: "task_plain", input: `{"prompt":"edit"}`, wl: wl},
 		"registered step":                  {id: "task_registered", input: stepInput(""), wl: wl, want: checkArgv},
 		"argv in input is ignored":         {id: "task_registered", input: stepInput(`,"argv":["/bin/rm","-rf","/"]`), wl: wl, want: checkArgv},

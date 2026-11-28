@@ -136,7 +136,7 @@ func TestInvariantGuardStopsTheRunBeforeReview(t *testing.T) {
 			// The base is durable: a reconciler built on the same store reads it.
 			fresh := NewReconciler(Options{Store: f.st, Bundle: f.bundle, Policy: policy.NewEngine(nil, nil)})
 			reg, err := fresh.workflowStep(t.Context(), check.ID)
-			if err != nil || reg == nil || reg.AuthorBase != base || reg.AuthorCommit != authorCommit(author.ArtifactsJSON) {
+			if err != nil || reg == nil || reg.AuthorBase != base || reg.AuthorBaseState != authorBaseRecorded || reg.AuthorCommit != authorCommit(author.ArtifactsJSON) {
 				t.Fatalf("command registration after restart = %+v, %v", reg, err)
 			}
 		})
@@ -274,7 +274,7 @@ func TestRetryTaskWithHandoffAuthorBase(t *testing.T) {
 		}
 		return got
 	}
-	orig := failed("task_first", first, commitA, workflowStepRecord{RunID: "task_first", Workflow: commandWorkflow})
+	orig := failed("task_first", first, commitA, workflowStepRecord{RunID: "task_first", Workflow: commandWorkflow, AuthorBaseState: authorBasePending})
 	retry, err := f.r.RetryTaskWithHandoff(ctx, orig.ID, false, "")
 	if err != nil {
 		t.Fatal(err)
@@ -300,12 +300,14 @@ func TestRetryTaskWithHandoffAuthorBase(t *testing.T) {
 	}
 }
 
-// TestSetRunAuthorBase checks which step sets the run's author base or its
-// unknown state: only the run's first author attempt, only once.
+// TestSetRunAuthorBase checks which step sets the run's author base and its
+// state: only the run's first author attempt, only once, and only on a run
+// whose registrations carry the state (written with the issue 214 rule). The
+// step's kind comes from its own input, never from the loaded bundle.
 func TestSetRunAuthorBase(t *testing.T) {
 	t.Parallel()
 	base, other := strings.Repeat("1", 40), strings.Repeat("2", 40)
-	// arts is a completed author's artifacts: its commit and these bases.
+	// arts is an author's artifacts: its commit and these bases.
 	arts := func(texts ...string) string {
 		items := []scruntime.Artifact{{Name: "git-commit", ContentType: "text/plain", Text: strings.Repeat("3", 40)}}
 		for _, text := range texts {
@@ -314,63 +316,70 @@ func TestSetRunAuthorBase(t *testing.T) {
 		raw, _ := json.Marshal(items)
 		return string(raw)
 	}
+	baseOnly := `[{"name":"git-base","contentType":"text/plain","text":"` + base + `"}]`
+	const (
+		author   = `{"workflow":"w","step_index":0,"role":"author"}`
+		unnamed  = `{"workflow":"w","step_index":0}`
+		verifier = `{"workflow":"w","step_index":1,"role":"verifier"}`
+		command  = `{"workflow":"w","step_index":1,"command":"check"}`
+	)
+	const (
+		pending  = authorBasePending
+		recorded = authorBaseRecorded
+		unknown  = authorBaseUnknown
+	)
+	done, failed, cancelled := domain.TaskStateCompleted, domain.TaskStateFailed, domain.TaskStateCancelled
 	for name, tc := range map[string]struct {
-		recorded      string
-		unknown       bool
-		pinned        string
-		author        bool
-		earlierAuthor bool
-		artifacts     string
-		want          string
-		wantUnknown   bool
+		state, base, pinned string
+		input               string
+		taskState           domain.TaskState
+		artifacts           string
+		want, wantState     string
 	}{
-		"first author records its base":                 {author: true, artifacts: arts(base), want: base},
-		"a pinned author with no base sets unknown":     {pinned: other, author: true, artifacts: arts(other), wantUnknown: true},
-		"a later step's author with no base is unknown": {author: true, earlierAuthor: true, artifacts: arts(other), wantUnknown: true},
-		"a later author keeps the first":                {recorded: base, author: true, artifacts: arts(other), want: base},
-		"unknown stays unknown after a later author":    {unknown: true, author: true, artifacts: arts(other), wantUnknown: true},
-		"unknown stays unknown after a verifier":        {unknown: true, author: false, artifacts: arts(other), wantUnknown: true},
-		"unknown wins over a recorded base":             {recorded: base, unknown: true, author: true, artifacts: arts(base), wantUnknown: true},
-		"a verifier or command records none":            {author: false, artifacts: arts(base)},
-		"a verifier passes the base on":                 {recorded: base, author: false, artifacts: arts(other), want: base},
-		"two base artifacts":                            {author: true, artifacts: arts(base, other), wantUnknown: true},
-		"base not a commit ID":                          {author: true, artifacts: arts("HEAD"), wantUnknown: true},
-		"a commit and no base":                          {author: true, artifacts: arts(), wantUnknown: true},
-		"a failed attempt with no commit sets neither":  {author: true, artifacts: `[{"name":"git-base","contentType":"text/plain","text":"` + base + `"}]`},
-		"no artifacts":                                  {author: true, artifacts: ""},
-		"no artifacts after a pinned attempt":           {pinned: other, author: true, artifacts: "", wantUnknown: true},
+		"first author records its base":               {state: pending, input: author, taskState: done, artifacts: arts(base), want: base, wantState: recorded},
+		"an author without a role records its base":   {state: pending, input: unnamed, taskState: done, artifacts: arts(base), want: base, wantState: recorded},
+		"a failed first author with a commit records": {state: pending, input: author, taskState: failed, artifacts: arts(base), want: base, wantState: recorded},
+		"a failed attempt with only a base records":   {state: pending, input: author, taskState: failed, artifacts: baseOnly, want: base, wantState: recorded},
+		"a failed attempt with nothing stays pending": {state: pending, input: author, taskState: failed, artifacts: "", wantState: pending},
+		"a failed attempt with other artifacts":       {state: pending, input: author, taskState: failed, artifacts: `[{"name":"git-status","contentType":"text/plain","text":""}]`, wantState: pending},
+		"a cancelled attempt with nothing":            {state: pending, input: author, taskState: cancelled, artifacts: "[]", wantState: pending},
+		"a completed author with nothing is unknown":  {state: pending, input: author, taskState: done, artifacts: "", wantState: unknown},
+		"a failed attempt with unreadable artifacts":  {state: pending, input: author, taskState: failed, artifacts: "{", wantState: unknown},
+		"a failed attempt with an invalid base":       {state: pending, input: author, taskState: failed, artifacts: `[{"name":"git-base","contentType":"text/plain","text":"HEAD"}]`, wantState: unknown},
+		"a pinned author while pending is unknown":    {state: pending, pinned: other, input: author, taskState: done, artifacts: arts(other), wantState: unknown},
+		"a later author keeps the first":              {state: recorded, base: base, input: author, taskState: done, artifacts: arts(other), want: base, wantState: recorded},
+		"a verifier passes the base on":               {state: recorded, base: base, input: verifier, taskState: done, artifacts: arts(other), want: base, wantState: recorded},
+		"a recorded state without a base is unknown":  {state: recorded, input: author, taskState: done, artifacts: arts(base), wantState: unknown},
+		"a recorded state with a bad base is unknown": {state: recorded, base: "HEAD", input: author, taskState: done, artifacts: arts(base), wantState: unknown},
+		"a verifier before any author stays pending":  {state: pending, input: verifier, taskState: done, artifacts: arts(base), wantState: pending},
+		"a command before any author stays pending":   {state: pending, input: command, taskState: done, artifacts: arts(base), wantState: pending},
+		"unreadable input is unknown":                 {state: pending, input: "edit the file", taskState: done, artifacts: arts(base), wantState: unknown},
+		"unknown stays unknown after a later author":  {state: unknown, input: author, taskState: done, artifacts: arts(other), wantState: unknown},
+		"unknown stays unknown after a verifier":      {state: unknown, input: verifier, taskState: done, artifacts: arts(other), wantState: unknown},
+		"an unrecognised state is unknown":            {state: "set", base: base, input: author, taskState: done, artifacts: arts(base), wantState: unknown},
+		"pre-guard, no base, is unknown":              {input: author, taskState: done, artifacts: arts(base), wantState: unknown},
+		"pre-guard with a later author's base":        {base: other, input: author, taskState: done, artifacts: arts(base), wantState: unknown},
+		"pre-guard before a verifier":                 {base: other, input: verifier, taskState: done, artifacts: arts(base), wantState: unknown},
+		"two base artifacts":                          {state: pending, input: author, taskState: done, artifacts: arts(base, other), wantState: unknown},
+		"base not a commit ID":                        {state: pending, input: author, taskState: done, artifacts: arts("HEAD"), wantState: unknown},
+		"a commit and no base":                        {state: pending, input: author, taskState: done, artifacts: arts(), wantState: unknown},
+		"a failed commit and no base":                 {state: pending, input: author, taskState: failed, artifacts: arts(), wantState: unknown},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			completed := &workflowStepRecord{AuthorBase: tc.recorded, AuthorBaseUnknown: tc.unknown, AuthorCommit: tc.pinned}
+			completed := &workflowStepRecord{AuthorBase: tc.base, AuthorBaseState: tc.state, AuthorCommit: tc.pinned}
+			task := domain.Task{InputJSON: tc.input, State: tc.taskState, ArtifactsJSON: tc.artifacts}
 			var next workflowStepRecord
-			setRunAuthorBase(&next, completed, tc.author, tc.earlierAuthor, tc.artifacts)
-			if next.AuthorBase != tc.want || next.AuthorBaseUnknown != tc.wantUnknown {
-				t.Fatalf("next = base %q, unknown %v; want %q, %v", next.AuthorBase, next.AuthorBaseUnknown, tc.want, tc.wantUnknown)
+			setRunAuthorBase(&next, completed, task)
+			if next.AuthorBase != tc.want || next.AuthorBaseState != tc.wantState {
+				t.Fatalf("next = base %q, state %q; want %q, %q", next.AuthorBase, next.AuthorBaseState, tc.want, tc.wantState)
 			}
 			// The same record as both (a retried attempt) gives the same answer.
-			setRunAuthorBase(completed, completed, tc.author, tc.earlierAuthor, tc.artifacts)
-			if completed.AuthorBase != tc.want || completed.AuthorBaseUnknown != tc.wantUnknown {
-				t.Fatalf("in place = base %q, unknown %v; want %q, %v", completed.AuthorBase, completed.AuthorBaseUnknown, tc.want, tc.wantUnknown)
+			setRunAuthorBase(completed, completed, task)
+			if completed.AuthorBase != tc.want || completed.AuthorBaseState != tc.wantState {
+				t.Fatalf("in place = base %q, state %q; want %q, %q", completed.AuthorBase, completed.AuthorBaseState, tc.want, tc.wantState)
 			}
 		})
-	}
-}
-
-// TestEarlierAuthorStep checks which workflow steps count as an earlier
-// author step.
-func TestEarlierAuthorStep(t *testing.T) {
-	t.Parallel()
-	steps := []domain.WorkflowStep{
-		{Name: "check", Command: "check"},
-		{Name: "review", Role: "verifier"},
-		{Name: "author", Role: "author"},
-		{Name: "polish"},
-	}
-	for index, want := range map[int]bool{-1: true, 0: false, 1: false, 2: false, 3: true, 4: true, 5: true} {
-		if got := earlierAuthorStep(steps, index); got != want {
-			t.Errorf("earlierAuthorStep(%d) = %v, want %v", index, got, want)
-		}
 	}
 }
 
@@ -409,7 +418,7 @@ func TestLegacyFailedAuthorRetryFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := f.r.workflowStep(ctx, retry.ID)
-	if err != nil || reg == nil || reg.AuthorBase != "" || !reg.AuthorBaseUnknown || reg.AuthorCommit != commitA {
+	if err != nil || reg == nil || reg.AuthorBase != "" || reg.AuthorBaseState != authorBaseUnknown || reg.AuthorCommit != commitA {
 		t.Fatalf("retry registration = %+v, %v; want no base, the unknown state, commit %s", reg, err, commitA)
 	}
 	// The retry, pinned to commitA, completes and reports its own checkout base.
@@ -436,7 +445,7 @@ func TestLegacyFailedAuthorRetryFailsClosed(t *testing.T) {
 		t.Fatal("no guard step after the retry")
 	}
 	reg, err = f.r.workflowStep(ctx, guard.ID)
-	if err != nil || reg == nil || reg.AuthorBase != "" || !reg.AuthorBaseUnknown {
+	if err != nil || reg == nil || reg.AuthorBase != "" || reg.AuthorBaseState != authorBaseUnknown {
 		t.Fatalf("guard registration = %+v, %v; want no author base and the unknown state", reg, err)
 	}
 	_, err = f.r.workflowCommand(ctx, *guard, f.bundle.Workloads["coder"])
@@ -474,7 +483,7 @@ func TestLegacyFirstAuthorBeforeSecondAuthorFailsClosed(t *testing.T) {
 			now := time.Now().UTC()
 			first := domain.Task{ID: "task_legacy_first", IdempotencyKey: "task_legacy_first", WorkloadName: "coder", State: domain.TaskStateSubmitted,
 				InputJSON: `{"workflow":"` + workflow + `","step_index":0,"role":"author"}`, CreatedAt: now, UpdatedAt: now}
-			entry, err := f.r.workflowStepEntry(first.ID, workflowStepRecord{RunID: first.ID, Workflow: workflow})
+			entry, err := f.r.workflowStepEntry(first.ID, workflowStepRecord{RunID: first.ID, Workflow: workflow, AuthorBaseState: authorBasePending})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -506,7 +515,7 @@ func TestLegacyFirstAuthorBeforeSecondAuthorFailsClosed(t *testing.T) {
 			}
 			second := child(first.ID)
 			reg, err := f.r.workflowStep(ctx, second.ID)
-			if err != nil || reg == nil || reg.AuthorBase != "" || !reg.AuthorBaseUnknown {
+			if err != nil || reg == nil || reg.AuthorBase != "" || reg.AuthorBaseState != authorBaseUnknown {
 				t.Fatalf("second author registration = %+v, %v; want the first author base recorded as unknown", reg, err)
 			}
 			if preUpgradeRegistration {
@@ -534,7 +543,7 @@ func TestLegacyFirstAuthorBeforeSecondAuthorFailsClosed(t *testing.T) {
 			}
 			guard := child(second.ID)
 			reg, err = f.r.workflowStep(ctx, guard.ID)
-			if err != nil || reg == nil || reg.AuthorBase != "" || !reg.AuthorBaseUnknown || reg.AuthorCommit != commitB {
+			if err != nil || reg == nil || reg.AuthorBase != "" || reg.AuthorBaseState != authorBaseUnknown || reg.AuthorCommit != commitB {
 				t.Fatalf("guard registration = %+v, %v; want no author base, the unknown state and commit %s", reg, err, commitB)
 			}
 			_, err = f.r.workflowCommand(ctx, guard, f.bundle.Workloads["coder"])
@@ -543,5 +552,135 @@ func TestLegacyFirstAuthorBeforeSecondAuthorFailsClosed(t *testing.T) {
 				t.Fatalf("guard launch = %v, want the author base refusal", err)
 			}
 		})
+	}
+}
+
+// putFailedStep stores a failed workflow step task with its registration and
+// artifacts, as a daemon would have left them.
+func putFailedStep(t *testing.T, f *commandFixture, id, input, artifacts string, rec workflowStepRecord) domain.Task {
+	t.Helper()
+	ctx := t.Context()
+	now := time.Now().UTC()
+	task := domain.Task{ID: id, IdempotencyKey: id, WorkloadName: "coder", State: domain.TaskStateSubmitted, InputJSON: input, CreatedAt: now, UpdatedAt: now}
+	entry, err := f.r.workflowStepEntry(id, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.PutMemory(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskState(ctx, id, domain.TaskStateSubmitted, domain.TaskStateFailed, "runtime_failed", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskArtifacts(ctx, id, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.st.GetTask(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// TestPreGuardRegistrationWithBaseFailsClosed checks a command step
+// registration written by a daemon that recorded author bases but not their
+// provenance (before the first author rule of issue 214): it may name a later
+// author's base, so the step is refused even when the base would pass the
+// ancestry check, and so is every step after a pre-guard registration.
+func TestPreGuardRegistrationWithBaseFailsClosed(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), nil)
+	ctx := t.Context()
+	commit, laterBase := strings.Repeat("a", 40), strings.Repeat("c", 40)
+	entry, err := f.r.workflowStepEntry("task_pre_guard", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: laterBase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.PutMemory(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task_pre_guard", WorkloadName: "coder", InputJSON: `{"workflow":"` + commandWorkflow + `","step_index":1,"command":"check"}`}
+	_, err = f.r.workflowCommand(ctx, task, f.bundle.Workloads["coder"])
+	var refusal *scruntime.CommandRefusal
+	if !errors.As(err, &refusal) || refusal.Reason != scruntime.CommandAuthorBaseUnavailable {
+		t.Fatalf("pre-guard registration launch = %v, want the author base refusal", err)
+	}
+}
+
+// TestFailedFirstAuthorBaseWithoutCommitIsKept checks a failed first author
+// that recorded where its checkout started but handed on no commit: its base
+// is the run's, and a retry checked out from a later base does not replace
+// it. (The coding runtime emits git-base only together with git-commit, so
+// this guards the rule, not a path seen today.)
+func TestFailedFirstAuthorBaseWithoutCommitIsKept(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), nil)
+	first := strings.Repeat("1", 40)
+	arts, _ := json.Marshal([]scruntime.Artifact{{Name: scruntime.GitBaseArtifact, ContentType: "text/plain", Text: first}})
+	orig := putFailedStep(t, f, "task_base_only", `{"workflow":"`+commandWorkflow+`","step_index":0,"role":"author"}`, string(arts),
+		workflowStepRecord{RunID: "task_base_only", Workflow: commandWorkflow, AuthorBaseState: authorBasePending})
+	retry, err := f.r.RetryTaskWithHandoff(t.Context(), orig.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := f.r.workflowStep(t.Context(), retry.ID)
+	if err != nil || reg == nil || reg.AuthorBase != first || reg.AuthorBaseState != authorBaseRecorded || reg.AuthorCommit != "" {
+		t.Fatalf("retry registration = %+v, %v; want recorded base %s and no pinned commit", reg, err, first)
+	}
+}
+
+// TestFirstAuthorRetryAcrossReload checks that which author is first comes
+// from the run's recorded history, not the loaded bundle: a failed first
+// author retried while its workflow is not loaded still records its base, and
+// the command step after the retry, once the workflow is back, compares from
+// it.
+func TestFirstAuthorRetryAcrossReload(t *testing.T) {
+	t.Parallel()
+	f := newCommandFixture(t, checkCommand(0, 0), nil)
+	ctx := t.Context()
+	first, commitA, commitB := strings.Repeat("1", 40), strings.Repeat("a", 40), strings.Repeat("b", 40)
+	arts := func(commit, base string) string {
+		raw, _ := json.Marshal([]scruntime.Artifact{
+			{Name: "git-commit", ContentType: "text/plain", Text: commit},
+			{Name: scruntime.GitBaseArtifact, ContentType: "text/plain", Text: base},
+		})
+		return string(raw)
+	}
+	orig := putFailedStep(t, f, "task_reload", `{"workflow":"`+commandWorkflow+`","step_index":0,"role":"author"}`, arts(commitA, first),
+		workflowStepRecord{RunID: "task_reload", Workflow: commandWorkflow, AuthorBaseState: authorBasePending})
+	f.r.Reload(&config.Bundle{Workloads: f.bundle.Workloads, Workflows: map[string]domain.Workflow{}}, policy.NewEngine(nil, nil))
+	retry, err := f.r.RetryTaskWithHandoff(ctx, orig.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.r.Reload(f.bundle, policy.NewEngine(nil, nil))
+	reg, err := f.r.workflowStep(ctx, retry.ID)
+	if err != nil || reg == nil || reg.AuthorBase != first || reg.AuthorBaseState != authorBaseRecorded || reg.AuthorCommit != commitA {
+		t.Fatalf("retry registration = %+v, %v; want recorded base %s, commit %s", reg, err, first, commitA)
+	}
+	if err := f.st.UpdateTaskState(ctx, retry.ID, retry.State, domain.TaskStateCompleted, "", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateTaskArtifacts(ctx, retry.ID, arts(commitB, commitA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.advanceWorkflowStep(ctx, retry); err != nil {
+		t.Fatal(err)
+	}
+	var guard *domain.Task
+	for _, task := range f.tasks() {
+		if task.ParentTaskID == retry.ID {
+			guard = &task
+		}
+	}
+	if guard == nil {
+		t.Fatal("no command step after the retry")
+	}
+	spec, err := f.r.workflowCommand(ctx, *guard, f.bundle.Workloads["coder"])
+	if err != nil || spec == nil || spec.AuthorBase != first {
+		t.Fatalf("command launch = %+v, %v; want base %s", spec, err, first)
 	}
 }
