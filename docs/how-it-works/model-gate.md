@@ -76,6 +76,7 @@ The gate appends a row for a missing or invalid token, an unknown workload, a mi
 What the code does today, where it falls short of the design.
 
 - Workflow steps after the first have a parent task but are created without a budget ceiling, so a Model Gate call from such a step is refused with `invalid_child_budget_ceiling`. This follows from the code and its tests; it has not been run end to end.
+- The gate does not check model families. A workload with `grants.modelGate.allowed: true` picks its model per request and may fall back to another provider, so the manifest loader refuses any workflow that uses such a workload as a `role: verifier` step ([ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), amendment of 2026-11-27).
 - Pre-call reserve estimation sizes input from prompt and schema bytes in the request body at one token per four bytes and reserves one output token per choice when no output limit is requested. It cannot upper-bound server-side stored context (`previous_response_id`, `conversation`, `cachedContent`) or fields outside the counted list, so a fallback charge to the reserve is not a strict upper bound for requests that rely on stored context or omit output limits.
 - Anthropic `advisor_message` iteration tokens are priced at the request model's rate (using the single built-in per-provider Anthropic rate), so calls whose advisor model is dearer than the request model can be undercharged until per-model pricing is built.
 

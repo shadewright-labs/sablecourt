@@ -533,7 +533,15 @@ func councilHarnessRefusal(role string, err error) (int, string) {
 	}
 }
 
-func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.Bundle, sandbox string) (*config.Bundle, error) {
+// isCouncilPanelRole reports whether name is a built-in council panel role.
+func isCouncilPanelRole(name string) bool {
+	return slices.Contains(councilPanel[:], name)
+}
+
+// addCouncilPanelWorkloads adds the built-in council panel workloads to b and
+// refuses a manifest workload that takes a panel name. It writes nothing;
+// recordWorkloads stores them with the rest of an accepted bundle.
+func addCouncilPanelWorkloads(b *config.Bundle, sandbox string) (*config.Bundle, error) {
 	if b == nil {
 		b = &config.Bundle{}
 	}
@@ -550,13 +558,6 @@ func ensureCouncilPanelWorkloads(ctx context.Context, st store.Store, b *config.
 				Class:  domain.ClassCodingAgent,
 				Coding: &domain.CodingConfig{Harness: role, Sandbox: sandbox},
 			},
-		}
-		if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{
-			Name:  w.Metadata.Name,
-			Zone:  w.Metadata.Zone,
-			Class: w.Spec.Class,
-		}); err != nil {
-			return nil, err
 		}
 		b.Workloads[role] = w
 	}

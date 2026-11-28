@@ -275,6 +275,7 @@ func (d *Dashboard) handleProviderSaveTiers(w http.ResponseWriter, r *http.Reque
 			Tier:     t,
 			Provider: strings.TrimSpace(r.FormValue("tier_" + t + "_provider")),
 			Model:    strings.TrimSpace(r.FormValue("tier_" + t + "_model")),
+			Family:   strings.TrimSpace(r.FormValue("tier_" + t + "_family")),
 		})
 	}
 	if err := contextpack.SaveModelTiers(r.Context(), d.store, routes); err != nil {
