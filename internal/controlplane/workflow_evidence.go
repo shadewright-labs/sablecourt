@@ -68,8 +68,12 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 // root task, then the halted run registration. The store has no transaction
 // over both, so a replay after the second write failed finds the event of
 // the same step (its fact names that step's task under key) and only writes
-// the registration again: the event is appended once (invariant 6).
-func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string) error {
+// the registration again, with the recorded event's reason rather than the
+// caller's: a refusal replayed through a failure path stays a refusal. The
+// event, and audit when not nil, are appended once (invariant 6): audit is
+// written only by the call that appended the event, after it, so a failed
+// event write or a replay never writes a second row.
+func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string, audit *domain.AuditRecord) error {
 	root, err := r.store.GetTask(ctx, runID)
 	if err != nil {
 		return err
@@ -86,12 +90,16 @@ func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workfl
 		var named map[string]any
 		if json.Unmarshal([]byte(ev.FactJSON), &named) == nil && named[key] == stepTaskID {
 			recorded = true
+			status = strings.TrimPrefix(ev.Reason, "workflow_halted_")
 			break
 		}
 	}
 	if !recorded {
 		if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, event, fact); err != nil {
 			return err
+		}
+		if audit != nil {
+			_ = r.store.AppendAudit(ctx, *audit)
 		}
 	}
 	rootStep.Status, rootStep.Reason = "halted", status

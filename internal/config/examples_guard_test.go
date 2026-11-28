@@ -148,6 +148,34 @@ func TestInvariantPathGuard(t *testing.T) {
 			r.commit("agent")
 			return base
 		}, paths: []string{"internal/redact"}, want: match},
+		// An entry ending in / matches the path itself as well as what is
+		// below it: a regular file of that name added by the author counts.
+		"listed directory entry, file of the same name added": {change: func(r guardRepo, base string) string {
+			r.write("policy", "x\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"policy/"}, want: match, output: "policy"},
+		"listed directory entry, directory of the same name added": {change: func(r guardRepo, base string) string {
+			r.write("policy/x.go", "package policy\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"policy/"}, want: match, output: "policy/x.go"},
+		"listed directory entry replaced by a file": {change: func(r guardRepo, base string) string {
+			r.git("rm", "-q", "-r", "internal/redact")
+			r.write("internal/redact", "x\n")
+			r.commit("agent")
+			return base
+		}, want: match, output: "internal/redact"},
+		"listed directory entry, prefix-only file name": {change: func(r guardRepo, base string) string {
+			r.write("policyx", "x\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"policy/"}, want: pass},
+		"listed entry of only a slash is invalid": {change: func(r guardRepo, base string) string {
+			r.write("cmd/tool/main.go", "package main // changed\n")
+			r.commit("agent")
+			return base
+		}, paths: []string{"/"}, want: fail},
 		"several agent commits": {change: func(r guardRepo, base string) string {
 			r.write("internal/redact/rules.go", "package redact // first\n")
 			r.commit("agent one")

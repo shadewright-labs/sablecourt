@@ -39,8 +39,10 @@ spec:
     # decides the match from its exit status over literal pathspecs, so no
     # file name is parsed, and the options override every repository
     # setting that could hide a change (submodule ignore rules, replace
-    # refs, diff.relative). An entry ending in / covers a directory; any
-    # other entry is one file or a directory, never a name prefix. Replace
+    # refs, diff.relative). Each entry matches the path itself and, when it
+    # is a directory, everything below it, never a name prefix. A trailing
+    # / is dropped after the check, so policy/ also matches a file named
+    # policy. Replace
     # the list with your repository's invariant paths. An empty list checks
     # nothing.
     commands:
@@ -59,7 +61,7 @@ spec:
               case "$p" in
                 (""|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*) echo "guard: invalid path list entry" >&2; exit 2 ;;
               esac
-              set -- "$@" ":(top,literal)$p"
+              set -- "$@" ":(top,literal)${p%/}"
             done
             shift "$n"
             ref=refs/sablecourt/author-base

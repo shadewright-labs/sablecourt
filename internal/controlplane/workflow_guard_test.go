@@ -434,16 +434,20 @@ func (s *haltWriteFailStore) PutMemory(ctx context.Context, entry domain.MemoryE
 
 // TestRunHaltReplayIsIdempotent checks each way a run halts: when the halted
 // registration write fails after the halt event, the replay halts the run
-// without a second halt event (invariant 6).
+// without a second halt event or a second verifier audit row, and the
+// registration keeps the recorded event's reason, whatever path replays it
+// (invariant 6).
 func TestRunHaltReplayIsIdempotent(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		paths  []string
 		event  string
 		review string
-		steps  int // a step that must not start, 0 for none
+		refuse bool // refuse the command launch once the author step is done
+		steps  int  // a step that must not start, 0 for none
 	}{
 		"command failed":  {paths: []string{"feature.txt"}, event: "workflow_halted_command_failed", steps: 2},
+		"command refused": {paths: []string{"feature.txt"}, event: "workflow_halted_command_refused", refuse: true, steps: 2},
 		"verdict missing": {paths: []string{"internal/redact/"}, event: "workflow_halted_verdict_missing", review: "no verdict line"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -467,6 +471,10 @@ func TestRunHaltReplayIsIdempotent(t *testing.T) {
 				Adapters: map[domain.WorkloadClass]scruntime.Adapter{domain.ClassCodingAgent: f.adapter},
 			})
 			root := f.start()
+			if tc.refuse {
+				f.runUntil("the author step", func() bool { _, ok := f.step(1); return terminal(f.step(0)) && ok })
+				f.adapter.CouncilRunner = refusingRunner{f.runner}
+			}
 			f.runUntil("the halted registration", func() bool { return f.runStatus(root.ID).Status == "halted" })
 			// A few more passes: nothing is appended once the run is halted.
 			for range 3 {
@@ -489,6 +497,22 @@ func TestRunHaltReplayIsIdempotent(t *testing.T) {
 			}
 			if halts != 1 {
 				t.Fatalf("halt events on the run = %d, want 1", halts)
+			}
+			if got, want := f.runStatus(root.ID).Reason, strings.TrimPrefix(tc.event, "workflow_halted_"); got != want {
+				t.Fatalf("halted registration reason = %q, want %q from the recorded event", got, want)
+			}
+			audits, err := f.st.ListAudit(t.Context(), 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifies := 0
+			for _, a := range audits {
+				if a.Action == "workflow.verify" {
+					verifies++
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.review != ""]; verifies != want {
+				t.Fatalf("workflow.verify audit rows = %d, want %d", verifies, want)
 			}
 			if _, ok := f.step(tc.steps); ok && tc.steps > 0 {
 				t.Fatalf("step %d started after the run halted", tc.steps)

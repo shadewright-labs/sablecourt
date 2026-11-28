@@ -255,5 +255,5 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if err != nil {
 		return err
 	}
-	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID)
+	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID, nil)
 }

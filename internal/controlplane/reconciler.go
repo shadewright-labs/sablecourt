@@ -1568,15 +1568,16 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		}
 		verdict, findings := finalVerifierVerdict(completedTask.ArtifactsJSON, meta.Prompt, digest)
 		if verdict == "" {
-			_ = r.store.AppendAudit(ctx, domain.AuditRecord{
-				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
-				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
-			})
 			fact, err := json.Marshal(map[string]string{"verifier_task_id": completedTask.ID})
 			if err != nil {
 				return err
 			}
-			return r.haltRun(ctx, member.RunID, rootStep, "workflow_halted_verdict_missing", string(fact), "verdict_missing", "verifier_task_id", completedTask.ID)
+			// haltRun writes the audit row once, with the halt event, so a
+			// replay of this verifier decision does not repeat it.
+			return r.haltRun(ctx, member.RunID, rootStep, "workflow_halted_verdict_missing", string(fact), "verdict_missing", "verifier_task_id", completedTask.ID, &domain.AuditRecord{
+				Category: "workflow", TaskID: completedTask.ID, WorkloadName: completedTask.WorkloadName,
+				Action: "workflow.verify", Outcome: "verdict_missing", CreatedAt: r.now(),
+			})
 		}
 		if verdict == contextpack.VerdictChangesRequested {
 			_ = r.store.AppendTaskMessage(ctx, domain.TaskMessage{
