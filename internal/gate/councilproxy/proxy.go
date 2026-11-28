@@ -102,10 +102,15 @@ func AllowsGateRequest(r *http.Request) bool {
 	return ok && name != "" && !strings.Contains(name, "/") && r.Method == http.MethodGet
 }
 
+// CommandHarness is the proxy profile of a command container (issue 134). It
+// allows no provider host, so the container reaches only the gate route.
+const CommandHarness = "command"
+
 var providerHosts = map[string][]string{
-	"claude": {"api.anthropic.com", "claude.ai", "console.anthropic.com", "platform.claude.com"},
-	"codex":  {"api.openai.com", "auth.openai.com", "chatgpt.com"},
-	"agy":    {"accounts.google.com", "antigravity.google", "oauth2.googleapis.com", "play.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"},
+	CommandHarness: nil,
+	"claude":       {"api.anthropic.com", "claude.ai", "console.anthropic.com", "platform.claude.com"},
+	"codex":        {"api.openai.com", "auth.openai.com", "chatgpt.com"},
+	"agy":          {"accounts.google.com", "antigravity.google", "oauth2.googleapis.com", "play.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"},
 }
 
 type lookupIP func(context.Context, string, string) ([]netip.Addr, error)

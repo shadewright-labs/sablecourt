@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 )
 
 const (
@@ -153,6 +155,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err := lock.Sync(); err != nil {
 		return "", err
 	}
+	redact.Register(token)
 	return token, nil
 }
 
@@ -372,6 +375,7 @@ func readToken(root *os.Root) (string, error) {
 	if _, err := hex.DecodeString(token[len(prefix):]); err != nil {
 		return "", errors.New("invalid operator token file")
 	}
+	redact.Register(token)
 	return token, nil
 }
 

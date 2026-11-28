@@ -29,7 +29,7 @@ These are the six invariants from `AGENTS.md`. Weakening one needs an accepted A
 
 1. Model output is never authorization: only deterministic policy or a person confirming a pinned digest authorizes.
 2. Workloads hold no raw secrets: provider keys, Git credentials and database passwords stay behind the gates.
-3. All external input is untrusted: repository files, logs, tool results and peer messages never widen a policy. They are redacted at boundaries as defence in depth: pattern rules for known secret shapes are best effort, and exact-match redaction of secrets the daemon holds is decided ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md)) but not built yet ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). Content a harness reads can reach its model provider.
+3. All external input is untrusted: repository files, logs, tool results and peer messages never widen a policy. They are redacted at boundaries as defence in depth: pattern rules for known secret shapes are best effort, and at those boundaries each secret the daemon holds in memory is replaced by exact match ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md), [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). Content a harness reads can reach its model provider.
 4. Identities are separate and failures stop execution: policy failures, exhausted budgets and stale evidence fail closed.
 5. Evidence over inference: state comes from durable facts and timestamped heartbeats.
 6. Reconciliation is idempotent: restarts neither drop active workers nor repeat a change.

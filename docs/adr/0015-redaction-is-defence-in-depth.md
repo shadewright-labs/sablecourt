@@ -94,3 +94,41 @@ Issue 180 becomes the work that makes invariant 3 testable: a table test per red
 Container mode carries invariant 2 for 0.1.0. Any later path that runs a harness outside a container needs its own amendment that states which guarantees hold there.
 
 Bypasses of the pattern rules are still fixed when cheap, as defence in depth, but a bypass is no longer a security defect by itself. A leak of a secret the daemon holds in memory, at a redacting boundary inside the daemon, is one.
+
+## Amendment 2026-11-27: what exact match covers in 0.1.0
+
+- Status of this amendment: Accepted (2026-11-27)
+
+Three review passes on [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180) each found a held value that got past the matcher in a form nobody had listed: a backslash before a value that starts with `n`, a duplicate JSON name, a number written with an exponent, a fragment split across two fields. Each fix added a decoded view, and each new view left the next form open. The user decided on 2026-11-27 to stop adding views and to accept exact match with stated limits. It stays a second layer: isolation keeps provider keys in the gate, and a workload holds only its task lease.
+
+This amendment narrows the first guarantee in the decision above ("every secret the daemon process holds in memory is replaced by exact match"). The accepted text stays as written; where it disagrees with this amendment, this amendment wins once it is accepted.
+
+### What is matched
+
+A registered value is matched in its literal bytes and in a fixed list of spellings: quoted (Go `strconv.Quote`), JSON-escaped (with and without HTML escaping, and with `\/`), and, for binary values, standard and URL base64 with and without padding and lower and upper case hex. The matcher reads the raw bytes, and also the bytes with CR, LF and their escaped forms skipped, so a value wrapped across lines still matches. Nothing else is decoded.
+
+At a boundary that carries a declared JSON record, the record is decoded once and every string and object name is matched, duplicates included. A record that shows a held value is refused as a whole: it is replaced by the marker as a JSON string, and none of its payload is kept. The typed boundaries in 0.1.0 are the launch input (`SABLECOURT_INPUT_JSON`) and stored task messages. Every other boundary replaces matches in place by literal match.
+
+The replacement never discloses a value. The marker is `[REDACTED:known_secret]` unless a registered value occurs inside it; then the replacement is empty and a refused record becomes `null`. Replaced text is scanned again, so a marker that forms a held value with its neighbours is replaced too. If that has not settled after eight rounds, the text becomes the marker alone. A stream keeps its raw input and emits only what the batch matcher returns for a prefix that ends right after a byte no registered spelling holds (other than CR, LF, a backslash, `r` or `n`); no match, line-break escape or backslash pair crosses such a byte, so the stream emits what a batch over the whole input returns. The cost: streamed output arrives in larger pieces, and a stream with no such byte in 64 KiB of pending input, or whose prefix does not settle, emits the marker and stops. A pattern rule that forms a held value after the exact pass turns the whole text into the marker.
+
+### New read boundaries
+
+Values registered after a record was stored are caught on read:
+
+- Stored task input and task messages, read by A2A `tasks/get`, the task API (`GET /api/v1/tasks`, `GET /api/v1/tasks/{id}`), the dashboard and the workload's own `/gate/task/messages`. All of them call one function and apply the record rule.
+- Model Gate responses on the primary and the fallback path: response headers are matched (a header whose name shows a held value is dropped) and the body passes through the stream matcher. A response the matcher cannot read, because it still carries a `Content-Encoding`, is refused with 502.
+- Scry replay: the ring is checked again against the registry as it is when a viewer subscribes. A viewer whose channel was full gets a gap marker before its next chunk, so the browser never joins two chunks the matcher did not see side by side.
+
+### Minimum length
+
+A credential shorter than 8 bytes (after trimming whitespace) cannot be matched without hitting ordinary text, so it is refused where it is loaded. The error names the setting and never the value. At start the daemon stops: provider keys, webhook secrets and every other secret in the store, MCP server secrets named by a manifest, `SABLECOURT_NOTIFY_WEBHOOK_URL` and a PostgreSQL DSN password. At run time a gate, handler or provider that loads such a value refuses the request or the write instead of using it; an unauthenticated caller is told only that the credential was refused. Kubernetes credentials read from a kubeconfig follow the same rule.
+
+### Documented limits
+
+These are not covered in 0.1.0 and are tracked in [issue 189](https://github.com/shadewright-labs/sablecourt/issues/189):
+
+- Spellings outside the list: percent encoding, mixed-case hex, base64 nested inside another encoding, Unicode normalisation, number renderings of a numeric value, and JSON nested inside a JSON string beyond the one decode.
+- Fragments of a value split across fields, records or messages. A reader who joins them can rebuild the value.
+- Paths with no exact matcher: audit fields, error and log text, the Agent Card, council reads, Takeover input to a workload's stdin, and database and Kubernetes credentials that the drivers resolve themselves (pgx query settings, environment and passfiles; a refreshed `BearerTokenFile` or a `KeyFile`).
+
+The property tested on the branch: at each named boundary, no registered value passes in its literal bytes or a listed spelling. Tests that pin a limit carry it in their name, so changing one is a visible decision.

@@ -16,6 +16,8 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
+	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/harnessimages"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	rt "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/runtime/mountguard"
@@ -190,6 +192,11 @@ func preparePrompt(s rt.CouncilLaunch) (string, error) {
 // read-only tool volume, tmpfs scratch), an allowlisted environment, the
 // per-launch internal network behind the proxy, a non-root user, a read-only
 // root file system, all capabilities dropped and no-new-privileges.
+//
+// A command launch (s.Command set, issue 134) gets the same guards with the
+// operator's argv in place of the harness CLI. It mounts no login volume and
+// no tool volume, sets HOME to the tmpfs scratch directory, and its stdin
+// carries neither a task lease nor a prompt.
 func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngineAPI, s rt.CouncilLaunch, login bool) (client.ContainerCreateOptions, error) {
 	var o client.ContainerCreateOptions
 	cfg, ok := a.CouncilHarnesses[s.Harness]
@@ -211,9 +218,26 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 	if l.NanoCPUs <= 0 || l.MemoryBytes <= 0 || l.PIDs <= 0 || l.WallTime <= 0 {
 		return o, errors.New("council requires positive CPU, memory, PID and wall-time limits")
 	}
-	cmd, err := councilCommand(s, login, cfg.Tool)
-	if err != nil {
-		return o, err
+	command := s.Command != nil
+	var cmd []string
+	var err error
+	if command {
+		if login || s.Prompt != "" || s.Model != "" {
+			return o, errors.New("a command launch carries no prompt, model or login")
+		}
+		// A command checks a pinned commit; it never gets a writable or live checkout.
+		if s.Checkout.Kind != rt.CouncilReview {
+			return o, errors.New("a command launch needs a read-only checkout pinned to a commit")
+		}
+		if err := domain.ValidCommandArgv(s.Command); err != nil {
+			return o, fmt.Errorf("invalid command: %w", err)
+		}
+		cmd = slices.Clone(s.Command)
+	} else {
+		cmd, err = councilCommand(s, login, cfg.Tool)
+		if err != nil {
+			return o, err
+		}
 	}
 	proxyRaw := cfg.ProxyURL
 	if s.ProxyURL != "" {
@@ -235,12 +259,16 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 			return o, errors.New("gate must use the pinned council proxy")
 		}
 	}
-	env := append(slices.Clone(councilBaseEnv),
+	base := councilBaseEnv
+	if command {
+		base = commandBaseEnv
+	}
+	env := append(slices.Clone(base),
 		"HTTP_PROXY="+proxyRaw, "HTTPS_PROXY="+proxyRaw,
 		"http_proxy="+proxyRaw, "https_proxy="+proxyRaw,
 		"NO_PROXY="+gate.Hostname(), "no_proxy="+gate.Hostname(),
 	)
-	if s.Harness == "claude" {
+	if s.Harness == "claude" && !command {
 		// Claude Code's documented switch that blocks every update, background
 		// and manual. A new version arrives only as a new pin in a release.
 		env = append(env, "DISABLE_UPDATES=1")
@@ -251,6 +279,9 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 		ms, err := councilWorkspace(s.Checkout, a.dockerSockets(), a.Mounts)
 		if err != nil {
 			return o, err
+		}
+		if command && slices.ContainsFunc(ms, func(m mount.Mount) bool { return !m.ReadOnly }) {
+			return o, errors.New("a command launch mounts its checkout read-only")
 		}
 		mounts = append(mounts, ms...)
 		m := ms[0]
@@ -279,12 +310,19 @@ func (a *Adapter) harnessContainerSpec(ctx context.Context, engine councilEngine
 	if s.NetworkID != "" && s.NetworkID != networkID {
 		return o, errors.New("council harness network was replaced")
 	}
-	imageID, err := a.inspectCouncilHarness(ctx, engine, s.Harness, cfg)
+	var imageID string
+	if command {
+		imageID, err = a.councilImageID(ctx, cfg.Image)
+	} else {
+		imageID, err = a.inspectCouncilHarness(ctx, engine, s.Harness, cfg)
+	}
 	if err != nil {
 		return o, err
 	}
-	mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: "/home/harness"})
-	if cfg.Tool != nil {
+	if !command {
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.LoginVolume, Target: harnessimages.StateDir})
+	}
+	if cfg.Tool != nil && !command {
 		// Read-only, and NoCopy so the engine never fills it from the image.
 		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: cfg.Tool.Volume, Target: councilToolDir, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
@@ -343,6 +381,9 @@ func (a *Adapter) inspectCouncilHarness(ctx context.Context, engine councilEngin
 }
 
 var councilBaseEnv = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/home/harness", "TMPDIR=/scratch"}
+
+// commandBaseEnv has no login volume to call home: HOME is the tmpfs scratch.
+var commandBaseEnv = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/scratch", "TMPDIR=/scratch"}
 
 func (a *Adapter) councilImageID(ctx context.Context, ref string) (string, error) {
 	image, err := a.localImage(ctx, ref)

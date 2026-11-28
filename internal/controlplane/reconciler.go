@@ -900,6 +900,11 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		return err
 	}
 	if len(events) == 0 || events[len(events)-1].Reason != "runtime_exit_observed" {
+		if task.State == domain.TaskStateFailed {
+			// A command step that failed on any other path (lost on restart,
+			// observation failures, a failed launch) still halts its run.
+			return r.haltCommandStep(ctx, task, nil)
+		}
 		return nil
 	}
 	reason := "runtime_completed"
@@ -909,6 +914,9 @@ func (r *Reconciler) reconcileTerminal(ctx context.Context, task domain.Task) er
 		reason = "runtime_failed"
 		if !isLogCloseFailureFact(events[len(events)-1].FactJSON) {
 			err = r.maybeAutoRemediate(ctx, task, reason)
+		}
+		if err == nil {
+			err = r.haltCommandStep(ctx, task, nil)
 		}
 	}
 	if err != nil {
@@ -928,7 +936,8 @@ func (r *Reconciler) failTask(ctx context.Context, task domain.Task, reason, fac
 	if err := r.store.UpdateTaskState(cleanupCtx, task.ID, task.State, domain.TaskStateFailed, reason, facts); err != nil {
 		return err
 	}
-	cleanupErr := r.stopTask(cleanupCtx, task.ID)
+	// Every failed command step halts its workflow run; a no-op for other tasks.
+	cleanupErr := errors.Join(r.haltCommandStep(cleanupCtx, task, nil), r.stopTask(cleanupCtx, task.ID))
 	if r.onTaskFailed != nil {
 		r.onTaskFailed(task, reason)
 	}
@@ -1092,6 +1101,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 			if err := r.store.RenewTaskLeases(ctx, task.ID, now, expiresAt); err != nil {
 				return true, err
 			}
+			// Keep the lease token registered for exact-match redaction while
+			// the renewed lease is live.
+			redact.ExtendOwned(task.ID, expiresAt)
 		} else if r.isTaskStale(task, now) {
 			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 		}
@@ -1213,12 +1225,17 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	claimed := false
 	startFailed := false
 	launchFacts := `{}`
+	var refusal *scruntime.CommandRefusal
 	defer func() {
 		if launchErr != nil && claimed {
 			cleanupCtx := context.WithoutCancel(ctx)
 			reason := "launch_failed"
 			if errors.Is(launchErr, errAuthorCheckoutUnavailable) {
 				reason = "author_checkout_unavailable"
+			}
+			if refusal != nil || errors.As(launchErr, &refusal) {
+				reason, launchFacts = "command_refused", commandRefusalFacts(refusal)
+				launchErr = errors.Join(launchErr, r.haltCommandStep(cleanupCtx, task, refusal))
 			}
 			cleanupErr := r.failTask(cleanupCtx, task, reason, launchFacts)
 			if startFailed && cleanupErr != nil {
@@ -1263,15 +1280,37 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
+	command, err := r.workflowCommand(ctx, task, wl)
+	if err != nil {
+		return err
+	}
 	starter, supportsPin := adapter.(pinnedStarter)
 	if commit != "" && !supportsPin {
 		return errAuthorCheckoutUnavailable
 	}
-	wl, inputJSON, pinned, err := r.prepareLaunchInput(ctx, task, wl)
-	if err != nil {
-		return err
+	var inputJSON string
+	var pinned []string
+	if command != nil {
+		// A command step gives no model a prompt, so it gets no context packet
+		// and none of its host pre-checks run. Without a container runner it
+		// is refused here, before any setup (issue 134). It gets no Model Gate
+		// coordinates, so no learning providers are pinned.
+		if cap, ok := adapter.(councilContainerCapable); !ok || !cap.SupportsCouncilContainers() || wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
+			return &scruntime.CommandRefusal{Command: command.Name, Reason: scruntime.CommandNoContainerRuntime}
+		}
+		inputJSON = "{}"
+	} else {
+		wl, inputJSON, pinned, err = r.prepareLaunchInput(ctx, task, wl)
+		if err != nil {
+			return err
+		}
 	}
-	if readOnly {
+	// The input reaches the workload as an environment value. It is a declared
+	// JSON record: decoded once and, when it shows a daemon-held value, refused
+	// whole (redact.RefusedJSON, none of the payload). Exact match only, so
+	// ordinary task text is not rewritten by pattern rules.
+	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(inputJSON)
+	if readOnly && command == nil {
 		var payload struct {
 			Packet string `json:"context_packet"`
 		}
@@ -1323,12 +1362,19 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			}
 		}
 	}
+	if command != nil {
+		// Commands run only in harness containers: no host fallback (issue 134).
+		if !spec.CouncilContainer {
+			return &scruntime.CommandRefusal{Command: command.Name, Reason: scruntime.CommandNoContainerRuntime}
+		}
+		spec.Command = command
+	}
 	// Host coding agents reach the gate over loopback. A council container has no host loopback.
 	if wl.Spec.Class == domain.ClassCodingAgent && !spec.CouncilContainer && r.hostDataGateURL != "" {
 		spec.DataGateURL = r.hostDataGateURL
 	}
 	// Only non-deterministic workloads with explicit Model Gate grants receive Model Gate coordinates.
-	if wl.Spec.Class != domain.ClassDeterministicController && wl.Spec.Grants.ModelGate.Allowed {
+	if wl.Spec.Class != domain.ClassDeterministicController && wl.Spec.Grants.ModelGate.Allowed && command == nil {
 		spec.ModelGateURL = r.modelGateURL
 		spec.ModelGateToken = token
 	}
@@ -1341,6 +1387,8 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	} else {
 		handle, startErr = adapter.Start(callCtx, spec)
 	}
+	// Keep a command refusal even when the start call also ran out of time.
+	_ = errors.As(startErr, &refusal)
 	if callCtx.Err() != nil {
 		startErr = callCtx.Err()
 	}
@@ -1497,6 +1545,17 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if step.Workload != completedTask.WorkloadName {
 		return nil
 	}
+	// After a command step, the next step follows the task the command checked.
+	author, authorIdx := completedTask, meta.StepIndex
+	if step.Command != "" {
+		if !commandPassed(completedTask) {
+			return r.haltCommandStep(ctx, completedTask, nil)
+		}
+		author, authorIdx, meta.MaxRetries, meta.RetryCount, err = r.commandStepAuthor(ctx, member, meta.AuthorTaskID, meta.AuthorStepIndex)
+		if err != nil {
+			return err
+		}
+	}
 
 	if step.Role == "verifier" || meta.Role == "verifier" {
 		digest, err := r.verifierDigest(ctx, completedTask.ID, member.AuthorCommit)
@@ -1590,7 +1649,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	prov, mod := nextStep.Provider, nextStep.Model
 	prompt := nextStep.Prompt
 	if nextStep.Role == "verifier" {
-		prompt = contextpack.BuildVerifierPrompt(completedTask, nextStep.Prompt) +
+		prompt = contextpack.BuildVerifierPrompt(author, nextStep.Prompt) +
 			"Write your findings before the final verdict line.\n"
 	}
 	payload := map[string]any{
@@ -1605,9 +1664,10 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	}
 	completedVerifier := step.Role == "verifier" || meta.Role == "verifier"
 	if nextStep.Role == "verifier" {
-		// A verifier after a verifier reviews the same author step.
-		payload["author_task_id"] = completedTask.ID
-		payload["author_step_index"] = meta.StepIndex
+		// A verifier after a command step reviews the task the command
+		// checked; a verifier after a verifier reviews the same author step.
+		payload["author_task_id"] = author.ID
+		payload["author_step_index"] = authorIdx
 		if completedVerifier {
 			payload["author_task_id"] = meta.AuthorTaskID
 			payload["author_step_index"] = meta.AuthorStepIndex
@@ -1633,10 +1693,13 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 	if mod != "" {
 		payload["model"] = mod
 	}
+	if nextStep.Command != "" {
+		payload = commandStepPayload(meta.Workflow, nextStep, nextIdx, meta.Input, author, authorIdx)
+	}
 	raw, _ := json.Marshal(payload)
 	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
-	if nextStep.Role == "verifier" {
-		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, completedTask.ArtifactsJSON)
+	if nextStep.Role == "verifier" || nextStep.Command != "" {
+		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)
 	}
 	idem := fmt.Sprintf("wf:%s:%s:step:%d", meta.Workflow, completedTask.ID, nextIdx)
 	child, err := r.submitTask(ctx, nextStep.Workload, idem, string(raw), completedTask.ID, &next)
@@ -1745,7 +1808,7 @@ func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapte
 			Name:        redact.String(artifact.Name),
 			ContentType: redact.String(artifact.ContentType),
 			URI:         redact.String(artifact.URI),
-			Text:        redact.String(artifact.Text),
+			Text:        redactArtifactText(artifact.ContentType, artifact.Text),
 		})
 	}
 	raw, err := json.Marshal(clean)
@@ -1763,6 +1826,58 @@ func (r *Reconciler) persistArtifacts(ctx context.Context, taskID string, adapte
 	}
 	relic.CreatedAt = r.now()
 	return writerStore.PutCouncilRelic(ctx, taskID, *relic)
+}
+
+// redactArtifactText redacts an artifact's text before it is stored. A JSON
+// artifact is redacted value by value, so a pattern can never consume the
+// escapes of its encoding and leave text that no longer decodes; text that is
+// not valid JSON is redacted as plain text.
+func redactArtifactText(contentType, text string) string {
+	if contentType != "application/json" || !json.Valid([]byte(text)) {
+		return redact.String(text)
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return redact.String(text)
+	}
+	raw, err := json.Marshal(redactJSONValue(v))
+	if err != nil {
+		return redact.String(text)
+	}
+	return string(raw)
+}
+
+func redactJSONValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return redact.String(t)
+	case []any:
+		for i := range t {
+			t[i] = redactJSONValue(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if _, ok := val.(string); ok && sensitiveJSONField(k) {
+				val = "[REDACTED:secret]"
+			}
+			out[redact.String(k)] = redactJSONValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// sensitiveJSONField reports whether the redaction rule for a sensitive JSON
+// field, such as "password", matches this key. Redacting keys and values
+// apart would miss such a field, so its string value is replaced whole.
+func sensitiveJSONField(key string) bool {
+	frag, err := json.Marshal(map[string]string{key: "placeholder"})
+	return err == nil && redact.String(string(frag)) != string(frag)
 }
 
 func newTaskID() (string, error) {

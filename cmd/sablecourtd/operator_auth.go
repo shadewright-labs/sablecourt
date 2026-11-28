@@ -21,6 +21,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -61,6 +62,8 @@ func newOperatorAuth(token string) *operatorAuth {
 		limiter:   newLoginLimiter(loginMaxFailures, loginFailureWindow, loginLimiterMaxClients),
 	}
 	rand.Read(auth.signKey[:])
+	redact.Register(token)
+	redact.RegisterBytes(auth.signKey[:])
 	return auth
 }
 
@@ -134,10 +137,13 @@ func (a *operatorAuth) requireOperatorAuth(mux *http.ServeMux, next http.Handler
 				}
 				if r.Method == http.MethodGet && secrets != nil && len(token) <= maxBearerSize &&
 					!strings.HasPrefix(token, "op_") && !strings.HasPrefix(token, model.TokenPrefix) && isObserverRoute(pattern) {
+					// A token too short to redact is refused like a missing one.
 					if want, err := secrets.Get(r.Context(), "observer_bearer_token"); err == nil &&
-						tokenDigestEqual(token, strings.TrimSpace(want)) {
-						scoped.ServeHTTP(w, r)
-						return
+						redact.RegisterSetting("observer_bearer_token", want) == nil {
+						if tokenDigestEqual(token, strings.TrimSpace(want)) {
+							scoped.ServeHTTP(w, r)
+							return
+						}
 					}
 				}
 			}
@@ -263,9 +269,16 @@ func (a *operatorAuth) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	var key [32]byte
 	rand.Read(key[:])
+	redact.RegisterBytes(key[:])
 	a.keyMu.Lock()
+	retired := a.signKey
 	a.signKey = key
 	a.keyMu.Unlock()
+	// The retired key has no lifetime left: sessionValue reads the current key
+	// only, and only its HMAC output ever leaves the daemon. Nothing can emit
+	// the old key now, so its registration is dropped and the registry stays
+	// bounded however many times the operator logs out.
+	redact.UnregisterBytes(retired[:])
 	http.SetCookie(w, &http.Cookie{
 		Name: operatorCookie, Path: "/", MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,

@@ -20,9 +20,9 @@ Sablecourt runs both on a single developer's laptop (macOS/Ubuntu with SQLite an
 - Both workstation and enterprise Kubernetes deployments run the exact same Go binary and policy engine.
 - Narrowly scoped bearer tokens isolate external integrations from full operator privileges.
 
-## Amendment, 2026-11-27 (Proposed)
+## Amendment, 2026-11-27 (Accepted 2026-11-28)
 
-Status of this amendment: Proposed (2026-11-27).
+Status of this amendment: Accepted (2026-11-28).
 
 Title: audit chain row encoding, blank hashes and an exported head.
 

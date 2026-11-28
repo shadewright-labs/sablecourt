@@ -267,6 +267,12 @@ func validateBundle(bundle *Bundle) error {
 			if !ok {
 				return fmt.Errorf("workflow %q step %q: workload %q not found", name, step.Name, step.Workload)
 			}
+			if step.Command != "" {
+				if err := validateCommandStep(wf.Spec.Steps, i, wl); err != nil {
+					return fmt.Errorf("workflow %q step %q: %w", name, step.Name, err)
+				}
+				continue
+			}
 			if wl.Spec.Class == domain.ClassDeterministicController && (step.Provider != "" || step.Model != "") {
 				return fmt.Errorf("workflow %q step %q: deterministic-controller cannot specify provider or model", name, step.Name)
 			}
@@ -400,6 +406,9 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 		if strings.TrimSpace(w.Spec.Coding.RepoPath) == "" {
 			return fmt.Errorf("workload %q: coding.repoPath is required", name)
 		}
+		if err := validateCommands(w.Spec.Coding.Commands); err != nil {
+			return fmt.Errorf("workload %q: %w", name, err)
+		}
 	case domain.ClassLongLivedAgent:
 		if w.Spec.Coding != nil {
 			return fmt.Errorf("workload %q: coding config is only valid for class %q", name, domain.ClassCodingAgent)
@@ -478,6 +487,11 @@ func validateVerifierStep(bundle *Bundle, earlier []domain.WorkflowStep, step do
 		}
 		if prev.Workload == step.Workload {
 			return fmt.Errorf("verifier workload %q is also used by step %q", step.Workload, prev.Name)
+		}
+		// A command step runs no model: a verifier after one checks the
+		// author step the command checked, so only that author counts.
+		if prev.Command != "" {
+			continue
 		}
 		if pw, ok := bundle.Workloads[prev.Workload]; ok && pw.Spec.Class != domain.ClassDeterministicController {
 			modelBefore = true
