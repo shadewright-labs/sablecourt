@@ -9,8 +9,8 @@ repo_url = "https://github.com/shadewright-labs/sablecourt"
 repo_name = "shadewright-labs/sablecourt"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright 2026 The Sablecourt Authors. Licensed under the Apache License 2.0."
-extra_css = ["stylesheets/brand.css", "stylesheets/hero-bg.css", "stylesheets/labs-switcher.css"]
-extra_javascript = ["javascripts/labs-switcher.js"]
+extra_css = ["stylesheets/brand.css", "stylesheets/hero-bg.css", "stylesheets/labs-switcher.css", "stylesheets/diagram-zoom.css"]
+extra_javascript = ["javascripts/diagram-zoom.js", "javascripts/labs-switcher.js"]
 # docs/reference.md is superseded by docs/reference/ and collides with docs/reference/index.md on
 # site/reference/index.html.
 exclude_docs = """
