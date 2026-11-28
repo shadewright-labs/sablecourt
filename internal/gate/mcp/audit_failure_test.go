@@ -204,3 +204,49 @@ func TestPRChecksEvidenceNotStoredWithoutItsRow(t *testing.T) {
 		t.Fatalf("evidence stored without its row: %v", err)
 	}
 }
+
+// failPRChecksPut fails storing git.pr_checks evidence and passes every other
+// call through.
+type failPRChecksPut struct{ store.Store }
+
+func (s failPRChecksPut) PutMemory(ctx context.Context, e domain.MemoryEntry) error {
+	if e.Namespace == prChecksNamespace {
+		return errors.New("disk full")
+	}
+	return s.Store.PutMemory(ctx, e)
+}
+
+// When the evidence cannot be stored after its row is written, the closing
+// row names the pull request, so it matches its evidence row (PR 246 review).
+func TestPRChecksStoreFailureRowNamesThePullRequest(t *testing.T) {
+	ctx := context.Background()
+	head := strings.Repeat("a1", 20)
+	backend := &fakePRBackend{openNumber: 42, report: passingReport(head)}
+	gate, st, _, token := setupPRGateWithStore(t, backend, domain.EffectAllow, []string{"shadewright-labs/sablecourt"}, func(in store.Store) store.Store {
+		return failPRChecksPut{in}
+	})
+	h := gate.ActionHandler()
+	openTestPR(t, h, token)
+	rec := postAction(t, h, "POST", "/git.pr_checks", token, `{"payload":{"owner":"shadewright-labs","repo":"sablecourt","pr_number":42}}`)
+	if rec.Code < 500 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+	rows, err := st.ListAudit(ctx, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Action != "evidence:git.pr_checks" || r.Outcome != "error" {
+			continue
+		}
+		var d map[string]any
+		if err := json.Unmarshal([]byte(r.DetailJSON), &d); err != nil {
+			t.Fatal(err)
+		}
+		if d["reason"] != "store_failed" || d["owner"] != "shadewright-labs" || d["repo"] != "sablecourt" || d["pr_number"] != float64(42) || d["head_sha"] != head {
+			t.Fatalf("closing row detail %s does not name the pull request", r.DetailJSON)
+		}
+		return
+	}
+	t.Fatalf("no closing error row among %d audit rows", len(rows))
+}
