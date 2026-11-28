@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 456" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Command step</title>
-  <desc id="d">When an author step completes and the next step is a command, the control plane submits the command step, with the author's commit in its registration. Launch checks read that registration, resolve the command from the manifest and need the run's recorded author base. A second check is that the harness container is created. If either fails, the step is refused, never on the host, and the run is halted when the task is a registered command step still declared by the loaded manifest. Otherwise the runner finishes its pre-start checks and asks Docker to start the command, inside the harness container on a read-only checkout of the author's commit, with no task lease and a proxy with no provider host. Docker sends the runner the output streams and the exit status. When capture and recording succeed, the capped, redacted result is stored. A passed result moves the run to the next step, which follows the author's task. Any other outcome tries to halt the run with the reason recorded on it, in one transaction with its event and audit row.</desc>
+  <desc id="d">When an author step completes and the next step is a command, the control plane submits the command step. If its launch checks and the container start succeed, the command runs in the harness container on a read-only checkout of the author's commit, with no task lease. Otherwise the step is refused, never on the host. The runner records the command's capped, redacted result. A result that passed with exit status 0 lets the run go on to the next step, which follows the author's task. A refusal or a result that did not pass makes the control plane attempt to halt the run.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -27,29 +27,26 @@
   <text class="s" x="60" y="147">completes</text>
 
   <polygon class="box" points="268,132 344,88 420,132 344,176"/>
-  <text class="s" x="344" y="137" text-anchor="middle">Checks pass?</text>
-
-  <polygon class="box" points="492,132 568,88 644,132 568,176"/>
-  <text class="s" x="568" y="137" text-anchor="middle">Container created?</text>
+  <text class="s" x="344" y="137" text-anchor="middle">Launch ok?</text>
 
   <rect class="frame" x="700" y="48" width="276" height="140" rx="12"/>
   <text class="idt" x="716" y="72">HARNESS CONTAINER</text>
   <rect class="key" x="716" y="92" width="244" height="80" rx="12"/>
   <text class="h" x="732" y="118">Command runs</text>
   <text class="s" x="732" y="139">read-only author commit</text>
-  <text class="s" x="732" y="156">no lease, no provider host</text>
+  <text class="s" x="732" y="156">no task lease</text>
 
-  <rect class="bad" x="268" y="232" width="376" height="64" rx="10"/>
+  <rect class="bad" x="268" y="232" width="176" height="64" rx="10"/>
   <text class="h" x="284" y="258">Refused</text>
   <text class="no" x="284" y="279">never on the host</text>
 
   <rect class="box" x="716" y="232" width="244" height="64" rx="10"/>
   <text class="h" x="732" y="258">Result stored</text>
-  <text class="s" x="732" y="279">stored if capture succeeds</text>
+  <text class="s" x="732" y="279">capped, redacted output</text>
 
   <rect class="bad" x="416" y="368" width="228" height="64" rx="10"/>
-  <text class="h" x="432" y="394">Run halted</text>
-  <text class="s" x="432" y="415">if registered; one transaction</text>
+  <text class="h" x="432" y="394">Halt attempted</text>
+  <text class="s" x="432" y="415">event, audit row, run record</text>
 
   <rect class="box" x="852" y="368" width="228" height="64" rx="10"/>
   <text class="h" x="868" y="394">Next step</text>
@@ -57,20 +54,16 @@
 
   <path class="f" d="M220 132H262" marker-end="url(#a)"/>
   <text class="lbl" x="241" y="124" text-anchor="middle">submit</text>
-  <path class="f" d="M420 132H486" marker-end="url(#a)"/>
-  <text class="lbl" x="456" y="124" text-anchor="middle">yes</text>
-  <path class="f" d="M644 132H710" marker-end="url(#a)"/>
-  <text class="lbl" x="676" y="124" text-anchor="middle">start</text>
+  <path class="f" d="M420 132H710" marker-end="url(#a)"/>
+  <text class="lbl" x="565" y="124" text-anchor="middle">yes</text>
 
   <path class="deny" d="M344 176V226" marker-end="url(#x)"/>
   <text class="no" x="356" y="208">no</text>
-  <path class="deny" d="M568 176V226" marker-end="url(#x)"/>
-  <text class="no" x="580" y="208">no</text>
-  <path class="deny" d="M530 296V362" marker-end="url(#x)"/>
-  <text class="lbl" x="542" y="334">halt tried if registered</text>
+  <path class="deny" d="M430 296V362" marker-end="url(#x)"/>
+  <text class="lbl" x="442" y="334">refused</text>
 
   <path class="f" d="M838 172V226" marker-end="url(#a)"/>
-  <text class="lbl" x="850" y="208">streams, exit status</text>
+  <text class="lbl" x="850" y="208">output, exit status</text>
   <path class="f" d="M920 296V362" marker-end="url(#a)"/>
   <text class="lbl" x="932" y="334">passed</text>
   <path class="deny" d="M760 296V400H650" marker-end="url(#x)"/>
