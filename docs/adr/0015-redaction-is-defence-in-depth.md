@@ -28,6 +28,10 @@ Host mode is covered by the 2026-11-27 amendment to [ADR-0011](0011-sanctum-scop
 
 The pattern redactor is a best-effort filter. It is defence in depth and Sablecourt does not describe it as a boundary.
 
+[![Pattern redaction applies to text Sablecourt writes, while content sent to providers through the Model Gate and the council proxy is not redacted.](../diagrams/redaction-paths.svg)](../diagrams/redaction-paths.svg "Open full size")
+
+Figure: where the pattern redactor applies and the two model-provider paths on which content leaves unredacted. Other outbound data, such as pull request fields and upstream MCP tool arguments, is not redacted either and is not drawn.
+
 The boundaries that must redact stay as the accepted ADRs and the design document name them: Data and Action Gate responses before they reach a workload, Conclave messages, Relics and Scry output before persistence or broadcast, context packets and repository pre-checks, learning statements and their export, and council peer excerpts and writer diffs. This ADR changes what redaction at those boundaries guarantees. It does not remove any of them.
 
 What invariant 3 guarantees after this ADR:

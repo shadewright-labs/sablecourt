@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 220" role="img" aria-labelledby="t d" data-diagram="flow" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Approval device pairing</title>
+  <desc id="d">What this ADR plans for pairing an approval device, drawn dashed because it is not built. The device proves possession of its P-256 private key, and an enrolled passkey or an already paired device then gives fresh confirmation. A red refused line leads to a box saying the pairing start and complete routes answer 503 today, because device enrolment needs independent confirmation. A legend marks planned and refused.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="220" rx="18" fill="#08060e"/>
+  <rect class="plan" x="32" y="40" width="250" height="72" rx="10"/>
+  <text class="h" x="48" y="66">Key possession proof</text>
+  <text class="s" x="48" y="87">a P-256 key, proved by</text>
+  <text class="s" x="48" y="104">its private key</text>
+  <rect class="plan" x="358" y="40" width="250" height="72" rx="10"/>
+  <text class="h" x="374" y="66">Fresh confirmation</text>
+  <text class="s" x="374" y="87">an enrolled passkey or</text>
+  <text class="s" x="374" y="104">a paired device</text>
+  <rect class="bad" x="720" y="40" width="360" height="72" rx="10"/>
+  <text class="no" x="736" y="66" text-anchor="start">Pairing routes answer 503 today</text>
+  <text class="s" x="736" y="87" text-anchor="start">start and complete, until independent</text>
+  <text class="s" x="736" y="104" text-anchor="start">confirmation lands in Stage 1</text>
+  <path class="r" d="M282 76H354" marker-end="url(#m)"/>
+  <text class="lbl" x="318" y="68" text-anchor="middle">then</text>
+  <path class="deny" d="M608 76H716" marker-end="url(#x)"/>
+  <text class="lbl" x="662" y="68" text-anchor="middle">refused</text>
+  <path class="r" d="M32 172H72" marker-end="url(#m)"/>
+  <text class="lbl" x="82" y="176" text-anchor="start">planned</text>
+  <path class="deny" d="M260 172H300" marker-end="url(#x)"/>
+  <text class="lbl" x="310" y="176" text-anchor="start">refused</text>
+</svg>
