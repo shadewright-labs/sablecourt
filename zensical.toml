@@ -33,6 +33,7 @@ nav = [
     { "Conclaves" = "how-it-works/conclaves.md" },
     { "Council" = "how-it-works/council.md" },
     { "Harness containers" = "how-it-works/harness-containers.md" },
+    { "Command steps" = "how-it-works/command-steps.md" },
     { "Context and learning" = "how-it-works/context-and-learning.md" },
     { "Integrations" = "how-it-works/integrations.md" },
   ] },

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/redact"
+	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 )
 
 const (
@@ -28,6 +29,10 @@ type processResult struct {
 	LogClose bool
 	Message  string
 	Response string
+	// TimedOut is set when the run passed its wall-time limit.
+	TimedOut bool `json:",omitempty"`
+	// Command is the result of a command step, set only by the runner.
+	Command *scruntime.CommandResult `json:",omitempty"`
 }
 
 type codingProcess struct {

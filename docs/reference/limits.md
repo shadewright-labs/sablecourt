@@ -93,7 +93,7 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Memory of a council container | `internal/runtime/coding.defaultCouncilMemoryBytes` | 2 GiB |
 | Processes in a council container | `internal/runtime/coding.defaultCouncilPIDs` | 256 |
 | Council container setup timeout | `internal/runtime/coding.defaultCouncilSetupTimeout` | 30 s |
-| Output kept per council container | `internal/runtime/docker.maxCouncilOutput` | 1 MiB |
+| Output kept per stream of a council or command container (a council stream past it is dropped, a command stream keeps its tail) | `internal/runtime/docker.maxCouncilOutput` | 1 MiB |
 | Gate request body | `internal/gate/councilproxy.MaxGateBodyBytes` | 2 MiB |
 | Gate connections | `internal/gate/councilproxy.MaxGateConns` | 32 |
 | Gate read header timeout | `internal/gate/councilproxy.GateReadHeaderTimeout` | 5 s |
@@ -142,6 +142,21 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Distinct exit code recorded when a harness exits `0` but closing or finalizing its output log fails | `internal/runtime.ExitCodeLogClose` | -2 |
 | Context pack pre-check timeout | `internal/contextpack.precheckTimeout` | 10 s |
 | Context pack pre-check output kept | `internal/contextpack.maxPrecheckBytes` | 16 KiB |
+
+## Command steps
+
+See [command steps](../how-it-works/command-steps.md).
+
+| Limit | Constant | Value |
+| --- | --- | --- |
+| Time limit of a command when `timeoutSeconds` is unset, container setup included | `internal/domain.DefaultCommandTimeout` | 10 min |
+| Highest `timeoutSeconds` | `internal/domain.MaxCommandTimeout` | 1 h |
+| Redacted output kept when `maxOutputBytes` is unset; more fails the step | `internal/domain.DefaultCommandOutputBytes` | 64 KiB |
+| Highest `maxOutputBytes` | `internal/domain.MaxCommandOutputBytes` | 1 MiB |
+| Bytes before a command stream's kept tail redacted with it as context, never shown | `internal/runtime/docker.outputLookback` | 64 KiB |
+| Entries in a command's `argv` | `internal/domain.MaxCommandArgs` | 64 |
+| Bytes in one `argv` entry | `internal/domain.MaxCommandArgBytes` | 4 KiB |
+| Bytes in a command's `failureReason` | `internal/domain.MaxCommandFailureReason` | 512 B |
 
 ## sablectl
 
