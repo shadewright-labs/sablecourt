@@ -57,6 +57,10 @@ When a stream reaches its final event and trailing bytes follow, the exact final
 
 Streams are copied to the caller as they arrive with a flush per chunk, so streaming is not delayed by accounting. Each chunk first passes through the exact matcher of `internal/redact`, on the primary and the fallback path. The stream matcher keeps the raw body it has not sent yet and sends only what the batch matcher returns for the part up to the last byte that occurs in no registered spelling (and is not CR, LF, a backslash, `r` or `n`), so the bytes sent equal the batch result for the whole body. The rest waits for the next chunk or the end of the body. Output can therefore arrive in larger pieces than upstream sent. If 64 KiB pile up with no such byte, the stream sends the marker and stops. Response headers are matched the same way, and a header whose name shows a held value is dropped. A response that still carries a `Content-Encoding` after the transport is refused with 502, because the matcher cannot read it.
 
+The gate relays only JSON and server-sent events. The upstream response must carry exactly one `Content-Type` naming `application/json` or `text/event-stream`, with no parameter other than a UTF-8 `charset`. The gate does not copy the upstream value: it sets `application/json` or `text/event-stream` itself, adding `; charset=utf-8` when the upstream named that charset. Any other value (HTML, plain text, `application/x-ndjson`, a `+json` suffix type, another charset, a missing or repeated header) is refused with 502 `upstream response content type not supported`, on any status and on the fallback path, and the upstream body is not sent. No provider the gate serves answers with NDJSON: Gemini's `streamGenerateContent` returns a JSON array, or SSE with `alt=sse`. Every response the gate writes, relayed or refused, carries `X-Content-Type-Options: nosniff`; an upstream value of that header is dropped.
+
+A refused encoding or content type is charged like an unreadable usage report: after a 2xx the admitted reserve is settled, because the provider already did the work, and after a non-2xx the reservation is released.
+
 ## Fallback
 
 A request routed to `openai` or `local` may be retried once on the other of the two, if the workload's grant lists it and it is configured, when the first call fails at transport level or answers 429, 502, 503 or 504. The response then carries the header `X-Sablecourt-Fallback-Provider` and an audit row `model.fallback`. Anthropic and Gemini requests are not retried elsewhere because their wire formats differ.
@@ -69,7 +73,7 @@ A task with a parent, such as a workflow step after the first, must carry a ceil
 
 ## What goes into the audit chain
 
-The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a fallback, a settlement failure and each successful call (model, uncached input, cache write, cache read, output tokens and cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller.
+The gate appends a row for a missing or invalid token, an unknown workload, a missing grant, a provider or budget refusal, a missing key, a failed upstream call, a refused response encoding (`encoded_upstream_response`) or content type (`unsupported_upstream_content_type`), a fallback, a settlement failure and each successful call (model, uncached input, cache write, cache read, output tokens and cost in micro-USD). It appends nothing for an unknown route, an unreadable body, an internal budget error or a non-2xx answer from the provider, for instance an upstream 400, which is passed to the caller when its content type is allowed.
 
 ## Known gaps
 

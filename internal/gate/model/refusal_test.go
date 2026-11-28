@@ -16,6 +16,7 @@ func TestModelGateRefusals(t *testing.T) {
 	upstreamCalls := 0
 	upstream := handlerTransport(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 	}))
 	gate, st := setupGateTest(t, nil, upstream)

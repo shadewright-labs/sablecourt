@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -340,7 +341,32 @@ func (g *Gate) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "upstream response encoding not supported")
 		return
 	}
+	// Only JSON and server-sent events are relayed. The workload gets a
+	// Content-Type the gate chooses from that list, never the upstream value,
+	// and nosniff, so a browser never renders a relayed body as HTML. Any
+	// other type is refused and budgeted like an encoded response.
+	relayType, ok := relayContentType(upResp.Header)
+	if !ok {
+		g.audit(ctx, lease.TaskID, lease.WorkloadName, "model_gate:"+activeProvider, "error", `{"reason":"unsupported_upstream_content_type"}`)
+		if upResp.StatusCode >= 200 && upResp.StatusCode < 300 {
+			releaseReservation = false
+			g.settleSuccess(ctx, lease, activeProvider, reqModel, reservationID, parsedUsage{Outcome: usageOutcomeNone}, reserve)
+		}
+		writeErr(w, http.StatusBadGateway, "upstream response content type not supported")
+		return
+	}
 	copyResponseHeaders(w.Header(), upResp.Header)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	switch relayType {
+	case relayJSONUTF8:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case relaySSE:
+		w.Header().Set("Content-Type", "text/event-stream")
+	case relaySSEUTF8:
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(upResp.StatusCode)
 	known := redact.NewStream()
 
@@ -664,6 +690,54 @@ func encodedResponse(h http.Header) bool {
 	return false
 }
 
+// relayType is a Content-Type the gate sets on a relayed response.
+type relayType int
+
+const (
+	relayJSON relayType = iota
+	relayJSONUTF8
+	relaySSE
+	relaySSEUTF8
+)
+
+// relayContentType maps the upstream Content-Type to one the gate relays.
+// It accepts exactly one value naming application/json or text/event-stream,
+// with at most a UTF-8 charset parameter (in any case or quoting). A missing,
+// repeated or unparsable value, another media type, another charset or any
+// other parameter is refused. No provider the gate serves answers with
+// application/x-ndjson (Gemini streams JSON arrays or, with alt=sse, SSE), so
+// it is not on the list.
+func relayContentType(h http.Header) (relayType, bool) {
+	vals := h.Values("Content-Type")
+	if len(vals) != 1 {
+		return 0, false
+	}
+	mediaType, params, err := mime.ParseMediaType(vals[0])
+	if err != nil {
+		return 0, false
+	}
+	utf8 := false
+	for k, v := range params {
+		if k != "charset" || !strings.EqualFold(v, "utf-8") {
+			return 0, false
+		}
+		utf8 = true
+	}
+	switch mediaType {
+	case "application/json":
+		if utf8 {
+			return relayJSONUTF8, true
+		}
+		return relayJSON, true
+	case "text/event-stream":
+		if utf8 {
+			return relaySSEUTF8, true
+		}
+		return relaySSE, true
+	}
+	return 0, false
+}
+
 // copyResponseHeaders copies upstream response headers for the workload. A
 // header whose name shows a daemon-held value is dropped, and held values in
 // header values are replaced by exact match.
@@ -671,7 +745,9 @@ func copyResponseHeaders(dst, src http.Header) {
 	reg := redact.DefaultRegistry()
 	for k, vals := range src {
 		lower := strings.ToLower(k)
-		if lower == "content-length" || lower == "connection" || lower == "transfer-encoding" {
+		switch lower {
+		case "content-length", "connection", "transfer-encoding", "content-type", "x-content-type-options":
+			// The gate sets Content-Type and X-Content-Type-Options itself.
 			continue
 		}
 		if reg.ContainsHeld(k) {
@@ -741,6 +817,7 @@ func extractRequestModel(provider, upstreamPath string, body []byte) string {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

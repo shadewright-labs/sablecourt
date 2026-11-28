@@ -213,12 +213,12 @@ func TestModelGateRefusesEncodedResponsesAndDropsHeldHeaderNames(t *testing.T) {
 		header http.Header
 		refuse bool
 	}{
-		{"gzip", http.Header{"Content-Encoding": {"gzip"}}, true},
-		{"second header", http.Header{"Content-Encoding": {"identity", "gzip"}}, true},
-		{"empty then gzip", http.Header{"Content-Encoding": {"", "br"}}, true},
-		{"list", http.Header{"Content-Encoding": {"identity, gzip"}}, true},
-		{"identity", http.Header{"Content-Encoding": {"identity"}}, false},
-		{"held value in a header name", http.Header{"X-" + openaiKey: {"v"}}, false},
+		{"gzip", http.Header{"Content-Type": {"application/json"}, "Content-Encoding": {"gzip"}}, true},
+		{"second header", http.Header{"Content-Type": {"application/json"}, "Content-Encoding": {"identity", "gzip"}}, true},
+		{"empty then gzip", http.Header{"Content-Type": {"application/json"}, "Content-Encoding": {"", "br"}}, true},
+		{"list", http.Header{"Content-Type": {"application/json"}, "Content-Encoding": {"identity, gzip"}}, true},
+		{"identity", http.Header{"Content-Type": {"application/json"}, "Content-Encoding": {"identity"}}, false},
+		{"held value in a header name", http.Header{"Content-Type": {"application/json"}, "X-" + openaiKey: {"v"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gate, tok := responseGate(t, map[string]string{"openai_api_key": openaiKey}, func(r *http.Request) (*http.Response, error) {
