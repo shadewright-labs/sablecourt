@@ -24,9 +24,10 @@ Each refusal returns an error; the audit rows are listed below.
 1. A bearer token with the `sc_task_` prefix must be present, in `Authorization`, `x-api-key` or `x-goog-api-key`, and match an active lease (not revoked, not expired): 401.
 2. The workload must be declared (403), must not be a deterministic controller and must hold `modelGate.allowed` (403, `no_model_gate_grant`).
 3. If `providers` is listed it must include the route's provider (403, `provider_not_allowed`). An empty list allows all four.
-4. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
-5. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
-6. The provider key must be available (502 otherwise). A key shorter than 8 bytes is refused with 502 and an error that names its secret, never the value, and is not sent upstream.
+4. If the lease is pinned, because the task's context packet carried learnings, the route's provider must be in the pinned set (403, `provider_not_admitted_with_learnings`). Fallback candidates are narrowed to that set as well ([destination check](context-and-learning.md#destination-check)).
+5. The `budgetRef` must resolve to a `Budget` (403, `missing_budget`).
+6. The body (up to 16 MiB) is read and a cost is reserved. An exceeded budget is 429 with `budget exceeded: <reason>`; a missing or malformed child ceiling is 403 `invalid_child_budget_ceiling`; any other budget-check error is 500.
+7. The provider key must be available (502 otherwise). A key shorter than 8 bytes is refused with 502 and an error that names its secret, never the value, and is not sent upstream.
 
 ## Reserve, forward, settle
 
@@ -80,6 +81,7 @@ The gate appends a row for a missing or invalid token, an unknown workload, a mi
 What the code does today, where it falls short of the design.
 
 - Workflow steps after the first have a parent task but are created without a budget ceiling, so a Model Gate call from such a step is refused with `invalid_child_budget_ceiling`. This follows from the code and its tests; it has not been run end to end.
+- The gate does not check model families. A workload with `grants.modelGate.allowed: true` picks its model per request and may fall back to another provider, so the manifest loader refuses any workflow that uses such a workload as a `role: verifier` step ([ADR-0010](../adr/0010-agentic-context-learnings-and-verification-pipeline.md), amendment of 2026-11-27).
 - Pre-call reserve estimation sizes input from prompt and schema bytes in the request body at one token per four bytes and reserves one output token per choice when no output limit is requested. It cannot upper-bound server-side stored context (`previous_response_id`, `conversation`, `cachedContent`) or fields outside the counted list, so a fallback charge to the reserve is not a strict upper bound for requests that rely on stored context or omit output limits.
 - Anthropic `advisor_message` iteration tokens are priced at the request model's rate (using the single built-in per-provider Anthropic rate), so calls whose advisor model is dearer than the request model can be undercharged until per-model pricing is built.
 

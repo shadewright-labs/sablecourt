@@ -223,7 +223,7 @@ func TestMCPHTTPSessionUsesReloadedPolicyAndGrants(t *testing.T) {
 		Workloads: map[string]domain.Workload{wl.Metadata.Name: wl},
 		Policies:  map[string]domain.Policy{"default": deny},
 	}
-	gate.Reload(updated, policy.NewEngine([]domain.Policy{deny}, nil))
+	mustReload(t, gate, updated, policy.NewEngine([]domain.Policy{deny}, nil))
 	if res := put("after-reload"); !res.IsError {
 		t.Errorf("write succeeded after policy reload")
 	}
@@ -232,7 +232,7 @@ func TestMCPHTTPSessionUsesReloadedPolicyAndGrants(t *testing.T) {
 	}
 
 	wl.Spec.Grants.MCPTools = nil
-	gate.Reload(&config.Bundle{
+	mustReload(t, gate, &config.Bundle{
 		Workloads: map[string]domain.Workload{wl.Metadata.Name: wl},
 		Policies:  initial.bundle.Policies,
 	}, initial.policy)
@@ -421,7 +421,10 @@ func TestGateReloadConcurrentRequestsNoRace(t *testing.T) {
 						return
 					default:
 						b, pol := makeConfig()
-						gate.Reload(b, pol)
+						if err := gate.Reload(b, pol); err != nil {
+							t.Errorf("Reload: %v", err) // not t.Fatal: this is not the test goroutine
+							return
+						}
 					}
 				}
 			}()
@@ -458,7 +461,7 @@ func TestActionKeepsSnapshotDuringReload(t *testing.T) {
 		Rules:         []domain.PolicyRule{{Workload: wl.Metadata.Name, Capability: capability, Effect: domain.EffectAllow}},
 	}}
 	deny := domain.Policy{Spec: domain.PolicySpec{DefaultEffect: domain.EffectDeny}}
-	gate.Reload(&config.Bundle{
+	mustReload(t, gate, &config.Bundle{
 		Workloads: map[string]domain.Workload{
 			wl.Metadata.Name: wl,
 			"candidate":      {Metadata: domain.ObjectMeta{Name: "candidate", Zone: domain.ZoneSandbox}},
@@ -477,7 +480,7 @@ func TestActionKeepsSnapshotDuringReload(t *testing.T) {
 	}
 
 	rec := run(&readAfterReload{Reader: strings.NewReader(body), reload: func() {
-		gate.Reload(&config.Bundle{
+		mustReload(t, gate, &config.Bundle{
 			Workloads: map[string]domain.Workload{wl.Metadata.Name: wl},
 			Policies:  map[string]domain.Policy{"default": deny},
 		}, policy.NewEngine([]domain.Policy{deny}, nil))

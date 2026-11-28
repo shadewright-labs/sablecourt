@@ -60,7 +60,7 @@ Lease
 :   The scoped, short-lived credential of a task: `sc_task_` plus 64 hex characters, stored only as a hash. See [identity and access](how-it-works/identity-and-access.md).
 
 Learning
-:   A rule for future runs. Today a `learning:*` entry in Court Memory; the ADR-0012 record is partly built. See [context and learning](how-it-works/context-and-learning.md).
+:   A rule for future runs, kept as an ADR-0012 learning record. Legacy `learning:*` entries in Court Memory reach no packet. See [context and learning](how-it-works/context-and-learning.md).
 
 Manifest
 :   A YAML document of `apiVersion: sablecourt.io/v1alpha1`. See [manifests](reference/manifests.md).

@@ -157,7 +157,7 @@ func TestBuiltinProposePromotionRefusals(t *testing.T) {
 		})
 	}
 
-	gate.Reload(nil, gate.snapshot().policy)
+	mustReload(t, gate, nil, gate.snapshot().policy)
 	if _, err := runAction(t, gate, "sandbox.propose_promotion", `{"workload":"exp-sandbox","branch":"sablecourt/p","reason":"r"}`); err == nil || !strings.Contains(err.Error(), "no manifest bundle") {
 		t.Fatalf("propose_promotion without a bundle = %v", err)
 	}
@@ -286,7 +286,7 @@ func TestInvokeToolDecisions(t *testing.T) {
 		domain.PolicyRule{Workload: "triage-agent", Capability: "mcp:github.comment", Effect: domain.EffectApprove},
 		domain.PolicyRule{Workload: "triage-agent", Capability: "mcp:memory.put", Effect: domain.EffectAllow},
 	)
-	gate.Reload(bundle, policy.NewEngine([]domain.Policy{pol}, nil))
+	mustReload(t, gate, bundle, policy.NewEngine([]domain.Policy{pol}, nil))
 	lease := domain.Lease{TaskID: "task-1", WorkloadName: "triage-agent"}
 
 	called := 0
@@ -348,7 +348,7 @@ func TestInvokeToolDecisions(t *testing.T) {
 	}
 
 	// No policy engine: fail closed and audit it.
-	gate.Reload(bundle, nil)
+	mustReload(t, gate, bundle, nil)
 	res, _ = gate.invokeTool(ctx, lease, wl, commentDef, nil)
 	if !res.IsError || toolText(t, res) != "policy failed closed" {
 		t.Fatalf("nil policy result = %q", toolText(t, res))
@@ -361,9 +361,11 @@ func TestInvokeToolDecisions(t *testing.T) {
 
 func TestRegisterUpstreamToolsSkipsIncompleteServers(t *testing.T) {
 	gate := New(Options{Bundle: &config.Bundle{}, Approvals: approval.NewQueue(nil, nil), Now: func() time.Time { return time.Unix(0, 0) }})
-	gate.RegisterUpstreamTools([]domain.UpstreamMCPServer{{Name: "x", URL: "https://x.example", AllowedTools: []string{"t"}}}, nil)
-	if len(gate.tools) != 0 {
-		t.Fatalf("tools registered without a bridge: %v", gate.tools)
+	if err := gate.RegisterUpstreamTools([]domain.UpstreamMCPServer{{Name: "x", URL: "https://x.example", AllowedTools: []string{"t"}}}, nil); err != nil {
+		t.Fatalf("RegisterUpstreamTools without a bridge = %v", err)
+	}
+	if len(gate.upstream) != 0 {
+		t.Fatalf("tools registered without a bridge: %v", gate.upstream)
 	}
 
 	var calledTool string
@@ -377,17 +379,19 @@ func TestRegisterUpstreamToolsSkipsIncompleteServers(t *testing.T) {
 		calledTool = body.Params.Name
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"result":{"ok":true}}`))}, nil
 	})})
-	gate.RegisterUpstreamTools([]domain.UpstreamMCPServer{
+	if err := gate.RegisterUpstreamTools([]domain.UpstreamMCPServer{
 		{Name: "", URL: "https://a.example", AllowedTools: []string{"t"}},
 		{Name: "b", URL: " ", AllowedTools: []string{"t"}},
 		{Name: "linear", URL: "https://linear.example/mcp", AllowedTools: []string{" list ", ""}},
-	}, bridge)
-	if len(gate.tools) != 1 {
-		t.Fatalf("tools = %v, want only linear.list", gate.tools)
+	}, bridge); err != nil {
+		t.Fatalf("RegisterUpstreamTools = %v", err)
 	}
-	def, ok := gate.tools["linear.list"]
+	if len(gate.upstream) != 1 || len(gate.tools) != 0 {
+		t.Fatalf("upstream = %v, tools = %v, want only upstream linear.list", gate.upstream, gate.tools)
+	}
+	def, ok := gate.upstream["linear.list"]
 	if !ok {
-		t.Fatalf("tools = %v", gate.tools)
+		t.Fatalf("upstream = %v", gate.upstream)
 	}
 	out, err := def.Handler(context.Background(), domain.Workload{}, "t", nil)
 	if err != nil || out != `{"ok":true}` || calledTool != "list" {

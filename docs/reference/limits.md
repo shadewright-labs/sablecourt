@@ -114,6 +114,8 @@ The rows are checked by `TestLimitsReferenceMatchesConstants` in `internal/refdo
 | Limit | Constant | Value |
 | --- | --- | --- |
 | Statement | `internal/store.MaxLearningStatementBytes` | 4 KiB |
+| Learnings in one packet | `internal/contextpack.MaxPacketLearnings` | 10 |
+| Learnings section of one packet | `internal/contextpack.MaxLearningSectionBytes` | 4 KiB |
 | Other text field | `internal/store.MaxLearningFieldBytes` | 512 B |
 | Outcome summary | `internal/store.MaxLearningOutcomeSummaryBytes` | 2 KiB |
 | Path globs per learning | `internal/store.MaxLearningPathGlobs` | 16 |

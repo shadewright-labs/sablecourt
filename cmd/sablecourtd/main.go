@@ -8,12 +8,14 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -351,6 +353,14 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
+// packetLearningDestination fixes the facts that decide whether a context
+// packet may carry learnings (ADR-0012): long-lived agents run in the Docker
+// adapter, and no model gateway receives the requests.
+func packetLearningDestination(adapters map[domain.WorkloadClass]scruntime.Adapter, modelGatewayURL string) contextpack.Destination {
+	da, ok := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	return contextpack.Destination{DockerAgents: ok && da != nil, ModelGateway: modelGatewayURL != ""}
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -534,25 +544,34 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		bundleMu sync.RWMutex
 		bundle   *config.Bundle
 	)
-	policies := newPolicyLoader(st, manifestsPath)
+	policies := newPolicyLoader(manifestsPath)
+	councilPanelOn := !isCitadel && adapters[domain.ClassCodingAgent] != nil
+	// loadAndSync reads the manifests and writes nothing; recordBundle writes
+	// the workloads to the store once every check has accepted the bundle.
 	loadAndSync := func() (*config.Bundle, *policy.Engine, error) {
 		b, pol, err := policies.Load(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !isCitadel && adapters[domain.ClassCodingAgent] != nil {
+		if councilPanelOn {
 			var err error
-			b, err = ensureCouncilPanelWorkloads(ctx, st, b, councilSandbox(councilDocker != nil))
+			b, err = addCouncilPanelWorkloads(b, councilSandbox(councilDocker != nil))
 			if err != nil {
 				return nil, nil, fmt.Errorf("register council panel workloads: %w", err)
 			}
 		}
 		return b, pol, nil
 	}
+	recordBundle := func(b *config.Bundle) error {
+		return recordWorkloads(ctx, st, b, councilPanelOn)
+	}
 
 	var policyEng *policy.Engine
 	bundle, policyEng, err = loadAndSync()
 	if err != nil {
+		return err
+	}
+	if err := recordBundle(bundle); err != nil {
 		return err
 	}
 	if manifestsPath != "" && bundle != nil {
@@ -616,21 +635,11 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		logger.Info("git.open_pr pinned to the repo root's origin", "repo", pinned)
 	}
 	mcpgate.RegisterBuiltinMemory(dataActionGate, st)
-	mcpBridge := mcpgate.NewUpstreamBridge(secretStore, nil)
-	registerUpstreamMCP := func(b *config.Bundle) {
-		if b == nil {
-			return
-		}
-		if err := preloadBundleSecrets(ctx, secretStore, b); err != nil {
-			logger.Error("refusing reloaded MCP server credentials", "error", err)
-		}
-		for _, w := range b.Workloads {
-			if len(w.Spec.Grants.MCPServers) > 0 {
-				dataActionGate.RegisterUpstreamTools(w.Spec.Grants.MCPServers, mcpBridge)
-			}
-		}
+	// Upstream MCP tools live apart from the built-in ones; every reload
+	// rebuilds them from the new bundle (gate.Reload).
+	if err := dataActionGate.SetUpstreamBridge(mcpgate.NewUpstreamBridge(secretStore, nil)); err != nil {
+		logger.Warn("upstream MCP tools refused at start-up; no upstream tools registered", "error", err)
 	}
-	registerUpstreamMCP(bundle)
 
 	if isCitadel {
 		logger.Info("citadel mode active: coding agents and council seats disabled, fail-closed operator auth enforced")
@@ -641,14 +650,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	if err := wireK8sRuntime(ctx, cfg, adapters, attachHub, logger); err != nil {
 		return err
 	}
+	packetDest := packetLearningDestination(adapters, cfg.modelGatewayURL)
+	logger.Info("context packet learning destination fixed at startup",
+		"dockerAgents", packetDest.DockerAgents, "modelGateway", packetDest.ModelGateway)
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:        st,
-		Bundle:       bundle,
-		Policy:       policyEng,
-		Adapters:     adapters,
-		ModelGateURL: "http://" + gateHost + "/gate/model",
-		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		PacketDestination: packetDest,
+		Store:             st,
+		Bundle:            bundle,
+		Policy:            policyEng,
+		Adapters:          adapters,
+		ModelGateURL:      "http://" + gateHost + "/gate/model",
+		DataGateURL:       "http://" + gateHost + "/gate/mcp",
 		// Host coding agents reach the gate over loopback, not a container alias.
 		HostDataGateURL: cfg.hostGateURL(),
 		MaxConcurrent:   cfg.maxConcurrent,
@@ -681,24 +694,31 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// One reload at a time: the reload route, the dashboard and the manifests
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
-	reloadFn := serialized(func() error {
-		b, pol, err := loadAndSync()
-		if err != nil {
-			return err
-		}
-		bundleMu.Lock()
-		bundle = b
-		bundleMu.Unlock()
-		modelGate.SetBundle(b)
-		reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
-		registerUpstreamMCP(b)
-		reconciler.Reload(b, pol)
-		_ = scheduler.Reload(ctx, b)
-		if b != nil {
-			logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
-		}
-		return nil
-	})
+	reloadFn := serialized(reloadSteps{
+		load:    loadAndSync,
+		check:   dataActionGate.CheckReload,
+		persist: recordBundle,
+		gate: func(b *config.Bundle, pol *policy.Engine) error {
+			// Register the reloaded bundle's MCP server secrets for exact
+			// redaction before the gate can reach the new upstream tools.
+			if err := preloadBundleSecrets(ctx, secretStore, b); err != nil {
+				logger.Error("refusing reloaded MCP server credentials", "error", err)
+			}
+			return reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
+		},
+		apply: func(b *config.Bundle, pol *policy.Engine) {
+			bundleMu.Lock()
+			bundle = b
+			bundleMu.Unlock()
+			modelGate.SetBundle(b)
+			reconciler.Reload(b, pol)
+			_ = scheduler.Reload(ctx, b)
+			if b != nil {
+				logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
+			}
+		},
+		logger: logger,
+	}.run)
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -1003,18 +1023,38 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			return
 		}
 		if err := contextpack.SaveModelTiers(r.Context(), st, routes); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			status := http.StatusInternalServerError
+			if contextpack.IsRouteRefusal(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, contextpack.GetModelTiers(r.Context(), st))
 	})
 	mux.HandleFunc("GET /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
-		var paths []string
-		if p := strings.TrimSpace(r.URL.Query().Get("path")); p != "" {
-			paths = strings.Split(p, ",")
+		if repo != "" {
+			// MatchLearnings yields none on a store error, so reject a bad
+			// remote URL here instead of answering with an empty list.
+			normalized, err := store.NormalizeRepoRemoteURL(repo)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo: " + err.Error()})
+				return
+			}
+			repo = normalized
 		}
-		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
+		var paths []string
+		for p := range strings.SplitSeq(r.URL.Query().Get("path"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		learnings := contextpack.MatchLearnings(r.Context(), st, repo, paths, 100)
+		if learnings == nil {
+			learnings = []domain.Learning{}
+		}
+		writeJSON(w, http.StatusOK, learnings)
 	})
 	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "legacy learning publication is disabled"})
@@ -2132,16 +2172,15 @@ func readUploadedAudio(r *http.Request) ([]byte, string, string, error) {
 	return data, "audio.webm", strings.TrimSpace(r.URL.Query().Get("language")), nil
 }
 
-// policyLoader reads the manifests, records the declared workloads and builds
-// the policy engine for each load.
+// policyLoader reads the manifests and builds the policy engine for each load.
+// It writes nothing; recordWorkloads stores the workloads of an accepted bundle.
 type policyLoader struct {
-	st            store.Store
 	manifestsPath string
 	gateBreaker   *policy.CircuitBreaker
 }
 
-func newPolicyLoader(st store.Store, manifestsPath string) *policyLoader {
-	return &policyLoader{st: st, manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
+func newPolicyLoader(manifestsPath string) *policyLoader {
+	return &policyLoader{manifestsPath: manifestsPath, gateBreaker: policy.NewCircuitBreaker(3, 2*time.Minute)}
 }
 
 // Breaker returns the circuit breaker the action gate records outcomes on.
@@ -2158,17 +2197,9 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 		return nil, nil, fmt.Errorf("load manifests: %w", err)
 	}
 	for _, w := range loaded.Workloads {
-		cardBytes, err := json.Marshal(w.Spec.AgentCard)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := l.st.UpsertWorkload(ctx, domain.WorkloadRecord{
-			Name:           w.Metadata.Name,
-			Zone:           w.Metadata.Zone,
-			Class:          w.Spec.Class,
-			ManifestDigest: loaded.ManifestDigest,
-			AgentCardJSON:  string(cardBytes),
-		}); err != nil {
+		// Refuse an agent card that cannot be recorded now, before any
+		// check accepts the bundle and recordWorkloads writes it.
+		if _, err := json.Marshal(w.Spec.AgentCard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -2178,6 +2209,32 @@ func (l *policyLoader) Load(ctx context.Context) (*config.Bundle, *policy.Engine
 	}
 	breaker := policy.NewCircuitBreaker(3, 2*time.Minute)
 	return loaded, policy.NewEngine(policies, breaker), nil
+}
+
+// recordWorkloads writes every workload of b to the store. With councilPanel
+// set, the built-in council panel workloads (whose names a manifest may then
+// not use) are written without a manifest digest or agent card, as they come
+// from no manifest.
+func recordWorkloads(ctx context.Context, st store.Store, b *config.Bundle, councilPanel bool) error {
+	if b == nil {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(b.Workloads)) {
+		w := b.Workloads[name]
+		rec := domain.WorkloadRecord{Name: w.Metadata.Name, Zone: w.Metadata.Zone, Class: w.Spec.Class}
+		if !councilPanel || !isCouncilPanelRole(name) {
+			cardBytes, err := json.Marshal(w.Spec.AgentCard)
+			if err != nil {
+				return err
+			}
+			rec.ManifestDigest = b.ManifestDigest
+			rec.AgentCardJSON = string(cardBytes)
+		}
+		if err := st.UpsertWorkload(ctx, rec); err != nil {
+			return fmt.Errorf("record workload %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // serialized returns fn guarded by one mutex, so calls never overlap and
@@ -2197,9 +2254,67 @@ func serialized(fn func() error) func() error {
 // sync) runs it through the daemon's one reload function. It never re-pins: a
 // changed or unreadable origin keeps git.open_pr refused, is logged here, and
 // Recheck writes it to the audit log once per change of the observed origin.
-func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) {
-	gate.Reload(b, pol)
+// reloadGitOps reloads the Data and Action Gate and rechecks the git.open_pr
+// target. A gate refusal is returned with nothing changed in the gate.
+func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, b *config.Bundle, pol *policy.Engine) error {
+	if err := gate.Reload(b, pol); err != nil {
+		return err
+	}
 	if err := binding.Recheck(ctx); err != nil {
 		logger.Warn("git.open_pr refused after reload", "error", err)
 	}
+	return nil
+}
+
+// reloadSteps is the order of a manifest reload, and a refused reload changes
+// nothing. load reads the manifests and writes nothing. check runs every test
+// that can refuse the bundle (the gate's CheckReload) before anything is
+// written or swapped. Only then does persist write the workloads to the store,
+// gate swap the gate's bundle, policy and upstream tools, and apply swap the
+// rest. When load fails or check refuses, nothing is written or swapped; a
+// refusal is returned and logged as "reload refused". When persist fails (a
+// store error, which may leave some rows written), the gate and apply steps
+// never run. gate refuses only what check refuses, since reloads are
+// serialized and built-in tools are registered at start. check and persist
+// may be nil.
+type reloadSteps struct {
+	load    func() (*config.Bundle, *policy.Engine, error)
+	check   func(*config.Bundle) error
+	persist func(*config.Bundle) error
+	gate    func(*config.Bundle, *policy.Engine) error
+	apply   func(*config.Bundle, *policy.Engine)
+	logger  *slog.Logger
+}
+
+func (s reloadSteps) run() error {
+	b, pol, err := s.load()
+	if err != nil {
+		return err
+	}
+	if s.check != nil {
+		if err := s.check(b); err != nil {
+			return s.refused(err)
+		}
+	}
+	if s.persist != nil {
+		if err := s.persist(b); err != nil {
+			return err
+		}
+	}
+	if err := s.gate(b, pol); err != nil {
+		return s.refused(err)
+	}
+	s.apply(b, pol)
+	return nil
+}
+
+// refused returns err as a refused reload and logs it.
+func (s reloadSteps) refused(err error) error {
+	if !strings.HasPrefix(err.Error(), "reload refused") {
+		err = fmt.Errorf("reload refused: %w", err)
+	}
+	if s.logger != nil {
+		s.logger.Warn("manifest reload refused; previous bundle, policy, upstream tools and stored workloads kept", "error", err)
+	}
+	return err
 }
