@@ -387,7 +387,7 @@ func StoreScenarios() []Scenario {
 				return err
 			}},
 		{Name: "decree resumes a paused conclave", Methods: []string{"AppendConclaveMessage"}, Commits: true,
-			Setup: room(domain.ConclaveStateInputRequired, "max_messages_reached(1)", 0),
+			Setup: room(domain.ConclaveStateInputRequired, "ping_pong_detected(10)", 0),
 			Run: func(ctx context.Context, st store.Store) error {
 				_, _, _, err := store.AppendConclavePost(ctx, st, post("operator", "decree"), roomLimits(1), true, false)
 				return err

@@ -183,7 +183,7 @@ func roomState(t *testing.T, st store.Store, id string) domain.ConclaveSession {
 }
 
 func TestConclavePostWards(t *testing.T) {
-	t.Run("message ceiling pauses and refuses until the operator resumes", func(t *testing.T) {
+	t.Run("message ceiling pauses and refuses, and a Decree cannot lift it", func(t *testing.T) {
 		r := newConclaveRig(t)
 		r.room(t, "room", domain.ConclaveStateActive, 0)
 		limits := r.limits()
@@ -208,6 +208,24 @@ func TestConclavePostWards(t *testing.T) {
 		if _, _, _, err := r.post(t, "room", "operator", limits, false, false); !errors.Is(err, store.ErrConclavePaused) {
 			t.Fatalf("operator post without resume = %v", err)
 		}
+		if _, _, _, err := r.post(t, "room", "operator", limits, true, false); !errors.Is(err, store.ErrWardTripped) {
+			t.Fatalf("resume past maxMessages = %v", err)
+		}
+	})
+
+	t.Run("a Decree resumes a ping-pong pause and opens a run window", func(t *testing.T) {
+		r := newConclaveRig(t)
+		r.room(t, "room", domain.ConclaveStateActive, 0)
+		limits := r.limits()
+		limits.MaxPingPong = 2
+		for _, from := range []string{"a", "b"} {
+			if _, _, _, err := r.post(t, "room", from, limits, false, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if c := roomState(t, r.st, "room"); c.WardReason != "ping_pong_detected(2)" {
+			t.Fatalf("room after ping pong = %+v", c)
+		}
 		id, reason, _, err := r.post(t, "room", "operator", limits, true, false)
 		if err != nil || id == 0 || reason != "" {
 			t.Fatalf("operator resume = %d, %q, %v", id, reason, err)
@@ -222,7 +240,7 @@ func TestConclavePostWards(t *testing.T) {
 		if len(audit) == 0 || audit[0].Action != "conclave.run_window_reset" || !strings.Contains(audit[0].DetailJSON, `"conclave_id":"room"`) {
 			t.Fatalf("resume audit = %+v", audit)
 		}
-		// The count restarts after the decree.
+		// The ping-pong window restarts after the decree.
 		if _, reason, _, err := r.post(t, "room", "a", limits, false, false); err != nil || reason != "" {
 			t.Fatalf("post after resume = %q, %v", reason, err)
 		}
@@ -550,6 +568,9 @@ func TestConclaveAuditAndCloseStores(t *testing.T) {
 			})
 			t.Run("ward_trips_audited_once_across_all_paths", func(t *testing.T) {
 				testWardTripsAuditedOnce(t, st)
+			})
+			t.Run("ward_trip_revokes_turn_leases", func(t *testing.T) {
+				testWardTripRevokesLeases(t, st)
 			})
 			if backend == "sqlite" {
 				t.Run("plain_close_audit_failure_rolls_back", func(t *testing.T) {

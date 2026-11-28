@@ -19,16 +19,18 @@ A Vassal posts only to roles in its own `canMessage` list (`all` and `operator` 
 
 A Ward is a limit that pauses the room instead of failing it. Defaults are twice the number of Vassals for `maxMessages` and `maxPingPong`, and six for `maxRuns`, which is also the largest value the loader accepts.
 
-- `maxMessages`: Vassal messages since the last Decree.
+- `maxMessages`: Vassal messages in the room. Operator and system messages do not count and do not restart the count.
 - `maxPingPong`: reached when that many recent messages came from two roles or fewer.
 - `maxRuns`: Vassal turns started in the current run window.
 - The budget named by `budgetRef`, and a 15-minute wall time for the whole room.
 
 Tripping one moves the room to `input-required`, records the reason and posts a `system` message. The `conclave.ward` audit row is written when a Vassal post, a report or a council answer trips the Ward, and when a turn is refused on `maxRuns`. A trip on the wall time, on a council budget or message check while a turn is reserved, while a task is claimed, or on a retry handoff pauses the room and blocks the turn without that audit row. Further Vassal posts fail with a paused error.
 
+A trip on `maxMessages`, `maxPingPong`, the budget, or missing budget evidence also revokes the gate leases of the room's turns in the transaction that pauses the room, so a turn still running can make no further Model, MCP or Data Gate call. If the revocation cannot be written, the trip is rolled back with it and the post or turn fails with that error instead. A lease minted after the trip, by a turn claimed before it, is revoked on the next reconcile pass instead of renewed. The turn's process is not stopped by the trip; it ends when it fails without the gates. A trip on `maxRuns` or the wall time keeps the leases, because the room still accepts the replies of turns already running.
+
 ## What a Decree resets
 
-A Decree is a message from the operator (`sablectl conclave decree <id> <message>`). It resumes a Ward-paused room, restarts the message and ping-pong counts, and opens a new run window of `maxRuns` turns (audit row `conclave.run_window_reset`). It cannot resume a room that stopped on its wall time. For a council it does not reset the start ceiling or the deadline.
+A Decree is a message from the operator (`sablectl conclave decree <id> <message>`). It resumes a Ward-paused room, restarts the ping-pong count, and opens a new run window of `maxRuns` turns (audit row `conclave.run_window_reset`). It does not restart the `maxMessages` count, and it cannot resume a room paused on `maxMessages` or on its wall time; such a room can only be closed. For a council it does not reset the start ceiling or the deadline.
 
 ## States, Relics and Scry
 
@@ -46,6 +48,6 @@ Voice Decrees and Takeover are parked ([ADR-0011](../adr/0011-sanctum-scope-trus
 
 ## In depth
 
-- [ADR-0008](../adr/0008-conclaves-wards-and-live-attach.md): the decision. The code differs on two points: a council turn in a container does not register with Scry, and ping-pong counts messages since the last Decree rather than consecutive turns.
+- [ADR-0008](../adr/0008-conclaves-wards-and-live-attach.md): the decision. The code differs on two points: a council turn in a container does not register with Scry, and ping-pong counts messages since the last Decree rather than consecutive turns, and a Decree cannot resume a room paused on `maxMessages`.
 - `internal/conclave/broker.go`, `internal/store/conclave.go`, `internal/attach/hub.go`, `internal/config/loader.go`.
 - Next: [council](council.md), [watch and steer](../how-to/watch-and-steer.md).

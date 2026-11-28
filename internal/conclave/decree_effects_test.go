@@ -19,7 +19,7 @@ func TestDecreeResumeAndReplayEffects(t *testing.T) {
 	ctx := context.Background()
 	st := brokerTestStore(t)
 	faults := audittest.Wrap(st)
-	bundle := limitsBundle(domain.ConclaveWards{MaxMessages: 1, MaxRuns: 5},
+	bundle := limitsBundle(domain.ConclaveWards{MaxMessages: 10, MaxPingPong: 1, MaxRuns: 5},
 		domain.ConclaveVassal{Role: "coder", Workload: "worker", CanMessage: []string{"operator"}},
 		domain.ConclaveVassal{Role: "reviewer", Workload: "worker", Activation: domain.ActivationOnMention, CanMessage: []string{"operator"}},
 	)
@@ -35,7 +35,8 @@ func TestDecreeResumeAndReplayEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// First vassal message reaches MaxMessages=1 and pauses the conclave.
+	// First vassal message reaches MaxPingPong=1 and pauses the conclave. A
+	// Decree cannot lift maxMessages, so the ping-pong Ward carries the resume.
 	if _, err := b.PostMessage(ctx, room.ID, "coder", "operator", "note", "hit limit", ""); err != nil {
 		t.Fatal(err)
 	}

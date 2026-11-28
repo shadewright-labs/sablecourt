@@ -187,7 +187,7 @@ A **Conclave** is the room. It is the one kind that uses court words for its fie
 | `spec.budgetRef` | A reference by name to a `Budget` for the room. ADR-0008 counts it among the Wards. |
 | `spec.wards` | The limits on the room. |
 | `spec.wards.maxRuns` | The most runs in one run window. An operator Decree that resumes a paused room resets the window baseline to the current run count, allowing up to `maxRuns` more runs, so the room total can exceed `maxRuns`. |
-| `spec.wards.maxMessages` | The most Vassal messages since the last operator Decree. |
+| `spec.wards.maxMessages` | The most Vassal messages in the room. Operator messages do not restart the count, and a Decree cannot resume a room paused on it. |
 | `spec.wards.maxPingPong` | The most back-and-forth turns, named after the table-tennis game. |
 | `spec.vassals` | The members. |
 | `spec.vassals[].role` | The name a member answers to in the room, such as `reviewer`. |

@@ -270,6 +270,9 @@ func UpdateConclaveState(ctx context.Context, db *sql.DB, policy CouncilPolicyRe
 		if audit == nil {
 			return true, fmt.Errorf("%w: conclave ward audit writer unavailable", ErrAuditWrite)
 		}
+		if err := revokeConclaveTurnLeases(ctx, tx, room, wardReason, now); err != nil {
+			return true, err
+		}
 		if err := audit(ctx, tx, domain.AuditRecord{
 			Category:   "conclave",
 			Action:     "conclave.ward",
@@ -332,10 +335,11 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 			return 0, err
 		}
 	}
-	if paused && !(operator && post.resume && room.WardReason != conclaveDeadline ||
+	// Neither the wall time nor maxMessages can be lifted by a Decree.
+	if paused && !(operator && post.resume && room.WardReason != conclaveDeadline && !isMaxMessagesReason(room.WardReason) ||
 		admitted && (room.WardReason == ConclaveMaxRunsWard || room.WardReason == conclaveDeadline)) {
 		// A post refused at the message ceiling also carries the persisted Ward reason.
-		if strings.HasPrefix(room.WardReason, "max_messages_reached(") {
+		if isMaxMessagesReason(room.WardReason) {
 			return 0, fmt.Errorf("%w: %w: %s", ErrConclavePaused, ErrWardTripped, room.WardReason)
 		}
 		return 0, ErrConclavePaused
@@ -364,9 +368,12 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 		}
 	}
 
-	var count int
+	var count, total int
 	if !operator {
 		decree, count, err = conclaveMessageCount(ctx, tx, msg.ConclaveID)
+		if err == nil {
+			total, err = conclaveTotalMessages(ctx, tx, msg.ConclaveID)
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -381,9 +388,9 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 	case paused && !operator:
 		reason = room.WardReason
 	}
-	if !operator && count >= limits.MaxMessages {
+	if !operator && total >= limits.MaxMessages {
 		if reason == "" {
-			reason = fmt.Sprintf("max_messages_reached(%d)", limits.MaxMessages)
+			reason = maxMessagesReason(limits)
 		}
 		refusal = true
 	}
@@ -397,7 +404,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 			}
 		}
 		if reason == "" {
-			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, count, limits)
+			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, total, count, limits)
 			if err != nil {
 				return 0, err
 			}
@@ -430,7 +437,7 @@ func appendConclavePost(ctx context.Context, db *sql.DB, policy CouncilPolicyRea
 			}
 		}
 		if !operator && reason == "" {
-			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, count+1, limits)
+			reason, err = conclaveMessageWard(ctx, tx, msg.ConclaveID, decree, total+1, count+1, limits)
 			if err != nil {
 				return 0, err
 			}
@@ -558,10 +565,14 @@ func FinishConclaveWake(ctx context.Context, db *sql.DB, id int64) (sql.Result, 
 
 func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID, reason string, now time.Time, audit AuditTxFunc) error {
 	if room.State == domain.ConclaveStateInputRequired && room.WardReason == reason {
-		return nil
+		// A lease issued after the first trip is revoked by the next one.
+		return revokeConclaveTurnLeases(ctx, tx, room, reason, now)
 	}
 	if audit == nil {
 		return fmt.Errorf("%w: conclave ward audit writer unavailable", ErrAuditWrite)
+	}
+	if err := revokeConclaveTurnLeases(ctx, tx, room, reason, now); err != nil {
+		return err
 	}
 	if _, err := insertConclaveMessage(ctx, tx, domain.ConclaveMessage{
 		ConclaveID: room.ID, FromRole: "system", ToRole: "operator", Kind: "system",
@@ -583,6 +594,45 @@ func pauseConclave(ctx context.Context, tx *sql.Tx, room lockedConclave, taskID,
 		DetailJSON: fmt.Sprintf(`{"conclave_id":%q,"ward":%q}`, room.ID, reason),
 		CreatedAt:  now,
 	})
+}
+
+// WardRevokesTurnLeases reports whether a Ward tripped for reason ends the
+// room's running turns: their gate leases are revoked with the trip, so the
+// harness can make no further Model, MCP or Data Gate call. The run ceiling
+// and the wall time still admit the replies of turns already running, so
+// they keep those leases (a council's deadline revokes them in the
+// reconciler instead).
+func WardRevokesTurnLeases(reason string) bool {
+	return reason != "" && reason != ConclaveMaxRunsWard && reason != conclaveDeadline
+}
+
+// revokeConclaveTurnLeases revokes, inside the trip's transaction, every live
+// lease of the room's turns. An error rolls the trip back with it, so a trip
+// is never recorded while its turns keep live leases.
+func revokeConclaveTurnLeases(ctx context.Context, tx *sql.Tx, room lockedConclave, reason string, now time.Time) error {
+	if !WardRevokesTurnLeases(reason) {
+		return nil
+	}
+	tasks, args := conclaveTurnTasks(room)
+	args = append(args, now.UTC().Format(time.RFC3339Nano))
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(
+		"UPDATE leases SET revoked_at = $%d WHERE revoked_at IS NULL AND task_id IN (%s)", len(args), tasks), args...)
+	if err != nil {
+		return fmt.Errorf("revoke conclave turn leases: %w", err)
+	}
+	NoteEffectRows(ctx, res, nil, "the leases of conclave %s turns were revoked", room.ID)
+	return nil
+}
+
+// conclaveTurnTasks selects the IDs of the room's turn tasks.
+func conclaveTurnTasks(room lockedConclave) (string, []any) {
+	if room.policy != nil {
+		return "SELECT task_id FROM council_attempts WHERE council_id=$1", []any{room.ID}
+	}
+	init, mentions, retries := conclaveTaskPatterns(room.ID)
+	return `SELECT id FROM tasks WHERE parent_task_id = '' AND
+		(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')`,
+		[]any{init, mentions, retries}
 }
 
 type conclaveTurnKey struct{}
@@ -666,7 +716,11 @@ func InsertTask(ctx context.Context, db *sql.DB, policy CouncilPolicyReader, tas
 	if err != nil {
 		return err
 	}
-	reason, err := conclaveMessageWard(ctx, tx, turn.id, decree, count, limits)
+	total, err := conclaveTotalMessages(ctx, tx, turn.id)
+	if err != nil {
+		return err
+	}
+	reason, err := conclaveMessageWard(ctx, tx, turn.id, decree, total, count, limits)
 	if err == nil && reason == "" {
 		reason, err = conclaveBudgetWard(ctx, tx, room, limits.Budget)
 	}
@@ -850,6 +904,8 @@ func insertConclaveMessage(ctx context.Context, tx *sql.Tx, msg domain.ConclaveM
 	return id, err
 }
 
+// conclaveMessageCount returns the latest operator message ID and the Vassal
+// messages after it, which the ping-pong Ward reads.
 func conclaveMessageCount(ctx context.Context, tx *sql.Tx, id string) (int64, int, error) {
 	var decree int64
 	if err := tx.QueryRowContext(ctx, `
@@ -868,9 +924,32 @@ func conclaveMessageCount(ctx context.Context, tx *sql.Tx, id string) (int64, in
 	return decree, count, err
 }
 
-func conclaveMessageWard(ctx context.Context, tx *sql.Tx, id string, decree int64, count int, limits ConclaveLimits) (string, error) {
-	if count >= limits.MaxMessages {
-		return fmt.Sprintf("max_messages_reached(%d)", limits.MaxMessages), nil
+// conclaveTotalMessages counts every Vassal message in the room. Operator and
+// system messages neither count nor restart it, so a Decree cannot extend
+// maxMessages.
+func conclaveTotalMessages(ctx context.Context, tx *sql.Tx, id string) (int, error) {
+	var total int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conclave_messages
+		WHERE conclave_id = $1 AND from_role NOT IN ('operator', 'system')
+	`, id).Scan(&total)
+	return total, err
+}
+
+func maxMessagesReason(limits ConclaveLimits) string {
+	return fmt.Sprintf("max_messages_reached(%d)", limits.MaxMessages)
+}
+
+func isMaxMessagesReason(reason string) bool {
+	return strings.HasPrefix(reason, "max_messages_reached(")
+}
+
+// conclaveMessageWard checks maxMessages against total, the room's Vassal
+// messages, and maxPingPong against count, those since the last operator
+// message.
+func conclaveMessageWard(ctx context.Context, tx *sql.Tx, id string, decree int64, total, count int, limits ConclaveLimits) (string, error) {
+	if total >= limits.MaxMessages {
+		return maxMessagesReason(limits), nil
 	}
 	if count < limits.MaxPingPong {
 		return "", nil
@@ -925,14 +1004,7 @@ func conclaveBudgetWard(ctx context.Context, tx *sql.Tx, room lockedConclave, bu
 		return "", nil
 	}
 	var totals domain.BudgetTotals
-	tasks := `SELECT id FROM tasks WHERE parent_task_id = '' AND
-		(idempotency_key LIKE $1 ESCAPE '!' OR idempotency_key LIKE $2 ESCAPE '!' OR idempotency_key LIKE $3 ESCAPE '!')`
-	init, mentions, retries := conclaveTaskPatterns(room.ID)
-	args := []any{init, mentions, retries}
-	if room.policy != nil {
-		tasks = "SELECT task_id FROM council_attempts WHERE council_id=$1"
-		args = []any{room.ID}
-	}
+	tasks, args := conclaveTurnTasks(room)
 	err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_microusd), 0)
 		FROM budget_ledger WHERE task_id IN (`+tasks+")", args...).Scan(&totals.InputTokens, &totals.CacheWriteTokens, &totals.CacheReadTokens, &totals.OutputTokens, &totals.CostMicroUSD)

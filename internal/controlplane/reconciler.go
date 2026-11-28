@@ -1256,6 +1256,19 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 		task.State = target
 		return false, errors.Join(earlyRevokeErr, r.reconcileTerminal(context.WithoutCancel(ctx), task))
 	case scruntime.StateRunning:
+		if assigned {
+			// A Ward trip revokes the room's leases in its own transaction. A
+			// lease minted after it (a turn claimed before the trip and
+			// launched after) is revoked here instead of renewed. A failed
+			// room read renews nothing, so the lease runs out on its TTL.
+			room, err := r.store.GetConclave(ctx, assignment.ConclaveID)
+			if err != nil {
+				return true, err
+			}
+			if room.State == domain.ConclaveStateInputRequired && store.WardRevokesTurnLeases(room.WardReason) {
+				return true, r.store.RevokeTaskLeases(context.WithoutCancel(ctx), task.ID)
+			}
+		}
 		now := r.now()
 		age := now.Sub(obs.ObservedAt)
 		if hasTimestamp && age >= 0 && age <= r.stalenessWindow {
