@@ -36,7 +36,7 @@ The architect is a council question, not an inline card. The text in `architect-
 
 ## The workflows
 
-- `coding`: `developer-go` (tier `coding`), then the `invariant-paths` command step, then `reviewer` (tier `critic`). The command step is the invariant path guard: it compares every path changed since the run's first author base with the path list in its argv and halts the run before the review when one matches, with a failure reason that names `coding-invariant` ([the invariant path guard](../../docs/how-it-works/command-steps.md#the-invariant-path-guard)). Replace the example list with your repository's invariant paths; an empty list checks nothing.
+- `coding`: `developer-go` (tier `coding`), then the `invariant-paths` command step, then `reviewer` (tier `critic`). The command step is the invariant path guard: it compares every path changed since the run's first author base with the path list in its argv and halts the run before the review when one matches, with a failure reason that names `coding-invariant` ([command steps](../../docs/how-it-works/command-steps.md)). Replace the example list with your repository's invariant paths; an empty list checks nothing.
 - `coding-invariant`: `developer-go`, `reviewer`, then `security` (tier `critic`). Use it for a change on an invariant path. It has no guard.
 - `docs-change`: `developer-docs`, then `reviewer`.
 
