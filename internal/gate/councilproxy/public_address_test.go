@@ -47,7 +47,6 @@ func TestPublicAddressSpecialPurposeRanges(t *testing.T) {
 		{"255.255.255.255/32 limited broadcast", "255.255.255.255", "223.255.255.255"},
 		{"::1/128 loopback", "::1", "2000::1"},
 		{"::/128 unspecified", "::", "2000::1"},
-		{"::ffff:0:0/96 mapped private", "::ffff:10.0.0.1", "::ffff:1.2.3.4"},
 		{"64:ff9b::/96 NAT64", "64:ff9b::808:808", "2000::1"},
 		{"64:ff9b:1::/48 local NAT64", "64:ff9b:1:ffff::1", "2000::1"},
 		{"100::/64 discard only", "100::1", "2000::1"},
@@ -81,6 +80,30 @@ func TestPublicAddressSpecialPurposeRanges(t *testing.T) {
 			}
 			if !publicAddress(netip.MustParseAddr(tc.outside)) {
 				t.Errorf("%s is just outside the range and must be allowed", tc.outside)
+			}
+		})
+	}
+}
+
+// The row ::ffff:0:0/96 (IPv4-mapped addresses) is a deliberate exception to
+// "every row is refused": publicAddress converts a mapped address to IPv4
+// first, so a mapped address is refused exactly when its IPv4 form is. The
+// mapped form of a public address is therefore allowed, and the mapped form
+// of a refused one is refused.
+func TestPublicAddressIPv4MappedFollowsIPv4Form(t *testing.T) {
+	for _, tc := range []struct {
+		name, addr string
+		want       bool
+	}{
+		{"mapped public address is allowed (documented exception)", "::ffff:1.2.3.4", true},
+		{"mapped private address is refused", "::ffff:10.0.0.1", false},
+		{"mapped loopback is refused", "::ffff:127.0.0.1", false},
+		{"mapped link local is refused", "::ffff:169.254.169.254", false},
+		{"mapped documentation address is refused", "::ffff:192.0.2.1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publicAddress(netip.MustParseAddr(tc.addr)); got != tc.want {
+				t.Errorf("publicAddress(%q) = %v, want %v", tc.addr, got, tc.want)
 			}
 		})
 	}
