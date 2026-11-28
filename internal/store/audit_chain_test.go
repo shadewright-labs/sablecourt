@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ type auditBackend struct {
 	st        store.Store
 	db        *sql.DB // raw handle used to tamper with rows
 	migration string  // file name of the audit chain version 2 migration
+	// mainLatest is the newest migration that main had before the audit chain
+	// version 2 migration was numbered after it.
+	mainLatest string
 }
 
 // openAuditBackend opens a fresh, migrated store and a raw handle to its tables.
@@ -33,7 +37,8 @@ func openAuditBackend(t *testing.T, backend string) auditBackend {
 		if b.st, err = sqlite.Open(path); err == nil {
 			b.db, err = sql.Open("sqlite", path)
 		}
-		b.migration = "0016_audit_chain_v2.sql"
+		b.migration = "0017_audit_chain_v2.sql"
+		b.mainLatest = "0016_lease_pinned_providers.sql"
 	case "postgres":
 		dsn := os.Getenv("SABLECOURT_TEST_POSTGRES_DSN")
 		if dsn == "" {
@@ -43,7 +48,8 @@ func openAuditBackend(t *testing.T, backend string) auditBackend {
 		if b.st, err = postgres.Open(key); err == nil {
 			b.db, err = sql.Open("pgx", key)
 		}
-		b.migration = "0012_audit_chain_v2.sql"
+		b.migration = "0013_audit_chain_v2.sql"
+		b.mainLatest = "0012_lease_pinned_providers.sql"
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +274,58 @@ func TestAuditChainMigrationStores(t *testing.T) {
 					}
 				})
 			}
+		})
+	}
+}
+
+// TestAuditChainMigrationAfterMainLatest takes a database back to main's latest
+// version (every migration applied except audit chain version 2) and checks that
+// Migrate applies only that migration, after main's latest one.
+func TestAuditChainMigrationAfterMainLatest(t *testing.T) {
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			b := openAuditBackend(t, backend)
+			if b.migration <= b.mainLatest {
+				t.Fatalf("%s sorts before main's latest migration %s", b.migration, b.mainLatest)
+			}
+			b.exec(t,
+				`DROP INDEX idx_audit_log_seq`,
+				`ALTER TABLE audit_log DROP COLUMN seq`,
+				`ALTER TABLE audit_log DROP COLUMN hash_version`,
+				`DELETE FROM schema_migrations WHERE version = '`+b.migration+`'`,
+			)
+			versions := func() []string {
+				rows, err := b.db.QueryContext(t.Context(), `SELECT version FROM schema_migrations ORDER BY version`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rows.Close()
+				var out []string
+				for rows.Next() {
+					var v string
+					if err := rows.Scan(&v); err != nil {
+						t.Fatal(err)
+					}
+					out = append(out, v)
+				}
+				if err := rows.Err(); err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			before := versions()
+			if !slices.Contains(before, b.mainLatest) {
+				t.Fatalf("database at main's latest version = %v, want %s applied", before, b.mainLatest)
+			}
+			if err := b.st.Migrate(t.Context()); err != nil {
+				t.Fatalf("migrate from main's latest version: %v", err)
+			}
+			want := append(slices.Clone(before), b.migration)
+			slices.Sort(want)
+			if after := versions(); !slices.Equal(after, want) {
+				t.Fatalf("migrations after = %v, want %v", after, want)
+			}
+			appendFour(t, b.st)
 		})
 	}
 }

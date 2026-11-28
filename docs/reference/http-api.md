@@ -108,8 +108,8 @@ Source: `cmd/sablecourtd/main.go`.
 | `GET /api/v1/providers` | Provider connection status and cached models. |
 | `POST /api/v1/providers/{id}/sync` | Refresh a provider's model list and return it. |
 | `GET /api/v1/providers/tiers` | The `fast`, `coding` and `critic` model routes. |
-| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model"}`. |
-| `GET /api/v1/learnings` | Up to 100 learnings from Court Memory that match `?repo=` and `?path=` (a comma-separated list). |
+| `POST /api/v1/providers/tiers` | Save model routes. Body is a list of `{"tier","provider","model","family"}` (`family` optional); a malformed or disagreeing family returns 400 and saves nothing. |
+| `GET /api/v1/learnings` | Up to 100 accepted, unexpired learnings from the ADR-0012 record that match `?repo=` and `?path=`, as a JSON array of `domain.Learning` objects (Go field names, `[]` when none match). `repo` is a repository remote URL with an `https`, `http` or `ssh` scheme, a host and no credentials, query or fragment; any other value, including a bare repository name, gets 400 with an `error` message. `path` is a comma-separated list of repository paths; spaces around each entry are trimmed. Legacy `learning:*` rows in Court Memory are not read. Before ADR-0012 this route returned Court Memory entries and took a repository name. |
 | `POST /api/v1/learnings` | Disabled: refuses every call ([ADR-0012](../adr/0012-learning-evidence-and-expiry.md)). |
 | `POST /api/v1/notify/test` | Send a test alert, with a redacted title and text, to the configured chat webhook (secret `notify_webhook_url`, or `SABLECOURT_NOTIFY_WEBHOOK_URL`). With no webhook configured nothing is sent and the reply is still 200 `{"status":"sent"}`; a failed send is 502. |
 
@@ -166,7 +166,7 @@ Source: `cmd/sablecourtd/main.go`, `cmd/sablecourtd/councils.go`, `cmd/sablecour
 | `with` | list of strings | `claude`, `codex`, `agy` | Must list all three once each, in any order. |
 | `sequential` | bool | `false` | Run the members of a round one after another. |
 
-Header `Idempotency-Key`: at most 256 characters, no control characters, one header only, and no operator token or secret in it. A repeat with the same key and the same body returns the existing session; a different body is refused. With Docker configured, opening checks each harness's image, login volume, vendor tool and login; without Docker (the host mode, unsupported for 0.1.0) it needs the three harness executables on the daemon's path and a working Seatbelt sandbox instead. Opening is refused in Citadel mode.
+Header `Idempotency-Key`: at most 256 characters, no control characters, one header only, and no operator token or secret in it. A repeat with the same key and the same body returns the existing session; a different body is refused. With Docker configured, opening checks each harness's image, login volume, vendor tool and login; without Docker it is refused unless the daemon runs with `--unsafe-host-harnesses` (host mode, unsupported for 0.1.0), which needs the three harness executables on the daemon's path and a working Seatbelt sandbox instead. Opening is refused in Citadel mode.
 
 ### Dashboard
 
@@ -268,7 +268,7 @@ Source: `cmd/sablecourtd/main.go`, `internal/webhook/github.go`, `internal/a2a/h
 
 Decided in [ADR-0014](../adr/0014-identity-and-authentication.md), which is Proposed: passkey enrolment and per-session revocation. Neither exists on `main`. `POST /logout` ends all sessions at once by replacing the signing key; a single session cookie cannot be revoked on its own.
 
-Decided in [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): operator acceptance and scoped matching of learnings. `POST /api/v1/learnings` stays disabled until then.
+Decided in [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): operator acceptance of learnings. `POST /api/v1/learnings` stays disabled until then.
 
 ## In depth
 

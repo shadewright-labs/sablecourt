@@ -88,9 +88,12 @@ func TestDaemonReloadKeepsTheStartPin(t *testing.T) {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	loader := newPolicyLoader(st, manifests)
+	loader := newPolicyLoader(manifests)
 	bundle, pol, err := loader.Load(ctx)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordWorkloads(ctx, st, bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CreateTask(ctx, domain.Task{ID: "task-p", IdempotencyKey: "p", WorkloadName: "pr-agent", State: domain.TaskStateWorking}); err != nil {
@@ -109,8 +112,10 @@ func TestDaemonReloadKeepsTheStartPin(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		reloadGitOps(ctx, logger, gate, binding, b, p)
-		return nil
+		if err := recordWorkloads(ctx, st, b, false); err != nil {
+			return err
+		}
+		return reloadGitOps(ctx, logger, gate, binding, b, p)
 	}
 	h := newHandler(st, nil, func() *config.Bundle { return bundle }, reloadFn, nil, gate, nil, nil, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
 

@@ -11,7 +11,7 @@ import (
 )
 
 // Audit row hash versions. Version 1 rows were written before the chain hashed
-// the row ID and sequence; migration 0016 (SQLite) and 0012 (Postgres) mark every
+// the row ID and sequence; migration 0017 (SQLite) and 0013 (Postgres) mark every
 // existing row as version 1. Every row appended after that is version 2.
 const (
 	AuditHashV1 = 1

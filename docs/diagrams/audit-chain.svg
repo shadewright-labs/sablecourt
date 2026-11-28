@@ -71,9 +71,10 @@
   <text class="s" x="700" y="231">row count and head</text>
   <text class="s" x="700" y="248">returned to caller</text>
 
-  <rect class="bad" x="308" y="304" width="284" height="64" rx="10"/>
-  <text class="no" x="324" y="330">Verify failed (409)</text>
-  <text class="s" x="324" y="351">mismatch, no hash, or read error</text>
+  <rect class="bad" x="308" y="300" width="284" height="80" rx="10"/>
+  <text class="no" x="324" y="324">Verify failed (409)</text>
+  <text class="s" x="324" y="345">no hash, sequence or hash mismatch,</text>
+  <text class="s" x="324" y="362">unmet anchor, or read error</text>
 
   <path class="f" d="M140 72H174" marker-end="url(#a)"/>
   <path class="f" d="M376 72H410" marker-end="url(#a)"/>
@@ -86,8 +87,8 @@
   <text class="lbl" x="635" y="212" text-anchor="middle">all match</text>
   <path class="r" d="M512 184V114" marker-end="url(#m)"/>
   <text class="lbl" x="524" y="152">reads rows</text>
-  <path class="deny" d="M450 256V298" marker-end="url(#x)"/>
-  <text class="no" x="462" y="284">hash mismatch</text>
+  <path class="deny" d="M450 256V294" marker-end="url(#x)"/>
+  <text class="no" x="462" y="282">a check fails</text>
 
   <rect class="plan" x="684" y="328" width="28" height="16" rx="4"/>
   <text class="lbl" x="720" y="340">planned</text>

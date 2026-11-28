@@ -563,10 +563,9 @@ func councilAssertEmpty(t *testing.T, st store.Store) {
 }
 
 func TestCouncilRuntimeCheckerAndPanelWorkloads(t *testing.T) {
-	st := daemonTestStore(t)
-	bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
+	bundle, err := addCouncilPanelWorkloads(nil, "seatbelt")
 	if err != nil {
-		t.Fatalf("ensureCouncilPanelWorkloads: %v", err)
+		t.Fatalf("addCouncilPanelWorkloads: %v", err)
 	}
 	for _, role := range councilPanel {
 		wl, ok := bundle.Workloads[role]
@@ -713,8 +712,7 @@ func TestCouncilCheckoutAdmissionOwnershipAndPrivatePaths(t *testing.T) {
 
 func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 	for _, role := range councilPanel {
-		t.Run("ensureCouncilPanelWorkloads refuses "+role, func(t *testing.T) {
-			st := daemonTestStore(t)
+		t.Run("addCouncilPanelWorkloads refuses "+role, func(t *testing.T) {
 			b := &config.Bundle{
 				Workloads: map[string]domain.Workload{
 					role: {
@@ -727,15 +725,14 @@ func TestReservedCouncilPanelNamesRefused(t *testing.T) {
 					},
 				},
 			}
-			if _, err := ensureCouncilPanelWorkloads(t.Context(), st, b, "seatbelt"); err == nil {
-				t.Fatalf("ensureCouncilPanelWorkloads accepted manifest workload named %q", role)
+			if _, err := addCouncilPanelWorkloads(b, "seatbelt"); err == nil {
+				t.Fatalf("addCouncilPanelWorkloads accepted manifest workload named %q", role)
 			}
 		})
 	}
 
 	t.Run("runtime checker refuses extra grants on panel workload", func(t *testing.T) {
-		st := daemonTestStore(t)
-		bundle, err := ensureCouncilPanelWorkloads(t.Context(), st, nil, "seatbelt")
+		bundle, err := addCouncilPanelWorkloads(nil, "seatbelt")
 		if err != nil {
 			t.Fatal(err)
 		}

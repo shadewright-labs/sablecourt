@@ -253,6 +253,11 @@ type Lease struct {
 	ExpiresAt    time.Time
 	RevokedAt    *time.Time
 	CreatedAt    time.Time
+	// PinnedProviders is non-nil when the task's context packet carried
+	// learnings. The lease then reaches only these Model Gate providers, the
+	// grant the packet was admitted under, whatever a later reload grants
+	// (ADR-0012). An empty non-nil list reaches none.
+	PinnedProviders []string
 }
 
 type BudgetEntry struct {

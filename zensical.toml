@@ -34,6 +34,7 @@ nav = [
     { "Council" = "how-it-works/council.md" },
     { "Harness containers" = "how-it-works/harness-containers.md" },
     { "Context and learning" = "how-it-works/context-and-learning.md" },
+    { "Audit" = "how-it-works/audit.md" },
     { "Integrations" = "how-it-works/integrations.md" },
   ] },
   { "How-to guides" = [

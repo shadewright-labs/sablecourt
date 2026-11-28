@@ -963,6 +963,116 @@ func TestWorkflowCheckoutAndVerdict(t *testing.T) {
 	}
 }
 
+type checkoutRecord struct {
+	step     string
+	pin      string
+	readOnly bool
+}
+
+type recordingPinnedAdapter struct {
+	pinnedAdapter
+	starts []checkoutRecord
+}
+
+func (a *recordingPinnedAdapter) record(s scruntime.LaunchSpec, commit string, readOnly bool) {
+	var meta struct {
+		Step string `json:"step"`
+	}
+	_ = json.Unmarshal([]byte(s.InputJSON), &meta)
+	a.starts = append(a.starts, checkoutRecord{step: meta.Step, pin: commit, readOnly: readOnly})
+}
+
+func (a *recordingPinnedAdapter) Start(ctx context.Context, s scruntime.LaunchSpec) (scruntime.Handle, error) {
+	a.record(s, "", false)
+	return a.pinnedAdapter.Start(ctx, s)
+}
+
+func (a *recordingPinnedAdapter) StartAtCommit(ctx context.Context, s scruntime.LaunchSpec, commit string, readOnly bool) (scruntime.Handle, error) {
+	a.record(s, commit, readOnly)
+	return a.pinnedAdapter.StartAtCommit(ctx, s, commit, readOnly)
+}
+
+// A verifier after a verifier reviews the commit the first verifier was pinned
+// to; only an author step's artifacts set a new commit.
+func TestVerifierChainKeepsAuthorCommit(t *testing.T) {
+	first, second := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	commitArtifact := func(c string) scruntime.Artifact {
+		return scruntime.Artifact{Name: "git-commit", ContentType: "text/plain", Text: c}
+	}
+	verdict := func(v string) scruntime.Artifact {
+		return scruntime.Artifact{Name: "final-message", ContentType: "text/plain", Text: "Reviewed.\nVERDICT: " + v}
+	}
+	stray := strings.Repeat("c", 40)
+	for _, tc := range []struct {
+		name string
+		// Artifacts of each task in launch order.
+		runs [][]scruntime.Artifact
+		want []checkoutRecord
+	}{
+		{
+			name: "author_verifier_verifier",
+			runs: [][]scruntime.Artifact{{commitArtifact(first)}, {verdict("PASS")}, {verdict("PASS")}},
+			want: []checkoutRecord{{"edit", "", false}, {"review", first, true}, {"security", first, true}},
+		},
+		{
+			name: "verifier_emits_commit",
+			runs: [][]scruntime.Artifact{{commitArtifact(first)}, {verdict("PASS"), commitArtifact(stray)}, {verdict("PASS")}},
+			want: []checkoutRecord{{"edit", "", false}, {"review", first, true}, {"security", first, true}},
+		},
+		{
+			name: "remediation_then_verifier_verifier",
+			runs: [][]scruntime.Artifact{{commitArtifact(first)}, {verdict("CHANGES_REQUESTED")}, {commitArtifact(second)}, {verdict("PASS")}, {verdict("PASS")}},
+			want: []checkoutRecord{{"edit", "", false}, {"review", first, true}, {"edit", first, false}, {"review", second, true}, {"security", second, true}},
+		},
+		{
+			name: "second_verifier_rejects_reruns_author",
+			runs: [][]scruntime.Artifact{{commitArtifact(first)}, {verdict("PASS")}, {verdict("CHANGES_REQUESTED")}, {commitArtifact(second)}},
+			want: []checkoutRecord{{"edit", "", false}, {"review", first, true}, {"security", first, true}, {"edit", first, false}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, _, _, unused := regressionFixture(t)
+			if err := r.CancelTask(ctx, unused.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			wl := r.bundle.Workloads["worker"]
+			wl.Spec.Class = domain.ClassCodingAgent
+			wl.Spec.Coding = &domain.CodingConfig{Harness: "claude"}
+			r.bundle.Workloads["worker"] = wl
+			steps := []domain.WorkflowStep{
+				{Name: "edit", Workload: "worker", Role: "author"},
+				{Name: "review", Workload: "worker", Role: "verifier", MaxRetries: 1},
+				{Name: "security", Workload: "worker", Role: "verifier"},
+			}
+			r.bundle.Workflows = map[string]domain.Workflow{"flow": {Spec: domain.WorkflowSpec{Steps: steps}}}
+			a := &recordingPinnedAdapter{}
+			a.nextState = scruntime.StateCompleted
+			r.adapters[wl.Spec.Class] = a
+			if _, err := r.StartWorkflow(ctx, "flow", "Change the code."); err != nil {
+				t.Fatal(err)
+			}
+			for i, arts := range tc.runs {
+				// The first pass launches the next task, the second collects its artifacts.
+				reconcile(t, r)
+				if len(a.starts) != i+1 {
+					t.Fatalf("after run %d: launches = %+v, want %+v", i, a.starts, tc.want)
+				}
+				a.artifacts = arts
+				reconcile(t, r)
+			}
+			if len(a.starts) != len(tc.want) {
+				t.Fatalf("launches = %+v, want %+v", a.starts, tc.want)
+			}
+			for i := range tc.want {
+				if a.starts[i] != tc.want[i] {
+					t.Errorf("launch %d = %+v, want %+v", i, a.starts[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 type exitWriteFailure struct{ store.Store }
 
 func (s exitWriteFailure) UpdateTaskState(ctx context.Context, id string, from, to domain.TaskState, reason, facts string) error {

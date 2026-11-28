@@ -51,7 +51,7 @@ Each area below carries one of four words:
 | --- | --- | --- | --- |
 | Tasks, reconciler, scheduler, restart recovery | Built | Faults in suspend and resume are tracked in #14 | [tasks](how-it-works/tasks.md) |
 | Task suspend and resume | Partly built | Suspend stops the workload, so resume cannot work (#14) | [tasks](how-it-works/tasks.md) |
-| Host coding runs | Unsupported, still the default today | macOS Seatbelt only, with an empty home directory. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only supported path for 0.1.0; [issue 181](https://github.com/shadewright-labs/sablecourt/issues/181) moves coding tasks onto them | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
+| Host coding runs | Unsupported, off by default | Coding tasks and council seats run only in harness containers; a host run needs `--unsafe-host-harnesses`, no container runtime, and macOS Seatbelt, with an empty home directory. The [ADR-0011 amendment of 2026-11-27](adr/0011-sanctum-scope-trust-and-cli-harnesses.md#amendment-2026-11-27-container-only-harnesses-for-010) makes harness containers the only supported path for 0.1.0 | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
 | Docker workloads and deterministic controllers | Built | Tracked in #11 | [workloads and runtimes](how-it-works/workloads-and-runtimes.md) |
 | Kubernetes runtime and `deploy/k8s` | Parked | | [overview](overview.md#parked-parts) |
 | Model Gate | Built | Known faults in #8 | [model gate](how-it-works/model-gate.md) |
@@ -61,7 +61,7 @@ Each area below carries one of four words:
 | Council | Partly built | Final message posting (#28), subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
 | Harness containers | Partly built | The proxy and the image build are in the tree (#76, #77). Nothing checks yet that a harness volume holds a login, and no command starts the login container; both are #79 | [harness containers](how-it-works/harness-containers.md) |
 | Context packets, verifier steps, failure handoff | Built | | [context and learning](how-it-works/context-and-learning.md) |
-| Learning (ADR-0012) | Partly built | The store exists; accept, match and inject are decided only (#43 to #47) | [context and learning](how-it-works/context-and-learning.md) |
+| Learning (ADR-0012) | Partly built | The store and the packet matcher with its destination check (#99) exist. Propose, accept, matching for other workloads and outcomes are decided only (#43 to #47), so no packet carries a learning yet | [context and learning](how-it-works/context-and-learning.md) |
 | Audit chain | Built | Sees deletion of the last rows only against an operator-kept head (`--anchor`); signed heads decided only | [audit](how-it-works/audit.md) |
 | Operator authentication | Built | Stateless 30-minute cookie, no logout; passkeys and sessions are decided only (ADR-0014, Proposed; #68, PR 93) | [identity and access](how-it-works/identity-and-access.md) |
 | Shadewright contract | Partly built | Incidents and verifications work; status read, learning read and incident template are open (#53 to #55) | [integrations](how-it-works/integrations.md) |
@@ -88,4 +88,5 @@ The epics behind the open work are #1 (scope and local trust), #15 (a CLI harnes
 - How-to: [index](how-to/index.md), covering install, manifests, harness logins, councils, approvals, watching and steering, retry, audit verification and finding why something was refused.
 - Reference: [index](reference/index.md), covering manifests, HTTP API, CLI, configuration, limits, metrics and the [glossary](glossary.md).
 - Design: [index](design/index.md), [architecture](design/architecture.md), [storage](design/storage.md), the [v0.1 baseline](design/v0.1-baseline.md) and the [harness spike record](harnesses.md).
+- Examples: the [coding court](https://github.com/shadewright-labs/sablecourt/blob/main/examples/coding-court/README.md) role cards and workflows.
 - Diagrams: [standard](diagrams/README.md).
