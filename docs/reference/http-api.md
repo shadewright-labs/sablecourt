@@ -69,7 +69,7 @@ Source: `cmd/sablecourtd/main.go`.
 | `POST /api/v1/tasks/{id}/resume` | Resume a suspended task. |
 | `GET /api/v1/tasks/{id}/scry` | Server-sent stream of redacted task output (Scry). Observer credential accepted. |
 | `POST /api/v1/tasks/{id}/takeover` | Take exclusive stdin control of a live task session that has a writable stdin; refused while another operator holds it. Body `{"operator"}`. |
-| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding the takeover; without a takeover of your own the write is refused (409). Body `{"operator","data"}`. |
+| `POST /api/v1/tasks/{id}/stdin` | Write to the task's stdin while holding a confirmed takeover. Refused with 404 when the task has no live session, and with 409 when its stdin is not writable, another operator holds the takeover, your takeover is not held or not yet confirmed, or the write fails. Body `{"operator","data"}`. |
 | `POST /api/v1/tasks/{id}/detach` | Release the takeover. Body `{"operator"}`. |
 | `GET /api/v1/stream` | Server-sent `state` events with a fingerprint of tasks, pending approvals and the newest audit row, sent at once and every 3 seconds, for the dashboard. |
 | `GET /api/v1/budget` | Token and micro-USD totals over all tasks. |

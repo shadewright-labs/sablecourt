@@ -396,6 +396,8 @@ func (d *Dashboard) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		"Budget":     budget,
 		"CostUSD":    fmt.Sprintf("%.4f", float64(budget.CostMicroUSD)/1_000_000.0),
 		"Cancelable": cancelable,
+		"Notice":     r.URL.Query().Get("notice"),
+		"ErrMsg":     r.URL.Query().Get("err"),
 	})
 }
 
@@ -836,9 +838,10 @@ func redirectNotice(w http.ResponseWriter, r *http.Request, msg string) {
 	http.Redirect(w, r, "/?notice="+url.QueryEscape(msg), http.StatusSeeOther)
 }
 
-// errText is the text a form shows for err. A failed audit write gets the
-// text of store.AuditFailureText, built from the effects recorded on ctx;
-// any other error is shown after prefix.
+// errText is the text a form redirect carries in its err query value, which
+// the page it redirects to shows in its error banner. A failed audit write
+// gets the text of store.AuditFailureText, built from the effects recorded on
+// ctx; any other error is shown after prefix.
 func errText(ctx context.Context, err error, what, prefix string) string {
 	if msg, ok := store.AuditFailureText(ctx, err, what); ok {
 		return msg

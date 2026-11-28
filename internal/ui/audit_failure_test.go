@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -148,7 +149,62 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 			if tc.check != nil {
 				tc.check(t, st, target)
 			}
+			// The page the form redirects to shows the error it carries.
+			faults.Heal()
+			if strings.HasPrefix(target, "/tasks/") {
+				page := getPage(t, mux, rec.Header().Get("Location"))
+				if want := `sc-banner-err">` + template.HTMLEscapeString(errMsg) + `<`; page.Code != http.StatusOK || !strings.Contains(page.Body.String(), want) {
+					t.Fatalf("task page %s (status %d) does not show the error %q", target, page.Code, errMsg)
+				}
+			}
 		})
+	}
+}
+
+// The task page shows the notice and the error a form redirect carries, as
+// the other pages do.
+func TestTaskPageShowsNoticeAndErr(t *testing.T) {
+	st := newUITestStore(t)
+	if err := st.UpsertWorkload(context.Background(), domain.WorkloadRecord{Name: "coder", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUITask(t, st, "task_n", domain.TaskStateFailed)
+	mux := newFormMux(t, Options{Store: st})
+	for _, tc := range []struct{ query, want, absent string }{
+		{"?notice=Retried+from+t1", `sc-banner-ok">Retried from t1<`, "sc-banner-err"},
+		{"?err=went+%3Cwrong%3E", `sc-banner-err">went &lt;wrong&gt;<`, "sc-banner-ok"},
+		{"", "", "sc-banner"},
+	} {
+		body := getPage(t, mux, "/tasks/task_n"+tc.query).Body.String()
+		if tc.want != "" && !strings.Contains(body, tc.want) {
+			t.Errorf("%q: page lacks %q", tc.query, tc.want)
+		}
+		if strings.Contains(body, tc.absent) {
+			t.Errorf("%q: page has %q", tc.query, tc.absent)
+		}
+	}
+}
+
+// Every page a form redirects to with notice or err shows both. A new
+// redirect target that drops them fails here once it is added to the list.
+func TestRedirectTargetsShowNoticeAndErr(t *testing.T) {
+	ctx := context.Background()
+	st := newUITestStore(t)
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "coder", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUITask(t, st, "task_n", domain.TaskStateFailed)
+	now := time.Now().UTC()
+	if err := st.CreateConclave(ctx, domain.ConclaveSession{ID: "cc-1", Title: "t", State: domain.ConclaveStateActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	mux := newFormMux(t, Options{Store: st})
+	for _, path := range []string{"/", "/memory", "/conclaves", "/conclaves/cc-1", "/providers", "/schedules", "/studio", "/tasks/task_n"} {
+		page := getPage(t, mux, path+"?notice=n+ok&err=e+bad")
+		body := page.Body.String()
+		if page.Code != http.StatusOK || !strings.Contains(body, `banner-ok">n ok<`) || !strings.Contains(body, `banner-err">e bad<`) {
+			t.Errorf("%s (status %d) does not show both notice and err", path, page.Code)
+		}
 	}
 }
 

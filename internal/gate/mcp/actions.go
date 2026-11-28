@@ -699,9 +699,9 @@ func validateRepoName(field, name string) error {
 
 // checkOpenPRTarget allows a pull request only against the GitHub repository
 // pinned when the daemon started (allowed, "owner/repo"): the origin remote of
-// repoRoot, where git.create_branch makes the head branch. Workload grants
-// name actions, not repositories, so this is the narrowest target the
-// manifests can bind today. If the origin read now differs from the pin, the
+// repoRoot, where git.create_branch makes the head branch. A workload's
+// grants.repos narrows this further, checked separately by the caller
+// (checkOwnerRepoGrant). If the origin read now differs from the pin, the
 // checkout changed under the daemon and the call is refused.
 func checkOpenPRTarget(ctx context.Context, repoRoot, allowed, owner, repo string) error {
 	if err := validateRepoName("owner", owner); err != nil {

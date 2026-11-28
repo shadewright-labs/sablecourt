@@ -54,13 +54,13 @@ func TestDecreeResumeAndReplayEffects(t *testing.T) {
 	if gotRoom.State != domain.ConclaveStateActive {
 		t.Fatalf("state %s, want active", gotRoom.State)
 	}
-	// Finding 3(a): eff1 omits that the conclave moved to active.
+	// Finding 3(a): eff1 lists that the conclave moved to active.
 	if !slices.Contains(eff1.List(), "conclave "+room.ID+" moved to active") {
 		t.Fatalf("effects %q omit committed transition to active", eff1.List())
 	}
 
-	// Finding 3(c): replaying the exact same decree hits wake_pending=1 and stores nothing,
-	// yet still records "message N was stored in conclave ...".
+	// Finding 3(c): replaying the exact same decree hits wake_pending=1 and stores
+	// nothing, so it records no effect.
 	ctx2, eff2 := store.TrackEffects(ctx)
 	_, err = b.PostMessage(ctx2, room.ID, "operator", "all", "decree", "@reviewer check", "")
 	if _, ok := store.AuditFailureText(ctx2, err, "posting the decree"); !ok {

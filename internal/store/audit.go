@@ -32,10 +32,15 @@ func RecordAudit(ctx context.Context, a AuditAppender, rec domain.AuditRecord) e
 
 // AuditWriteError returns nil when err is nil, and otherwise logs err and
 // returns an error wrapping ErrAuditWrite that names rec's action and outcome.
-// Every audit write goes through it, including the rows a store writes inside
-// its own transactions, so a caller always sees ErrAuditWrite and answers with
-// AuditFailureText. The store error goes to the log only, never to callers
-// that may show it to an operator or a workload.
+// RecordAudit, LogAudit and the rows a store writes inside its own
+// transactions all go through it, so a failed write there wraps ErrAuditWrite
+// (inside a transaction, the store then rolls back). The drift rows of the MCP
+// Gate's repository binding call AppendAudit directly and keep a failed row
+// owed for the next reload. A failed commit of a transaction that wrote a row
+// is a store error, not ErrAuditWrite. Callers of RecordAudit answer an
+// ErrAuditWrite with AuditFailureText; LogAudit only logs it. The store error
+// goes to the log only, never to callers that may show it to an operator or a
+// workload.
 func AuditWriteError(ctx context.Context, rec domain.AuditRecord, err error) error {
 	if err == nil {
 		return nil
