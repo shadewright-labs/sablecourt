@@ -1,8 +1,8 @@
 # Council
 
-Status: partly built. Missing: a preflight that refuses a round when images or logins are absent (#79), posting a harness's final message to the room (#28) and knowledge of subscription windows (#36). The end-to-end smoke test (#80) is still open. See "Not built yet".
+Status: partly built. Missing: posting a harness's final message to the room (#28) and knowledge of subscription windows (#36). The end-to-end smoke test (#80) is still open. See "Not built yet".
 
-A council puts one question to `claude`, `codex` and `agy` at once, lets each read the others' answers, and ends with a digest the daemon writes from the recorded answers. It is a [Conclave](conclaves.md) with a fixed three-seat panel, a scheduler that works in rounds, and ceilings on rounds, starts and time. Each turn is one launch of one harness, in its own [harness container](harness-containers.md), built by the same function as a standalone coding task's container. Without a container runtime the daemon has no coding runtime and refuses to open a council, unless host mode is forced with `--unsafe-host-harnesses`, which puts the turns outside invariants 2 and 3. The scheduler is code, not a model: it counts, reserves and records. The harnesses answer, and a writer seat, when the API names one, can also change its own worktree.
+A council puts one question to `claude`, `codex` and `agy` at once, lets each read the others' answers, and ends with a digest the daemon writes from the recorded answers. It is a [Conclave](conclaves.md) with a fixed three-seat panel, a scheduler that works in rounds, and ceilings on rounds, starts and time. Each turn is one launch of one harness, in its own [harness container](harness-containers.md), built by the same function as a standalone coding task's container. Without a container runtime the daemon has no coding runtime and refuses to open a council, unless host mode is forced with `--unsafe-host-harnesses`, which puts the turns outside invariants 2 and 3. In container mode the daemon checks each harness's local image, login volume and credential path before it creates a council, and refuses the request at the first failure (#79). The scheduler is code, not a model: it counts, reserves and records. The harnesses answer, and a writer seat, when the API names one, can also change its own worktree.
 
 ## What `sablectl council` does
 
@@ -68,7 +68,6 @@ At close the daemon writes the Relic `digest`, authored by `system`: the stop re
 
 ## Not built yet
 
-- Refusing a round before it starts when a harness image or its login is missing (#79). The decision is a dated comment on the issue; there is no ADR yet. Today a missing image or login volume fails the launch, and Sablecourt does not detect a volume that holds no valid login. [Log in to harnesses](../how-to/log-in-harnesses.md) shows the manual steps. The decision: check for the credential files in each login volume from a short container with no network, create the volume with its label in a new `sablectl harness login <harness>`, and run that login through Docker from the CLI.
 - The harness posting its own final message to the room (#28), and knowing each subscription's usage windows before a round starts (#36).
 - Model Gate accounting does not cover subscription inference ([ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md)). The council ceilings bound the number of turns and the council's wall time. Each turn also has its own wall time, at most the time left before the deadline, and the proxy allows a harness at most 16 tunnels at once, each at most 15 minutes. None of these counts tokens or cost.
 
