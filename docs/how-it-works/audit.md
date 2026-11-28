@@ -2,7 +2,7 @@
 
 Sablecourt keeps one append-only table, `audit_log`, in its store. Each row holds the SHA-256 hash of the row before it, so an edit to a stored row, a deleted row in the middle or a reordered pair breaks the chain, and `sablectl audit verify` says where. The hashes carry no key: anyone who can write to the database can also recompute them. What the chain can and cannot show follows from that.
 
-Status: built. Signed chain heads are decided only. The row encoding, the sequence numbers and the anchor described here come from the [ADR-0009 amendment of 2026-11-27](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md#amendment-2026-11-27-proposed), whose status is Proposed.
+Status: built. Signed chain heads are proposed in ADR-0014 only, not built. The row encoding, the sequence numbers and the anchor described here come from the [ADR-0009 amendment of 2026-11-27](../adr/0009-sanctum-citadel-audit-chain-and-crypto-approvals.md#amendment-2026-11-27-proposed), whose status is Proposed.
 
 [![The audit chain runs from genesis through rows linked by SHA-256 to the head, with signed heads planned; sablectl audit verify asks the daemon, the store walks the rows and the answer is 200 with the head or 409 when a check fails.](../diagrams/audit-chain.svg)](../diagrams/audit-chain.svg "Open full size")
 
@@ -73,7 +73,7 @@ A head printed by one run can be kept outside the database and passed back later
 - A `|` moved between fields, or an edited row ID, in version 1 rows.
 - Actions that never got a row: dispatch, passed-through upstream errors, and actions whose audit write failed while the caller went ahead (next section).
 
-Signed chain heads, which would close the first two without an operator keeping the head by hand, are decided in [ADR-0014](../adr/0014-identity-and-authentication.md) and not built.
+Signed chain heads, which would close the first two without an operator keeping the head by hand, are proposed in [ADR-0014](../adr/0014-identity-and-authentication.md) and not built.
 
 ## When an audit write fails
 
@@ -81,7 +81,7 @@ Version 2 of the chain changed the rows and the checks, not how callers treat a 
 
 - The MCP Gate spends an approval, then writes its `consumed` row. If that write fails, or the request was cancelled by then, the action does not run, and the caller gets 500 saying the approval is spent and a new one is needed.
 - Closing a Conclave and an audited Ward pause write their rows in the state change's transaction, so a failed audit write rolls the state change back.
-- The Shadewright integration returns 500 when its `conclave.open` or `shadewright.incident_escalated` row cannot be written.
+- The Shadewright integration returns 500 when its `conclave.open`, `shadewright.incident_escalated` or `shadewright.verification_posted` row cannot be written.
 - A `denied` row for a changed or unreadable repository origin that cannot be written stays owed, and later reloads write it in order (at most 16 are kept).
 
 Most other callers ignore the error and go ahead without a row, among them the Model Gate's `audit` helper, the reconciler and the approval queue. Once the newest row has lost its hash, every append fails, so those actions keep running unaudited until an operator repairs the chain, and `sablectl audit verify` keeps reporting it broken.
