@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Scans the whole Git history of a repository with gitleaks and the repository's .gitleaks.toml, the command of
+# Scans the Git history of a repository with gitleaks and the repository's .gitleaks.toml, the command of
 # secret-scan.yml (and of hack/test/gitleaks_test.sh, so the controls test exactly what CI runs). Findings are
-# printed redacted; exit 1 on any finding. The log options are gitleaks' defaults (every ref, full history) plus
-# --diff-merges=first-parent: without it `git log -p` shows no diff for a merge commit, so a change made only
+# printed redacted; exit 1 on any finding. Two modes:
+#   - Full (default): the full history of the checked-out ref (HEAD), not other branches that a full clone holds.
+#   - Pull request: when SECRET_SCAN_BASE and SECRET_SCAN_HEAD are both set (full commit ids), only the commits
+#     in SECRET_SCAN_BASE..SECRET_SCAN_HEAD, the ones the pull request brings. A fake credential on an unrelated
+#     pushed branch is then no longer scanned in another pull request's run (issue 193).
+# The log options are the range plus --diff-merges=first-parent: without it `git log -p` shows no diff for a merge commit, so a change made only
 # while resolving a merge (a token added in the merge commit itself) would never be scanned.
 #
 # Fails closed when the history cannot be read. gitleaks runs `git log` itself and ignores its exit status: a
@@ -23,7 +27,14 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
   exit 2
 fi
 gitleaks="$1" repo="${2:-.}"
-range=(--all --full-history)
+base="${SECRET_SCAN_BASE:-}" head="${SECRET_SCAN_HEAD:-}"
+if [ -n "${base}${head}" ]; then
+  [[ "${base}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "secret scan: SECRET_SCAN_BASE is not a commit id" >&2; exit 2; }
+  [[ "${head}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "secret scan: SECRET_SCAN_HEAD is not a commit id" >&2; exit 2; }
+  range=("${base}..${head}")
+else
+  range=(HEAD --full-history)
+fi
 log_opts=("${range[@]}" --diff-merges=first-parent)
 work="$(mktemp -d "${TMPDIR:-/tmp}/secret-scan.XXXXXX")"
 work="$(cd "${work}" && pwd)" # absolute, so the shim directory in PATH survives a change of directory
