@@ -694,31 +694,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// One reload at a time: the reload route, the dashboard and the manifests
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
-	reloadFn := serialized(reloadSteps{
-		load:    loadAndSync,
-		check:   dataActionGate.CheckReload,
-		persist: recordBundle,
-		gate: func(b *config.Bundle, pol *policy.Engine) error {
-			// Register the reloaded bundle's MCP server secrets for exact
-			// redaction before the gate can reach the new upstream tools.
-			if err := preloadBundleSecrets(ctx, secretStore, b); err != nil {
-				logger.Error("refusing reloaded MCP server credentials", "error", err)
-			}
-			return reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
-		},
-		apply: func(b *config.Bundle, pol *policy.Engine) {
+	reloadFn := serialized(daemonReloadSteps(ctx, logger, loadAndSync, recordBundle, secretStore, dataActionGate, repoBinding,
+		func(b *config.Bundle, pol *policy.Engine) {
 			bundleMu.Lock()
 			bundle = b
 			bundleMu.Unlock()
 			modelGate.SetBundle(b)
 			reconciler.Reload(b, pol)
-			_ = scheduler.Reload(ctx, b)
+			reloadSchedules(ctx, logger, scheduler, b)
 			if b != nil {
 				logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 			}
-		},
-		logger: logger,
-	}.run)
+		}).run)
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -2266,9 +2253,51 @@ func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, 
 	return nil
 }
 
+// daemonReloadSteps wires the daemon's manifest reload: load reads the
+// manifests, persist records the workloads, and apply swaps the bundle into
+// the rest of the daemon. check asks the gate whether it accepts the bundle,
+// then registers the bundle's MCP server secrets for exact redaction and
+// refuses the reload when one is too short to redact. So a refused secret
+// stops the reload before anything is written or swapped, and an accepted
+// bundle's secrets are registered before the store, the gate or apply sees
+// its grants. Registration only adds values: a refused reload may leave the
+// secrets it read registered, which widens redaction and grants nothing.
+func daemonReloadSteps(ctx context.Context, logger *slog.Logger, load func() (*config.Bundle, *policy.Engine, error), persist func(*config.Bundle) error, secrets secret.SecretStore, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, apply func(*config.Bundle, *policy.Engine)) reloadSteps {
+	return reloadSteps{
+		load: load,
+		check: func(b *config.Bundle) error {
+			if err := gate.CheckReload(b); err != nil {
+				return err
+			}
+			if err := preloadBundleSecrets(ctx, secrets, b); err != nil {
+				return fmt.Errorf("reload refused: MCP server credentials: %w", err)
+			}
+			return nil
+		},
+		persist: persist,
+		gate: func(b *config.Bundle, pol *policy.Engine) error {
+			return reloadGitOps(ctx, logger, gate, binding, b, pol)
+		},
+		apply:  apply,
+		logger: logger,
+	}
+}
+
+// reloadSchedules swaps the scheduler to b's schedules. It runs in apply,
+// after the gate swap, so it cannot refuse the reload; a failure is logged.
+// The loader refuses an invalid cron expression, so it fails only for a
+// bundle that skipped the loader, and then no schedule fires until the next
+// accepted reload.
+func reloadSchedules(ctx context.Context, logger *slog.Logger, s *controlplane.Scheduler, b *config.Bundle) {
+	if err := s.Reload(ctx, b); err != nil {
+		logger.Error("schedules not reloaded; no schedule fires until the next accepted reload", "error", err)
+	}
+}
+
 // reloadSteps is the order of a manifest reload, and a refused reload changes
 // nothing. load reads the manifests and writes nothing. check runs every test
-// that can refuse the bundle (the gate's CheckReload) before anything is
+// that can refuse the bundle (the gate's CheckReload and, in the daemon, the
+// MCP server secret registration of daemonReloadSteps) before anything is
 // written or swapped. Only then does persist write the workloads to the store,
 // gate swap the gate's bundle, policy and upstream tools, and apply swap the
 // rest. When load fails or check refuses, nothing is written or swapped; a
