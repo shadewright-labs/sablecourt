@@ -32,14 +32,47 @@ func streamRun(reg *Registry, doc string, cuts []int) (string, bool) {
 // only where the batch redactor fails closed too.
 func checkStreamProperty(t testing.TB, reg *Registry, doc string, cuts []int) {
 	t.Helper()
+	newBatch(reg, doc).check(t, cuts)
+}
+
+// batch holds what the batch redactor gives for one document, so a sweep over
+// many splits of the same document computes it once. Under the race detector
+// with atomic coverage, recomputing it for every split made the cascade sweep
+// take minutes of CPU in CI.
+type batch struct {
+	reg  *Registry
+	doc  string
+	want string
+	// settled is 0 until batchSettles has run, then 1 (settles) or 2 (fails
+	// closed).
+	settled int
+}
+
+func newBatch(reg *Registry, doc string) *batch {
+	return &batch{reg: reg, doc: doc, want: reg.RedactExact(doc)}
+}
+
+func (b *batch) settles() bool {
+	if b.settled == 0 {
+		b.settled = 2
+		if batchSettles(b.reg.matcher.Load(), b.doc) {
+			b.settled = 1
+		}
+	}
+	return b.settled == 1
+}
+
+// check runs the property for one split of the document.
+func (b *batch) check(t testing.TB, cuts []int) {
+	t.Helper()
+	reg, doc, want := b.reg, b.doc, b.want
 	got, closed := streamRun(reg, doc, cuts)
 	if reg.ContainsHeld(got) {
 		t.Fatalf("stream cut at %v of %q emitted %q, which shows a held value", cuts, doc, got)
 	}
-	want := reg.RedactExact(doc)
 	// Checked before equality: a stream that closes early can still emit
 	// what batch gives when the rest of doc redacts to the marker alone.
-	if closed && len(doc) <= maxStreamPending && batchSettles(reg.matcher.Load(), doc) {
+	if closed && len(doc) <= maxStreamPending && b.settles() {
 		t.Fatalf("stream cut at %v of %q closed with %q, but batch settled to %q", cuts, doc, got, want)
 	}
 	if got == want {
@@ -54,19 +87,20 @@ func checkStreamProperty(t testing.TB, reg *Registry, doc string, cuts []int) {
 // cuts for short docs, byte-by-byte writes and random cuts.
 func checkEverySplit(t *testing.T, reg *Registry, doc string, seed uint64) {
 	t.Helper()
+	b := newBatch(reg, doc)
 	n := len(doc)
 	for i := 0; i <= n; i++ {
-		checkStreamProperty(t, reg, doc, []int{i})
+		b.check(t, []int{i})
 	}
 	every := make([]int, 0, n)
 	for i := 1; i < n; i++ {
 		every = append(every, i)
 	}
-	checkStreamProperty(t, reg, doc, every)
+	b.check(t, every)
 	if n <= 96 {
 		for i := 0; i <= n; i++ {
 			for j := i; j <= n; j++ {
-				checkStreamProperty(t, reg, doc, []int{i, j})
+				b.check(t, []int{i, j})
 			}
 		}
 	}
@@ -76,7 +110,7 @@ func checkEverySplit(t *testing.T, reg *Registry, doc string, seed uint64) {
 		for c := rng.IntN(8); c < n; c += 1 + rng.IntN(16) {
 			cuts = append(cuts, c)
 		}
-		checkStreamProperty(t, reg, doc, cuts)
+		b.check(t, cuts)
 	}
 }
 
@@ -240,9 +274,9 @@ func streamFuzzInput(data []byte) (*Registry, string, []int) {
 
 // Random documents made of held values, their halves, markers, backslash runs
 // and line breaks, cut at random: the stream gives the batch output or closes
-// with the marker.
+// with the marker. It runs serially for the reason given on
+// TestStreamMatchesBatchOnRewriteCascades.
 func TestStreamMatchesBatchOnRandomDocuments(t *testing.T) {
-	t.Parallel()
 	rng := rand.New(rand.NewPCG(180, 3))
 	for range 3000 {
 		data := make([]byte, 1+rng.IntN(40))

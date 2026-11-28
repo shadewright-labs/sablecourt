@@ -107,11 +107,14 @@ func batchSettles(m *acMatcher, s string) bool {
 // changed text already emitted, and the emitted text and the rest formed a
 // held value. For every generated cascade the stream must give exactly what
 // the batch redactor gives, in every split, and never show a held value.
+//
+// The test and its cases run serially. Run in parallel under the race
+// detector with atomic coverage (the CI mode), they contend on the shared
+// coverage counters and took about 30 times the CPU, enough to starve the
+// other packages of the CI run.
 func TestStreamMatchesBatchOnRewriteCascades(t *testing.T) {
-	t.Parallel()
 	for ci, tc := range cascadeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			rng := rand.New(rand.NewPCG(180, uint64(ci)))
 			m := tc.reg.matcher.Load()
 			settles := batchSettles(m, tc.doc)
@@ -119,9 +122,10 @@ func TestStreamMatchesBatchOnRewriteCascades(t *testing.T) {
 			if settles && tc.reg.ContainsHeld(want) {
 				t.Fatalf("batch output %q shows a held value", want)
 			}
+			b := newBatch(tc.reg, tc.doc)
 			check := func(cuts []int) {
 				t.Helper()
-				checkStreamProperty(t, tc.reg, tc.doc, cuts)
+				b.check(t, cuts)
 			}
 			n := len(tc.doc)
 			for i := 0; i <= n; i++ {
