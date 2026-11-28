@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -206,6 +207,27 @@ func (f *commandFixture) runStatus(rootID string) workflowStepRecord {
 	return *rec
 }
 
+// setAuthorBase replaces the author base in the command step's registration.
+func (f *commandFixture) setAuthorBase(base string) {
+	f.t.Helper()
+	check, ok := f.step(1)
+	if !ok {
+		f.t.Fatal("no command step")
+	}
+	reg, err := f.r.workflowStep(f.t.Context(), check.ID)
+	if err != nil || reg == nil {
+		f.t.Fatalf("command registration: %v", err)
+	}
+	reg.AuthorBase = base
+	entry, err := f.r.workflowStepEntry(check.ID, *reg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.st.PutMemory(f.t.Context(), entry); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func checkCommand(maxOutput, timeoutSeconds int) domain.CodingCommand {
 	return domain.CodingCommand{Name: "check", Argv: checkArgv, TimeoutSeconds: timeoutSeconds, MaxOutputBytes: maxOutput, FailureReason: "the diff touches an invariant path: use the coding-invariant workflow"}
 }
@@ -376,6 +398,27 @@ func TestCommandStepRefusedBeforeAnyContainer(t *testing.T) {
 			swap:    func(f *commandFixture) { f.adapter.CouncilRunner = refusingRunner{f.runner} },
 			refusal: scruntime.CommandContainerRefused,
 		},
+		// Issue 214: no recorded author base, or one that is not an ancestor
+		// of the pinned commit, fails the step; no comparison is skipped.
+		"author base missing": {
+			swap:    func(f *commandFixture) { f.setAuthorBase("") },
+			refusal: scruntime.CommandAuthorBaseUnavailable,
+		},
+		"author base not an ancestor": {
+			swap: func(f *commandFixture) {
+				repo := f.bundle.Workloads["coder"].Spec.Coding.RepoPath
+				out, err := exec.Command("git", "-C", repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated").Output()
+				if err != nil {
+					f.t.Fatal(err)
+				}
+				f.setAuthorBase(strings.TrimSpace(string(out)))
+			},
+			refusal: scruntime.CommandAuthorBaseUnavailable,
+		},
+		"author base names no object": {
+			swap:    func(f *commandFixture) { f.setAuthorBase(strings.Repeat("e", 40)) },
+			refusal: scruntime.CommandAuthorBaseUnavailable,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -432,7 +475,14 @@ func TestWorkflowCommandResolvesArgvOnlyFromManifest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	register("task_registered", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit})
+	base := strings.Repeat("b", 40)
+	register("task_registered", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base, AuthorBaseState: authorBaseRecorded})
+	register("task_pending", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBaseState: authorBasePending})
+	register("task_unknown", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base, AuthorBaseState: authorBaseUnknown})
+	register("task_pre_guard_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: base})
+	register("task_no_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit})
+	register("task_bad_base", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: "HEAD~1", AuthorBaseState: authorBaseRecorded})
+	register("task_other_format", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1, AuthorCommit: commit, AuthorBase: strings.Repeat("b", 64), AuthorBaseState: authorBaseRecorded})
 	register("task_no_commit", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 1})
 	register("task_wrong_index", workflowStepRecord{RunID: "task_root", Workflow: commandWorkflow, Index: 2, AuthorCommit: commit})
 	stepInput := func(extra string) string {
@@ -448,24 +498,35 @@ func TestWorkflowCommandResolvesArgvOnlyFromManifest(t *testing.T) {
 		wl        domain.Workload
 		want      []string // nil means not a command step
 		refused   bool
+		noBase    bool
 	}{
-		"ordinary task":                 {id: "task_plain", input: `{"prompt":"edit"}`, wl: wl},
-		"registered step":               {id: "task_registered", input: stepInput(""), wl: wl, want: checkArgv},
-		"argv in input is ignored":      {id: "task_registered", input: stepInput(`,"argv":["/bin/rm","-rf","/"]`), wl: wl, want: checkArgv},
-		"input names a command":         {id: "task_plain", input: `{"prompt":"edit","command":"check"}`, wl: wl, refused: true},
-		"input names a command in case": {id: "task_plain", input: `{"prompt":"edit","Command":"check"}`, wl: wl, refused: true},
-		"input names another command":   {id: "task_registered", input: `{"workflow":"` + commandWorkflow + `","step_index":1,"command":"deploy"}`, wl: wl, refused: true},
-		"step without registration":     {id: "task_unregistered", input: stepInput(""), wl: wl, refused: true},
-		"registration without commit":   {id: "task_no_commit", input: stepInput(""), wl: wl, refused: true},
-		"registration for another step": {id: "task_wrong_index", input: stepInput(""), wl: wl, refused: true},
-		"command not in allowed set":    {id: "task_registered", input: stepInput(""), wl: noCommands, refused: true},
-		"command step input dropped":    {id: "task_registered", input: `{"workflow":"` + commandWorkflow + `","step_index":1}`, wl: wl, refused: true},
+		"registration without author base": {id: "task_no_base", input: stepInput(""), wl: wl, noBase: true},
+		"author base not a commit ID":      {id: "task_bad_base", input: stepInput(""), wl: wl, noBase: true},
+		"author base of another format":    {id: "task_other_format", input: stepInput(""), wl: wl, noBase: true},
+		"author base still pending":        {id: "task_pending", input: stepInput(""), wl: wl, noBase: true},
+		"author base unknown":              {id: "task_unknown", input: stepInput(""), wl: wl, noBase: true},
+		"pre-guard registration with base": {id: "task_pre_guard_base", input: stepInput(""), wl: wl, noBase: true},
+		"ordinary task":                    {id: "task_plain", input: `{"prompt":"edit"}`, wl: wl},
+		"registered step":                  {id: "task_registered", input: stepInput(""), wl: wl, want: checkArgv},
+		"argv in input is ignored":         {id: "task_registered", input: stepInput(`,"argv":["/bin/rm","-rf","/"]`), wl: wl, want: checkArgv},
+		"input names a command":            {id: "task_plain", input: `{"prompt":"edit","command":"check"}`, wl: wl, refused: true},
+		"input names a command in case":    {id: "task_plain", input: `{"prompt":"edit","Command":"check"}`, wl: wl, refused: true},
+		"input names another command":      {id: "task_registered", input: `{"workflow":"` + commandWorkflow + `","step_index":1,"command":"deploy"}`, wl: wl, refused: true},
+		"step without registration":        {id: "task_unregistered", input: stepInput(""), wl: wl, refused: true},
+		"registration without commit":      {id: "task_no_commit", input: stepInput(""), wl: wl, refused: true},
+		"registration for another step":    {id: "task_wrong_index", input: stepInput(""), wl: wl, refused: true},
+		"command not in allowed set":       {id: "task_registered", input: stepInput(""), wl: noCommands, refused: true},
+		"command step input dropped":       {id: "task_registered", input: `{"workflow":"` + commandWorkflow + `","step_index":1}`, wl: wl, refused: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			task := domain.Task{ID: tc.id, WorkloadName: "coder", InputJSON: tc.input}
 			spec, err := f.r.workflowCommand(ctx, task, tc.wl)
 			var refusal *scruntime.CommandRefusal
 			switch {
+			case tc.noBase:
+				if !errors.As(err, &refusal) || refusal.Reason != scruntime.CommandAuthorBaseUnavailable || spec != nil {
+					t.Fatalf("spec %+v, err %v; want an author_base_unavailable refusal", spec, err)
+				}
 			case tc.refused:
 				if !errors.As(err, &refusal) || refusal.Reason != scruntime.CommandNotAllowed || spec != nil {
 					t.Fatalf("spec %+v, err %v; want a command_not_allowed refusal", spec, err)
@@ -475,7 +536,7 @@ func TestWorkflowCommandResolvesArgvOnlyFromManifest(t *testing.T) {
 					t.Fatalf("spec %+v, err %v; want no command", spec, err)
 				}
 			default:
-				if err != nil || spec == nil || !slices.Equal(spec.Argv, tc.want) || spec.Timeout != domain.DefaultCommandTimeout || spec.MaxOutputBytes != domain.DefaultCommandOutputBytes {
+				if err != nil || spec == nil || !slices.Equal(spec.Argv, tc.want) || spec.AuthorBase != base || spec.Timeout != domain.DefaultCommandTimeout || spec.MaxOutputBytes != domain.DefaultCommandOutputBytes {
 					t.Fatalf("spec %+v, err %v; want the manifest argv %v", spec, err, tc.want)
 				}
 			}

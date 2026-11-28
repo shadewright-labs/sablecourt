@@ -9,6 +9,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
+	"github.com/shadewright-labs/sablecourt/internal/store"
 )
 
 // Workflow command steps (issue 134). A command step runs one entry of its
@@ -78,11 +79,20 @@ func (r *Reconciler) workflowCommand(ctx context.Context, task domain.Task, wl d
 	if !ok || domain.ValidCommandArgv(cmd.Argv) != nil {
 		return nil, refuse
 	}
+	// Only a first author base recorded with its provenance, naming a commit
+	// of the same object format as the pinned commit, is compared from; a
+	// pending, unknown or pre-guard registration fails the step: no
+	// comparison is skipped (issue 214).
+	base, recorded := recordedAuthorBase(member)
+	if !recorded || len(base) != len(member.AuthorCommit) {
+		return nil, &scruntime.CommandRefusal{Command: meta.Command, Reason: scruntime.CommandAuthorBaseUnavailable}
+	}
 	return &scruntime.CommandSpec{
 		Name:           cmd.Name,
 		Argv:           slices.Clone(cmd.Argv),
 		Timeout:        cmd.Timeout(),
 		MaxOutputBytes: cmd.OutputCap(),
+		AuthorBase:     base,
 	}, nil
 }
 
@@ -108,12 +118,35 @@ func (r *Reconciler) isCommandStep(workflow string, index int, workload string) 
 	return ok
 }
 
+// recordedRefusal is the refusal of the task's command_refused event, if it
+// has one, so a halt retried after the refusal path failed stays a refusal.
+func recordedRefusal(ctx context.Context, st store.Store, taskID string) (*scruntime.CommandRefusal, error) {
+	events, err := st.ListTaskEvents(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		if ev.Reason != "command_refused" {
+			continue
+		}
+		var fact struct {
+			Refusal string `json:"refusal"`
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(ev.FactJSON), &fact) == nil && fact.Refusal != "" {
+			return &scruntime.CommandRefusal{Command: fact.Command, Reason: fact.Refusal}, nil
+		}
+	}
+	return nil, nil
+}
+
 // commandRefusalFacts is the fixed-text fact of a refused command step.
 func commandRefusalFacts(refusal *scruntime.CommandRefusal) string {
 	detail := map[string]string{
-		scruntime.CommandNotAllowed:         "the command is not in the allowed set of the step's workload, or the task is not a registered command step",
-		scruntime.CommandNoContainerRuntime: "commands run only in harness containers and no container runtime is configured; there is no host fallback",
-		scruntime.CommandContainerRefused:   "the command's harness container could not be built or started; there is no host fallback",
+		scruntime.CommandNotAllowed:            "the command is not in the allowed set of the step's workload, or the task is not a registered command step",
+		scruntime.CommandNoContainerRuntime:    "commands run only in harness containers and no container runtime is configured; there is no host fallback",
+		scruntime.CommandContainerRefused:      "the command's harness container could not be built or started; there is no host fallback",
+		scruntime.CommandAuthorBaseUnavailable: "the run has no recorded first author base (unknown, or the run started before the daemon recorded it), or it is not an ancestor of the commit the step checks",
 	}[refusal.Reason]
 	raw, _ := json.Marshal(struct {
 		Reason  string `json:"reason"`
@@ -228,6 +261,14 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if cmd, ok := wl.Spec.Coding.Command(step.Command); ok {
 		fact.FailureReason = cmd.FailureReason
 	}
+	if refusal == nil {
+		// A halt written on the refusal path that failed is retried by a
+		// failure path, which carries no refusal: the task's own
+		// command_refused event keeps the halt a refusal.
+		if refusal, err = recordedRefusal(ctx, r.store, task.ID); err != nil {
+			return err
+		}
+	}
 	event, status := "workflow_halted_command_failed", "command_failed"
 	if refusal != nil {
 		event, status = "workflow_halted_command_refused", "command_refused"
@@ -247,17 +288,12 @@ func (r *Reconciler) haltCommandStep(ctx context.Context, task domain.Task, refu
 	if err != nil {
 		return err
 	}
-	root, err := r.store.GetTask(ctx, member.RunID)
+	detail, err := json.Marshal(map[string]any{"workflow": meta.Workflow, "step": step.Name, "step_index": meta.StepIndex, "command": meta.Command})
 	if err != nil {
 		return err
 	}
-	if err := r.store.UpdateTaskState(ctx, root.ID, root.State, root.State, event, string(raw)); err != nil {
-		return err
-	}
-	rootStep.Status, rootStep.Reason = "halted", status
-	entry, err := r.workflowStepEntry(root.ID, *rootStep)
-	if err != nil {
-		return err
-	}
-	return r.store.PutMemory(ctx, entry)
+	return r.haltRun(ctx, member.RunID, rootStep, event, string(raw), status, "command_task_id", task.ID, domain.AuditRecord{
+		Category: "workflow", TaskID: task.ID, WorkloadName: task.WorkloadName,
+		Action: "workflow.command", Outcome: status, DetailJSON: string(detail), CreatedAt: r.now(),
+	})
 }

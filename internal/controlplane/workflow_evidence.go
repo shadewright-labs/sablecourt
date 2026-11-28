@@ -34,8 +34,19 @@ type workflowStepRecord struct {
 	Workflow     string
 	Index        int
 	AuthorCommit string
-	Status       string `json:",omitempty"`
-	Reason       string `json:",omitempty"`
+	// AuthorBase is the commit the run's first author step started from
+	// (issue 214), carried from step to step and never replaced once set.
+	AuthorBase string `json:",omitempty"`
+	// AuthorBaseState says where AuthorBase comes from (issue 214):
+	// authorBasePending (no author attempt of the run has recorded a base
+	// yet), authorBaseRecorded (AuthorBase is the run's first author base)
+	// or authorBaseUnknown. A daemon from before this rule never writes it,
+	// so a registration without it, whatever AuthorBase it holds, has an
+	// unknown first author base. A command step of the run is refused unless
+	// the state is authorBaseRecorded.
+	AuthorBaseState string `json:",omitempty"`
+	Status          string `json:",omitempty"`
+	Reason          string `json:",omitempty"`
 }
 
 func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
@@ -61,6 +72,43 @@ func (r *Reconciler) workflowStep(ctx context.Context, id string) (*workflowStep
 	return &step, nil
 }
 
+// haltRun halts a workflow run in one store transaction: the halt event on
+// the run's root task, the halt's audit row and the halted run registration
+// are all written or none is (decision of 2026-11-28 on issue 214, ADR-0009,
+// invariant 6). A failed transaction leaves nothing behind, and a later call
+// (the failure path after a refusal, or a later reconcile pass) retries the
+// whole halt. A replay that finds the event of the same
+// step (its fact names that step's task under key), checked inside the
+// transaction, writes nothing: the registration already says halted with the
+// recorded reason.
+func (r *Reconciler) haltRun(ctx context.Context, runID string, rootStep *workflowStepRecord, event, fact, status, key, stepTaskID string, audit domain.AuditRecord) error {
+	root, err := r.store.GetTask(ctx, runID)
+	if err != nil {
+		return err
+	}
+	halted := *rootStep
+	halted.Status, halted.Reason = "halted", status
+	entry, err := r.workflowStepEntry(root.ID, halted)
+	if err != nil {
+		return err
+	}
+	err = store.UpdateTaskStateWithEffects(ctx, r.store, root.ID, root.State, root.State, event, fact, store.TransitionEffects{
+		Recorded: func(reason, factJSON string) bool {
+			if !strings.HasPrefix(reason, "workflow_halted_") {
+				return false
+			}
+			var named map[string]any
+			return json.Unmarshal([]byte(factJSON), &named) == nil && named[key] == stepTaskID
+		},
+		Audit:  &audit,
+		Memory: &entry,
+	})
+	if errors.Is(err, store.ErrAlreadyRecorded) {
+		return nil
+	}
+	return err
+}
+
 // stepAuthorCommit is the commit a verifier following the completed step must
 // review. Only an author step's artifacts set a new commit; a completed verifier
 // passes on the commit it was pinned to, whatever artifacts it emitted.
@@ -72,19 +120,135 @@ func stepAuthorCommit(completed *workflowStepRecord, completedVerifier bool, art
 }
 
 func authorCommit(artifacts string) string {
+	return commitArtifact(artifacts, "git-commit")
+}
+
+// The states of a run's first author base (workflowStepRecord.AuthorBaseState).
+const (
+	authorBasePending  = "pending"
+	authorBaseRecorded = "recorded"
+	authorBaseUnknown  = "unknown"
+)
+
+// recordedAuthorBase reports the run's first author base that a command step
+// registration may compare from: only a base recorded by a daemon that keeps
+// its provenance (issue 214).
+func recordedAuthorBase(step *workflowStepRecord) (string, bool) {
+	if step.AuthorBaseState != authorBaseRecorded || !validCommitID(step.AuthorBase) {
+		return "", false
+	}
+	return step.AuthorBase, true
+}
+
+// setRunAuthorBase sets the author base and its state that next, the
+// registration of the step after completed, carries (issue 214). The rule
+// reads only the run's recorded history (completed's registration, and the
+// completed task's own input and artifacts), never the loaded bundle:
+//
+//   - a recorded base is carried unchanged; no later author replaces it;
+//   - any state other than pending or recorded (a registration written
+//     before this rule, which may hold a later author's base, or the
+//     unknown state) gives the unknown state, and so does a recorded state
+//     without a valid base;
+//   - while pending, a verifier or command step changes nothing, and a
+//     step whose input does not parse gives the unknown state;
+//   - while pending, an author attempt that names its checkout's start in a
+//     valid git-base artifact records it; an attempt that did not complete
+//     (failed or cancelled) and left neither a git-base nor a git-commit
+//     artifact keeps the state pending, so its retry, checked out afresh,
+//     is the first attempt; any other author outcome (a commit without a
+//     base, an invalid or repeated base, a completed attempt with no
+//     artifacts, an attempt pinned to an earlier commit) gives the unknown
+//     state.
+//
+// next and completed may be the same record (a retried attempt keeps its
+// registration).
+func setRunAuthorBase(next, completed *workflowStepRecord, completedTask domain.Task) {
+	base, state := "", authorBaseUnknown
+	switch {
+	case completed.AuthorBaseState == authorBaseRecorded:
+		if recorded, ok := recordedAuthorBase(completed); ok {
+			base, state = recorded, authorBaseRecorded
+		}
+	case completed.AuthorBaseState != authorBasePending:
+	case !validStepInput(completedTask.InputJSON):
+	case !recordedAuthorStep(completedTask.InputJSON):
+		state = authorBasePending
+	case completed.AuthorCommit != "":
+	default:
+		artifacts := completedTask.ArtifactsJSON
+		if recorded := commitArtifact(artifacts, scruntime.GitBaseArtifact); recorded != "" {
+			base, state = recorded, authorBaseRecorded
+		} else if completedTask.State != domain.TaskStateCompleted && !hasArtifact(artifacts, scruntime.GitBaseArtifact) && !hasArtifact(artifacts, "git-commit") {
+			state = authorBasePending
+		}
+	}
+	next.AuthorBase, next.AuthorBaseState = base, state
+}
+
+// stepKind is the part of a workflow step task's input, as the control plane
+// wrote it, that says which kind of step it is.
+type stepKind struct {
+	Role    string `json:"role"`
+	Command string `json:"command"`
+}
+
+// validStepInput reports whether a step task's input parses as a JSON object.
+func validStepInput(input string) bool {
+	var kind *stepKind
+	return json.Unmarshal([]byte(input), &kind) == nil && kind != nil
+}
+
+// recordedAuthorStep reports whether a workflow step task's own input makes
+// it an author step: neither a verifier nor a command step.
+func recordedAuthorStep(input string) bool {
+	var kind stepKind
+	if json.Unmarshal([]byte(input), &kind) != nil {
+		return false
+	}
+	return kind.Role != "verifier" && kind.Command == ""
+}
+
+// hasArtifact reports whether artifacts name an artifact called name, valid
+// or not. Artifacts that do not parse count as present, so they fail closed.
+func hasArtifact(artifacts, name string) bool {
+	if artifacts == "" {
+		return false
+	}
+	var items []scruntime.Artifact
+	if json.Unmarshal([]byte(artifacts), &items) != nil {
+		return true
+	}
+	for _, item := range items {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// validCommitID reports whether id is a full SHA-1 or SHA-256 commit ID in hex.
+func validCommitID(id string) bool {
+	if len(id) != 40 && len(id) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
+}
+
+// commitArtifact returns the commit ID of the one text artifact with this
+// name, or "" when there is none, more than one, or it is not a commit ID.
+func commitArtifact(artifacts, name string) string {
 	var items []scruntime.Artifact
 	if json.Unmarshal([]byte(artifacts), &items) != nil {
 		return ""
 	}
 	commit := ""
 	for _, item := range items {
-		if item.Name != "git-commit" {
+		if item.Name != name {
 			continue
 		}
-		if commit != "" || item.ContentType != "text/plain" || (len(item.Text) != 40 && len(item.Text) != 64) {
-			return ""
-		}
-		if _, err := hex.DecodeString(item.Text); err != nil {
+		if commit != "" || item.ContentType != "text/plain" || !validCommitID(item.Text) {
 			return ""
 		}
 		commit = item.Text

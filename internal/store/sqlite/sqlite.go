@@ -333,6 +333,10 @@ func (s *SQLiteStore) UpdateTaskState(ctx context.Context, taskID string, from, 
 		_ = tx.Rollback()
 		return store.ErrConflict
 	}
+	if err := store.ApplyTransitionEffects(ctx, tx, taskID, s.appendAuditTx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO task_events (task_id, from_state, to_state, reason, fact_json, created_at)

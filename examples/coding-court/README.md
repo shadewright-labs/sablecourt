@@ -1,6 +1,6 @@
 # Coding court example
 
-`coding-court.yaml` is a manifest bundle for any Go repository, with four inline role cards and three workflows. `architect-question.md` is a separate council question text, not a card. The same set written for this repository is in [`sablecourt/`](sablecourt/README.md). Check the bundle with:
+`coding-court.yaml` is a manifest bundle for any Go repository, with four inline role cards, one command and three workflows. `architect-question.md` is a separate council question text, not a card. The same set written for this repository is in [`sablecourt/`](sablecourt/README.md). Check the bundle with:
 
 ```sh
 go run ./cmd/sablectl validate examples/coding-court/coding-court.yaml
@@ -24,7 +24,7 @@ The verdict contract belongs to the control plane, not to the cards or the workf
 
 The ADR-0010 amendment requires a verifier step to run a model family that no step in its chain ran. The example aims for that: the developers use the `claude` harness (Anthropic), the reviewer `codex` (OpenAI) and the security reviewer `agy` with a Gemini model (Google). The family comes from the model, not the harness: `agy` can run Claude models, so its step names a Gemini model.
 
-The families above are the intended routing, not an enforced rule. The verifier steps name `provider` and `model` themselves, because the compiled default `critic` route (`internal/contextpack/tiers.go`) is `cli:claude`, the author's harness, and a provider or model on the step replaces the route of its tier ([context and learning](../../docs/how-it-works/context-and-learning.md)). The model names are examples, so replace them with ones your harness lists. Enforcement of families waits for [issue 206](https://github.com/shadewright-labs/sablecourt/issues/206), so today nothing in the daemon checks them. Until then, check the resolved family of every step before each verifier, fix rounds included. In a closed-loop fix round the reconciler submits the step recorded as the verifier's author step again with that step's own tier, provider and model (`internal/controlplane/reconciler.go`). For the first verifier that is the author step. For a second verifier in a row, such as `security` after `review`, it is the first verifier's step, so this example's `go-change-security` would rerun `review`.
+The families above are the intended routing, not an enforced rule. The verifier steps name `provider` and `model` themselves, because the compiled default `critic` route (`internal/contextpack/tiers.go`) is `cli:claude`, the author's harness, and a provider or model on the step replaces the route of its tier ([context and learning](../../docs/how-it-works/context-and-learning.md)). The model names are examples, so replace them with ones your harness lists. Enforcement of families waits for [issue 206](https://github.com/shadewright-labs/sablecourt/issues/206), so today nothing in the daemon checks them. Until then, check the resolved family of every step before each verifier, fix rounds included. In a closed-loop fix round the reconciler submits the step recorded as the verifier's author step again with that step's own tier, provider and model (`internal/controlplane/reconciler.go`). For the first verifier that is the author step. For a second verifier in a row, such as `security` after `review`, it is the first verifier's step, so this example's `coding-invariant` would rerun `review`.
 
 ## Fix rounds
 
@@ -36,8 +36,8 @@ The architect is a council question, not an inline card. The text in `architect-
 
 ## The workflows
 
-- `go-change`: `developer-go` (tier `coding`), then `reviewer` (tier `critic`).
-- `go-change-security`: the same, then `security` (tier `critic`). Use it for a change to a sensitive path such as credentials, authorization or input handling.
+- `coding`: `developer-go` (tier `coding`), then the `invariant-paths` command step, then `reviewer` (tier `critic`). The command step is the invariant path guard: it compares every path changed since the run's first author base with the path list in its argv and halts the run before the review when one matches, with a failure reason that names `coding-invariant` ([command steps](../../docs/how-it-works/command-steps.md)). Replace the example list with your repository's invariant paths; an empty list checks nothing.
+- `coding-invariant`: `developer-go`, `reviewer`, then `security` (tier `critic`). Use it for a change on an invariant path. It has no guard.
 - `docs-change`: `developer-docs`, then `reviewer`.
 
 ## Before you run it

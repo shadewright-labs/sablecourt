@@ -1,5 +1,5 @@
 # Generic coding court for any Go repository: four role cards and three
-# workflows. The architect is not a card: it is prose for a council question,
+# workflows (coding, coding-invariant, docs-change). The architect is not a card: it is prose for a council question,
 # see architect-question.md. The set written for the Sablecourt repository
 # is in sablecourt/.
 #
@@ -33,6 +33,59 @@ spec:
     harness: claude
     repoPath: .
     sandbox: container
+    # The invariant path guard of the coding workflow (issue 214). It runs
+    # after the author and fails when the author's changes since the run's
+    # first author base touch a listed path, or on any Git error. Git
+    # decides the match from its exit status over literal pathspecs, so no
+    # file name is parsed, and the options override every repository
+    # setting that could hide a change (submodule ignore rules, replace
+    # refs, diff.relative). Each entry matches the path itself and, when it
+    # is a directory, everything below it, never a name prefix. A trailing
+    # / is dropped after the check, so policy/ also matches a file named
+    # policy. Replace
+    # the list with your repository's invariant paths. An empty list checks
+    # nothing.
+    commands:
+      - name: invariant-paths
+        argv:
+          - sh
+          - -c
+          - |
+            set -u
+            if [ "$#" -eq 0 ]; then
+              echo "guard: the path list is empty, so no path was checked"
+              exit 0
+            fi
+            n=$#
+            for p in "$@"; do
+              case "$p" in
+                (""|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*) echo "guard: invalid path list entry" >&2; exit 2 ;;
+              esac
+              set -- "$@" ":(top,literal)${p%/}"
+            done
+            shift "$n"
+            ref=refs/sablecourt/author-base
+            base=$(git --no-replace-objects rev-parse --verify --quiet --end-of-options "$ref^{commit}") || { echo "guard: no author base ($ref)" >&2; exit 2; }
+            git --no-replace-objects merge-base --is-ancestor "$base" HEAD || { echo "guard: the author base is not an ancestor of HEAD" >&2; exit 2; }
+            out=$(git --no-replace-objects -c core.quotePath=true diff --name-status --no-renames --ignore-submodules=none --no-ext-diff --no-textconv --no-relative --exit-code "$base" HEAD -- "$@")
+            rc=$?
+            if [ "$rc" -eq 0 ] && [ -n "$out" ]; then rc=1; fi
+            case "$rc" in
+              (0) echo "guard: no changed path is on the list ($n entries)" ;;
+              (1)
+                echo "guard: the change touches a listed invariant path:"
+                printf '%s\n' "$out"
+                exit 1 ;;
+              (*) echo "guard: git diff failed with status $rc" >&2; exit 2 ;;
+            esac
+          - guard
+          - internal/redact/
+          - internal/policy/
+          - internal/approval/
+          - internal/gate/
+          - internal/audit/
+        timeoutSeconds: 60
+        failureReason: "the change touches an invariant path: start it again with the coding-invariant workflow, which adds the security step"
   agentCard:
     description: Writes Go changes and their table-driven tests in the assigned worktree.
     skills:
@@ -177,16 +230,19 @@ spec:
 apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
-  name: go-change
+  name: coding
   zone: runtime
 spec:
-  description: A Go change by an author, then a review.
+  description: A Go change by an author, the invariant path guard, then a review. The guard halts the run when the change touches an invariant path.
   steps:
     - name: author
       workload: developer-go
       role: author
       tier: coding
       prompt: Build the change described in the task, with its failing test first.
+    - name: invariant-paths
+      workload: developer-go
+      command: invariant-paths
     - name: review
       workload: reviewer
       role: verifier
@@ -198,10 +254,10 @@ spec:
 apiVersion: sablecourt.io/v1alpha1
 kind: Workflow
 metadata:
-  name: go-change-security
+  name: coding-invariant
   zone: runtime
 spec:
-  description: A Go change on a sensitive path. The security step is required here.
+  description: A Go change on an invariant path. The security step is required here.
   steps:
     - name: author
       workload: developer-go

@@ -41,6 +41,7 @@ if curl -sS --max-time 5 -o /dev/null https://api.anthropic.com/ 2>/dev/null; th
 code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$SABLECOURT_DATA_GATE_URL")
 [[ $code == 401 ]] || exit 42
 git -C /workspace rev-parse HEAD || exit 43
+[[ $(git -C /workspace rev-parse --verify 'refs/sablecourt/author-base^{commit}') == $(git -C /workspace rev-parse HEAD~1) ]] || exit 44
 printf 'token ghp_%s\n' "$(printf 'R%.0s' $(seq 36))"
 exit "$1"
 `
@@ -138,6 +139,9 @@ func TestCommandStepDocker(t *testing.T) {
 	testWrite(t, repo, "committed.txt", "committed-v1\n", 0o644)
 	testGit(t, repo, "add", "committed.txt")
 	testGit(t, repo, "commit", "-m", "v1")
+	base := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
+	testWrite(t, repo, "committed.txt", "committed-v2\n", 0o644)
+	testGit(t, repo, "commit", "-am", "v2")
 	commit := strings.TrimSpace(testGit(t, repo, "rev-parse", "HEAD"))
 
 	adapter := NewAdapter(filepath.Join(t.TempDir(), "worktrees"))
@@ -168,7 +172,7 @@ func TestCommandStepDocker(t *testing.T) {
 				TaskToken:        "sc_task_" + rand.Text(),
 				CouncilContainer: true,
 				Command: &scruntime.CommandSpec{Name: "check", Argv: []string{"/bin/bash", "--noprofile", "--norc", "-c", commandProbe, "check", tc.exit, harnessimages.StateDir},
-					Timeout: 30 * time.Second, MaxOutputBytes: domain.DefaultCommandOutputBytes},
+					Timeout: 30 * time.Second, MaxOutputBytes: domain.DefaultCommandOutputBytes, AuthorBase: base},
 			}
 			h, err := adapter.StartAtCommit(t.Context(), spec, commit, true)
 			if isContainerHandle(h) {
