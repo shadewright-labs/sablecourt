@@ -11,6 +11,8 @@
 #     cannot change yet name the commits whose history holds that value, so the same value in a new commit is
 #     reported.
 #   - A token that only a merge commit introduces (added while resolving the merge) fails the scan.
+#   - In a pull request range, a token that main removed and the branch keeps through a merge of main fails the
+#     scan, and a pull request event with an empty base or head is refused.
 # The secrets are assembled at run time, so this file holds none. Usage: hack/test/gitleaks_test.sh [gitleaks]
 set -euo pipefail
 
@@ -141,6 +143,30 @@ merge_only() {
 merge_only "token added only in a merge commit" notes/merged.txt "token = ghp_$(alnum 36)"
 merge_only "key added only in a merge commit, allowlisted path" internal/attach/hub_test.go "$(pem_block)"
 merge_only "token added only in a merge commit to an existing file" README.txt "token = ghp_$(alnum 36)"
+
+# merge_restores <name>: main removed a token (an earlier commit, outside the range) and the branch, made before
+# that, merges main keeping its copy: the first-parent diff of the merge is empty, the diff against main adds it.
+# The scan runs in pull request mode (base = main after the removal, head = the merge).
+merge_restores() {
+  new_repo
+  echo base > "${repo}/README.txt"
+  printf 'token = ghp_%s\n' "$(alnum 36)" > "${repo}/old.txt"
+  git_q -C "${repo}" add -A && git_q -C "${repo}" commit -qm "token and base"
+  git_q -C "${repo}" checkout -q -b topic
+  git_q -C "${repo}" checkout -q main
+  git_q -C "${repo}" rm -q old.txt && git_q -C "${repo}" commit -qm "remove token"
+  base_sha="$(git -C "${repo}" rev-parse HEAD)"
+  git_q -C "${repo}" checkout -q topic
+  echo topic > "${repo}/topic.txt"
+  git_q -C "${repo}" add -A && git_q -C "${repo}" commit -qm topic
+  git_q -C "${repo}" merge -q --no-ff -s ours main -m "merge main, keep token"
+  head_sha="$(git -C "${repo}" rev-parse HEAD)"
+  local got=0
+  SECRET_SCAN_BASE="${base_sha}" SECRET_SCAN_HEAD="${head_sha}" \
+    "${root}/hack/secret-scan.sh" "${gitleaks}" "${repo}" > "${work}/out" 2>&1 || got=$?
+  if [ "${got}" = 1 ]; then echo "ok   $1"; else echo "FAIL $1: exit ${got}, want 1"; fails=$((fails + 1)); fi
+}
+merge_restores "a token restored by a merge of main is found in a pull request range"
 
 # The scan fails closed when the history cannot be read. A stub git first in PATH breaks `git log`, either for
 # every caller or only for gitleaks' own call (`log -p -U0` with no --format), while every other git command
