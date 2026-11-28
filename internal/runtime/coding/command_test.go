@@ -89,6 +89,7 @@ func TestBuildCommandProcessResult(t *testing.T) {
 		taskExit  int // what Observe reports
 		output    string
 		truncated bool
+		exact     bool
 	}{
 		"passed":        {res: scruntime.CouncilResult{Stdout: "ok\n"}, outcome: scruntime.CommandPassed, output: "ok"},
 		"stderr joined": {res: scruntime.CouncilResult{Stdout: "out", Stderr: "warn"}, outcome: scruntime.CommandPassed, output: "out\nwarn"},
@@ -97,7 +98,7 @@ func TestBuildCommandProcessResult(t *testing.T) {
 		// The cap keeps the last whole lines: the cut line is dropped.
 		"over cap exit 0":             {res: scruntime.CouncilResult{Stdout: strings.Repeat("a", 40) + "\nTAIL"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: "TAIL", truncated: true},
 		"over cap exit 3":             {res: scruntime.CouncilResult{ExitCode: 3, Stdout: strings.Repeat("b", 64) + "\nlast"}, outcome: scruntime.CommandOutputOverCap, exit: 3, taskExit: 3, output: "last", truncated: true},
-		"over cap with no whole line": {res: scruntime.CouncilResult{Stdout: strings.Repeat("c", 64)}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
+		"over cap with no whole line": {res: scruntime.CouncilResult{Stdout: strings.Repeat("c", 64)}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true, exact: true},
 		// Redaction grows the output past the cap: that is a cut too.
 		"redaction grows past cap":       {res: scruntime.CouncilResult{Stdout: strings.Repeat("api"+"_key=abcdef\n", 2) + "ok"}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, output: "api_key=[REDACTED:secret]\nok", truncated: true},
 		"runner overflow":                {res: scruntime.CouncilResult{Stdout: "[REDACTED:output limit]", OutputOverflow: true}, outcome: scruntime.CommandOutputOverCap, taskExit: -1, truncated: true},
@@ -114,7 +115,13 @@ func TestBuildCommandProcessResult(t *testing.T) {
 			if got == nil || got.Command != "check" || got.Outcome != tc.outcome || got.ExitCode != tc.exit || out.ExitCode != tc.taskExit || got.OutputTruncated != tc.truncated {
 				t.Fatalf("result = %+v (task exit %d), want outcome %s exit %d task exit %d truncated %v", got, out.ExitCode, tc.outcome, tc.exit, tc.taskExit, tc.truncated)
 			}
-			if !strings.HasPrefix(got.Output, tc.output) || len(got.Output) > rec.MaxOutputBytes || strings.Contains(got.Output, secret) {
+			// exact cases must match whole (no fragment of a cut line); the rest only
+			// pin the start, because a redaction marker may carry a suffix.
+			outputOK := strings.HasPrefix(got.Output, tc.output)
+			if tc.exact {
+				outputOK = got.Output == tc.output
+			}
+			if !outputOK || len(got.Output) > rec.MaxOutputBytes || strings.Contains(got.Output, secret) {
 				t.Fatalf("output = %q, want %q within %d bytes and redacted", got.Output, tc.output, rec.MaxOutputBytes)
 			}
 			if (tc.outcome == scruntime.CommandPassed) != (out.Message == "") {
