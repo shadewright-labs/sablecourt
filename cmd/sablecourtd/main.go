@@ -41,6 +41,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/integrations"
 	"github.com/shadewright-labs/sablecourt/internal/notify"
 	"github.com/shadewright-labs/sablecourt/internal/operatortoken"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
 	"github.com/shadewright-labs/sablecourt/internal/providers"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
@@ -378,8 +379,13 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			cfg.listenAddr = "0.0.0.0:7432"
 		}
 	}
+	gatewayField := "--model-gateway-url"
 	if cfg.modelGatewayURL == "" {
 		cfg.modelGatewayURL = strings.TrimSpace(os.Getenv("SABLECOURT_MODEL_GATEWAY_URL"))
+		gatewayField = "SABLECOURT_MODEL_GATEWAY_URL"
+	}
+	if err := checkOutboundURLs(cfg, gatewayField); err != nil {
+		return err
 	}
 
 	dbPath := cfg.dbPath
@@ -461,9 +467,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		}
 		gitSyncer = config.NewGitSyncer(cfg.manifestsGitRepo, cfg.manifestsGitBranch, syncDir)
 		if _, sha, err := gitSyncer.SyncOnce(ctx); err != nil {
-			logger.Warn("initial manifests git sync failed", "repo", cfg.manifestsGitRepo, "error", err)
+			logger.Warn("initial manifests git sync failed", "repo", outbound.DisplayGitRemote(cfg.manifestsGitRepo), "error", err)
 		} else {
-			logger.Info("synced manifests from git", "repo", cfg.manifestsGitRepo, "sha", sha[:12])
+			logger.Info("synced manifests from git", "repo", outbound.DisplayGitRemote(cfg.manifestsGitRepo), "sha", sha[:12])
 			manifestsPath = syncDir
 		}
 	}
@@ -612,7 +618,7 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 		GatewayURL: cfg.modelGatewayURL,
 	})
 	if cfg.modelGatewayURL != "" {
-		logger.Info("model gate routing through external AI gateway", "url", cfg.modelGatewayURL)
+		logger.Info("model gate routing through external AI gateway", "url", outbound.Display(cfg.modelGatewayURL))
 	}
 
 	breaker := policies.Breaker()

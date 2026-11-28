@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
@@ -91,13 +93,48 @@ func (s *Service) resolve(ctx context.Context, explicit, secretKey, envKey, def 
 	return def
 }
 
-func (s *Service) Status(ctx context.Context) Status {
-	sttURL := s.resolve(ctx, s.sttURL, "voice_stt_url", "SABLECOURT_STT_URL", DefaultSTTURL)
+// resolveURL is resolve for a backend URL, and also returns the name of the
+// setting the value came from, so a refusal can point at it.
+func (s *Service) resolveURL(ctx context.Context, explicit, label, secretKey, envKey, def string) (string, string) {
+	if explicit != "" {
+		return explicit, label
+	}
+	if s.secrets != nil {
+		if v, err := s.secrets.Get(ctx, secretKey); err == nil && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v), secretKey
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v, envKey
+	}
+	return def, label
+}
+
+func (s *Service) sttEndpoint(ctx context.Context) (string, string) {
+	sttURL, field := s.resolveURL(ctx, s.sttURL, "voice STT URL", "voice_stt_url", "SABLECOURT_STT_URL", DefaultSTTURL)
 	if !strings.HasSuffix(sttURL, "/transcriptions") && !strings.HasSuffix(sttURL, "/inference") {
 		sttURL = strings.TrimRight(sttURL, "/") + "/v1/audio/transcriptions"
 	}
+	return sttURL, field
+}
+
+func (s *Service) ttsEndpoint(ctx context.Context) (string, string) {
+	return s.resolveURL(ctx, s.ttsURL, "voice TTS URL", "voice_tts_url", "SABLECOURT_TTS_URL", "")
+}
+
+// shownURL is a backend URL as Status reports it: without user info, query
+// or fragment.
+func shownURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return outbound.Display(raw)
+}
+
+func (s *Service) Status(ctx context.Context) Status {
+	sttURL, _ := s.sttEndpoint(ctx)
 	sttModel := s.resolve(ctx, s.sttModel, "voice_stt_model", "SABLECOURT_STT_MODEL", DefaultSTTModel)
-	ttsURL := s.resolve(ctx, s.ttsURL, "voice_tts_url", "SABLECOURT_TTS_URL", "")
+	ttsURL, _ := s.ttsEndpoint(ctx)
 	ttsModel := s.resolve(ctx, s.ttsModel, "voice_tts_model", "SABLECOURT_TTS_MODEL", DefaultTTSModel)
 	ttsVoice := s.resolve(ctx, s.ttsVoice, "voice_tts_voice", "SABLECOURT_TTS_VOICE", "")
 
@@ -110,10 +147,10 @@ func (s *Service) Status(ctx context.Context) Status {
 		}
 	}
 	return Status{
-		STTURL:     sttURL,
+		STTURL:     shownURL(sttURL),
 		STTModel:   sttModel,
 		TTSBackend: backend,
-		TTSURL:     ttsURL,
+		TTSURL:     shownURL(ttsURL),
 		TTSModel:   ttsModel,
 		TTSVoice:   ttsVoice,
 	}
@@ -128,9 +165,9 @@ func (s *Service) Transcribe(ctx context.Context, audio []byte, filename, langua
 	if strings.TrimSpace(filename) == "" {
 		filename = "audio.webm"
 	}
-	sttURL := s.resolve(ctx, s.sttURL, "voice_stt_url", "SABLECOURT_STT_URL", DefaultSTTURL)
-	if !strings.HasSuffix(sttURL, "/transcriptions") && !strings.HasSuffix(sttURL, "/inference") {
-		sttURL = strings.TrimRight(sttURL, "/") + "/v1/audio/transcriptions"
+	sttURL, sttField := s.sttEndpoint(ctx)
+	if err := outbound.Check(sttField, sttURL); err != nil {
+		return "", err
 	}
 	sttModel := s.resolve(ctx, s.sttModel, "voice_stt_model", "SABLECOURT_STT_MODEL", DefaultSTTModel)
 
@@ -157,9 +194,9 @@ func (s *Service) Transcribe(ctx context.Context, audio []byte, filename, langua
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := s.client.Do(req)
+	resp, err := outbound.Client(s.client, sttField).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("local STT request to %s failed: %w", sttURL, err)
+		return "", fmt.Errorf("local STT request to %s failed: %w", outbound.Display(sttURL), unwrapURLError(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -194,13 +231,16 @@ func (s *Service) Speak(ctx context.Context, text, voiceOverride string) ([]byte
 		clean = clean[:4000]
 	}
 
-	ttsURL := s.resolve(ctx, s.ttsURL, "voice_tts_url", "SABLECOURT_TTS_URL", "")
+	ttsURL, ttsField := s.ttsEndpoint(ctx)
 	voiceName := strings.TrimSpace(voiceOverride)
 	if voiceName == "" {
 		voiceName = s.resolve(ctx, s.ttsVoice, "voice_tts_voice", "SABLECOURT_TTS_VOICE", "")
 	}
 
 	if ttsURL != "" {
+		if err := outbound.Check(ttsField, ttsURL); err != nil {
+			return nil, "", err
+		}
 		ttsModel := s.resolve(ctx, s.ttsModel, "voice_tts_model", "SABLECOURT_TTS_MODEL", DefaultTTSModel)
 		if voiceName == "" {
 			voiceName = "af_heart"
@@ -216,9 +256,9 @@ func (s *Service) Speak(ctx context.Context, text, voiceOverride string) ([]byte
 			return nil, "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := s.client.Do(req)
+		resp, err := outbound.Client(s.client, ttsField).Do(req)
 		if err != nil {
-			return nil, "", fmt.Errorf("local TTS request to %s failed: %w", ttsURL, err)
+			return nil, "", fmt.Errorf("local TTS request to %s failed: %w", outbound.Display(ttsURL), unwrapURLError(err))
 		}
 		defer resp.Body.Close()
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
@@ -263,4 +303,13 @@ func (s *Service) Speak(ctx context.Context, text, voiceOverride string) ([]byte
 	}
 
 	return nil, "", errors.New("no local TTS backend configured; set SABLECOURT_TTS_URL (Kokoro/Piper/mlx-audio)")
+}
+
+// unwrapURLError drops the *url.Error wrapper, whose text repeats the full
+// request URL, user info included.
+func unwrapURLError(err error) error {
+	if ue := (*url.Error)(nil); errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

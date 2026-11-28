@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
@@ -54,24 +56,24 @@ func New(opts Options) *Notifier {
 // webhookURL returns the configured webhook URL, or "" when none is set. A URL
 // too short to redact is refused with an error naming its setting, and no
 // webhook is sent.
-func (n *Notifier) webhookURL(ctx context.Context) (string, error) {
+func (n *Notifier) webhookURL(ctx context.Context) (string, string, error) {
 	if n.secrets != nil {
 		u, err := n.secrets.Get(ctx, "notify_webhook_url")
 		if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
-			return "", err
+			return "", "", err
 		}
 		if err == nil && strings.TrimSpace(u) != "" {
 			if err := redact.RegisterSetting("notify_webhook_url", u); err != nil {
-				return "", err
+				return "", "", err
 			}
-			return strings.TrimSpace(u), nil
+			return strings.TrimSpace(u), "notify_webhook_url", nil
 		}
 	}
 	u := strings.TrimSpace(os.Getenv("SABLECOURT_NOTIFY_WEBHOOK_URL"))
 	if err := redact.RegisterSetting("SABLECOURT_NOTIFY_WEBHOOK_URL", u); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return u, nil
+	return u, "SABLECOURT_NOTIFY_WEBHOOK_URL", nil
 }
 
 // Send dispatches a redacted notification if notify_webhook_url is configured.
@@ -81,12 +83,15 @@ func (n *Notifier) Send(ctx context.Context, ev Event) error {
 	if n == nil {
 		return nil
 	}
-	target, err := n.webhookURL(ctx)
+	target, setting, err := n.webhookURL(ctx)
 	if err != nil {
 		return err
 	}
 	if target == "" {
 		return nil
+	}
+	if err := outbound.Check(setting, target); err != nil {
+		return err
 	}
 	title := redact.String(strings.TrimSpace(ev.Title))
 	detail := redact.String(strings.TrimSpace(ev.Detail))
@@ -152,8 +157,13 @@ func (n *Notifier) Send(ctx context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
-	resp, err := n.client.Do(req)
+	resp, err := outbound.Client(n.client, setting).Do(req)
 	if err != nil {
+		// The webhook URL is a secret: report the cause, not the *url.Error
+		// text that carries the URL.
+		if ue := (*url.Error)(nil); errors.As(err, &ue) {
+			return fmt.Errorf("notify webhook request failed: %w", ue.Err)
+		}
 		return err
 	}
 	defer resp.Body.Close()

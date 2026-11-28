@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 )
 
 type DeviceCodeResponse struct {
@@ -42,6 +44,9 @@ func (g *GitHubDeviceFlow) Start(ctx context.Context, scopes string) (DeviceCode
 	if scopes == "" {
 		scopes = "repo"
 	}
+	if err := g.checkBaseURL(); err != nil {
+		return DeviceCodeResponse{}, err
+	}
 	form := url.Values{
 		"client_id": {g.ClientID},
 		"scope":     {scopes},
@@ -74,6 +79,9 @@ func (g *GitHubDeviceFlow) Start(ctx context.Context, scopes string) (DeviceCode
 func (g *GitHubDeviceFlow) PollToken(ctx context.Context, deviceCode string, interval time.Duration) (string, error) {
 	if interval <= 0 {
 		interval = 5 * time.Second
+	}
+	if err := g.checkBaseURL(); err != nil {
+		return "", err
 	}
 	for {
 		form := url.Values{
@@ -124,8 +132,15 @@ func (g *GitHubDeviceFlow) PollToken(ctx context.Context, deviceCode string, int
 }
 
 func (g *GitHubDeviceFlow) httpClient() *http.Client {
-	if g.Client != nil {
-		return g.Client
+	cli := g.Client
+	if cli == nil {
+		cli = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return outbound.Client(cli, "GitHub OAuth base URL")
+}
+
+// checkBaseURL refuses a base URL that would carry the device code and the
+// returned access token in plain text off the machine.
+func (g *GitHubDeviceFlow) checkBaseURL() error {
+	return outbound.Check("GitHub OAuth base URL", g.BaseURL)
 }

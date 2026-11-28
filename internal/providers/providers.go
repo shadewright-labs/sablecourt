@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -148,6 +149,7 @@ func NewRegistry(opts Options) *Registry {
 	if cli == nil {
 		cli = &http.Client{Timeout: 10 * time.Second}
 	}
+	cli = outbound.Client(cli, "provider base URL")
 	baseMap := make(map[string]string)
 	for _, p := range builtinProviders {
 		baseMap[p.ID] = p.BaseURL
@@ -452,6 +454,9 @@ func (r *Registry) SyncModels(ctx context.Context, providerID string) ([]ModelIn
 }
 
 func (r *Registry) fetchOpenAIModels(ctx context.Context, providerID, base, apiKey string) ([]ModelInfo, error) {
+	if err := outbound.Check(providerID+" provider base URL", base); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		return nil, err
@@ -487,6 +492,9 @@ func (r *Registry) fetchOpenAIModels(ctx context.Context, providerID, base, apiK
 }
 
 func (r *Registry) fetchAnthropicModels(ctx context.Context, base, apiKey string) ([]ModelInfo, error) {
+	if err := outbound.Check("anthropic provider base URL", base); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		return nil, err
@@ -518,6 +526,9 @@ func (r *Registry) fetchAnthropicModels(ctx context.Context, base, apiKey string
 }
 
 func (r *Registry) fetchGeminiModels(ctx context.Context, base, apiKey string) ([]ModelInfo, error) {
+	if err := outbound.Check("gemini provider base URL", base); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1beta/models", nil)
 	if err != nil {
 		return nil, err

@@ -22,6 +22,7 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gatehttp"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store"
@@ -807,15 +808,14 @@ func copyResponseHeaders(dst, src http.Header) {
 }
 
 func joinUpstreamURL(baseURL, reqPath, rawQuery string) (string, error) {
+	// The same rule the daemon applies to --model-gateway-url at start, again
+	// on every request: https, or http only on a loopback host.
+	if err := outbound.Check("model gate upstream base URL", baseURL); err != nil {
+		return "", err
+	}
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", err
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("unsupported upstream scheme %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return "", errors.New("upstream base URL missing host")
 	}
 	if strings.ContainsAny(reqPath, "\\\r\n") || strings.Contains(reqPath, "@") || strings.Contains(reqPath, "://") {
 		return "", errors.New("invalid upstream path characters")

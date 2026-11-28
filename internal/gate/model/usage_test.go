@@ -892,9 +892,9 @@ func TestModelGateDecompressesGzipUpstreamReplies(t *testing.T) {
 			})
 			client := newPipeHTTPClient(t, upstream)
 			gate, st := setupGateTest(t, map[string]UpstreamConfig{
-				"openai":    {BaseURL: "http://openai.pipe", SecretName: "openai_api_key", RequireSecret: true},
-				"anthropic": {BaseURL: "http://anthropic.pipe", SecretName: "anthropic_api_key", RequireSecret: true, AnthropicVer: "2023-06-01"},
-				"gemini":    {BaseURL: "http://gemini.pipe", SecretName: "gemini_api_key", RequireSecret: true},
+				"openai":    {BaseURL: "http://127.0.0.1:1", SecretName: "openai_api_key", RequireSecret: true},
+				"anthropic": {BaseURL: "http://127.0.0.2:1", SecretName: "anthropic_api_key", RequireSecret: true, AnthropicVer: "2023-06-01"},
+				"gemini":    {BaseURL: "http://127.0.0.3:1", SecretName: "gemini_api_key", RequireSecret: true},
 			}, client)
 			b := gate.bundle.Budgets["agent-budget"]
 			b.Spec.PerTask.MaxInputTokens = 10000

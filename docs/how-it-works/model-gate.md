@@ -15,7 +15,7 @@ Status: built. Inference that a subscription harness runs outside the gate is no
 | `anthropic/v1/messages` | Anthropic |
 | `gemini/v1beta/models/<model>:generateContent` and `:streamGenerateContent` | Gemini |
 
-Any other path returns 404. Keys come from the secret store under `openai_api_key`, `anthropic_api_key`, `gemini_api_key` and `local_model_api_key`. With `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`) every provider route goes to one external gateway and no key is required. The caller's own `Authorization`, `x-api-key`, `x-goog-api-key` and `Accept-Encoding` headers are dropped: the gate injects the provider's credential and lets its HTTP transport negotiate gzip and decompress replies (including streams) before reading usage. Redirects are refused.
+Any other path returns 404. Keys come from the secret store under `openai_api_key`, `anthropic_api_key`, `gemini_api_key` and `local_model_api_key`. With `--model-gateway-url` (or `SABLECOURT_MODEL_GATEWAY_URL`) every provider route goes to one external gateway and no key is required. That URL must be `https` or plain `http` to a loopback host; the daemon refuses to start otherwise and the gate checks it again on each request ([outbound URLs](../reference/configuration.md#outbound-urls)). The caller's own `Authorization`, `x-api-key`, `x-goog-api-key` and `Accept-Encoding` headers are dropped: the gate injects the provider's credential and lets its HTTP transport negotiate gzip and decompress replies (including streams) before reading usage. Redirects are refused.
 
 ## Order of checks
 

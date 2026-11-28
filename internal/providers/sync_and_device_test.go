@@ -205,7 +205,7 @@ func TestFetchModelsWithHTTPTestServers(t *testing.T) {
 				{"http 401", http.StatusUnauthorized, `{"error":"denied"}`, false, false, "HTTP 401"},
 				{"http 500", http.StatusInternalServerError, `server down`, false, false, "HTTP 500"},
 				{"malformed JSON", http.StatusOK, `{not-json`, false, false, "invalid character"},
-				{"invalid URL", http.StatusOK, `{}`, true, false, "missing protocol scheme"},
+				{"invalid URL", http.StatusOK, `{}`, true, false, "provider base URL: not a valid URL"},
 				{"transport failure", http.StatusOK, `{}`, false, true, "connect"},
 			} {
 				t.Run(providerID+"/"+tc.name, func(t *testing.T) {
@@ -528,7 +528,7 @@ func TestGitHubDeviceFlowWithHTTPTestServer(t *testing.T) {
 			wantErr   string
 		}{
 			{name: "blank client ID", clientID: " ", baseURL: srv.URL, wantErr: "client_id is required"},
-			{name: "invalid base URL", clientID: "cid", baseURL: "://bad", wantErr: "missing protocol scheme"},
+			{name: "invalid base URL", clientID: "cid", baseURL: "://bad", wantErr: "GitHub OAuth base URL: not a valid URL"},
 			{name: "default repo scope", clientID: "cid-1", baseURL: srv.URL + "/", scopes: "", status: http.StatusOK,
 				body:      `{"device_code":"dev-1","user_code":"AAAA-BBBB","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}`,
 				wantScope: "repo"},

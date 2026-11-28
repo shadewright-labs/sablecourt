@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -138,6 +139,10 @@ func (gh *GitHubPROpener) githubAPIClient(ctx context.Context) (string, string, 
 	if gh == nil || gh.Secrets == nil {
 		return "", "", nil, errors.New("secret store unavailable for github_token")
 	}
+	apiBase, err := gh.apiBase()
+	if err != nil {
+		return "", "", nil, err
+	}
 	token, err := gh.Secrets.Get(ctx, "github_token")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("load github_token: %w", err)
@@ -145,11 +150,20 @@ func (gh *GitHubPROpener) githubAPIClient(ctx context.Context) (string, string, 
 	if err := redact.RegisterSetting("github_token", token); err != nil {
 		return "", "", nil, err
 	}
+	return apiBase, token, gh.httpClient(), nil
+}
+
+// apiBase returns the GitHub API base URL without a trailing slash, and
+// refuses one that would send github_token in plain text off the machine.
+func (gh *GitHubPROpener) apiBase() (string, error) {
 	apiBase := strings.TrimRight(gh.APIURL, "/")
 	if apiBase == "" {
-		apiBase = "https://api.github.com"
+		return "https://api.github.com", nil
 	}
-	return apiBase, token, gh.httpClient(), nil
+	if err := outbound.Check("GitHub API URL", apiBase); err != nil {
+		return "", err
+	}
+	return apiBase, nil
 }
 
 func (gh *GitHubPROpener) doGitHubGET(ctx context.Context, endpoint, token string, cli *http.Client, dst any) (int, error) {

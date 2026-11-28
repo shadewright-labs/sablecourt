@@ -18,6 +18,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/contextpack"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 )
 
 type Bundle struct {
@@ -458,6 +459,14 @@ func validateWorkload(name string, w domain.Workload, bundle *Bundle) error {
 	}
 	if err := validateUpstreamServerNames(name, serverNames); err != nil {
 		return err
+	}
+	for i, srv := range w.Spec.Grants.MCPServers {
+		if strings.TrimSpace(srv.URL) == "" {
+			continue // skipped at registration, so nothing is ever sent
+		}
+		if err := outbound.Check(fmt.Sprintf("workload %q: grants.mcpServers[%d].url", name, i), srv.URL); err != nil {
+			return err
+		}
 	}
 
 	for _, target := range w.Spec.Grants.DelegateTo {

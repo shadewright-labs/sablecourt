@@ -103,16 +103,16 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 	if gh.Secrets == nil {
 		return "", errors.New("secret store unavailable for github_token")
 	}
+	apiBase, err := gh.apiBase()
+	if err != nil {
+		return "", err
+	}
 	token, err := gh.Secrets.Get(ctx, "github_token")
 	if err != nil {
 		return "", fmt.Errorf("load github_token: %w", err)
 	}
 	if err := redact.RegisterSetting("github_token", token); err != nil {
 		return "", err
-	}
-	apiBase := gh.APIURL
-	if apiBase == "" {
-		apiBase = "https://api.github.com"
 	}
 	cli := gh.httpClient()
 
@@ -122,7 +122,7 @@ func (gh *GitHubPROpener) OpenPR(ctx context.Context, in OpenPRInput) (string, e
 		"base":  in.Base,
 		"body":  in.Body,
 	})
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls", strings.TrimRight(apiBase, "/"), url.PathEscape(in.Owner), url.PathEscape(in.Repo))
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBase, url.PathEscape(in.Owner), url.PathEscape(in.Repo))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return "", err

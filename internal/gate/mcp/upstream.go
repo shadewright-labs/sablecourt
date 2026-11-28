@@ -16,6 +16,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
@@ -146,9 +147,13 @@ func (g *Gate) addUpstreamLocked(into map[string]ToolDef, servers []domain.Upstr
 }
 
 func (b *UpstreamBridge) CallTool(ctx context.Context, srv domain.UpstreamMCPServer, toolName string, args json.RawMessage) (string, error) {
+	field := fmt.Sprintf("upstream MCP server %q url", srv.Name)
+	if err := outbound.Check(field, srv.URL); err != nil {
+		return "", err
+	}
 	u, err := url.Parse(strings.TrimSpace(srv.URL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("invalid upstream MCP server URL %q", srv.URL)
+	if err != nil {
+		return "", fmt.Errorf("%s: not a valid URL", field)
 	}
 	var parsedArgs any
 	if len(args) > 0 {
@@ -205,8 +210,12 @@ func (b *UpstreamBridge) CallTool(ctx context.Context, srv domain.UpstreamMCPSer
 		req.Header.Set(hdr, prefix+strings.TrimSpace(val))
 	}
 
-	resp, err := b.Client.Do(req)
+	resp, err := outbound.Client(b.Client, field).Do(req)
 	if err != nil {
+		// The *url.Error text repeats the URL, user name included.
+		if ue := (*url.Error)(nil); errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return "", fmt.Errorf("upstream MCP request failed: %w", err)
 	}
 	defer resp.Body.Close()

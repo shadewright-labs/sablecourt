@@ -15,7 +15,6 @@ spec:
             - --runtime=k8s
             - --k8s-namespace=sablecourt
             - --k8s-runtime-class=gvisor
-            - --model-gateway-url=http://agentgateway.sablecourt.svc:3000
             - --db=/var/lib/sablecourt/sablecourt.db
             - --manifests=/etc/sablecourt/manifests
             - --secret-file=/run/secrets/sablecourt/secrets.json

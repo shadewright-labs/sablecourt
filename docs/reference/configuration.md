@@ -70,6 +70,21 @@ Source: `internal/gate/model/gate.go`. With `--model-gateway-url` set, every pro
 | `gemini` | `https://generativelanguage.googleapis.com` | `gemini_api_key` | `/v1beta/models/<model>:generateContent`, `:streamGenerateContent` |
 | `local` | `http://127.0.0.1:11434` | `local_model_api_key` (optional) | `/v1/chat/completions`, `/v1/responses` |
 
+## Outbound URLs
+
+Source: `internal/outbound`. Every URL the daemon sends requests to from configuration must use `https`, or plain `http` to a loopback host: an IPv4 address in `127.0.0.0/8`, `[::1]` or the name `localhost` (any case). Plain `http` to any other host, including `0.0.0.0`, `[::]`, a private address or a cluster service name, is refused, as is any other scheme, a URL with no scheme and a URL with no host. The same check runs on every redirect target, so an `https` endpoint cannot move a request to plain `http`. An error names the flag, setting or field and never the URL, so user info, a token in the path or a query key does not reach a log.
+
+| URL | Checked at start or load | Checked before each request |
+| --- | --- | --- |
+| `--model-gateway-url`, or `SABLECOURT_MODEL_GATEWAY_URL` | The daemon refuses to start. | The Model Gate answers 502 `invalid upstream URL`; the same check covers the built-in upstreams above. |
+| `--manifests-git-repo` | The daemon refuses to start. | Each sync. For this one URL `ssh://`, `file://`, an scp-like `user@host:path` and a local path are also accepted; `git://` and Git's `transport::address` form (`ext::`, `fd::`) are refused. |
+| `spec.grants.mcpServers[].url` | The manifest loader refuses the bundle, at start or on reload (an entry without a URL is still skipped). | Each upstream MCP call (parked). |
+| `notify_webhook_url`, or `SABLECOURT_NOTIFY_WEBHOOK_URL` | Not checked. | Each chat alert (parked). |
+| `voice_stt_url` and `voice_tts_url`, or their environment variables | Not checked. | Each transcription and each spoken reply (parked). |
+| Provider base URLs (the Model Gate upstreams above) | Not configurable. | Each model list sync on the `/providers` page. |
+
+`sablectl` applies its own rule to `--api`: it sends the operator token only over `https` or to a local daemon ([`SABLECOURT_OPERATOR_TOKEN`](#environment-variables)). The tool downloads of `sablectl harness install` accept only `https` on fixed vendor hosts. The gate URLs the daemon passes to workloads (`SABLECOURT_DATA_GATE_URL`, `SABLECOURT_MODEL_GATE_URL`) point at the daemon itself and are not configuration, so this rule does not apply to them.
+
 ## Environment variables
 
 Source: `internal/operatortoken/token.go`, `cmd/sablecourtd/main.go`, `cmd/sablectl/main.go`, `internal/notify/notify.go`, `internal/runtime/docker/docker.go`, `internal/harnessimages`, `internal/runtime/coding`, `internal/waitart`.

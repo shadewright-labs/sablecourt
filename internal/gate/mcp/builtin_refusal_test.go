@@ -418,8 +418,8 @@ func TestUpstreamBridgeRefusals(t *testing.T) {
 		want    string
 		wantErr string
 	}{
-		{"file URL", NewUpstreamBridge(nil, respond(200, `{}`)), domain.UpstreamMCPServer{URL: "file:///etc/passwd"}, "", "invalid upstream MCP server URL"},
-		{"no host", NewUpstreamBridge(nil, respond(200, `{}`)), domain.UpstreamMCPServer{URL: "https:///x"}, "", "invalid upstream MCP server URL"},
+		{"file URL", NewUpstreamBridge(nil, respond(200, `{}`)), domain.UpstreamMCPServer{URL: "file:///etc/passwd"}, "", "url: only https"},
+		{"no host", NewUpstreamBridge(nil, respond(200, `{}`)), domain.UpstreamMCPServer{URL: "https:///x"}, "", "url: the URL has no host"},
 		{"secret without store", NewUpstreamBridge(nil, respond(200, `{}`)), withSecret, "", "secret store unavailable"},
 		{"missing secret", NewUpstreamBridge(secret.NewMemoryStore(nil), respond(200, `{}`)), withSecret, "", `secret "api_key" unavailable`},
 		{"blank secret", NewUpstreamBridge(secret.NewMemoryStore(map[string]string{"api_key": "  "}), respond(200, `{}`)), withSecret, "", `secret "api_key" unavailable`},

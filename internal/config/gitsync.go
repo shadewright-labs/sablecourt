@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/shadewright-labs/sablecourt/internal/outbound"
 )
 
 // GitSyncer keeps a local checkout of a Git-tracked manifests repository in sync
@@ -44,6 +46,9 @@ func (g *GitSyncer) SyncOnce(ctx context.Context) (bool, string, error) {
 	if strings.HasPrefix(g.Branch, "-") || strings.HasPrefix(g.RepoURL, "-") {
 		return false, "", fmt.Errorf("git sync branch and repo URL must not start with '-'")
 	}
+	if err := outbound.CheckGitRemote("manifests Git remote", g.RepoURL); err != nil {
+		return false, "", err
+	}
 
 	gitDir := filepath.Join(g.LocalDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -52,7 +57,8 @@ func (g *GitSyncer) SyncOnce(ctx context.Context) (bool, string, error) {
 		}
 		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", g.Branch, "--", g.RepoURL, g.LocalDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return false, "", fmt.Errorf("git clone %q: %s (%w)", g.RepoURL, strings.TrimSpace(string(out)), err)
+			shown := outbound.DisplayGitRemote(g.RepoURL)
+			return false, "", fmt.Errorf("git clone %q: %s (%w)", shown, strings.ReplaceAll(strings.TrimSpace(string(out)), g.RepoURL, shown), err)
 		}
 	} else {
 		fetch := exec.CommandContext(ctx, "git", "-C", g.LocalDir, "fetch", "--depth=1", "--", "origin", g.Branch)
