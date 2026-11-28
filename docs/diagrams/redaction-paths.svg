@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 648" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Where redaction applies</title>
-  <desc id="d">Two zones. In the first, text Sablecourt writes, which is coding output, council diffs, Conclave posts and context packets, is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and the redacted text goes to the store, the UI and peer prompts. A box for exact match of registered values the daemon holds adds to the redactor and is built. In the second zone, the two model-provider paths, no redaction applies. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the same bytes to the model providers outside Sablecourt. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
+  <desc id="d">Two zones. In the first, text Sablecourt writes, which is task input, coding output, council diffs, Conclave posts and context packets, and task input is filtered by the pattern redactor, which is best effort and knows only some secret shapes, and the redacted text goes to the store, the UI and peer prompts. Task input is redacted when the store writes the task or a task message, so the stored copy is the redacted one. The launch input is then delivered to the built-in agent on its standard input as one JSON line, for Docker and Kubernetes, and no environment variable carries it. A box for exact match of registered values the daemon holds adds to the redactor and is built. In the second zone, the two model-provider paths, no redaction applies. The built-in agent (the sablecourt-agent container) sends its task history and context packet as requests to the Model Gate, which forwards the same bytes to the model providers outside Sablecourt. A harness container, which can read any file in its checkout, sends requests to the council proxy, which copies a TLS tunnel it cannot read to the listed provider hosts on port 443, outside Sablecourt. A legend marks the subject and outside systems.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -35,17 +35,19 @@
   <text class="lanet" x="44" y="54">WHERE SABLECOURT WRITES TEXT</text>
   <rect class="lane" x="24" y="324" width="1072" height="260" rx="14"/>
   <text class="lanet" x="44" y="354">WHERE CONTENT REACHES PROVIDERS, NO REDACTION</text>
-  <rect class="box" x="44" y="88" width="250" height="72" rx="10"/>
+  <rect class="box" x="44" y="88" width="250" height="88" rx="10"/>
   <text class="h" x="60" y="114">Text Sablecourt writes</text>
-  <text class="s" x="60" y="135">coding output, council diffs,</text>
-  <text class="s" x="60" y="152">Conclave posts, context packets</text>
+  <text class="s" x="60" y="135">task input, coding output,</text>
+  <text class="s" x="60" y="152">council diffs, Conclave posts,</text>
+  <text class="s" x="60" y="169">context packets</text>
   <rect class="key" x="366" y="88" width="250" height="72" rx="12"/>
   <text class="h" x="382" y="114">Pattern redactor</text>
   <text class="s" x="382" y="135">best effort,</text>
   <text class="s" x="382" y="152">known secret shapes only</text>
   <rect class="box" x="688" y="88" width="250" height="72" rx="10"/>
   <text class="h" x="704" y="114">Store, UI, peer prompts</text>
-  <text class="s" x="704" y="135">where readers and peers see it</text>
+  <text class="s" x="704" y="135">task input redacted on write,</text>
+  <text class="s" x="704" y="152">read by readers and peers</text>
   <rect class="box" x="366" y="208" width="250" height="72" rx="10"/>
   <text class="h" x="382" y="234">Exact match</text>
   <text class="s" x="382" y="255">registered values the daemon</text>
@@ -55,6 +57,12 @@
   <path class="f" d="M616 124H682" marker-end="url(#a)"/>
   <text class="lbl" x="649" y="116" text-anchor="middle">redacted</text>
   <path class="f" d="M491 208V166" marker-end="url(#a)"/>
+  <rect class="box" x="688" y="208" width="250" height="72" rx="10"/>
+  <text class="h" x="704" y="234">Workload stdin</text>
+  <text class="s" x="704" y="255">built-in agent, Docker and</text>
+  <text class="s" x="704" y="272">Kubernetes, no env variable</text>
+  <path class="f" d="M813 160V202" marker-end="url(#a)"/>
+  <text class="lbl" x="825" y="186" text-anchor="start">one JSON line</text>
   <text class="lbl" x="503" y="192" text-anchor="start">adds</text>
   <rect class="box" x="44" y="388" width="210" height="64" rx="10"/>
   <text class="h" x="60" y="414">Built-in agent</text>

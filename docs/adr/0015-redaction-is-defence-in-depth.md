@@ -136,3 +136,15 @@ These are not covered in 0.1.0 and are tracked in [issue 189](https://github.com
 - Paths with no exact matcher: audit fields, error and log text, the Agent Card, council reads, Takeover input to a workload's stdin, and database and Kubernetes credentials that the drivers resolve themselves (pgx query settings, environment and passfiles; a refreshed `BearerTokenFile` or a `KeyFile`).
 
 The property tested on the branch: at each named boundary, no registered value passes in its literal bytes or a listed spelling. Tests that pin a limit carry it in their name, so changing one is a visible decision.
+
+## Amendment, 2026-11-28: launch input moves from the environment to stdin
+
+- Status of this amendment: Proposed (2026-11-28)
+
+The accepted text and the amendment of 2026-11-27 name the launch input boundary as `SABLECOURT_INPUT_JSON`. That boundary is unchanged: it is still the typed JSON record the launch input is, and the record rule above still applies to it. Only the transport moved. For Docker and Kubernetes workloads, the input is now written as one JSON line on the workload's stdin, and the environment holds only `SABLECOURT_INPUT_STDIN=1`. The accepted text stays as written.
+
+Why: environment values are readable by anything that can inspect the container, such as `docker inspect`, a pod spec or a process listing. Stdin is not shown there.
+
+The stored copy is redacted on write: both stores pass task input and task messages through `store.RedactTaskInput` in `CreateTask` and `AppendTaskMessage`, so every reader and every launch path reads the redacted copy. The read boundaries of the 2026-11-27 amendment stay as a second pass for values registered later. Scry also redacts JSON-quoted secret keys.
+
+If the input cannot be delivered on stdin, the task fails with reason `input_not_delivered` instead of running without it.
