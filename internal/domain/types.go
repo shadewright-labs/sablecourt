@@ -1,9 +1,6 @@
 package domain
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"math"
 	"time"
 )
@@ -100,6 +97,9 @@ type CodingConfig struct {
 	Harness  string `json:"harness"`
 	RepoPath string `json:"repoPath"`
 	Sandbox  string `json:"sandbox"`
+	// Commands is the allowed set a workflow command step may run in a task's
+	// worktree. Only this operator configuration names a command's argv.
+	Commands []CodingCommand `json:"commands,omitempty"`
 }
 
 type AgentCard struct {
@@ -192,6 +192,9 @@ type WorkflowStep struct {
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model,omitempty"`
 	Prompt     string `json:"prompt,omitempty"`
+	// Command names an entry of the step workload's coding.commands. The step
+	// runs that command against the previous step's commit instead of a harness.
+	Command string `json:"command,omitempty"`
 }
 
 type Schedule struct {
@@ -317,6 +320,8 @@ type Approval struct {
 
 type AuditRecord struct {
 	ID           int64
+	Seq          int64
+	HashVersion  int
 	Category     string
 	TaskID       string
 	WorkloadName string
@@ -326,17 +331,6 @@ type AuditRecord struct {
 	PrevHash     string
 	RowHash      string
 	CreatedAt    time.Time
-}
-
-// ComputeAuditRowHash derives a deterministic tamper-evident SHA-256 chain hash for an audit row.
-func ComputeAuditRowHash(prevHash string, rec AuditRecord, createdAtRFC3339 string) string {
-	if prevHash == "" {
-		prevHash = "genesis"
-	}
-	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-		prevHash, rec.Category, rec.TaskID, rec.WorkloadName, rec.Action, rec.Outcome, rec.DetailJSON, createdAtRFC3339)
-	sum := sha256.Sum256([]byte(payload))
-	return hex.EncodeToString(sum[:])
 }
 
 type ProviderPrefs struct {

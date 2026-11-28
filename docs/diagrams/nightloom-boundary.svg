@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 396" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Nightloom and Sablecourt boundary</title>
+  <desc id="d">Two products sit in separate zones. In the Nightloom zone, Nightloom is a read-only watchman with a loopback listener only, and it watches unmanaged sessions started by hand and host processes. In the Sablecourt zone, sablecourtd launches the managed workloads, which are the workloads declared in manifests and the three built-in council panel workloads. Nightloom reaches sablecourtd only through read-only routes with an observer token, drawn dashed. sablecourtd never scans the unmanaged sessions or the host process table, drawn as a red refused line with the word never. A legend marks the read-only line and the refused line.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="396" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="250" height="300" rx="14"/>
+  <text class="lanet" x="44" y="54">NIGHTLOOM</text>
+  <rect class="lane" x="464" y="24" width="632" height="300" rx="14"/>
+  <text class="lanet" x="484" y="54">SABLECOURT</text>
+  <rect class="box" x="44" y="96" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="122">Nightloom</text>
+  <text class="s" x="60" y="143">read-only watchman</text>
+  <text class="s" x="60" y="160">loopback listener only</text>
+  <rect class="box" x="44" y="224" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="250">Unmanaged sessions</text>
+  <text class="s" x="60" y="271">started by hand</text>
+  <text class="s" x="60" y="288">and host processes</text>
+  <rect class="key" x="484" y="96" width="210" height="72" rx="12"/>
+  <text class="h" x="500" y="122">sablecourtd</text>
+  <text class="s" x="500" y="143">launches manifest and</text>
+  <text class="s" x="500" y="160">council panel workloads</text>
+  <rect class="box" x="866" y="96" width="210" height="72" rx="10"/>
+  <text class="h" x="882" y="122">Managed workloads</text>
+  <text class="s" x="882" y="143">manifests, council panel</text>
+  <text class="s" x="882" y="160">launched by sablecourtd</text>
+  <path class="r" d="M254 128H478" marker-end="url(#m)"/>
+  <text class="lbl" x="366" y="120" text-anchor="middle">read-only routes</text>
+  <path class="f" d="M694 128H860" marker-end="url(#a)"/>
+  <text class="lbl" x="777" y="120" text-anchor="middle">launches</text>
+  <path class="f" d="M149 168V218" marker-end="url(#a)"/>
+  <text class="lbl" x="161" y="196" text-anchor="start">watches</text>
+  <path class="deny" d="M589 168V260H260" marker-end="url(#x)"/>
+  <text class="no" x="375" y="252" text-anchor="middle">never scans</text>
+  <path class="r" d="M24 352H64" marker-end="url(#m)"/>
+  <text class="lbl" x="74" y="356" text-anchor="start">read-only, observer token</text>
+  <path class="deny" d="M290 352H330" marker-end="url(#x)"/>
+  <text class="lbl" x="340" y="356" text-anchor="start">refused</text>
+</svg>

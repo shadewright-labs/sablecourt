@@ -41,6 +41,7 @@
         <h1 class="sc-h1">Audit Tribunal ({{len .Records}})</h1>
         {{if .ChainValid}}
         <span class="sc-badge sc-badge-jade"><i class="sc-glyph sc-glyph-working"></i>SHA-256 chain verified ({{.VerifiedRows}} rows)</span>
+        {{if .Head.Seq}}<span class="sc-badge" title="Record this head outside the database and pass it to sablectl audit verify --anchor later">head {{.Head.Seq}}:{{.Head.Hash}}</span>{{end}}
         {{else}}
         <span class="sc-badge sc-badge-red"><i class="sc-glyph sc-glyph-failed"></i>SHA-256 chain broken: {{.ChainError}}</span>
         {{end}}

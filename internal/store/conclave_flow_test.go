@@ -638,7 +638,7 @@ func testPlainClosePreservesTerminalState(t *testing.T, st store.Store) {
 			if len(closes) != 1 || closes[0].Outcome != string(tc.first) {
 				t.Fatalf("conclave.close audits for %s = %+v, want 1 row with outcome %s", id, closes, tc.first)
 			}
-			if _, err := st.VerifyAuditChain(ctx); err != nil {
+			if _, err := st.VerifyAuditChain(ctx, nil); err != nil {
 				t.Fatalf("VerifyAuditChain: %v", err)
 			}
 		})
@@ -795,7 +795,7 @@ func testWardTripsAuditedOnce(t *testing.T, st store.Store) {
 		}
 	})
 
-	if _, err := st.VerifyAuditChain(ctx); err != nil {
+	if _, err := st.VerifyAuditChain(ctx, nil); err != nil {
 		t.Fatalf("VerifyAuditChain: %v", err)
 	}
 }

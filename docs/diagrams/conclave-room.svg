@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 532" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="t">Conclave messaging rules</title>
+  <desc id="d">Who may message whom in a Conclave. A vassal in the runtime zone, coder, sends a message to the Conclave broker in sablecourtd. The broker allows it only if the sender lists the target in its canMessage list, then redacts and stores it and wakes the target if it is an on-mention role, here the vassal reviewer in the runtime zone. The broker counts the vassal messages against the Wards: a message limit and a ping-pong limit, plus the budget ceiling when the template names one; the operator's Decrees are not counted. The operator, outside the daemon, steers the room with a Decree sent to the broker. A manifest that lets a sandbox-zone vassal message a runtime-zone vassal, directly or through all, is refused at manifest load: a red line from the sandbox vassal to the coder vassal says never. A legend marks flow and refused lines.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
+    <marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#f87171"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".22"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <style>
+      .lane{fill:#111422;stroke:#373040}
+      .lanet{fill:#8a8594;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#14111c;stroke:#8a8594;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#2dd4bf;stroke-width:1.6}
+      .ext{fill:#14111c;stroke:#7fd6b4;stroke-width:1.2}
+      .plan{fill:#14111c;stroke:#8a8594;stroke-width:1.2;stroke-dasharray:5 4}
+      .wait{fill:#14111c;stroke:#f0b86a;stroke-width:1.2}
+      .bad{fill:#14111c;stroke:#f87171;stroke-width:1.2}
+      .frame{fill:none;stroke:#bbb4c5;stroke-dasharray:5 5;stroke-width:1.2}
+      .h{fill:#efe9dc;font-size:15px;font-weight:650}
+      .s{fill:#bbb4c5;font-size:12.5px}
+      .cap{fill:#8a8594;font-size:12.5px}
+      .pn{fill:#8a8594;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .n{fill:#2dd4bf;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .idt{fill:#bbb4c5;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .lbl{fill:#bbb4c5;font-size:12px}
+      .no{fill:#f87171;font-size:13px;font-weight:600}
+      .f{stroke:#2dd4bf;stroke-width:1.8;fill:none}
+      .r{stroke:#8a8594;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .deny{stroke:#f87171;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .life{stroke:#373040;stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="532" rx="18" fill="#08060e"/>
+  <rect class="lane" x="24" y="24" width="250" height="150" rx="14"/>
+  <text class="lanet" x="44" y="54">SANDBOX ZONE</text>
+  <rect class="box" x="44" y="76" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="102">Sandbox vassal</text>
+  <text class="s" x="60" y="123">a sandbox-zone workload</text>
+  <rect class="lane" x="24" y="214" width="250" height="260" rx="14"/>
+  <text class="lanet" x="44" y="244">RUNTIME ZONE</text>
+  <rect class="box" x="44" y="266" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="292">Vassal: coder</text>
+  <text class="s" x="60" y="313">a runtime-zone workload</text>
+  <rect class="box" x="44" y="366" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="392">Vassal: reviewer</text>
+  <text class="s" x="60" y="413">a runtime-zone workload</text>
+  <rect class="lane" x="330" y="24" width="480" height="450" rx="14"/>
+  <text class="lanet" x="350" y="54">SABLECOURTD</text>
+  <rect class="box" x="450" y="76" width="240" height="72" rx="10"/>
+  <text class="h" x="466" y="102">Wards</text>
+  <text class="s" x="466" y="123">max messages, max ping-pong</text>
+  <text class="s" x="466" y="140">budget ceiling, if one is named</text>
+  <rect class="key" x="450" y="258" width="240" height="160" rx="12"/>
+  <text class="h" x="466" y="284">Conclave broker</text>
+  <text class="s" x="466" y="305">allows a message only if</text>
+  <text class="s" x="466" y="322">sender may message target</text>
+  <text class="s" x="466" y="341" text-anchor="start">redacts and stores it</text>
+  <text class="s" x="466" y="358" text-anchor="start">wakes on-mention roles</text>
+  <rect class="lane" x="866" y="214" width="230" height="260" rx="14"/>
+  <text class="lanet" x="886" y="244">OUTSIDE</text>
+  <rect class="box" x="886" y="290" width="190" height="64" rx="10"/>
+  <text class="h" x="902" y="316">Operator</text>
+  <text class="s" x="902" y="337">issues a Decree</text>
+  <path class="deny" d="M149 140V262" marker-end="url(#x)"/>
+  <text class="no" x="161" y="196" text-anchor="start">never</text>
+  <text class="lbl" x="161" y="214" text-anchor="start">refused at manifest load</text>
+  <path class="f" d="M254 290H450" marker-end="url(#a)"/>
+  <text class="lbl" x="352" y="282" text-anchor="middle">message</text>
+  <path class="f" d="M450 390H254" marker-end="url(#a)"/>
+  <text class="lbl" x="352" y="382" text-anchor="middle">wakes if on-mention</text>
+  <path class="f" d="M570 258V152" marker-end="url(#a)"/>
+  <text class="lbl" x="582" y="210" text-anchor="start">counts vassal messages</text>
+  <path class="f" d="M886 322H696" marker-end="url(#a)"/>
+  <text class="lbl" x="791" y="314" text-anchor="middle">Decree</text>
+  <path class="f" d="M24 504H64" marker-end="url(#a)"/>
+  <text class="lbl" x="74" y="508" text-anchor="start">flow</text>
+  <path class="deny" d="M200 504H240" marker-end="url(#x)"/>
+  <text class="lbl" x="250" y="508" text-anchor="start">refused</text>
+</svg>

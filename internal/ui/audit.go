@@ -14,6 +14,7 @@ type auditViewData struct {
 	ChainValid   bool
 	VerifiedRows int
 	ChainError   string
+	Head         domain.AuditChainHead
 	Records      []domain.AuditRecord
 }
 
@@ -37,13 +38,14 @@ func (d *Dashboard) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 		filtered = append(filtered, rec)
 	}
 
-	verified, err := d.store.VerifyAuditChain(r.Context())
+	head, err := d.store.VerifyAuditChain(r.Context(), nil)
 	data := auditViewData{
 		Category:     cat,
 		Workload:     wl,
 		Outcome:      outcome,
 		ChainValid:   err == nil,
-		VerifiedRows: verified,
+		VerifiedRows: head.Rows,
+		Head:         head,
 		Records:      filtered,
 	}
 	if err != nil {

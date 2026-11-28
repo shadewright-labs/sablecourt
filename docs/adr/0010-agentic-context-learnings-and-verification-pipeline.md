@@ -11,6 +11,10 @@ Launching a coding or reasoning agent with only a raw user prompt leaves the age
 
 Sablecourt adopts a five-part context and verification pipeline inside the control plane.
 
+[![A verifier step reads the author output and its verdict passes the workflow on, halts it or sends the findings back for a retry.](../diagrams/verifier-loop.svg)](../diagrams/verifier-loop.svg "Open full size")
+
+Figure: the verifier verdict and the retry loop of the closed-loop failure handoff.
+
 ### 1. Scoped learnings on Court Memory
 
 Corrections and team rules are stored under reserved namespaces (`learning:global`, `learning:repo:<name>`, `learning:path:<glob>`). Operators can create learnings on `/memory` or save any Conclave message as a learning in one click.

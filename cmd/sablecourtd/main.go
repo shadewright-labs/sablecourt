@@ -1633,12 +1633,25 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		writeJSON(w, http.StatusOK, items)
 	})
 	mux.HandleFunc("GET /api/v1/audit/verify", func(w http.ResponseWriter, r *http.Request) {
-		n, err := st.VerifyAuditChain(r.Context())
+		// anchor=SEQ:HASH is a head recorded from an earlier answer; without it a
+		// deletion of the newest rows cannot be seen.
+		anchor, err := domain.ParseAuditAnchor(r.URL.Query().Get("anchor"))
 		if err != nil {
-			writeJSON(w, http.StatusConflict, map[string]any{"valid": false, "verifiedRows": n, "error": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "verifiedRows": n})
+		head, err := st.VerifyAuditChain(r.Context(), anchor)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"valid": false, "verifiedRows": head.Rows, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"valid":        true,
+			"verifiedRows": head.Rows,
+			"legacyRows":   head.LegacyRows,
+			"anchored":     anchor != nil,
+			"head":         map[string]any{"seq": head.Seq, "id": head.ID, "hash": head.Hash},
+		})
 	})
 	mux.HandleFunc("GET /api/v1/audit/export", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListAudit(r.Context(), 10000)

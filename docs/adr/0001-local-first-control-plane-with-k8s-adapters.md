@@ -11,6 +11,10 @@ Sablecourt must orchestrate heterogeneous agents behind strict policy, budget, a
 
 Build v0.1 as a single local-first Go control plane daemon backed by SQLite in WAL mode, running on macOS or Linux. Isolate every infrastructure concern (state store, workload runtime, secret provider, network transport) behind narrow Go interfaces so the core domain logic never imports container runtime or cluster SDKs directly.
 
+[![The daemon with its store, the execution adapters and the gates, with Kubernetes and PostgreSQL parked.](../diagrams/architecture-overview.svg)](../diagrams/architecture-overview.svg "Open full size")
+
+Figure: the single daemon, its SQLite store and the execution adapters on main today, with Kubernetes and PostgreSQL marked as parked.
+
 In v0.1, declared intent (workload manifests, capability policies, budget rules) is loaded from Git-tracked files on disk, and runtime operational state (tasks, leases, budget counters, approvals, audit log) is stored in SQLite.
 
 ## Alternatives considered

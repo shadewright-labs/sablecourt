@@ -16,6 +16,12 @@ Build two thin, deterministic Go proxies inside Sablecourt for v0.1, behind clea
 
 Raw upstream credentials stay inside the gate process (loaded from OS keychain, mounted secret files, or external secret stores) and never cross into workload environments.
 
+## Diagram
+
+[![Docker workloads reach model providers and the Git host through the Model Gate and the MCP Gate, with an Approval Queue behind the MCP Gate.](../diagrams/system-context.svg)](../diagrams/system-context.svg "Open full size")
+
+Figure: Docker workloads reach providers and the Git host through the Model Gate and the MCP Gate, which sit inside the daemon. Council harness containers reach their listed provider hosts through the council proxy instead, and host coding runs are drawn as unsupported for 0.1.0.
+
 ## Alternatives considered
 
 - Adopting `agentgateway` immediately for Model and MCP routing. Rejected for v0.1 because integrating an external gateway binary, its config schema, and its policy hooks adds moving parts while Sablecourt's own budget and identity schemas are still settling.

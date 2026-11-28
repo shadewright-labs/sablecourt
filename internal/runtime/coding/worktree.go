@@ -47,6 +47,7 @@ type worktreeState struct {
 	Worker       *workerIdentity    `json:",omitempty"`
 	Container    *containerIdentity `json:",omitempty"`
 	Result       *processResult     `json:",omitempty"`
+	Command      *commandRecord     `json:",omitempty"`
 }
 
 func (s *worktreeState) checkoutDir(taskBase string) string {
@@ -656,6 +657,9 @@ func worktreeArtifacts(ctx context.Context, dir string, state *worktreeState, st
 	}
 	if state.Result != nil && state.Result.Response != "" {
 		artifacts = append(artifacts, scruntime.Artifact{Name: "final-message", ContentType: "text/plain", Text: state.Result.Response})
+	}
+	if art, ok := commandArtifact(state); ok {
+		artifacts = append(artifacts, art)
 	}
 	return artifacts, nil
 }

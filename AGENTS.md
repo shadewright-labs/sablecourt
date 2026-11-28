@@ -21,6 +21,7 @@ Weakening any invariant below requires an accepted ADR in `docs/adr/` first.
 - No emails, personal paths, host names, IPs, or real credentials in tracked files or tests.
 - Go standard library first; justify every third-party dependency in an ADR or commit message.
 - Every parser, redaction rule, policy boundary, and refusal path ships with table-driven tests passing under `go test -race ./...`.
+- Some packages carry their own AGENTS.md with rules for that package; read it before changing code there.
 
 ## Releases
 

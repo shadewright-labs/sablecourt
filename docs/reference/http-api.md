@@ -95,7 +95,7 @@ Source: `cmd/sablecourtd/main.go`.
 | Route | Purpose |
 | --- | --- |
 | `GET /api/v1/audit` | The newest 50 audit rows, newest first. |
-| `GET /api/v1/audit/verify` | Walk the audit hash chain and report whether it is valid. |
+| `GET /api/v1/audit/verify` | Walk the audit hash chain. 200 with `verifiedRows`, `legacyRows` (version 1 rows) and the chain `head` (`seq`, `id`, `hash`); 409 with the error when a row has no hash or does not match, or the chain does not reach the optional `anchor=SEQ:HASH`; 400 for a malformed anchor. |
 | `GET /api/v1/audit/export` | The newest 10000 audit rows as `application/x-ndjson`, oldest first. |
 | `GET /api/v1/memory` | List up to 100 Court Memory entries, never those in a `learning:` namespace. Query `namespace` and `q` (substring match). |
 | `POST /api/v1/memory` | Set an entry; the value is redacted, and a `learning:` namespace is refused with 403. Body `{"namespace","key","value"}`. |

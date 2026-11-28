@@ -417,28 +417,70 @@ func newRootCmdWithTransport(defaultTransport http.RoundTripper) *cobra.Command 
 		},
 	})
 
-	auditCmd.AddCommand(&cobra.Command{
+	var auditAnchor string
+	auditVerifyCmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify the tamper-evident SHA-256 hash chain across all audit records",
+		Long: "Verify the tamper-evident SHA-256 hash chain across all audit records and print the chain head.\n\n" +
+			"Keep the printed head (SEQ:HASH) outside the database. Passing it back with --anchor makes\n" +
+			"verification fail when rows up to that head were deleted or the chain was recomputed.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cli, base := httpClient(10 * time.Second)
-			body, err := fetchGET(cli, base+"/api/v1/audit/verify")
+			path := "/api/v1/audit/verify"
+			anchor, err := domain.ParseAuditAnchor(auditAnchor)
 			if err != nil {
 				return err
 			}
-			if jsonOut {
-				_, err = cmd.OutOrStdout().Write(body)
+			if anchor != nil {
+				path += "?anchor=" + url.QueryEscape(auditAnchor)
+			}
+			cli, base := httpClient(10 * time.Second)
+			body, err := fetchGET(cli, base+path)
+			if err != nil {
 				return err
 			}
 			var res struct {
 				Valid        bool `json:"valid"`
 				VerifiedRows int  `json:"verifiedRows"`
+				LegacyRows   int  `json:"legacyRows"`
+				Anchored     bool `json:"anchored"`
+				Head         struct {
+					Seq  int64  `json:"seq"`
+					Hash string `json:"hash"`
+				} `json:"head"`
 			}
-			_ = json.Unmarshal(body, &res)
-			fmt.Fprintf(cmd.OutOrStdout(), "%s audit hash chain valid (%d rows verified)\n", stJade.Render("✓"), res.VerifiedRows)
+			if err := json.Unmarshal(body, &res); err != nil {
+				return fmt.Errorf("decode verify result: %w", err)
+			}
+			// Check the answer before printing anything, in --json mode too, so a
+			// daemon that ignores the anchor cannot report an unchecked chain as
+			// anchored.
+			if !res.Valid {
+				return fmt.Errorf("audit hash chain not valid")
+			}
+			if anchor != nil && !res.Anchored {
+				return fmt.Errorf("audit anchor %d was not checked: the daemon did not report \"anchored\": true", anchor.Seq)
+			}
+			if jsonOut {
+				_, err = cmd.OutOrStdout().Write(body)
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%s audit hash chain valid (%d rows verified", stJade.Render("✓"), res.VerifiedRows)
+			if res.LegacyRows > 0 {
+				fmt.Fprintf(out, ", %d written with the version 1 hash", res.LegacyRows)
+			}
+			if res.Anchored {
+				fmt.Fprint(out, ", anchor matched")
+			}
+			fmt.Fprintln(out, ")")
+			if res.Head.Seq > 0 {
+				fmt.Fprintf(out, "  head: %d:%s\n", res.Head.Seq, res.Head.Hash)
+			}
 			return nil
 		},
-	})
+	}
+	auditVerifyCmd.Flags().StringVar(&auditAnchor, "anchor", "", "Chain head recorded earlier as SEQ:HASH; verification fails if the chain no longer contains it")
+	auditCmd.AddCommand(auditVerifyCmd)
 	auditCmd.AddCommand(&cobra.Command{
 		Use:   "export",
 		Short: "Export audit records as JSONL to stdout",
