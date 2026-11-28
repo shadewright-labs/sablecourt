@@ -681,10 +681,11 @@ func (r *Reconciler) RetryTaskWithHandoff(ctx context.Context, origTaskID string
 			return domain.Task{}, err
 		}
 		if member != nil && payload["role"] != "verifier" {
-			// A retried author keeps the run's first author base; if the
-			// failed attempt was the first (not pinned to an earlier commit),
-			// its own base becomes it. Read before the pin below changes.
-			member.AuthorBase = runAuthorBase(member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), orig.ArtifactsJSON)
+			// A retried author keeps the run's first author base or its
+			// unknown state; if the failed attempt was the first, its own
+			// base, or the unknown state when it has none, becomes it. Read
+			// before the pin below changes.
+			setRunAuthorBase(member, member, !r.isCommandStep(member.Workflow, member.Index, orig.WorkloadName), r.earlierAuthorStep(member.Workflow, member.Index), orig.ArtifactsJSON)
 			if commit := authorCommit(orig.ArtifactsJSON); commit != "" {
 				member.AuthorCommit = commit
 			}
@@ -1623,7 +1624,7 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 				}
 				raw, _ := json.Marshal(payload)
 				idem := fmt.Sprintf("wf:%s:remediate:%s:%d", meta.Workflow, completedTask.ID, meta.RetryCount+1)
-				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase})
+				remTask, err := r.submitTask(ctx, authorStep.Workload, idem, string(raw), completedTask.ID, &workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: meta.AuthorStepIndex, AuthorCommit: member.AuthorCommit, AuthorBase: member.AuthorBase, AuthorBaseUnknown: member.AuthorBaseUnknown})
 				if err != nil {
 					return err
 				}
@@ -1695,8 +1696,8 @@ func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask doma
 		payload = commandStepPayload(meta.Workflow, nextStep, nextIdx, meta.Input, author, authorIdx)
 	}
 	raw, _ := json.Marshal(payload)
-	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx,
-		AuthorBase: runAuthorBase(member, !completedVerifier && step.Command == "", completedTask.ArtifactsJSON)}
+	next := workflowStepRecord{RunID: member.RunID, Workflow: member.Workflow, Index: nextIdx}
+	setRunAuthorBase(&next, member, !completedVerifier && step.Command == "", earlierAuthorStep(wf.Spec.Steps, meta.StepIndex), completedTask.ArtifactsJSON)
 	if nextStep.Role == "verifier" || nextStep.Command != "" {
 		next.AuthorCommit = stepAuthorCommit(member, completedVerifier, author.ArtifactsJSON)
 	}

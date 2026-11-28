@@ -37,8 +37,14 @@ type workflowStepRecord struct {
 	// AuthorBase is the commit the run's first author step started from
 	// (issue 214), carried from step to step and never replaced once set.
 	AuthorBase string `json:",omitempty"`
-	Status     string `json:",omitempty"`
-	Reason     string `json:",omitempty"`
+	// AuthorBaseUnknown records that the run's first author attempt
+	// completed or failed without a recorded base (it started before issue
+	// 214, or its git-base artifact was missing or invalid). It is carried
+	// from step to step like AuthorBase, no later author's base replaces
+	// it, and a command step of the run is refused (issue 214).
+	AuthorBaseUnknown bool   `json:",omitempty"`
+	Status            string `json:",omitempty"`
+	Reason            string `json:",omitempty"`
 }
 
 func (r *Reconciler) workflowStepEntry(id string, step workflowStepRecord) (domain.MemoryEntry, error) {
@@ -115,19 +121,54 @@ func authorCommit(artifacts string) string {
 	return commitArtifact(artifacts, "git-commit")
 }
 
-// runAuthorBase is the author base the step after completed carries: the one
-// already recorded for the run, or, when none is and the completed step is
-// the run's first author attempt (an author, not a verifier or command step,
-// not pinned to an earlier attempt's commit), the commit that author's
-// checkout started from. A later author attempt, pinned to an earlier
-// attempt's commit, never sets or replaces it: when the first attempt's base
-// is unknown (a task from before issue 214), it stays unknown and the
-// command step is refused.
-func runAuthorBase(completed *workflowStepRecord, authorStep bool, artifacts string) string {
-	if completed.AuthorBase != "" || !authorStep || completed.AuthorCommit != "" {
-		return completed.AuthorBase
+// setRunAuthorBase sets the author base and its unknown state that next, the
+// registration of the step after completed, carries (issue 214):
+//
+//   - a run whose first author base is unknown stays unknown, and a recorded
+//     base is carried unchanged; no later author replaces either;
+//   - a verifier or command step before any author sets neither;
+//   - the run's first author attempt that hands on a commit sets the commit
+//     its checkout started from, or the unknown state when it has no valid
+//     git-base artifact; an attempt that hands on no commit (a failed run)
+//     sets neither, so its retry, checked out afresh, is the first attempt;
+//   - an author that cannot be the first attempt (pinned to an earlier
+//     attempt's commit, or at a later workflow step than the first author
+//     step) finding neither recorded comes from a registration written
+//     before issue 214, so it sets the unknown state.
+//
+// A command step of a run in the unknown state is refused. next and completed
+// may be the same record (a retried attempt keeps its registration).
+func setRunAuthorBase(next, completed *workflowStepRecord, authorStep, earlierAuthor bool, artifacts string) {
+	base, unknown := "", false
+	switch {
+	case completed.AuthorBaseUnknown:
+		unknown = true
+	case completed.AuthorBase != "":
+		base = completed.AuthorBase
+	case !authorStep:
+	case completed.AuthorCommit != "" || earlierAuthor:
+		unknown = true
+	case authorCommit(artifacts) == "":
+	default:
+		base = commitArtifact(artifacts, scruntime.GitBaseArtifact)
+		unknown = base == ""
 	}
-	return commitArtifact(artifacts, scruntime.GitBaseArtifact)
+	next.AuthorBase, next.AuthorBaseUnknown = base, unknown
+}
+
+// earlierAuthorStep reports whether steps declare an author step (neither a
+// verifier nor a command step) before index. An index outside steps reports
+// true, so a registration that does not match the workflow fails closed.
+func earlierAuthorStep(steps []domain.WorkflowStep, index int) bool {
+	if index < 0 || index > len(steps) {
+		return true
+	}
+	for _, step := range steps[:index] {
+		if step.Role != "verifier" && step.Command == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // validCommitID reports whether id is a full SHA-1 or SHA-256 commit ID in hex.

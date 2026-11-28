@@ -79,10 +79,10 @@ func (r *Reconciler) workflowCommand(ctx context.Context, task domain.Task, wl d
 	if !ok || domain.ValidCommandArgv(cmd.Argv) != nil {
 		return nil, refuse
 	}
-	// No recorded author base, or one that cannot name a commit of the same
-	// object format as the pinned commit, fails the step: no comparison is
-	// skipped (issue 214).
-	if len(member.AuthorBase) != len(member.AuthorCommit) || !validCommitID(member.AuthorBase) {
+	// A run whose first author base is unknown, no recorded author base, or
+	// one that cannot name a commit of the same object format as the pinned
+	// commit, fails the step: no comparison is skipped (issue 214).
+	if member.AuthorBaseUnknown || len(member.AuthorBase) != len(member.AuthorCommit) || !validCommitID(member.AuthorBase) {
 		return nil, &scruntime.CommandRefusal{Command: meta.Command, Reason: scruntime.CommandAuthorBaseUnavailable}
 	}
 	return &scruntime.CommandSpec{
@@ -108,6 +108,20 @@ func (r *Reconciler) commandStepOf(workflow string, index int, workload string) 
 		return domain.WorkflowStep{}, domain.Workload{}, false
 	}
 	return steps[index], bundle.Workloads[workload], true
+}
+
+// earlierAuthorStep reports whether the loaded bundle declares an author step
+// of this workflow before index; with no bundle or workflow it reports true,
+// so the run's author base fails closed.
+func (r *Reconciler) earlierAuthorStep(workflow string, index int) bool {
+	r.mu.Lock()
+	bundle := r.bundle
+	r.mu.Unlock()
+	if bundle == nil {
+		return true
+	}
+	wf, ok := bundle.Workflows[workflow]
+	return !ok || earlierAuthorStep(wf.Spec.Steps, index)
 }
 
 // isCommandStep reports whether the bundle declares this workflow step as a command step.
