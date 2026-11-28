@@ -454,20 +454,30 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
+// specialAddresses holds the rows of the IANA IPv4 and IPv6 Special-Purpose
+// Address Registries (both last updated 2025-10-09) that publicAddress does
+// not already refuse through IsGlobalUnicast, IsPrivate or the 2000::/3
+// check. The globally reachable rows (AS112, AMT, the 6to4 and Teredo
+// blocks) are refused too: no provider API lives in them.
+// TestPublicAddressSpecialPurposeRanges has one line per registry row.
 var specialAddresses = []netip.Prefix{
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{0}), 8),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{100, 64}), 10),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 0, 0}), 24),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 0, 2}), 24),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 88, 99}), 24),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 18}), 15),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 51, 100}), 24),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{203, 0, 113}), 24),
-	netip.PrefixFrom(netip.AddrFrom4([4]byte{240}), 4),
-	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01}), 23),
-	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8}), 32),
-	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x02}), 16),
-	netip.PrefixFrom(netip.AddrFrom16([16]byte{0x3f, 0xff}), 20),
+	netip.MustParsePrefix("0.0.0.0/8"),         // This network, RFC 791
+	netip.MustParsePrefix("100.64.0.0/10"),     // Shared Address Space, RFC 6598
+	netip.MustParsePrefix("192.0.0.0/24"),      // IETF Protocol Assignments, RFC 6890
+	netip.MustParsePrefix("192.0.2.0/24"),      // Documentation (TEST-NET-1), RFC 5737
+	netip.MustParsePrefix("192.31.196.0/24"),   // AS112-v4, RFC 7535
+	netip.MustParsePrefix("192.52.193.0/24"),   // AMT, RFC 7450
+	netip.MustParsePrefix("192.88.99.0/24"),    // Deprecated 6to4 Relay Anycast, RFC 7526
+	netip.MustParsePrefix("192.175.48.0/24"),   // Direct Delegation AS112 Service, RFC 7534
+	netip.MustParsePrefix("198.18.0.0/15"),     // Benchmarking, RFC 2544
+	netip.MustParsePrefix("198.51.100.0/24"),   // Documentation (TEST-NET-2), RFC 5737
+	netip.MustParsePrefix("203.0.113.0/24"),    // Documentation (TEST-NET-3), RFC 5737
+	netip.MustParsePrefix("240.0.0.0/4"),       // Reserved and Limited Broadcast, RFC 1112, RFC 919
+	netip.MustParsePrefix("2001::/23"),         // IETF Protocol Assignments, RFC 2928
+	netip.MustParsePrefix("2001:db8::/32"),     // Documentation, RFC 3849
+	netip.MustParsePrefix("2002::/16"),         // 6to4, RFC 3056
+	netip.MustParsePrefix("2620:4f:8000::/48"), // Direct Delegation AS112 Service, RFC 7534
+	netip.MustParsePrefix("3fff::/20"),         // Documentation, RFC 9637
 }
 
 var globalIPv6 = netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20}), 3)
