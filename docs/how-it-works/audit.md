@@ -48,7 +48,7 @@ Before it inserts, the store reads the newest row in that transaction and takes 
 
 Version 1 hashed `prev_hash` and the same row fields joined with an unescaped `|`, and left out the row ID and the sequence. Migration `0017_audit_chain_v2.sql` (SQLite) and `0013_audit_chain_v2.sql` (PostgreSQL) add `seq` and `hash_version`, number every existing row that has a hash in ID order from 1, and mark them version 1. Those rows keep their stored hash and are checked with the version 1 rule, so a `|` moved between two of their fields, or an edited ID, still goes unseen in them. Verification reports how many there are.
 
-Rows written before `0005_audit_chain.sql` have no hash. They keep sequence 0 and fail verification, and no code can tell them from rows whose hash was blanked later. The hashed rows after them were chained from `genesis` past them, so the chain verifies once an operator deletes the rows without a hash. Rows appended after the migration are version 2 and chain onto the last version 1 row.
+Rows written before `0005_audit_chain.sql` have no hash. They keep sequence 0 and fail verification, and no code can tell them from rows whose hash was blanked later. The hashed rows after them were chained from `genesis` past them, so for these pre-chain rows the chain verifies once an operator deletes them. Deleting a numbered row whose hash was blanked later does not repair the chain: its sequence leaves a gap, and verification still fails. Rows appended after the migration are version 2 and chain onto the last version 1 row.
 
 ## How verification works
 
