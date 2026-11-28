@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 532" role="img" aria-labelledby="t d" data-diagram="components" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="t">Conclave messaging rules</title>
-  <desc id="d">Who may message whom in a Conclave. A vassal in the runtime zone, coder, sends a message to the Conclave broker in sablecourtd. The broker allows it only if the sender lists the target in its canMessage list, then redacts and stores it and wakes on-mention roles, and delivers it to the vassal reviewer in the runtime zone. The broker counts every message against the Wards: a message limit, a ping-pong limit and the session budget ceiling. The operator, outside the daemon, steers the room with a Decree sent to the broker. A sandbox-zone vassal may never message a runtime-zone vassal: a red line from the sandbox vassal to the coder vassal says never, refused at manifest load. A legend marks flow and refused lines.</desc>
+  <desc id="d">Who may message whom in a Conclave. A vassal in the runtime zone, coder, sends a message to the Conclave broker in sablecourtd. The broker allows it only if the sender lists the target in its canMessage list, then redacts and stores it and wakes the target if it is an on-mention role, here the vassal reviewer in the runtime zone. The broker counts every message against the Wards: a message limit, a ping-pong limit and the budget ceiling when the template names one. The operator, outside the daemon, steers the room with a Decree sent to the broker. A sandbox-zone vassal may never message a runtime-zone vassal: a red line from the sandbox vassal to the coder vassal says never, refused at manifest load. A legend marks flow and refused lines.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#2dd4bf"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8a8594"/></marker>
@@ -49,7 +49,7 @@
   <rect class="box" x="450" y="76" width="240" height="72" rx="10"/>
   <text class="h" x="466" y="102">Wards</text>
   <text class="s" x="466" y="123">max messages, max ping-pong</text>
-  <text class="s" x="466" y="140">session budget ceiling</text>
+  <text class="s" x="466" y="140">budget ceiling, if one is named</text>
   <rect class="key" x="450" y="258" width="240" height="160" rx="12"/>
   <text class="h" x="466" y="284">Conclave broker</text>
   <text class="s" x="466" y="305">allows a message only if</text>
@@ -67,7 +67,7 @@
   <path class="f" d="M254 290H450" marker-end="url(#a)"/>
   <text class="lbl" x="352" y="282" text-anchor="middle">message</text>
   <path class="f" d="M450 390H254" marker-end="url(#a)"/>
-  <text class="lbl" x="352" y="382" text-anchor="middle">delivers if allowed</text>
+  <text class="lbl" x="352" y="382" text-anchor="middle">wakes if on-mention</text>
   <path class="f" d="M570 258V152" marker-end="url(#a)"/>
   <text class="lbl" x="582" y="210" text-anchor="start">counts</text>
   <path class="f" d="M886 322H696" marker-end="url(#a)"/>
