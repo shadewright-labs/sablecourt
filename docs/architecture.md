@@ -46,7 +46,7 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 | :--- | :--- |
 | 1. Manifest load | `sablecourtd` loads local YAML files or syncs a GitOps repository (`--manifests-git-repo`). `validateBundle` rejects any `sandbox`-zone workload that requests mutating GitOps actions, runtime-zone Conclave messaging, or external Agent Card advertisement. |
 | 2. Task creation | An operator (UI, CLI, webhook, Schedule, A2A, or Shadewright Escalation API) submits a task with an idempotency key. `sablecourtd` persists the task in `submitted` state. |
-| 3. Lease minting | The control plane reconciler mints a scoped task bearer token (`sc_task_<64 hex>`) and stores only its SHA-256 hash in `leases`. Raw provider keys never enter the workload environment. |
+| 3. Lease minting | The control plane reconciler mints a scoped task bearer token (`sc_task_<64 hex>`) and stores only its SHA-256 hash in `leases`. When the context packet carried learnings, the lease also stores the providers the packet was admitted under, and the Model Gate holds it to them after a reload. Raw provider keys never enter the workload environment. |
 | 4. Isolated launch | The matching runtime adapter starts the workload. Local `coding-agent` runs write a read-only `.sablecourt-session.json` marker so Nightloom recognizes the session as Sablecourt-managed. |
 | 5. Capability mediation | Model requests hit `/gate/model/{provider}/...` with `Authorization: Bearer sc_task_...` (checked against leases, grants, and budgets). Tool and action requests hit `/gate/mcp` or `/gate/action/{name}` and pass through deterministic policy (`allow`, `approve`, `deny`) and the Approval Queue. |
 | 6. Observation and steering | Operators watch live redacted output via `Scry`, claim exclusive `stdin` via `Takeover`, or steer multi-agent rooms via `Decree` (text or voice). |
@@ -55,10 +55,10 @@ Sablecourt is a Go control plane (`sablecourtd`) and operator CLI (`sablectl`) t
 
 ## Agentic context, learnings, and verification pipeline (ADR-0010)
 
-Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Matching scoped learnings are currently attached automatically to CLI coding tasks. The packet combines:
+Before dispatching a non-deterministic task, `Reconciler.launchTask` runs `internal/contextpack.Assemble` to build a redacted, 32 KiB-capped context packet for the task input. Learnings enter the packet only when its model destination is local (see [context and learning](how-it-works/context-and-learning.md#destination-check)). The packet combines:
 
 1. Task intent (`prompt`, `input`, workflow step metadata, and any failure handoff).
-2. Scoped learnings matched from `Court Memory` under `learning:global`, `learning:repo:<name>`, and `learning:path:<glob>` namespaces.
+2. For a local destination only, up to ten accepted, unexpired learnings from the ADR-0012 learning record, in a section of at most 4 KiB. Legacy `learning:*` rows in Court Memory are not read.
 3. Recent Conclave Decrees and Relics when the task runs inside a Conclave.
 4. A read-only repository pre-check (10-second timeout, 16 KiB cap) running `git status --short`, `git diff --stat`, `go vet ./...` for Go modules, and `sg scan` when `sgconfig.yml` is present.
 

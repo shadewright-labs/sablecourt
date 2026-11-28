@@ -30,7 +30,7 @@ Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [cou
 ## Not built yet
 
 - Server-side sessions, passkeys and roles: decided in [ADR-0014](../adr/0014-identity-and-authentication.md), Proposed.
-- The learning record of [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): stored, not yet accepted or injected.
+- The learning record of [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): stored and matched for local destinations only, not yet accepted through any route.
 - The proxy-to-daemon hop of the harness containers is described in an amendment to [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) that is still Proposed.
 
 ## In depth

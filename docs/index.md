@@ -61,7 +61,7 @@ Each area below carries one of four words:
 | Council | Partly built | Final message posting (#28), subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
 | Harness containers | Partly built | The proxy and the image build are in the tree (#76, #77). Nothing checks yet that a harness volume holds a login, and no command starts the login container; both are #79 | [harness containers](how-it-works/harness-containers.md) |
 | Context packets, verifier steps, failure handoff | Built | | [context and learning](how-it-works/context-and-learning.md) |
-| Learning (ADR-0012) | Partly built | The store exists; accept, match and inject are decided only (#43 to #47) | [context and learning](how-it-works/context-and-learning.md) |
+| Learning (ADR-0012) | Partly built | The store and the packet matcher with its destination check (#99) exist. Propose, accept, matching for other workloads and outcomes are decided only (#43 to #47), so no packet carries a learning yet | [context and learning](how-it-works/context-and-learning.md) |
 | Audit chain | Built | Misses deletion of the last rows (#10); signed heads decided only | [audit](how-it-works/audit.md) |
 | Operator authentication | Built | Stateless 30-minute cookie, no logout; passkeys and sessions are decided only (ADR-0014, Proposed; #68, PR 93) | [identity and access](how-it-works/identity-and-access.md) |
 | Shadewright contract | Partly built | Incidents and verifications work; status read, learning read and incident template are open (#53 to #55) | [integrations](how-it-works/integrations.md) |

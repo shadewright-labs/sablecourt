@@ -232,7 +232,7 @@ func (r *Reconciler) prepareCouncilCheckout(ctx context.Context, payload map[str
 	return wl, nil
 }
 
-func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, error) {
+func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, wl domain.Workload) (domain.Workload, string, []string, error) {
 	assignment, assigned := store.TaskConclaveAssignment(task)
 	council := assigned && assignment.Round > 0
 	var payload map[string]json.RawMessage
@@ -245,11 +245,11 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		unreservedCouncil, err = referencesCouncil(ctx, r.store, payload)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && !council && !unreservedCouncil {
-		return wl, task.InputJSON, nil
+		return wl, task.InputJSON, nil, nil
 	}
 
 	// Only the dispatcher can create a round reservation. Its immutable input
@@ -259,7 +259,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		var err error
 		wl, err = r.prepareCouncilCheckout(ctx, payload, assignment, wl)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		const maxCouncilPacketBytes = 32 << 10 // AssembleCouncil's total packet budget.
 		packet := payload["context_packet"]
@@ -267,7 +267,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		if !utf8.Valid(packet) || json.Unmarshal(packet, &markdown) != nil ||
 			strings.TrimSpace(markdown) == "" || len(markdown) > maxCouncilPacketBytes ||
 			redact.String(markdown) != markdown {
-			return wl, "", errors.New("invalid reserved council packet")
+			return wl, "", nil, errors.New("invalid reserved council packet")
 		}
 	}
 	// Typed consumers may match field names case-insensitively. The checkout
@@ -290,7 +290,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	}
 	if wl.Spec.Class == domain.ClassDeterministicController && unreservedCouncil {
 		raw, err := json.Marshal(payload)
-		return wl, string(raw), err
+		return wl, string(raw), nil, err
 	}
 	if rebuild && !council {
 		precheckInput := maps.Clone(payload)
@@ -299,7 +299,7 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 		})
 		sanitized, err := json.Marshal(precheckInput)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		task.InputJSON = string(sanitized)
 	}
@@ -307,32 +307,39 @@ func (r *Reconciler) prepareLaunchInput(ctx context.Context, task domain.Task, w
 	if raw, ok := payload["tier"]; ok {
 		var tier, provider, model string
 		if err := json.Unmarshal(raw, &tier); err != nil || tier == "" {
-			return wl, "", errors.New("invalid model tier")
+			return wl, "", nil, errors.New("invalid model tier")
 		}
 		if raw, ok := payload["provider"]; ok {
 			if err := json.Unmarshal(raw, &provider); err != nil || provider == "" {
-				return wl, "", errors.New("invalid tier provider")
+				return wl, "", nil, errors.New("invalid tier provider")
 			}
 		}
 		if raw, ok := payload["model"]; ok {
 			if err := json.Unmarshal(raw, &model); err != nil || model == "" {
-				return wl, "", errors.New("invalid tier model")
+				return wl, "", nil, errors.New("invalid tier model")
 			}
 		}
 		provider, model, err := resolveTierRoute(ctx, r.store, wl, tier, provider, model)
 		if err != nil {
-			return wl, "", err
+			return wl, "", nil, err
 		}
 		payload["provider"], _ = json.Marshal(provider)
 		payload["model"], _ = json.Marshal(model)
 	}
 
+	// A packet with learnings pins the task's leases to the providers it was
+	// admitted under, so a later reload cannot widen where they go (ADR-0012).
+	var pinned []string
 	if !council {
-		markdown = contextpack.Assemble(ctx, r.store, task, wl).Markdown
+		packet := contextpack.Assemble(ctx, r.store, task, wl, r.packetDest)
+		markdown = packet.Markdown
+		if packet.LearningCount > 0 {
+			pinned = append([]string{}, wl.Spec.Grants.ModelGate.Providers...)
+		}
 	}
 	payload["context_packet"], _ = json.Marshal(markdown)
 	raw, err := json.Marshal(payload)
-	return wl, string(raw), err
+	return wl, string(raw), pinned, err
 }
 
 // isCheckoutField reports whether key selects a council checkout, in any case.
