@@ -111,7 +111,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			},
 			fail:   audittest.Action("task.detach"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/detach", body: `{"operator":"alice"}`,
-			wantCode: 500, wantBody: "the takeover was released, but its audit record could not be written",
+			wantCode: 500, wantBody: "the takeover was released, but an audit record could not be written",
 			check: func(t *testing.T, env apiEnv, faults *audittest.Store, _ string) {
 				faults.Heal()
 				if rec := apiCall(env.h, http.MethodPost, "/api/v1/tasks/task_tty/takeover", `{"operator":"bob"}`); rec.Code != http.StatusOK {
@@ -122,7 +122,7 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 		{
 			name: "cancel goes ahead and reports the record", fail: audittest.Action("task.cancel"),
 			method: http.MethodPost, path: "/api/v1/tasks/task_tty/cancel",
-			wantCode: 500, wantBody: "task task_tty was cancelled, but its audit record could not be written",
+			wantCode: 500, wantBody: "task task_tty was cancelled, but an audit record could not be written",
 			check: func(t *testing.T, env apiEnv, _ *audittest.Store, _ string) {
 				task, err := env.st.GetTask(ctx, "task_tty")
 				if err != nil {
@@ -132,6 +132,44 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 					t.Fatalf("state %s, want cancelled", task.State)
 				}
 			},
+		},
+		{
+			name: "suspend goes ahead and reports the record", fail: audittest.Action("task.suspend"),
+			method: http.MethodPost, path: "/api/v1/tasks/task_tty/suspend",
+			wantCode: 500, wantBody: "task task_tty was suspended, but an audit record could not be written",
+		},
+		{
+			name: "resume is refused",
+			prepare: func(t *testing.T, env apiEnv) string {
+				env.seedTask(t, "task_susp", domain.TaskStateSuspended)
+				return ""
+			},
+			fail:   audittest.Action("task.resume"),
+			method: http.MethodPost, path: "/api/v1/tasks/task_susp/resume",
+			wantCode: 500, wantBody: "resume refused: its audit record could not be written, nothing was changed",
+		},
+		{
+			name: "retry reports the task it created",
+			prepare: func(t *testing.T, env apiEnv) string {
+				env.seedTask(t, "task_old", domain.TaskStateFailed)
+				return ""
+			},
+			fail:   audittest.Action("task.retry"),
+			method: http.MethodPost, path: "/api/v1/tasks/task_old/retry",
+			wantCode: 500, wantBody: "was submitted, but an audit record could not be written",
+		},
+		{
+			name: "denial is refused and stays pending",
+			prepare: func(t *testing.T, env apiEnv) string {
+				apr, err := env.approvals.Request(ctx, "task_tty", "coder", "action:git.open_pr", map[string]string{"t": "y"}, time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return apr.ID + "|" + apr.PayloadSHA256
+			},
+			fail:   func(rec domain.AuditRecord) bool { return rec.Category == "approval" && rec.Outcome == "denied" },
+			method: http.MethodPost, path: "/api/v1/approvals/{id}/deny", body: `{"reason":"no"}`,
+			wantCode: 500, wantBody: "denial refused: its audit record could not be written, nothing was changed",
 		},
 		{
 			name: "scry is a read and streams with the record logged", fail: audittest.Action("task.scry"),
@@ -166,6 +204,10 @@ func TestOperatorRoutesAuditWriteFailures(t *testing.T) {
 			if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %s, want %d containing %q", rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
 			}
+			// A 500 for a failed audit write says what already happened.
+			if b := rec.Body.String(); tc.wantCode == 500 && !strings.Contains(b, "nothing was changed") && !strings.Contains(b, ", but an audit record could not be written") {
+				t.Fatalf("500 does not say what already happened: %s", b)
+			}
 			if len(faults.Refused()) == 0 {
 				t.Fatal("no audit write was attempted")
 			}
@@ -195,7 +237,7 @@ func TestPromotionBranchNotCreatedWhenAuditWriteFails(t *testing.T) {
 	}})
 	faults.Fail(audittest.Action("sandbox.propose_promotion"))
 	rec := apiCall(env.h, http.MethodPost, "/api/v1/promote/trial", "")
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "no branch was created") {
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "promotion refused: its audit record could not be written, nothing was changed") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 	out, err := exec.Command("git", "-C", repo, "branch", "--list", "sablecourt/promote-trial").CombinedOutput()

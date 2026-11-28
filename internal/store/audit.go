@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 )
@@ -65,16 +67,40 @@ func AfterEffect(done string, err error) error {
 }
 
 // AuditFailureText reports whether err is a failed audit write and returns the
-// text a caller answers with (HTTP 500). For an AfterEffectError the text says
-// what already happened; otherwise it says that the request, named by what,
-// was refused and nothing was changed.
+// text a caller answers with (HTTP 500). When err holds AfterEffectErrors,
+// wrapped or joined at any depth, the text names every effect that already
+// happened, outermost first; otherwise it says that the request, named by
+// what, was refused and nothing was changed.
 func AuditFailureText(err error, what string) (string, bool) {
 	if !errors.Is(err, ErrAuditWrite) {
 		return "", false
 	}
-	var after *AfterEffectError
-	if errors.As(err, &after) {
-		return after.Done + ", but an audit record could not be written", true
+	if done := afterEffects(err, nil); len(done) != 0 {
+		return strings.Join(done, "; ") + ", but an audit record could not be written", true
 	}
 	return what + " refused: its audit record could not be written, nothing was changed", true
+}
+
+// afterEffects collects the Done text of every AfterEffectError in the tree
+// of err, depth first, skipping repeats.
+func afterEffects(err error, done []string) []string {
+	if err == nil {
+		return done
+	}
+	// The walk looks at each node of the tree itself, so it inspects the
+	// node's own type, not what it wraps (errors.As would find only the
+	// first match).
+	node := any(err)
+	if after, ok := node.(*AfterEffectError); ok && !slices.Contains(done, after.Done) {
+		done = append(done, after.Done)
+	}
+	switch u := node.(type) {
+	case interface{ Unwrap() error }:
+		done = afterEffects(u.Unwrap(), done)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			done = afterEffects(e, done)
+		}
+	}
+	return done
 }

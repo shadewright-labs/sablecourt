@@ -319,6 +319,9 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 		}
 		apr, err := g.approvals.Request(ctx, lease.TaskID, workload.Metadata.Name, capability, payload, 15*time.Minute)
 		if err != nil {
+			if msg, ok := store.AuditFailureText(err, "the approval request"); ok {
+				return errorToolResult(msg), nil
+			}
 			return errorToolResult("failed to enqueue approval: " + err.Error()), nil
 		}
 		_ = g.store.UpdateTaskState(ctx, lease.TaskID, domain.TaskStateWorking, domain.TaskStateInputRequired, "approval_required", fmt.Sprintf(`{"approval_id":%q}`, apr.ID))
@@ -343,6 +346,11 @@ func (g *Gate) invokeTool(ctx context.Context, lease domain.Lease, workload doma
 				outcome = "denied"
 			}
 			g.audit(ctx, lease.TaskID, workload.Metadata.Name, capability, outcome, fmt.Sprintf(`{"error":%q}`, redact.String(err.Error())))
+			// A failed audit write inside the tool says what already
+			// happened, as it does for an action.
+			if msg, ok := store.AuditFailureText(err, def.Name); ok {
+				return errorToolResult(msg), nil
+			}
 			return errorToolResult(redact.String(err.Error())), nil
 		}
 		red := redact.Text(out)
@@ -507,6 +515,14 @@ func (g *Gate) ActionHandler() http.Handler {
 					return
 				}
 				auditAction("error", map[string]any{"error": redact.String(err.Error())})
+				// A failed audit write in the check (git.merge_pr writes its
+				// evidence row there) is a local failure, answered with HTTP
+				// 500 like every other failed audit write. No approval exists
+				// yet and none was spent.
+				if msg, ok := store.AuditFailureText(err, "the action"); ok {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+					return
+				}
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": redact.String(err.Error())})
 				return
 			}
@@ -521,6 +537,10 @@ func (g *Gate) ActionHandler() http.Handler {
 					return
 				}
 				apr, err := g.approvals.Request(ctx, ac.Lease.TaskID, wlName, capability, value, 15*time.Minute)
+				if msg, ok := store.AuditFailureText(err, "the approval request"); ok {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+					return
+				}
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
@@ -610,7 +630,12 @@ func (g *Gate) ActionHandler() http.Handler {
 			}
 			auditAction("error", map[string]any{"error": redact.String(err.Error()), "approval_id": approvalUsed})
 			// A failed audit write inside the executor is a local failure,
-			// answered with HTTP 500 like every other failed audit write.
+			// answered with HTTP 500 like every other failed audit write. An
+			// approval presented with the request is spent by now, so the
+			// answer says so instead of saying that nothing changed.
+			if approvalUsed != "" {
+				err = spentApproval(approvalUsed, err)
+			}
 			if msg, ok := store.AuditFailureText(err, "the action"); ok {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 				return
@@ -675,6 +700,20 @@ func (g *Gate) authenticateWithSnapshot(w http.ResponseWriter, r *http.Request, 
 		return authContext{}, false
 	}
 	return authContext{Lease: lease, Workload: wl}, true
+}
+
+// spentApproval marks a failed audit write met after approval id was spent
+// as one that came after that effect. When the executor reported no effect
+// of its own, the action did not run.
+func spentApproval(id string, err error) error {
+	if !errors.Is(err, store.ErrAuditWrite) {
+		return err
+	}
+	var after *store.AfterEffectError
+	if errors.As(err, &after) {
+		return store.AfterEffect("approval "+id+" was spent, request a new one", err)
+	}
+	return store.AfterEffect("approval "+id+" was spent and the action did not run", err)
 }
 
 // audit writes a record that cannot change what happens next, a refusal or

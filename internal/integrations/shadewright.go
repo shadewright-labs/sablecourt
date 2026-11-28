@@ -312,14 +312,16 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 		if err != nil {
 			return internalErrorResponse(err)
 		}
-		if err := h.store.AppendAudit(ctx, domain.AuditRecord{
+		// The room exists by now; a retry of the same incident writes the
+		// row it is missing.
+		if err := store.RecordAudit(ctx, h.store, domain.AuditRecord{
 			Category:   "conclave",
 			Action:     "conclave.open",
 			Outcome:    "active",
 			DetailJSON: detail,
 			CreatedAt:  now,
 		}); err != nil {
-			return internalErrorResponse(err)
+			return conclaveWriteError(store.AfterEffect("conclave "+id+" was created", err))
 		}
 	}
 	if !hasRelic {
@@ -386,14 +388,14 @@ func (h *ShadewrightHandler) recordIncident(ctx context.Context, req incidentReq
 	if err != nil {
 		return internalErrorResponse(err)
 	}
-	if err := h.store.AppendAudit(ctx, domain.AuditRecord{
+	if err := store.RecordAudit(ctx, h.store, domain.AuditRecord{
 		Category:   "integration",
 		Action:     "shadewright.incident_escalated",
 		Outcome:    "ok",
 		DetailJSON: detail,
 		CreatedAt:  now,
 	}); err != nil {
-		return internalErrorResponse(err)
+		return conclaveWriteError(store.AfterEffect("the incident was escalated to conclave "+id, err))
 	}
 
 	status := http.StatusCreated
@@ -550,14 +552,14 @@ func (h *ShadewrightHandler) recordVerification(ctx context.Context, req verific
 		if err != nil {
 			return internalErrorResponse(err)
 		}
-		if err := h.store.AppendAudit(ctx, domain.AuditRecord{
+		if err := store.RecordAudit(ctx, h.store, domain.AuditRecord{
 			Category:   "integration",
 			Action:     "shadewright.verification_posted",
 			Outcome:    redactedStatus,
 			DetailJSON: detail,
 			CreatedAt:  h.now(),
 		}); err != nil {
-			return internalErrorResponse(err)
+			return conclaveWriteError(store.AfterEffect(fmt.Sprintf("the verification was posted as message %d", msg.ID), err))
 		}
 	}
 
@@ -670,6 +672,11 @@ func internalErrorResponse(err error) integrationResponse {
 }
 
 func conclaveWriteError(err error) integrationResponse {
+	// A failed audit write says what already happened, or that the request
+	// was refused and nothing was changed.
+	if msg, ok := store.AuditFailureText(err, "the escalation"); ok {
+		return errorResponse(http.StatusInternalServerError, msg)
+	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return errorResponse(http.StatusNotFound, "conclave not found")

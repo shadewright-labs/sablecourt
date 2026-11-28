@@ -114,7 +114,7 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	var created bool
 	retried, err := d.reconciler.RetryTaskWithHandoff(controlplane.WithCreatedFlag(r.Context(), &created), id, withHandoff, "operator_ui_retry")
 	if err != nil {
-		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/tasks/"+url.PathEscape(id)+"?err="+url.QueryEscape(errText(err, "retry", "")), http.StatusSeeOther)
 		return
 	}
 	// Same row as POST /api/v1/tasks/{id}/retry in cmd/sablecourtd, written
@@ -129,7 +129,7 @@ func (d *Dashboard) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 			DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 			CreatedAt:    time.Now().UTC(),
 		}); err != nil {
-			msg := "Retry task " + retried.ID + " was submitted, but its audit record could not be written"
+			msg := errText(store.AfterEffect("retry task "+retried.ID+" was submitted", err), "retry", "")
 			http.Redirect(w, r, "/tasks/"+url.PathEscape(retried.ID)+"?err="+url.QueryEscape(msg), http.StatusSeeOther)
 			return
 		}
@@ -263,7 +263,7 @@ func (d *Dashboard) handleConclaveSaveLearning(w http.ResponseWriter, r *http.Re
 		DetailJSON:   string(detailBytes),
 		CreatedAt:    now,
 	}); err != nil {
-		redirectConclaveErr(w, r, id, "proposal refused: its audit record could not be written, nothing was changed")
+		redirectConclaveErr(w, r, id, errText(err, "proposal", ""))
 		return
 	}
 	if err := d.store.PutMemory(r.Context(), entry); err != nil {
@@ -326,7 +326,7 @@ func (d *Dashboard) handleConclaveUploadRelic(w http.ResponseWriter, r *http.Req
 	}
 
 	if _, err := d.conclave.PutRelic(r.Context(), id, "operator", name, contentType, content); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
+		redirectConclaveErr(w, r, id, errText(err, "storing the relic", ""))
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Relic "+name+" added"), http.StatusSeeOther)

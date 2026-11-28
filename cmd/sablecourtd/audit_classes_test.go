@@ -210,6 +210,9 @@ func TestAuditWriteFailuresAnswer500(t *testing.T) {
 			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %s, want 500 containing %q", rec.Code, rec.Body.String(), tc.wantBody)
 			}
+			if b := rec.Body.String(); !strings.Contains(b, "nothing was changed") && !strings.Contains(b, ", but an audit record could not be written") {
+				t.Fatalf("500 does not say what already happened: %s", b)
+			}
 			if len(faults.Refused()) == 0 {
 				t.Fatal("no audit write was attempted")
 			}

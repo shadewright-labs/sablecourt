@@ -17,19 +17,22 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/store/audittest"
 )
 
-// The dashboard's audit writes by class (issue 107 row 3): a learning
-// proposal is recorded first and refused when the record cannot be written;
-// a retry has created its task by the time its row is written, so the failed
-// row is reported with the new task.
+// dashAuditCase is one dashboard form whose audit write fails.
+type dashAuditCase struct {
+	name    string
+	fail    string
+	post    func(t *testing.T, st store.Store) (string, url.Values)
+	wantErr string
+	check   func(t *testing.T, st store.Store, path string)
+}
+
+// The dashboard's audit writes by class (issue 107 row 3): a form that starts
+// work is recorded first and refused with "nothing was changed" when the
+// record cannot be written; a form whose effect already happened (a retry
+// task created, a task cancelled or suspended) names that effect.
 func TestDashboardAuditWriteFailures(t *testing.T) {
 	ctx := context.Background()
-	cases := []struct {
-		name    string
-		fail    string
-		post    func(t *testing.T, st store.Store) (string, url.Values)
-		wantErr string
-		check   func(t *testing.T, st store.Store, path string)
-	}{
+	cases := []dashAuditCase{
 		{
 			name: "learning proposal is refused and not stored",
 			fail: "learning.propose",
@@ -65,7 +68,7 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 				}
 				return "/ui/tasks/task_failed/retry", url.Values{}
 			},
-			wantErr: "was submitted, but its audit record could not be written",
+			wantErr: "was submitted, but an audit record could not be written",
 			check: func(t *testing.T, st store.Store, path string) {
 				if _, err := st.GetTask(ctx, strings.TrimPrefix(path, "/tasks/")); err != nil {
 					t.Fatalf("retry task missing: %v", err)
@@ -73,6 +76,31 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 			},
 		},
 	}
+	task := func(id string, state domain.TaskState, path string) func(t *testing.T, st store.Store) (string, url.Values) {
+		return func(t *testing.T, st store.Store) (string, url.Values) {
+			seedUITask(t, st, id, state)
+			return path, url.Values{}
+		}
+	}
+	cases = append(cases, []dashAuditCase{
+		{name: "cancel reports the task it cancelled", fail: "task.cancel",
+			post:    task("task_c", domain.TaskStateWorking, "/ui/tasks/task_c/cancel"),
+			wantErr: "task task_c was cancelled, but an audit record could not be written"},
+		{name: "suspend reports the task it suspended", fail: "task.suspend",
+			post:    task("task_s", domain.TaskStateWorking, "/ui/tasks/task_s/suspend"),
+			wantErr: "task task_s was suspended, but an audit record could not be written"},
+		{name: "resume is refused", fail: "task.resume",
+			post:    task("task_r", domain.TaskStateSuspended, "/ui/tasks/task_r/resume"),
+			wantErr: "resume refused: its audit record could not be written, nothing was changed"},
+		{name: "retry is refused before its task", fail: "task.submit",
+			post:    task("task_f", domain.TaskStateFailed, "/ui/tasks/task_f/retry"),
+			wantErr: "retry refused: its audit record could not be written, nothing was changed"},
+		{name: "submission is refused", fail: "task.submit",
+			post: func(*testing.T, store.Store) (string, url.Values) {
+				return "/ui/tasks", url.Values{"workload": {"coder"}, "input_json": {"hi"}}
+			},
+			wantErr: "task submission refused: its audit record could not be written, nothing was changed"},
+	}...)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newUITestStore(t)
@@ -84,7 +112,7 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 				Spec:     domain.WorkloadSpec{Class: domain.ClassLongLivedAgent},
 			}}}
 			faults := audittest.Wrap(st)
-			dash, err := NewDashboard(Options{Store: faults, Reconciler: controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle})})
+			dash, err := NewDashboard(Options{Store: faults, Reconciler: controlplane.NewReconciler(controlplane.Options{Store: faults, Bundle: bundle})})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,7 +128,23 @@ func TestDashboardAuditWriteFailures(t *testing.T) {
 			if !strings.Contains(errMsg, tc.wantErr) {
 				t.Fatalf("redirect %s err=%q, want %q", target, errMsg, tc.wantErr)
 			}
-			tc.check(t, st, target)
+			if strings.Contains(tc.wantErr, ", but ") && strings.Contains(errMsg, "nothing was changed") {
+				t.Fatalf("err=%q says nothing changed after an effect", errMsg)
+			}
+			if len(faults.Refused()) == 0 {
+				t.Fatal("no audit write was attempted")
+			}
+			if tc.check != nil {
+				tc.check(t, st, target)
+			}
 		})
+	}
+}
+
+func seedUITask(t *testing.T, st store.Store, id string, state domain.TaskState) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := st.CreateTask(context.Background(), domain.Task{ID: id, IdempotencyKey: id, WorkloadName: "coder", State: state, InputJSON: `{"prompt":"p"}`, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -98,7 +98,7 @@ func (d *Dashboard) handleOpenConclave(w http.ResponseWriter, r *http.Request) {
 	decree := strings.TrimSpace(r.FormValue("decree"))
 	sess, err := d.conclave.Open(r.Context(), tplName, title, decree)
 	if err != nil {
-		http.Redirect(w, r, "/conclaves?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/conclaves?err="+url.QueryEscape(errText(err, "opening the conclave", "")), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, fmt.Sprintf("/conclaves/%s?notice=%s", url.PathEscape(sess.ID), url.QueryEscape("Conclave convened")), http.StatusSeeOther)
@@ -117,7 +117,7 @@ func (d *Dashboard) handlePostDecree(w http.ResponseWriter, r *http.Request) {
 	to := strings.TrimSpace(r.FormValue("to"))
 	body := strings.TrimSpace(r.FormValue("body"))
 	if _, err := d.conclave.PostMessage(r.Context(), id, "operator", to, "decree", body, ""); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
+		redirectConclaveErr(w, r, id, errText(err, "posting the message", ""))
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Decree issued"), http.StatusSeeOther)
@@ -135,7 +135,7 @@ func (d *Dashboard) handleCloseConclave(w http.ResponseWriter, r *http.Request) 
 	}
 	state := domain.ConclaveState(r.FormValue("state"))
 	if err := d.conclave.Close(r.Context(), id, state); err != nil {
-		redirectConclaveErr(w, r, id, err.Error())
+		redirectConclaveErr(w, r, id, errText(err, "closing the conclave", ""))
 		return
 	}
 	http.Redirect(w, r, "/conclaves/"+url.PathEscape(id)+"?notice="+url.QueryEscape("Conclave closed"), http.StatusSeeOther)

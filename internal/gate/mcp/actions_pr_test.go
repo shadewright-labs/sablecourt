@@ -176,11 +176,12 @@ func setupPRGateWithStore(t *testing.T, backend *fakePRBackend, mergeEffect doma
 	}
 
 	eng := policy.NewEngine([]domain.Policy{bundle.Policies["default"]}, nil)
-	queue := approval.NewQueue(st, autoApprover{})
 	var gateStore store.Store = st
 	if wrap != nil {
 		gateStore = wrap(st)
 	}
+	// The queue writes through the same store, so a test can fail its rows.
+	queue := approval.NewQueue(gateStore, autoApprover{})
 	gate := New(Options{
 		Store:     gateStore,
 		Bundle:    bundle,

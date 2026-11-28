@@ -129,12 +129,13 @@ func (r *Reconciler) CancelTask(ctx context.Context, taskID, reason string) erro
 	}
 	cleanupErr := errors.Join(leaseErr, r.stopTask(cleanupCtx, taskID))
 	// Cancelling stops execution, so it is never refused for a missing
-	// record; a record that cannot be written is returned to the caller.
+	// record; a record that cannot be written is returned to the caller,
+	// marked as coming after the cancellation.
 	auditErr := store.RecordAudit(cleanupCtx, r.store, domain.AuditRecord{
 		Category: "controlplane", TaskID: taskID, WorkloadName: task.WorkloadName,
 		Action: "task.cancel", Outcome: "cancelled", DetailJSON: fmt.Sprintf(`{"reason":%q}`, reason), CreatedAt: r.now(),
 	})
-	return errors.Join(cleanupErr, auditErr)
+	return errors.Join(cleanupErr, store.AfterEffect("task "+taskID+" was cancelled", auditErr))
 }
 
 func terminalTaskState(state domain.TaskState) bool {
@@ -282,8 +283,9 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		return err
 	}
 	// Suspending stops execution, so it is never refused for a missing
-	// record; a record that cannot be written is returned to the caller.
-	return store.RecordAudit(ctx, r.store, domain.AuditRecord{
+	// record; a record that cannot be written is returned to the caller,
+	// marked as coming after the suspension.
+	return store.AfterEffect("task "+taskID+" was suspended", store.RecordAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       taskID,
 		WorkloadName: task.WorkloadName,
@@ -291,7 +293,7 @@ func (r *Reconciler) SuspendTask(ctx context.Context, taskID, reason string) err
 		Outcome:      "suspended",
 		DetailJSON:   fmt.Sprintf(`{"checkpoint_id":%q,"reason":%q}`, cp.ID, reason),
 		CreatedAt:    r.now(),
-	})
+	}))
 }
 
 // ResumeTask restores the latest checkpoint, mints a fresh gate lease, and moves a suspended task back to working.

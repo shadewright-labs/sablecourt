@@ -142,19 +142,20 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		closeErr := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled)
-		// The session exists by now, so an audit failure is reported as
-		// coming after it was opened.
-		if errors.Is(cause, store.ErrAuditWrite) {
-			done := "conclave " + session.ID + " was opened and then cancelled"
-			if closeErr != nil {
-				done = "conclave " + session.ID + " was opened and could not be cancelled"
-			}
-			cause = store.AfterEffect(done, cause)
-		}
+		done := "conclave " + session.ID + " was opened and then cancelled"
+		var err error
 		if closeErr != nil {
-			return domain.ConclaveSession{}, errors.Join(cause, closeErr)
+			done = "conclave " + session.ID + " was opened and could not be cancelled"
+			err = errors.Join(cause, closeErr)
+		} else {
+			err = errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
 		}
-		return domain.ConclaveSession{}, errors.Join(cause, b.cancelOpeningTurns(cleanupCtx, session.ID))
+		// The session exists by now, so an audit failure anywhere in the
+		// opening or its cleanup is reported as coming after it was opened.
+		if errors.Is(err, store.ErrAuditWrite) {
+			err = store.AfterEffect(done, err)
+		}
+		return domain.ConclaveSession{}, err
 	}
 
 	limits := b.limits(bundle, tpl, true)

@@ -20,6 +20,7 @@ func TestAuditFailureText(t *testing.T) {
 		{"refused and wrapped", fmt.Errorf("wake vassal: %w", refused), "task submission refused: its audit record could not be written, nothing was changed", true},
 		{"after effect", AfterEffect("task t1 was created", refused), "task t1 was created, but an audit record could not be written", true},
 		{"after effect wrapped and joined", errors.Join(errors.New("cleanup"), fmt.Errorf("x: %w", AfterEffect("message 3 was stored", refused))), "message 3 was stored, but an audit record could not be written", true},
+		{"nested and joined effects all named", AfterEffect("conclave c1 was opened and then cancelled", errors.Join(errors.New("submit failed"), AfterEffect("task t1 was cancelled", refused), AfterEffect("task t1 was cancelled", refused))), "conclave c1 was opened and then cancelled; task t1 was cancelled, but an audit record could not be written", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

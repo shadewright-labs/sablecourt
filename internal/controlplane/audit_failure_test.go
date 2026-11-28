@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
@@ -24,7 +25,9 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 		fail    func(domain.AuditRecord) bool
 		act     func(r *Reconciler, task domain.Task) error
 		wantErr bool
-		check   func(t *testing.T, st store.Store, task domain.Task)
+		// wantText is what store.AuditFailureText answers for the error.
+		wantText string
+		check    func(t *testing.T, st store.Store, task domain.Task)
 	}{
 		{
 			name: "submit is refused and creates no task",
@@ -33,7 +36,8 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 				_, err := r.SubmitTask(ctx, "worker", "second", "{}")
 				return err
 			},
-			wantErr: true,
+			wantErr:  true,
+			wantText: "op refused: its audit record could not be written, nothing was changed",
 			check: func(t *testing.T, st store.Store, _ domain.Task) {
 				if _, err := st.GetTaskByIdempotencyKey(ctx, "second"); !errors.Is(err, store.ErrNotFound) {
 					t.Fatalf("task created without its record: %v", err)
@@ -67,18 +71,20 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 			prepare: func(t *testing.T, r *Reconciler, task domain.Task) {
 				launchAndSuspend(t, r, task)
 			},
-			fail:    audittest.Action("task.resume"),
-			act:     func(r *Reconciler, task domain.Task) error { return r.ResumeTask(ctx, task.ID) },
-			wantErr: true,
+			fail:     audittest.Action("task.resume"),
+			act:      func(r *Reconciler, task domain.Task) error { return r.ResumeTask(ctx, task.ID) },
+			wantErr:  true,
+			wantText: "op refused: its audit record could not be written, nothing was changed",
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateSuspended)
 			},
 		},
 		{
-			name:    "cancel goes ahead and reports the record",
-			fail:    audittest.Action("task.cancel"),
-			act:     func(r *Reconciler, task domain.Task) error { return r.CancelTask(ctx, task.ID, "") },
-			wantErr: true,
+			name:     "cancel goes ahead and reports the record",
+			fail:     audittest.Action("task.cancel"),
+			act:      func(r *Reconciler, task domain.Task) error { return r.CancelTask(ctx, task.ID, "") },
+			wantErr:  true,
+			wantText: " was cancelled, but an audit record could not be written",
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateCancelled)
 			},
@@ -90,9 +96,10 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			fail:    audittest.Action("task.suspend"),
-			act:     func(r *Reconciler, task domain.Task) error { return r.SuspendTask(ctx, task.ID, "") },
-			wantErr: true,
+			fail:     audittest.Action("task.suspend"),
+			act:      func(r *Reconciler, task domain.Task) error { return r.SuspendTask(ctx, task.ID, "") },
+			wantErr:  true,
+			wantText: " was suspended, but an audit record could not be written",
 			check: func(t *testing.T, st store.Store, task domain.Task) {
 				requireState(t, st, task.ID, domain.TaskStateSuspended)
 			},
@@ -133,6 +140,9 @@ func TestControlPlaneAuditWriteFailures(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if msg, _ := store.AuditFailureText(err, "op"); !strings.Contains(msg, tc.wantText) {
+				t.Fatalf("text %q, want %q", msg, tc.wantText)
 			}
 			if tc.check != nil {
 				tc.check(t, st, task)

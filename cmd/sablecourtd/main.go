@@ -1051,8 +1051,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.CancelTask(r.Context(), id, "api_cancelled"); err != nil {
-			if errors.Is(err, store.ErrAuditWrite) {
-				writeAuditFailed(w, "task "+id+" was cancelled")
+			if writeAuditError(w, err, "cancel") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1089,7 +1088,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				DetailJSON:   fmt.Sprintf(`{"retried_from":%q,"handoff":%v}`, id, withHandoff),
 				CreatedAt:    time.Now().UTC(),
 			}); err != nil {
-				writeAuditFailed(w, "retry task "+retried.ID+" was submitted")
+				writeAuditError(w, store.AfterEffect("retry task "+retried.ID+" was submitted", err), "retry")
 				return
 			}
 		}
@@ -1108,8 +1107,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	mux.HandleFunc("POST /api/v1/tasks/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := reconciler.SuspendTask(r.Context(), id, "api_suspended"); err != nil {
-			if errors.Is(err, store.ErrAuditWrite) {
-				writeAuditFailed(w, "task "+id+" was suspended")
+			if writeAuditError(w, err, "suspend") {
 				return
 			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -1211,7 +1209,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				CreatedAt:  time.Now().UTC(),
 			}); err != nil {
 				attachHub.ReleaseTakeover(id, body.Operator)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "takeover refused: its audit record could not be written"})
+				writeAuditError(w, err, "takeover")
 				return
 			}
 			if err := attachHub.ConfirmTakeover(id, body.Operator); err != nil {
@@ -1270,7 +1268,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				DetailJSON: fmt.Sprintf(`{"operator":%q}`, body.Operator),
 				CreatedAt:  time.Now().UTC(),
 			}); err != nil {
-				writeAuditFailed(w, "the takeover was released")
+				writeAuditError(w, store.AfterEffect("the takeover was released", err), "detach")
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "detached", "id": id})
@@ -1794,7 +1792,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			DetailJSON:   fmt.Sprintf(`{"branch":%q}`, branch),
 			CreatedAt:    time.Now().UTC(),
 		}); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "promotion refused: its audit record could not be written, no branch was created"})
+			writeAuditError(w, err, "promotion")
 			return
 		}
 		cmd := exec.CommandContext(r.Context(), "git", "branch", "--", branch) // #nosec G702 -- newHandler matches a manifest workload and passes its prefixed name as one argument after -- to git branch, without a shell.
@@ -1937,6 +1935,9 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if err := conclaveBroker.Close(r.Context(), r.PathValue("id"), domain.ConclaveState(body.State)); err != nil {
+				if writeAuditError(w, err, "closing the conclave") {
+					return
+				}
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
 			}
@@ -2172,12 +2173,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeAuditFailed reports an effect that has already happened but whose
-// audit record could not be written. done names the effect.
-func writeAuditFailed(w http.ResponseWriter, done string) {
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": done + ", but its audit record could not be written"})
 }
 
 // writeAuditError answers HTTP 500 when err is a failed audit write and

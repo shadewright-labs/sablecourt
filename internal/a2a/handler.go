@@ -101,6 +101,10 @@ func BrokerHandler(opts Options) http.Handler {
 			}
 			inBytes, _ := json.Marshal(map[string]string{"prompt": strings.Join(texts, "\n")})
 			task, err := opts.Reconciler.SubmitTask(r.Context(), p.Workload, p.ID, string(inBytes))
+			if msg, ok := store.AuditFailureText(err, "task submission"); ok {
+				writeRPCError(w, req.ID, -32603, msg)
+				return
+			}
 			if err != nil {
 				writeRPCError(w, req.ID, -32002, err.Error())
 				return
