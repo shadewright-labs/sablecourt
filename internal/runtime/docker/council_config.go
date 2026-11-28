@@ -178,8 +178,12 @@ func preparePrompt(s rt.CouncilLaunch) (string, error) {
 		len(s.Prompt) > 64<<10 || strings.TrimSpace(s.Prompt) == "" || strings.HasPrefix(strings.TrimSpace(s.Prompt), "-") || strings.ContainsRune(s.Prompt, 0) {
 		return "", errors.New("invalid council bootstrap input")
 	}
-	prompt := redact.String(strings.ReplaceAll(s.Prompt, s.TaskToken, "[REDACTED]"))
-	if privateKeyStart.MatchString(prompt) || len(prompt) > 64<<10 {
+	raw := strings.ReplaceAll(s.Prompt, s.TaskToken, "[REDACTED]")
+	// redact.String withholds an unfinished private key through the end of
+	// the text; a council prompt that holds one is refused instead of sent
+	// without its rest.
+	prompt := redact.String(raw)
+	if redact.UnfinishedKey(raw) || privateKeyStart.MatchString(prompt) || len(prompt) > 64<<10 {
 		return "", errors.New("unsafe council prompt")
 	}
 	return prompt, nil

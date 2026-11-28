@@ -131,6 +131,11 @@ func TestRedactorLinearGrowth(t *testing.T) {
 		},
 		{
 			name: "pem truncated body",
+			// With an unfinished key withheld whole, Text on this shape is
+			// the private key pattern alone, whose step from the bit-state
+			// backtracker to the NFA near 5 KiB doubles the ratio when the
+			// sizes straddle it; both sizes start past it.
+			minSmall: 1 << 13,
 			build: func(n int) string {
 				return joinParts("-----BEGIN ", "RSA PRIVATE KEY-----\n") + strings.Repeat("MIIEfixture\n", max(1, n/12))
 			},
@@ -146,6 +151,11 @@ func TestRedactorLinearGrowth(t *testing.T) {
 		},
 		{
 			name: "pem repeated unclosed grep lines",
+			// With an unfinished key withheld whole, Text on this shape is
+			// the private key pattern alone, whose step from the bit-state
+			// backtracker to the NFA near 5 KiB doubles the ratio when the
+			// sizes straddle it; both sizes start past it.
+			minSmall: 1 << 13,
 			build: func(n int) string {
 				return strings.Repeat("grep '"+joinParts("-----BEGIN ", "PRIVATE KEY-----")+"' x\n", max(1, n/38))
 			},
@@ -266,12 +276,22 @@ func TestRedactorLinearGrowth(t *testing.T) {
 		},
 		{
 			name: "pem truncated inline base64 body",
+			// With an unfinished key withheld whole, Text on this shape is
+			// the private key pattern alone, whose step from the bit-state
+			// backtracker to the NFA near 5 KiB doubles the ratio when the
+			// sizes straddle it; both sizes start past it.
+			minSmall: 1 << 13,
 			build: func(n int) string {
 				return joinParts("-----BEGIN ", "PRIVATE KEY----- ") + strings.Repeat("MIIEfixture0", max(1, n/12))
 			},
 		},
 		{
 			name: "N1 pem repeated headers on one line",
+			// With an unfinished key withheld whole, Text on this shape is
+			// the private key pattern alone, whose step from the bit-state
+			// backtracker to the NFA near 5 KiB doubles the ratio when the
+			// sizes straddle it; both sizes start past it.
+			minSmall: 1 << 13,
 			build: func(n int) string {
 				return strings.Repeat(joinParts("-----BEGIN ", "PRIVATE KEY----- "), max(1, n/28))
 			},

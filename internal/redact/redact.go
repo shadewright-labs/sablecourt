@@ -16,6 +16,9 @@ type rule struct {
 	// what replace puts in that span.
 	pre, post int
 	marker    string
+	// unfinished extends the matches with an unfinished private key (see
+	// withUnfinishedKey).
+	unfinished bool
 }
 
 // Go's regexp package implements RE2, guaranteeing linear O(n) scan time with no backtracking.
@@ -26,6 +29,9 @@ var rules = []rule{
 		category: "private_key",
 		re:       regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`),
 		replace:  "[REDACTED:private_key]",
+		// A key whose END line is missing or cut off is withheld from its
+		// BEGIN line through the end of the text.
+		unfinished: true,
 	},
 	{
 		category: "sablecourt_token",
@@ -105,11 +111,27 @@ func redactPatterns(input string) Result {
 
 	for _, r := range rules {
 		matches := r.re.FindAllStringIndex(out, -1)
+		if r.unfinished {
+			matches = withUnfinishedKey(out, matches)
+		}
 		if len(matches) == 0 {
 			continue
 		}
 		totalHits += len(matches)
 		seen[r.category] = struct{}{}
+		if r.unfinished {
+			// The rule has no groups, so each match becomes r.replace.
+			var b strings.Builder
+			pos := 0
+			for _, m := range matches {
+				b.WriteString(out[pos:m[0]])
+				b.WriteString(r.replace)
+				pos = m[1]
+			}
+			b.WriteString(out[pos:])
+			out = b.String()
+			continue
+		}
 		out = r.re.ReplaceAllString(out, r.replace)
 	}
 
@@ -166,6 +188,9 @@ func patternSpans(input string) ([]markedSpan, []patternMatch) {
 	)
 	for _, r := range rules {
 		matches := r.re.FindAllStringSubmatchIndex(cur, -1)
+		if r.unfinished {
+			matches = withUnfinishedKey(cur, matches)
+		}
 		if len(matches) == 0 {
 			continue
 		}

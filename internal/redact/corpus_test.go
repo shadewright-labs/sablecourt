@@ -109,6 +109,56 @@ func TestCorpusMustHide(t *testing.T) {
 			mustNotContain: []string{"fixtureBodyLine1"},
 			mustContain:    []string{"before\r\n", "\r\nafter"},
 		},
+		// A key with no END line after its BEGIN line is withheld from
+		// the BEGIN line through the end of the text (issue 262).
+		{
+			name:           "pem rsa truncated no end line",
+			input:          "before\n" + pemBlock("RSA PRIVATE KEY", pemBody, "\n", false),
+			mustNotContain: []string{"fixtureBodyLine1", "fixtureBodyLine2"},
+			mustContain:    []string{"before\n[REDACTED:private_key]"},
+			wantCategory:   "private_key",
+			wantMarker:     "[REDACTED:private_key]",
+		},
+		{
+			name:           "pem ec truncated no end line",
+			input:          "before\n" + pemBlock("EC PRIVATE KEY", pemBody, "\n", false),
+			mustNotContain: []string{"fixtureBodyLine1"},
+			mustContain:    []string{"before\n"},
+		},
+		{
+			name:           "pem openssh truncated no end line",
+			input:          "before\n" + pemBlock("OPENSSH PRIVATE KEY", pemBody, "\n", false),
+			mustNotContain: []string{"fixtureBodyLine1"},
+			mustContain:    []string{"before\n"},
+		},
+		{
+			name:           "pem pkcs8 truncated no end line",
+			input:          "before\n" + pemBlock("PRIVATE KEY", pemBody, "\n", false),
+			mustNotContain: []string{"fixtureBodyLine1"},
+			mustContain:    []string{"before\n"},
+		},
+		{
+			name:           "complete pem then truncated pem preserve text between",
+			input:          pemBlock("PRIVATE KEY", pemBody, "\n", true) + "\nkeep-between\n" + pemBlock("OPENSSH PRIVATE KEY", "unclosedTailSecret", "\n", false),
+			mustNotContain: []string{"fixtureBodyLine1", "unclosedTailSecret"},
+			mustContain:    []string{"[REDACTED:private_key]\nkeep-between\n[REDACTED:private_key]"},
+		},
+		{
+			name:           "N5 truncated pem body on header line with space",
+			input:          joinParts("-----BEGIN ", "PRIVATE KEY----- ") + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw",
+			mustNotContain: []string{"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"},
+		},
+		{
+			name:           "N5 truncated pem body glued to header line",
+			input:          joinParts("-----BEGIN ", "PRIVATE KEY-----") + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw",
+			mustNotContain: []string{"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"},
+		},
+		{
+			name:           "N5 truncated pem double-escaped newline body",
+			input:          `{"msg":"{\"k\":\"` + joinParts("-----BEGIN ", "PRIVATE KEY-----") + `\\nMIIEvQIBADANBgkqhkiG9w0BAQE\"}"}`,
+			mustNotContain: []string{"MIIEvQIBADANBgkqhkiG9w0BAQE"},
+			mustContain:    []string{`{"msg":"{\"k\":\"[REDACTED:private_key]`},
+		},
 		{
 			name:           "provider ghp token",
 			input:          "val=" + ghp,
@@ -404,10 +454,6 @@ func TestCorpusMustKeep(t *testing.T) {
 		{
 			name:  "M7 openapi password schema",
 			input: "password:\n  type: string\n  minLength: 8\n",
-		},
-		{
-			name:  "M7 pem header in grep command with no key body",
-			input: "grep '" + joinParts("-----BEGIN ", "PRIVATE KEY-----") + "' *.pem\nfile1.pem\n",
 		},
 		{
 			name:  "M7 pre-redacted plain REDACTED marker",

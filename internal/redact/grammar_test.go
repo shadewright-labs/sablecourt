@@ -169,7 +169,8 @@ func grammarHideRows() []grammarRow {
 		}
 	}
 
-	// Truncated PEM blocks: main needs the END line.
+	// Truncated PEM blocks: a BEGIN line with no END line after it is
+	// withheld through the end of the text (issue 262).
 	body := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"
 	layouts := []func(hdr string) string{
 		func(hdr string) string { return hdr + "\n" + body },
@@ -184,7 +185,7 @@ func grammarHideRows() []grammarRow {
 		hdr := joinParts("-----BEGIN ", lbl, "-----")
 		for _, l := range layouts {
 			in := l(hdr)
-			rows = append(rows, grammarRow{name: "pem " + in, input: in, needles: []string{body}, class: "truncated PEM"})
+			rows = append(rows, grammarRow{name: "pem " + in, input: in, needles: []string{body}})
 		}
 	}
 	return rows

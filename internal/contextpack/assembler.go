@@ -147,9 +147,11 @@ func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.W
 	}
 
 	for _, r := range relics {
-		body := r.Body
-		if len(body) > 2048 {
-			body = body[:2048] + "\n...[truncated]"
+		// Redact the whole body before cutting it, so the cut cannot keep
+		// the start of a secret without its end.
+		body, cut := redact.Head(r.Body, 2048, nil)
+		if cut {
+			body += "\n...[truncated]"
 		}
 		data := map[string]string{"name": r.Name, "author": r.AuthorRole, "body": body}
 		optional = append(optional, packetContext{

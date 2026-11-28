@@ -152,10 +152,6 @@ func knownGapRows() []gapRow {
 		{class: "JWT", name: "M5 jwt dot at start of line", input: jwtWrappedDots, leaks: []string{"hbGciOiJIUzI1Ni", "c2lnbmF0dXJlMTIz"}},
 		{class: "JWT", name: "M5 jwt spaces around dots", input: jwtSpacedDots, leaks: []string{"hbGciOiJIUzI1Ni", "c2lnbmF0dXJlMTIz"}},
 		{class: "JWT", name: "M5 jwt preceded by word char", input: "jwt_" + jwtNoPad + " 1" + jwtNoPad, leaks: []string{"hbGciOiJIUzI1Ni", "c2lnbmF0dXJlZml4dHVyZTEyMw"}},
-		{class: "truncated PEM", name: "pem rsa truncated no end line", input: "before\n" + pemBlock("RSA PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1", "fixtureBodyLine2"}, example: "a BEGIN RSA PRIVATE KEY header and body with no END line"},
-		{class: "truncated PEM", name: "pem ec truncated no end line", input: "before\n" + pemBlock("EC PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1"}},
-		{class: "truncated PEM", name: "pem openssh truncated no end line", input: "before\n" + pemBlock("OPENSSH PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1"}},
-		{class: "truncated PEM", name: "pem pkcs8 truncated no end line", input: "before\n" + pemBlock("PRIVATE KEY", pemBody, "\n", false), leaks: []string{"fixtureBodyLine1"}},
 		{class: "truncated PEM", name: "pem mismatched end line", input: joinParts("before\n", "-----BEGIN ", "RSA PRIVATE KEY-----\n", pemBody, "\n", "-----END ", "EC PRIVATE KEY-----\n", "trailingSecretBody"), leaks: []string{"fixtureBodyLine1", "trailingSecretBody"}, example: "a BEGIN PRIVATE KEY block closed by an END line of another label"},
 		{class: "other: split tokens", name: "provider ghp split by invalid utf8 byte", input: "val=" + ghpSplit, leaks: []string{"0123456789", "abcdefghij", "klmnopqrst"}, example: "a GitHub token with an invalid UTF-8 byte inside"},
 		{class: "other: split tokens", name: "provider ghp split inside prefix by invalid utf8 byte", input: "val=" + ghpSplitPrefix, leaks: []string{"0123456789", "abcdefghij", "klmnopqrst"}},
@@ -175,7 +171,6 @@ func knownGapRows() []gapRow {
 		{class: "other: split tokens", name: "provider ghp long prefix split before tail by invalid utf8 byte", input: "val=" + joinParts("ghp_", "0123456789abcdefghij", "\xff", "tailSecret99"), leaks: []string{"0123456789", "tailSecret99"}},
 		{class: "Basic auth", name: "authorization basic split by invalid utf8 byte", input: "Authorization: Basic " + joinParts("dXNl", "\xff", "cjpmaXh0dXJl"), leaks: []string{"dXNl", "cjpmaXh0dXJl"}},
 		{class: "other: value shapes", name: "adjacent quoted secrets on one line", input: `password="first secret val" api_key="second secret val" status=ok`, leaks: []string{"first secret val", "second secret val"}},
-		{class: "truncated PEM", name: "complete pem then truncated pem preserve text between", input: pemBlock("PRIVATE KEY", pemBody, "\n", true) + "\nkeep-between\n" + pemBlock("OPENSSH PRIVATE KEY", "unclosedTailSecret", "\n", false), leaks: []string{"fixtureBodyLine1", "unclosedTailSecret"}},
 		{class: "nested YAML", name: "nested yaml secret then safe sibling then second secret", input: "secret:\n  value: firstYamlSec\nstatus: healthy\ntoken:\n  value: secondYamlSec\n", leaks: []string{"firstYamlSec", "secondYamlSec"}},
 		{class: "URL userinfo", name: "N2 url password containing comma", input: "postgres://app:hunter2,pw@example.com/x", leaks: []string{"hunter2", ",pw@example.com"}},
 		{class: "URL userinfo", name: "N2 url password containing semicolon", input: "postgres://app:hunter2;pw@example.com/x", leaks: []string{"hunter2", ";pw@example.com"}},
@@ -184,9 +179,6 @@ func knownGapRows() []gapRow {
 		{class: "URL userinfo", name: "N2 url password containing closing brace", input: "postgres://app:hunter2}pw@example.com/x", leaks: []string{"hunter2", "}pw@example.com"}},
 		{class: "cookies", name: "N3 go map Set-Cookie multiple values", input: "map[Set-Cookie:[sid=abc123; Path=/ refresh=xyz789; Secure]]", leaks: []string{"abc123", "xyz789"}},
 		{class: "cookies", name: "N3 json array Set-Cookie multiple values", input: `{"Set-Cookie":["a=b; Path=/","refresh=xyz789"]}`, leaks: []string{"a=b", "xyz789"}},
-		{class: "truncated PEM", name: "N5 truncated pem body on header line with space", input: joinParts("-----BEGIN ", "PRIVATE KEY----- ") + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw", leaks: []string{"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"}},
-		{class: "truncated PEM", name: "N5 truncated pem body glued to header line", input: joinParts("-----BEGIN ", "PRIVATE KEY-----") + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw", leaks: []string{"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"}, example: "BEGIN PRIVATE KEY header with the body glued to it, no END line"},
-		{class: "truncated PEM", name: "N5 truncated pem double-escaped newline body", input: `{"msg":"{\"k\":\"` + joinParts("-----BEGIN ", "PRIVATE KEY-----") + `\\nMIIEvQIBADANBgkqhkiG9w0BAQE\"}"}`, leaks: []string{"MIIEvQIBADANBgkqhkiG9w0BAQE"}},
 		{class: "cookies", name: "N6 curl single-quoted Cookie preserves closing quote and url", input: "curl -H 'Cookie: a=b' https://x.invalid", leaks: []string{"a=b"}, example: "curl -H 'Cookie: a=b' https://x.invalid"},
 		{class: "cookies", name: "N6 curl double-quoted Cookie preserves closing quote and url", input: `curl -H "Cookie: a=b" https://x.invalid`, leaks: []string{"a=b"}},
 		// Rows from the first rewrite's known-gap table that main's redactor
@@ -220,6 +212,7 @@ func knownGapRows() []gapRow {
 		{class: "over-redaction", name: "bearer authentication failed prose", input: "Authorization: Bearer authentication failed", overRedacted: true, example: "Authorization: Bearer authentication failed"},
 		{class: "over-redaction", name: "env reference in password value", input: "password: ${DB_PASSWORD}", overRedacted: true, example: "password: ${DB_PASSWORD}"},
 		{class: "over-redaction", name: "secret name reference", input: "existingSecret: postgres-secret", overRedacted: true},
+		{class: "over-redaction", name: "private key header with no key after it", input: "grep '" + joinParts("-----BEGIN ", "PRIVATE KEY-----") + "' *.pem\nfile1.pem\n", overRedacted: true, example: "grep '-----BEGIN PRIVATE KEY-----' *.pem"},
 	}
 }
 

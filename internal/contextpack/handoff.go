@@ -51,8 +51,13 @@ func BuildFailureHandoff(task domain.Task, events []domain.TaskEvent, messages [
 				if txt == "" {
 					continue
 				}
-				if len(txt) > 4096 {
-					txt = "...[truncated]\n" + txt[len(txt)-4096:]
+				// Redact the whole artifact before cutting it to its tail,
+				// so the cut cannot drop the start of a secret and keep
+				// the rest of it.
+				if tail, cut := redact.Tail(txt, 0, 4096, store.RedactLearningText); cut {
+					txt = "...[truncated]\n" + tail
+				} else {
+					txt = tail
 				}
 				b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", a.Name, txt))
 			}
@@ -66,9 +71,9 @@ func BuildFailureHandoff(task domain.Task, events []domain.TaskEvent, messages [
 		}
 		b.WriteString("\n## Recent Messages\n\n")
 		for _, m := range messages[start:] {
-			body := strings.TrimSpace(m.Content)
-			if len(body) > 1024 {
-				body = body[:1024] + "...[truncated]"
+			body, cut := redact.Head(strings.TrimSpace(m.Content), 1024, store.RedactLearningText)
+			if cut {
+				body += "...[truncated]"
 			}
 			b.WriteString(fmt.Sprintf("- [%s] %s\n", m.Role, body))
 		}
@@ -98,8 +103,11 @@ func BuildVerifierPrompt(authorTask domain.Task, stepPrompt string) string {
 				if txt == "" {
 					continue
 				}
-				if len(txt) > 4096 {
-					txt = txt[:4096] + "\n...[truncated]"
+				// Redact the whole artifact before cutting it, so the cut
+				// cannot keep the start of a secret without its end.
+				txt, cut := redact.Head(txt, 4096, nil)
+				if cut {
+					txt += "\n...[truncated]"
 				}
 				b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", a.Name, txt))
 			}

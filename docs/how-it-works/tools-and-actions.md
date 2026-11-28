@@ -56,7 +56,7 @@ Exact match is the layer that can be tested as a guarantee ([ADR-0015](../adr/00
 
 A credential shorter than 8 bytes is refused where it is loaded, with an error that names the setting and not the value; at start the daemon does not run with one. `git.push` runs without a token only when the store has no `github_token`; a short one, or any other error reading it, refuses the push before Git runs. The rule covers only credentials the daemon reads itself: a Kubernetes `BearerTokenFile` or `KeyFile` that the client library reads later is not checked, so the daemon can start with a short one.
 
-Pattern rules are the second layer: regular expressions for some common key shapes, bearer headers and secret-looking `key: value` pairs, run in linear time. They are best effort, and the test rows in `internal/redact` show what they replace. Both layers find their matches on the same text and overlapping matches are merged before anything is replaced, so a held value inside or across a key shape removes the whole key, not just the held part.
+Pattern rules are the second layer: regular expressions for some common key shapes, bearer headers and secret-looking `key: value` pairs, run in linear time. They are best effort, and the test rows in `internal/redact` show what they replace. A private key `BEGIN` line with no `END` line after it, such as a key whose end a cut removed, is replaced together with everything after it in the same text, so the text after it is lost too, even when the line was a bare header with no key (an over-redaction row below). Both layers find their matches on the same text and overlapping matches are merged before anything is replaced, so a held value inside or across a key shape removes the whole key, not just the held part.
 
 Exact match does not cover percent encoding, mixed-case hex, nested encodings, Unicode normalisation, number renderings, or a value split across fields or records. It does not run on audit fields, error and log text, the Agent Card, council reads or Takeover input, and it holds no database or Kubernetes credential that the drivers resolve themselves (pgx query settings, environment and password files, a refreshed `BearerTokenFile` or a `KeyFile`). These limits are tracked in [issue 189](https://github.com/shadewright-labs/sablecourt/issues/189).
 
@@ -71,7 +71,7 @@ The tests in `internal/redact` hold, for the pattern rules, a corpus of syntheti
 | token key names | 3 | `auth_token: <value>`, `https://x.invalid/?token=<value>&next=/home` |
 | URL userinfo | 17 | `postgres://app:<password>@example.com:5432/x`, `redis://:<password>@cache.internal:6379/0`, `postgres://app:p@<rest of password>@example.com/x` |
 | Basic auth | 7 | `Authorization: Basic <base64>`, `Proxy-Authorization: Basic <base64>`, `map[Authorization:[Basic <base64>]]` |
-| truncated PEM | 9 | `a BEGIN RSA PRIVATE KEY header and body with no END line`, `a BEGIN PRIVATE KEY block closed by an END line of another label`, `BEGIN PRIVATE KEY header with the body glued to it, no END line` |
+| truncated PEM | 1 | `a BEGIN PRIVATE KEY block closed by an END line of another label` |
 | JWT | 11 | `session=<header>.<payload>.<signature>`, `tok=<header>.<payload>`, `enc=<five dot-separated segments>` |
 | cookies | 11 | `Cookie: session=<value>`, `Set-Cookie: sid=<value>; Path=/; HttpOnly`, `curl -H 'Cookie: a=b' https://x.invalid` |
 | nested YAML | 34 | `secret:\n  value: <value>`, `database:\n  password:\n    value: <value>`, `{"text":"secret:\n  value: <value>\n"}` |
@@ -83,7 +83,7 @@ The tests in `internal/redact` hold, for the pattern rules, a corpus of syntheti
 | other: command-line flags | 4 | `mycli --password <value> --host db.internal`, `curl -u admin:<value> https://api.invalid/v1`, `curl --proxy-user u:<value> https://example.test/` |
 | other: split tokens | 17 | `a GitHub token with an invalid UTF-8 byte inside`, `a GitHub token with a zero-width space inside`, `AKIA<16 characters>_ID` |
 | other: opaque strings | 1 | `deploy <40 hex characters>` |
-| over-redaction | 6 | `interface Cfg { token: string; apiKey: string }`, `secret:\n  secretName: db-creds\n  defaultMode: 0400`, `password: changed` |
+| over-redaction | 7 | `interface Cfg { token: string; apiKey: string }`, `secret:\n  secretName: db-creds\n  defaultMode: 0400`, `password: changed` |
 
 <!-- redact-gaps:end -->
 

@@ -78,7 +78,7 @@ func TestLocalProxyCompiler(t *testing.T) {
 			if err := os.MkdirAll(redactDir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, file := range []string{"redact.go", "known.go", "exactjson.go"} {
+			for _, file := range []string{"redact.go", "known.go", "exactjson.go", "unfinished.go"} {
 				if err := os.WriteFile(filepath.Join(redactDir, file), []byte("package redact"), 0600); err != nil {
 					t.Fatal(err)
 				}

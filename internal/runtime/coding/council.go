@@ -1648,15 +1648,11 @@ func filterStatusLines(status string, excluded map[string]bool) string {
 	return strings.Join(kept, "\n")
 }
 
+// redactDiffText redacts a diff. redact.String withholds a private key with
+// no END line from its BEGIN line through the end, so the head cut of the
+// diff that follows cannot keep part of a key body.
 func redactDiffText(text string) string {
-	clean := redact.String(text)
-	if hasUnfinishedPrivateKey(clean) {
-		starts := privateKeyStart.FindAllStringIndex(clean, -1)
-		if len(starts) > 0 {
-			clean = clean[:starts[len(starts)-1][0]] + "[REDACTED:private_key]"
-		}
-	}
-	return clean
+	return redact.String(text)
 }
 
 func readOnlyArtifacts(taskBase string, state *worktreeState) ([]scruntime.Artifact, error) {

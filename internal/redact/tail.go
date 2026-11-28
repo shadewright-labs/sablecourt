@@ -82,7 +82,8 @@ const unfinishedKeyMarker = "[REDACTED:private_key]"
 
 // hideUnfinishedKey replaces everything from the first private key BEGIN
 // line that has no END line after it through the end of s with the private
-// key marker. No rule matches such a key, so without this its body would be
+// key marker. String does the same (see withUnfinishedKey); Tail keeps this
+// for a clean pass that does not, since without it the key body would be
 // shown as soon as a cut dropped the BEGIN line. The diagnostics after it
 // are lost with it.
 func hideUnfinishedKey(s string) string {
