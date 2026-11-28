@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"log/slog"
 	"maps"
 	"net"
@@ -440,10 +441,17 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	}
 	// Packages without a logger of their own, such as the failed audit writes
 	// store.RecordAudit logs, write through the daemon's logger, whether it was
-	// supplied or made here. The previous default comes back on return.
+	// supplied or made here. The previous default comes back on return, with
+	// the standard log package's writer and flags, which slog.SetDefault
+	// changes and does not change back.
 	previousLogger := slog.Default()
+	previousLogOutput, previousLogFlags := log.Writer(), log.Flags()
 	slog.SetDefault(logger)
-	defer slog.SetDefault(previousLogger)
+	defer func() {
+		slog.SetDefault(previousLogger)
+		log.SetOutput(previousLogOutput)
+		log.SetFlags(previousLogFlags)
+	}()
 
 	var gitSyncer *config.GitSyncer
 	if cfg.manifestsGitRepo != "" {

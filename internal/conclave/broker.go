@@ -139,15 +139,17 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 	}
 
 	fail := func(cause error) (domain.ConclaveSession, error) {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
 		// The store notes the session it created and every step of this
 		// cleanup that changed something, so an audit failure anywhere in
 		// the opening is answered with what is left. Both steps run whatever
-		// the other returns, so a room that cannot be closed still has its
-		// started turns cancelled.
-		closeErr := b.Close(cleanupCtx, session.ID, domain.ConclaveStateCancelled)
-		return domain.ConclaveSession{}, errors.Join(cause, closeErr, b.cancelOpeningTurns(cleanupCtx, session.ID))
+		// the other returns, each with its own deadline, so a room that
+		// cannot be closed in time still has its started turns cancelled.
+		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), openCleanupTimeout)
+		closeErr := b.Close(closeCtx, session.ID, domain.ConclaveStateCancelled)
+		cancelClose()
+		turnsCtx, cancelTurns := context.WithTimeout(context.WithoutCancel(ctx), openCleanupTimeout)
+		defer cancelTurns()
+		return domain.ConclaveSession{}, errors.Join(cause, closeErr, b.cancelOpeningTurns(turnsCtx, session.ID))
 	}
 
 	limits := b.limits(bundle, tpl, true)
@@ -172,6 +174,9 @@ func (b *Broker) Open(ctx context.Context, templateName, title, initialDecree st
 	}
 	return session, nil
 }
+
+// openCleanupTimeout bounds each cleanup step of a failed opening.
+var openCleanupTimeout = 5 * time.Second
 
 func (b *Broker) cancelOpeningTurns(ctx context.Context, roomID string) error {
 	if b.reconciler == nil {

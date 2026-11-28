@@ -569,7 +569,7 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 		}
 		if isRetry {
 			if err := store.RecordAudit(ctx, r.store, retryAuditRecord(retry, task, now)); err != nil {
-				r.logNotCreated(ctx, task)
+				r.logNotCreated(ctx, task, nil)
 				return domain.Task{}, err
 			}
 		}
@@ -593,8 +593,14 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 	}
 	if err != nil {
 		if !replay {
-			// The row above names a task that was not created; say so.
-			r.logNotCreated(ctx, task)
+			// The rows above name a task that was not created; say so for
+			// each of them, so a repeat that creates a different task leaves
+			// no task.retry row naming one that never existed.
+			var retried *retryRow
+			if isRetry {
+				retried = &retry
+			}
+			r.logNotCreated(ctx, task, retried)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			// The unique key selects the winner even when submissions race.
@@ -624,8 +630,14 @@ func (r *Reconciler) submitTask(ctx context.Context, workloadName, idempotencyKe
 }
 
 // logNotCreated records that the task a task.submit row named was not
-// created.
-func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task) {
+// created. When retry is not nil, the task.retry row written for the same
+// task gets its own not_created row.
+func (r *Reconciler) logNotCreated(ctx context.Context, task domain.Task, retry *retryRow) {
+	if retry != nil {
+		closing := retryAuditRecord(*retry, task, r.now())
+		closing.Outcome = "not_created"
+		store.LogAudit(ctx, r.store, closing)
+	}
 	store.LogAudit(ctx, r.store, domain.AuditRecord{
 		Category:     "controlplane",
 		TaskID:       task.ID,
