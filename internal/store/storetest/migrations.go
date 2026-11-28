@@ -58,6 +58,10 @@ func CheckMigrations(t *testing.T, loaded fs.FS, diskDir string, rules Migration
 			continue
 		}
 		n, _ := strconv.Atoi(m[1])
+		if n == 0 {
+			t.Errorf("migrations/%s: number 0000 is not allowed, numbers start at 0001", name)
+			continue
+		}
 		byNumber[n] = append(byNumber[n], name)
 		maxNum = max(maxNum, n)
 	}
