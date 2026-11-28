@@ -29,7 +29,7 @@ These are the six invariants from `AGENTS.md`. Weakening one needs an accepted A
 
 1. Model output is never authorization: only deterministic policy or a person confirming a pinned digest authorizes.
 2. Workloads hold no raw secrets: provider keys, Git credentials and database passwords stay behind the gates.
-3. All external input is untrusted: repository files, logs, tool results and peer messages never widen a policy. They are redacted at boundaries as defence in depth: pattern rules for known secret shapes are best effort, and exact-match redaction of secrets the daemon holds is decided ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md)) but not built yet ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). Content a harness reads can reach its model provider.
+3. All external input is untrusted: repository files, logs, tool results and peer messages never widen a policy. They are redacted at boundaries as defence in depth: pattern rules for known secret shapes are best effort, and at those boundaries each secret the daemon holds in memory is replaced by exact match ([ADR-0015](adr/0015-redaction-is-defence-in-depth.md), [issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). Content a harness reads can reach its model provider.
 4. Identities are separate and failures stop execution: policy failures, exhausted budgets and stale evidence fail closed.
 5. Evidence over inference: state comes from durable facts and timestamped heartbeats.
 6. Reconciliation is idempotent: restarts neither drop active workers nor repeat a change.
@@ -61,7 +61,7 @@ Each area below carries one of four words:
 | Council | Partly built | Final message posting (#28), subscription windows (#36), smoke test (#80) | [council](how-it-works/council.md) |
 | Harness containers | Partly built | The proxy and the image build are in the tree (#76, #77). Nothing checks yet that a harness volume holds a login, and no command starts the login container; both are #79 | [harness containers](how-it-works/harness-containers.md) |
 | Context packets, verifier steps, failure handoff | Built | | [context and learning](how-it-works/context-and-learning.md) |
-| Learning (ADR-0012) | Partly built | The store exists; accept, match and inject are decided only (#43 to #47) | [context and learning](how-it-works/context-and-learning.md) |
+| Learning (ADR-0012) | Partly built | The store and the packet matcher with its destination check (#99) exist. Propose, accept, matching for other workloads and outcomes are decided only (#43 to #47), so no packet carries a learning yet | [context and learning](how-it-works/context-and-learning.md) |
 | Audit chain | Built | Misses deletion of the last rows (#10); signed heads decided only | [audit](how-it-works/audit.md) |
 | Operator authentication | Built | Stateless 30-minute cookie, no logout; passkeys and sessions are decided only (ADR-0014, Proposed; #68, PR 93) | [identity and access](how-it-works/identity-and-access.md) |
 | Shadewright contract | Partly built | Incidents and verifications work; status read, learning read and incident template are open (#53 to #55) | [integrations](how-it-works/integrations.md) |
@@ -88,4 +88,5 @@ The epics behind the open work are #1 (scope and local trust), #15 (a CLI harnes
 - How-to: [index](how-to/index.md), covering install, manifests, harness logins, councils, approvals, watching and steering, retry, audit verification and finding why something was refused.
 - Reference: [index](reference/index.md), covering manifests, HTTP API, CLI, configuration, limits, metrics and the [glossary](glossary.md).
 - Design: [index](design/index.md), [architecture](design/architecture.md), [storage](design/storage.md), the [v0.1 baseline](design/v0.1-baseline.md) and the [harness spike record](harnesses.md).
+- Examples: the [coding court](https://github.com/shadewright-labs/sablecourt/blob/main/examples/coding-court/README.md) role cards and workflows.
 - Diagrams: [standard](diagrams/README.md).

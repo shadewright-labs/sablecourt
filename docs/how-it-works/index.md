@@ -22,7 +22,7 @@ Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [cou
 | --- | --- |
 | 1. Model output is never authorization | The policy engine (`internal/policy`) decides each tool, action and delegation request; an `approve` effect needs a person to confirm the pinned digest (`internal/approval`). |
 | 2. Workloads hold no raw secrets | Provider keys stay in the secret store and the Model Gate; a workload gets a lease and a stripped environment. The subscription logins of ADR-0011 are the one exception. |
-| 3. External input is untrusted | The policy engine and the action catalog never take policy from input. `internal/redact` runs at the MCP Gate, in Conclave messages and Relics, in Court Memory writes, in Scry output and in council context, as best-effort defence in depth for known secret shapes ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)). Exact-match redaction of secrets the daemon holds is decided and not built ([issue 180](https://github.com/shadewright-labs/sablecourt/issues/180)). The Model Gate forwards request bodies as sent, so content a harness reads can reach its provider. |
+| 3. External input is untrusted | The policy engine and the action catalog never take policy from input. `internal/redact` runs at the MCP Gate, in Conclave messages and Relics, in Court Memory writes, in Scry output and replay, in council context, on Model Gate responses and on stored task input when it is read. Exact match of daemon-held secrets covers literal bytes and a fixed list of spellings; pattern rules are best effort ([ADR-0015](../adr/0015-redaction-is-defence-in-depth.md)). The Model Gate forwards request bodies as sent, so content a harness reads can reach its provider. |
 | 4. Separate identities, fail closed | Policy defaults to deny, a manifest with another default is rejected, an exhausted budget stops a call, a missing sandbox stops a launch. |
 | 5. Evidence over inference | The reconciler decides from observed runtime state and stored heartbeats, and fails a task whose workload or adapter is missing. |
 | 6. Idempotent reconciliation | Idempotency keys on tasks, reserved council turns, and recovery of running tasks at startup. |
@@ -30,7 +30,7 @@ Rooms in which several workloads cooperate are [Conclaves](conclaves.md); a [cou
 ## Not built yet
 
 - Server-side sessions, passkeys and roles: decided in [ADR-0014](../adr/0014-identity-and-authentication.md), Proposed.
-- The learning record of [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): stored, not yet accepted or injected.
+- The learning record of [ADR-0012](../adr/0012-learning-evidence-and-expiry.md): stored and matched for local destinations only, not yet accepted through any route.
 - The proxy-to-daemon hop of the harness containers is described in an amendment to [ADR-0011](../adr/0011-sanctum-scope-trust-and-cli-harnesses.md) that is still Proposed.
 
 ## In depth

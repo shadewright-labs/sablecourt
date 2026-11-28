@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,9 @@ import (
 	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/store"
+	"github.com/shadewright-labs/sablecourt/internal/ui"
 )
 
 // apiEnvConfig selects the optional parts of the daemon handler under test.
@@ -562,6 +565,40 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 	if rec.Code != http.StatusGone || apiError(t, rec) != "legacy learning publication is disabled" {
 		t.Fatalf("learnings %d %s", rec.Code, rec.Body.String())
 	}
+	seedAPILearning(t, env.st, "Accepted advice for local agents")
+	if err := env.st.PutMemory(context.Background(), domain.MemoryEntry{Namespace: "learning:global", Key: "legacy", Value: "Legacy advice from Court Memory", Author: "operator", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings", "")
+	var listed []domain.Learning
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); rec.Code != http.StatusOK || err != nil {
+		t.Fatalf("list learnings %d %s %v", rec.Code, rec.Body.String(), err)
+	}
+	if len(listed) != 1 || listed[0].Statement != "Accepted advice for local agents" || strings.Contains(rec.Body.String(), "Legacy advice") {
+		t.Fatalf("listed learnings %s", rec.Body.String())
+	}
+	for _, q := range []string{"repo=sablecourt", "repo=https://user:pw%40example.test/org/repo", "repo=ftp://example.test/org/repo"} {
+		rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings?"+q, "")
+		if rec.Code != http.StatusBadRequest || !strings.Contains(apiError(t, rec), "repository remote URL") {
+			t.Fatalf("invalid repo query %q returned %d %s, want 400", q, rec.Code, rec.Body.String())
+		}
+	}
+	seedAPILearningScoped(t, env.st, "path-advice", "Advice for b.go", domain.LearningScope{PathGlobs: []string{"b.go"}})
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"path=a.go,%20b.go", 2},
+		{"path=%20b.go%20,", 2},
+		{"path=a.go", 1},
+		{"repo=https://example.test/org/repo&path=a.go,%20b.go", 2},
+	} {
+		rec = apiCall(env.h, http.MethodGet, "/api/v1/learnings?"+tc.query, "")
+		listed = nil
+		if err := json.Unmarshal(rec.Body.Bytes(), &listed); rec.Code != http.StatusOK || err != nil || len(listed) != tc.want {
+			t.Fatalf("list learnings %q: %d %s %v, want %d entries", tc.query, rec.Code, rec.Body.String(), err, tc.want)
+		}
+	}
 	rec = apiCall(env.h, http.MethodGet, "/api/v1/providers", "")
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("providers without registry %d %s", rec.Code, rec.Body.String())
@@ -569,6 +606,41 @@ func TestAPIProviderTiersAndLearnings(t *testing.T) {
 	rec = apiCall(env.h, http.MethodPost, "/api/v1/providers/openai/sync", "")
 	if rec.Code != http.StatusServiceUnavailable || apiError(t, rec) != "provider registry unavailable" {
 		t.Fatalf("sync without registry %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// seedAPILearning proposes and accepts a global learning backed by a task artifact.
+func seedAPILearning(t *testing.T, st store.Store, statement string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "learning-evidence", AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "learning-evidence", IdempotencyKey: "learning-evidence", WorkloadName: "learning-evidence", State: domain.TaskStateCompleted, ArtifactsJSON: `[{"name":"record","text":"recorded observation"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	seedAPILearningScoped(t, st, "advice", statement, domain.LearningScope{Global: true})
+}
+
+// seedAPILearningScoped proposes and accepts a learning backed by the task
+// artifact that seedAPILearning records.
+func seedAPILearningScoped(t *testing.T, st store.Store, id, statement string, scope domain.LearningScope) {
+	t.Helper()
+	ctx := context.Background()
+	ls, err := store.Learnings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Minute)
+	l, err := ls.ProposeLearning(ctx, domain.Learning{
+		ID: id, Statement: statement, Scope: scope, SourceKind: domain.LearningSourceTask,
+		SourceID: "learning-evidence", EvidenceRef: "artifact:record", Author: "operator-1", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ls.AcceptLearning(store.WithLearningOperator(ctx, "operator-1"), l.ID, l.VersionDigest, now); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1105,5 +1177,168 @@ func TestAPIApproveRefusesMalformedBody(t *testing.T) {
 	}
 	if got, _ := env.st.GetApproval(context.Background(), apr.ID); got.Status != domain.ApprovalPending {
 		t.Fatalf("malformed approval body decided the approval: %q", got.Status)
+	}
+}
+
+// A message stored before a value became a daemon-held secret must still be
+// redacted when the workload reads its task messages.
+func TestGateTaskMessagesRedactsRegisteredSecrets(t *testing.T) {
+	ctx := context.Background()
+	st := daemonTestStore(t)
+	addMessageTestLease(t, st)
+	secret := "stored_message_" + strings.Repeat("m3", 12)
+	if err := st.AppendTaskMessage(ctx, domain.TaskMessage{TaskID: "task", Role: "user", Content: "use " + secret, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	redact.Register(secret)
+	h := newHandler(st, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gate/task/messages", nil)
+	req.Header.Set("Authorization", "Bearer test-task-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The first task message is the stored task input, which is JSON: a held value
+// written there with a JSON escape must not leave through the messages route.
+func TestGateTaskMessagesRedactsEscapedHeldValueInJSON(t *testing.T) {
+	ctx := context.Background()
+	st := daemonTestStore(t)
+	addMessageTestLease(t, st)
+	secret := "stored_escaped_" + strings.Repeat("m4", 12)
+	content := `{"prompt":"` + "\\" + `u0073` + secret[1:] + `"}`
+	if err := st.AppendTaskMessage(ctx, domain.TaskMessage{TaskID: "task", Role: "user", Content: content, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	redact.Register(secret)
+	h := newHandler(st, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gate/task/messages", nil)
+	req.Header.Set("Authorization", "Bearer test-task-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	var msgs []domain.TaskMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &msgs); err != nil || len(msgs) != 1 {
+		t.Fatalf("messages %v: %s", err, rec.Body.String())
+	}
+	var input struct {
+		Prompt string `json:"prompt"`
+	}
+	_ = json.Unmarshal([]byte(msgs[0].Content), &input)
+	if strings.Contains(msgs[0].Content, secret) || strings.Contains(input.Prompt, secret) {
+		t.Fatalf("task message shows a held value after decoding: %q", msgs[0].Content)
+	}
+}
+
+// Third review: the workload gate refused a held value in stored task input,
+// but A2A tasks/get, the task API and the dashboard returned the stored row as
+// it was. Each read path applies the record rule on read, whether the value
+// was registered before the task was stored or after.
+func TestStoredTaskInputRedactedOnEveryRead(t *testing.T) {
+	uesc := "\\" + "u0073" // "s" as a JSON unicode escape
+	for i, when := range []string{"registered before storing", "registered after storing"} {
+		for _, spell := range []string{"literal", "escaped"} {
+			t.Run(when+", "+spell, func(t *testing.T) {
+				ctx := context.Background()
+				st := daemonTestStore(t)
+				token := addMessageTestLease(t, st)
+				held := fmt.Sprintf("stored_input_%d_%s_", i, spell) + strings.Repeat("r8", 10)
+				written := held
+				if spell == "escaped" {
+					written = uesc + held[1:]
+				}
+				if i == 0 {
+					redact.Register(held)
+				}
+				input := `{"prompt":"use ` + written + `"}`
+				now := time.Now().UTC()
+				if err := st.CreateTask(ctx, domain.Task{ID: "read-task", IdempotencyKey: "read-task", WorkloadName: "worker", State: domain.TaskStateWorking, InputJSON: input, ArtifactsJSON: `[{"text":"` + written + `"}]`, CreatedAt: now, UpdatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.AppendTaskMessage(ctx, domain.TaskMessage{TaskID: "read-task", Role: "user", Content: input, CreatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.AppendTaskMessage(ctx, domain.TaskMessage{TaskID: "task", Role: "user", Content: input, CreatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+				if i == 1 {
+					redact.Register(held)
+				}
+				dash, err := ui.NewDashboard(ui.Options{Store: st})
+				if err != nil {
+					t.Fatal(err)
+				}
+				a2aToken := "a2a_" + strings.Repeat("t5", 12)
+				secrets := defaultIntegrationSecrets()
+				_ = secrets.Set(ctx, "a2a_bearer_token", a2aToken)
+				rec := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: &config.Bundle{}, Policy: policy.NewEngine(nil, policy.NewCircuitBreaker(3, time.Minute))})
+				h := newHandler(st, secrets, nil, nil, nil, nil, nil, rec, nil, nil, nil, nil, dash, handlerConfig{operatorToken: testOperatorToken})
+
+				reads := map[string]*httptest.ResponseRecorder{
+					"task API":      apiCall(h, http.MethodGet, "/api/v1/tasks/read-task", ""),
+					"task list API": apiCall(h, http.MethodGet, "/api/v1/tasks", ""),
+					"dashboard":     apiCall(h, http.MethodGet, "/", ""),
+					"task page":     apiCall(h, http.MethodGet, "/tasks/read-task", ""),
+				}
+				a2a := httptest.NewRequest(http.MethodPost, "/a2a", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"read-task"}}`))
+				a2a.Header.Set("Authorization", "Bearer "+a2aToken)
+				reads["A2A tasks/get"] = httptest.NewRecorder()
+				h.ServeHTTP(reads["A2A tasks/get"], a2a)
+				gate := httptest.NewRequest(http.MethodGet, "/gate/task/messages", nil)
+				gate.Header.Set("Authorization", "Bearer "+token)
+				reads["workload gate"] = httptest.NewRecorder()
+				h.ServeHTTP(reads["workload gate"], gate)
+
+				for name, rec := range reads {
+					body := rec.Body.String()
+					if rec.Code != http.StatusOK {
+						t.Fatalf("%s: status %d: %s", name, rec.Code, body)
+					}
+					if strings.Contains(body, held) || strings.Contains(body, written) || strings.Contains(body, held[1:]) {
+						t.Fatalf("%s shows the held value: %s", name, body)
+					}
+					if !strings.Contains(body, redact.KnownSecretMarker) {
+						t.Fatalf("%s does not mark the refused record: %s", name, body)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Fix round: an idempotent replay of POST /api/v1/tasks and POST
+// /api/v1/tasks/{id}/retry returned the stored task input as stored, without
+// the shared read function, so a value registered after storing came back.
+func TestTaskWriteResponsesUseTheSharedRead(t *testing.T) {
+	ctx := context.Background()
+	st := daemonTestStore(t)
+	held := "stored_write_reply_" + strings.Repeat("w6", 10)
+	input := `{"prompt":"use ` + held + `"}`
+	now := time.Now().UTC()
+	if err := st.UpsertWorkload(ctx, domain.WorkloadRecord{Name: "worker", Zone: domain.ZoneRuntime, Class: domain.ClassLongLivedAgent, AgentCardJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(ctx, domain.Task{ID: "done-task", IdempotencyKey: "done-key", WorkloadName: "worker", State: domain.TaskStateFailed, InputJSON: input, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	redact.Register(held)
+	bundle := &config.Bundle{Workloads: map[string]domain.Workload{"worker": {Metadata: domain.ObjectMeta{Name: "worker"}}}}
+	rec := controlplane.NewReconciler(controlplane.Options{Store: st, Bundle: bundle, Policy: policy.NewEngine(nil, policy.NewCircuitBreaker(3, time.Minute))})
+	h := newHandler(st, defaultIntegrationSecrets(), nil, nil, nil, nil, nil, rec, nil, nil, nil, nil, nil, handlerConfig{operatorToken: testOperatorToken})
+	for name, resp := range map[string]*httptest.ResponseRecorder{
+		"idempotent replay": apiCall(h, http.MethodPost, "/api/v1/tasks", `{"workload":"worker","idempotencyKey":"done-key","inputJson":"{}"}`),
+		"retry":             apiCall(h, http.MethodPost, "/api/v1/tasks/done-task/retry", ""),
+	} {
+		body := resp.Body.String()
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("%s: status %d: %s", name, resp.Code, body)
+		}
+		if strings.Contains(body, held) || !strings.Contains(body, redact.KnownSecretMarker) {
+			t.Fatalf("%s did not refuse the stored input: %s", name, body)
+		}
 	}
 }

@@ -63,8 +63,8 @@ All mutating operator endpoints enforce same-origin CSRF checks (`Sec-Fetch-Site
 
 | Endpoint / Flag | Purpose |
 | --- | --- |
-| `GET /api/v1/learnings?repo=<name>&path=<paths>` | Return matching global, repo, and path-glob Scoped Learnings. |
-| `POST /api/v1/learnings` | Save a redacted Scoped Learning (`scope`, `key`, `rule`, `author`). |
+| `GET /api/v1/learnings?repo=<remote URL>&path=<paths>` | Return accepted, unexpired learnings from the ADR-0012 record that match. |
+| `POST /api/v1/learnings` | Disabled: refuses every call with 410. |
 | `GET /api/v1/providers/tiers` | Read configured `fast`, `coding`, and `critic` model tier routes. |
 | `POST /api/v1/providers/tiers` | Persist role-based model tier routes (`[{"tier":"critic","provider":"cli:codex","model":"gpt-6.2-astra"}]`; an optional `family` names the model family of a model the built-in rules do not recognize). |
 | `POST /api/v1/tasks/{id}/retry?handoff=true` | Retry a task with a standardized `failure-handoff.md` built from artifacts and events. |

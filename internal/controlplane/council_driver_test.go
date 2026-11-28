@@ -12,6 +12,7 @@ import (
 
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	"github.com/shadewright-labs/sablecourt/internal/gate/model"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	scruntime "github.com/shadewright-labs/sablecourt/internal/runtime"
 	"github.com/shadewright-labs/sablecourt/internal/store"
 )
@@ -125,11 +126,16 @@ func TestCouncilCheckoutAtDispatch(t *testing.T) {
 
 type writerObservation struct {
 	artifactAdapter
-	exitCode int
+	exitCode   int
+	observedAt time.Time // zero means now
 }
 
 func (a *writerObservation) Observe(context.Context, scruntime.Handle) (scruntime.Observation, error) {
-	return scruntime.Observation{State: a.nextState, ExitCode: a.exitCode, ObservedAt: time.Now().UTC()}, nil
+	at := a.observedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return scruntime.Observation{State: a.nextState, ExitCode: a.exitCode, ObservedAt: at}, nil
 }
 
 func TestObservedWriterDiff(t *testing.T) {
@@ -481,6 +487,41 @@ func TestCouncilLeaseRevokedOnTerminalObservationAndCappedAtDeadline(t *testing.
 		}
 		if lease.ExpiresAt.After(deadline) {
 			t.Fatalf("renewed lease expires at %v, after council deadline %v", lease.ExpiresAt, deadline)
+		}
+	})
+
+	t.Run("renewal extends the exact-match expiry of the task token", func(t *testing.T) {
+		ctx := t.Context()
+		r, st, task, adapter, _ := setupCouncilTask(t, 3*time.Hour)
+		hash := model.HashToken(adapter.lastSpec.TaskToken)
+		minted, err := st.GetActiveLeaseByTokenHash(ctx, hash, r.now())
+		if err != nil {
+			t.Fatalf("expected active lease after launch: %v", err)
+		}
+		// The minted token itself is registered under the task, with the
+		// lease expiry.
+		got, ok := redact.DefaultRegistry().OwnedExpiry(task.ID)
+		if !ok || !got.Equal(minted.ExpiresAt) {
+			t.Fatalf("registry expiry after mint = %v (%v), want %v", got, ok, minted.ExpiresAt)
+		}
+		// Within the two minute staleness window, so the heartbeat renews.
+		later := time.Now().UTC().Add(90 * time.Second)
+		r.now = func() time.Time { return later }
+		adapter.observedAt = later
+		adapter.nextState = scruntime.StateRunning
+		if _, err := r.observeTask(ctx, task); err != nil {
+			t.Fatalf("observeTask running: %v", err)
+		}
+		renewed, err := st.GetActiveLeaseByTokenHash(ctx, hash, later)
+		if err != nil {
+			t.Fatalf("expected active lease after renewal: %v", err)
+		}
+		if !renewed.ExpiresAt.After(minted.ExpiresAt) {
+			t.Fatalf("lease was not renewed: %v, minted %v", renewed.ExpiresAt, minted.ExpiresAt)
+		}
+		got, ok = redact.DefaultRegistry().OwnedExpiry(task.ID)
+		if !ok || !got.Equal(renewed.ExpiresAt) {
+			t.Fatalf("registry expiry after renewal = %v (%v), want %v", got, ok, renewed.ExpiresAt)
 		}
 	})
 }

@@ -447,7 +447,7 @@ func TestUpstreamBridgeRefusals(t *testing.T) {
 
 	t.Run("custom header without prefix", func(t *testing.T) {
 		var got http.Header
-		b := NewUpstreamBridge(secret.NewMemoryStore(map[string]string{"api_key": " v1 "}), &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b := NewUpstreamBridge(secret.NewMemoryStore(map[string]string{"api_key": " v1-key-value "}), &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			got = r.Header
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"result":1}`))}, nil
 		})})
@@ -456,7 +456,7 @@ func TestUpstreamBridgeRefusals(t *testing.T) {
 		if _, err := b.CallTool(ctx, s, "t", nil); err != nil {
 			t.Fatal(err)
 		}
-		if got.Get("X-Api-Key") != "v1" || got.Get("Authorization") != "" {
+		if got.Get("X-Api-Key") != "v1-key-value" || got.Get("Authorization") != "" {
 			t.Fatalf("headers = %v", got)
 		}
 	})

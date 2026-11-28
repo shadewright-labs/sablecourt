@@ -46,7 +46,8 @@ type taskInputMeta struct {
 }
 
 // Assemble builds a bounded, redacted context-packet.md for a task before dispatch.
-func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.Workload) Packet {
+// Learnings enter the packet only when dest.LearningsAllowed(wl) holds (ADR-0012).
+func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.Workload, dest Destination) Packet {
 	var meta taskInputMeta
 	_ = json.Unmarshal([]byte(task.InputJSON), &meta)
 	peerWake := meta.Activation == string(domain.ActivationOnMention) && meta.FromRole != "operator"
@@ -57,10 +58,6 @@ func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.W
 	repoPath := strings.TrimSpace(meta.RepoPath)
 	if repoPath == "" && wl.Spec.Coding != nil {
 		repoPath = strings.TrimSpace(wl.Spec.Coding.RepoPath)
-	}
-	repoName := ""
-	if repoPath != "" {
-		repoName = filepath.Base(filepath.Clean(repoPath))
 	}
 
 	var changedPaths []string
@@ -73,7 +70,13 @@ func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.W
 		}
 	}
 
-	learnings := MatchLearnings(ctx, st, repoName, changedPaths, 20)
+	// No remote URL is derived from the checkout, so repository-scoped
+	// learnings never match here. A packet whose destination is not local
+	// reads no learnings at all.
+	var learnings []packetContext
+	if dest.LearningsAllowed(wl) {
+		learnings = learningSection(MatchLearnings(ctx, st, "", changedPaths, MaxPacketLearnings))
+	}
 
 	var relics []domain.ConclaveRelic
 	var decrees []domain.ConclaveMessage
@@ -136,12 +139,7 @@ func Assemble(ctx context.Context, st store.Store, task domain.Task, wl domain.W
 		b.WriteString(strings.TrimSpace(meta.FailureHandoff) + "\n")
 	}
 
-	var optional []packetContext
-	for _, l := range learnings {
-		optional = append(optional, packetContext{
-			section: "Scoped Learnings", text: fmt.Sprintf("- [%s / %s] %s\n", l.Namespace, l.Key, l.Value), at: l.UpdatedAt,
-		})
-	}
+	optional := learnings
 	for _, d := range decrees {
 		optional = append(optional, packetContext{
 			section: "Recent Conclave Decrees", text: fmt.Sprintf("- (%s) %s\n", d.FromRole, d.Body), at: d.CreatedAt,

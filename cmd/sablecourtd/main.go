@@ -185,6 +185,29 @@ type daemonConfig struct {
 	logger               *slog.Logger
 }
 
+// wireK8sRuntime installs the Kubernetes runtime adapter when --runtime=k8s.
+// A missing or unreadable configuration leaves the other adapters in place. A
+// credential in it too short to redact stops the start, like every other
+// credential the daemon loads.
+func wireK8sRuntime(ctx context.Context, cfg daemonConfig, adapters map[domain.WorkloadClass]scruntime.Adapter, hub *attach.Hub, logger *slog.Logger) error {
+	if cfg.runtimeBackend != "k8s" {
+		return nil
+	}
+	k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass)
+	if short := (*redact.ShortSecretError)(nil); errors.As(err, &short) {
+		return err
+	}
+	if err != nil {
+		logger.Warn("kubernetes runtime unavailable", "error", err)
+		return nil
+	}
+	k8sAdapter.SetAttachHub(ctx, hub)
+	adapters[domain.ClassLongLivedAgent] = k8sAdapter
+	adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
+	logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
+	return nil
+}
+
 // worktreeRootPath is the directory that holds every checkout the daemon
 // makes: worktrees beside the database.
 func worktreeRootPath(dbPath string) string {
@@ -330,6 +353,14 @@ func wireCouncilContainers(adapters map[domain.WorkloadClass]scruntime.Adapter, 
 	codingAdapter.DaemonListen = listenAddr
 }
 
+// packetLearningDestination fixes the facts that decide whether a context
+// packet may carry learnings (ADR-0012): long-lived agents run in the Docker
+// adapter, and no model gateway receives the requests.
+func packetLearningDestination(adapters map[domain.WorkloadClass]scruntime.Adapter, modelGatewayURL string) contextpack.Destination {
+	da, ok := adapters[domain.ClassLongLivedAgent].(*docker.Adapter)
+	return contextpack.Destination{DockerAgents: ok && da != nil, ModelGateway: modelGatewayURL != ""}
+}
+
 func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.mode))
 	if mode == "" || mode == "sanctum" || mode == "local" {
@@ -430,6 +461,9 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	pgDSN := cfg.postgresDSN
 	if pgDSN == "" {
 		pgDSN = os.Getenv("SABLECOURT_POSTGRES_DSN")
+	}
+	if err := registerDSN(pgDSN); err != nil {
+		return err
 	}
 	var st store.Store
 	if cfg.openStore != nil {
@@ -547,10 +581,15 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	}
 
 	stores := []secret.SecretStore{secret.NewKeyringStore("sablecourt")}
+	var fileSecretStore *secret.FileStore
 	if secretFile != "" {
-		stores = append(stores, secret.NewFileStore(secretFile))
+		fileSecretStore = secret.NewFileStore(secretFile)
+		stores = append(stores, fileSecretStore)
 	}
-	secretStore := &secret.ChainStore{Stores: stores}
+	secretStore := secret.NewObservingStore(&secret.ChainStore{Stores: stores}, registerDaemonSecret)
+	if err := preloadDaemonSecrets(ctx, secretStore, fileSecretStore, bundle); err != nil {
+		return err
+	}
 
 	modelGate := model.New(model.Options{
 		Store:      gateLeaseStore{st},
@@ -608,24 +647,21 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 			logger.Warn("citadel mode running on SQLite; set SABLECOURT_POSTGRES_DSN for production HA")
 		}
 	}
-	if cfg.runtimeBackend == "k8s" {
-		if k8sAdapter, err := k8sruntime.NewFromConfig(cfg.kubeconfigPath, cfg.k8sNamespace, cfg.k8sRuntimeClass); err == nil {
-			k8sAdapter.SetAttachHub(ctx, attachHub)
-			adapters[domain.ClassLongLivedAgent] = k8sAdapter
-			adapters[domain.ClassDeterministicController] = controller.NewAdapter(k8sAdapter)
-			logger.Info("using kubernetes runtime adapter", "namespace", cfg.k8sNamespace, "runtimeClass", cfg.k8sRuntimeClass)
-		} else {
-			logger.Warn("kubernetes runtime unavailable", "error", err)
-		}
+	if err := wireK8sRuntime(ctx, cfg, adapters, attachHub, logger); err != nil {
+		return err
 	}
+	packetDest := packetLearningDestination(adapters, cfg.modelGatewayURL)
+	logger.Info("context packet learning destination fixed at startup",
+		"dockerAgents", packetDest.DockerAgents, "modelGateway", packetDest.ModelGateway)
 
 	reconciler := controlplane.NewReconciler(controlplane.Options{
-		Store:        st,
-		Bundle:       bundle,
-		Policy:       policyEng,
-		Adapters:     adapters,
-		ModelGateURL: "http://" + gateHost + "/gate/model",
-		DataGateURL:  "http://" + gateHost + "/gate/mcp",
+		PacketDestination: packetDest,
+		Store:             st,
+		Bundle:            bundle,
+		Policy:            policyEng,
+		Adapters:          adapters,
+		ModelGateURL:      "http://" + gateHost + "/gate/model",
+		DataGateURL:       "http://" + gateHost + "/gate/mcp",
 		// Host coding agents reach the gate over loopback, not a container alias.
 		HostDataGateURL: cfg.hostGateURL(),
 		MaxConcurrent:   cfg.maxConcurrent,
@@ -658,26 +694,18 @@ func runDaemon(ctx context.Context, cfg daemonConfig) (runErr error) {
 	// One reload at a time: the reload route, the dashboard and the manifests
 	// git sync can call it together, and the gate and the reconciler must end
 	// with the same bundle and policy.
-	reloadFn := serialized(reloadSteps{
-		load:    loadAndSync,
-		check:   dataActionGate.CheckReload,
-		persist: recordBundle,
-		gate: func(b *config.Bundle, pol *policy.Engine) error {
-			return reloadGitOps(ctx, logger, dataActionGate, repoBinding, b, pol)
-		},
-		apply: func(b *config.Bundle, pol *policy.Engine) {
+	reloadFn := serialized(daemonReloadSteps(ctx, logger, loadAndSync, recordBundle, secretStore, dataActionGate, repoBinding,
+		func(b *config.Bundle, pol *policy.Engine) {
 			bundleMu.Lock()
 			bundle = b
 			bundleMu.Unlock()
 			modelGate.SetBundle(b)
 			reconciler.Reload(b, pol)
-			_ = scheduler.Reload(ctx, b)
+			reloadSchedules(ctx, logger, scheduler, b)
 			if b != nil {
 				logger.Info("reloaded manifests", "workloads", len(b.Workloads), "schedules", len(b.Schedules), "digest", shortDigest(b.ManifestDigest))
 			}
-		},
-		logger: logger,
-	}.run)
+		}).run)
 
 	provReg := providers.NewRegistry(providers.Options{
 		Store:   st,
@@ -993,11 +1021,27 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 	})
 	mux.HandleFunc("GET /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
-		var paths []string
-		if p := strings.TrimSpace(r.URL.Query().Get("path")); p != "" {
-			paths = strings.Split(p, ",")
+		if repo != "" {
+			// MatchLearnings yields none on a store error, so reject a bad
+			// remote URL here instead of answering with an empty list.
+			normalized, err := store.NormalizeRepoRemoteURL(repo)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo: " + err.Error()})
+				return
+			}
+			repo = normalized
 		}
-		writeJSON(w, http.StatusOK, contextpack.MatchLearnings(r.Context(), st, repo, paths, 100))
+		var paths []string
+		for p := range strings.SplitSeq(r.URL.Query().Get("path"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		learnings := contextpack.MatchLearnings(r.Context(), st, repo, paths, 100)
+		if learnings == nil {
+			learnings = []domain.Learning{}
+		}
+		writeJSON(w, http.StatusOK, learnings)
 	})
 	mux.HandleFunc("POST /api/v1/learnings", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "legacy learning publication is disabled"})
@@ -1050,7 +1094,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 		events, _ := st.ListTaskEvents(r.Context(), id)
 		budget, _ := st.TaskBudgetTotals(r.Context(), id)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"task":   task,
+			"task":   controlplane.TaskForRead(task),
 			"events": events,
 			"budget": budget,
 		})
@@ -1087,7 +1131,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 				CreatedAt:    time.Now().UTC(),
 			})
 		}
-		writeJSON(w, http.StatusCreated, retried)
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(retried))
 	})
 	if conclaveBroker != nil {
 		integrations.NewShadewright(integrations.ShadewrightOptions{
@@ -1506,7 +1550,7 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(w, http.StatusOK, controlplane.TasksForRead(items))
 	})
 	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -1523,7 +1567,8 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusCreated, task)
+		// An idempotent replay returns the stored task.
+		writeJSON(w, http.StatusCreated, controlplane.TaskForRead(task))
 	})
 	mux.HandleFunc("GET /api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
 		items, err := st.ListAudit(r.Context(), 50)
@@ -1673,7 +1718,11 @@ func newHandler(st store.Store, secrets secret.SecretStore, getBundle func() *co
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, msgs)
+		// A message stored before its text became a daemon-held secret is
+		// still refused on the way out. The first message is the task input,
+		// a declared JSON record, so it follows the same rule as the launch
+		// input and the other task read paths.
+		writeJSON(w, http.StatusOK, controlplane.TaskMessagesForRead(msgs))
 	})
 	mux.HandleFunc("POST /gate/task/messages", func(w http.ResponseWriter, r *http.Request) {
 		lease, ok := authenticateGateLease(w, r, st)
@@ -2204,9 +2253,51 @@ func reloadGitOps(ctx context.Context, logger *slog.Logger, gate *mcpgate.Gate, 
 	return nil
 }
 
+// daemonReloadSteps wires the daemon's manifest reload: load reads the
+// manifests, persist records the workloads, and apply swaps the bundle into
+// the rest of the daemon. check asks the gate whether it accepts the bundle,
+// then registers the bundle's MCP server secrets for exact redaction and
+// refuses the reload when one is too short to redact. So a refused secret
+// stops the reload before anything is written or swapped, and an accepted
+// bundle's secrets are registered before the store, the gate or apply sees
+// its grants. Registration only adds values: a refused reload may leave the
+// secrets it read registered, which widens redaction and grants nothing.
+func daemonReloadSteps(ctx context.Context, logger *slog.Logger, load func() (*config.Bundle, *policy.Engine, error), persist func(*config.Bundle) error, secrets secret.SecretStore, gate *mcpgate.Gate, binding *mcpgate.RepoBinding, apply func(*config.Bundle, *policy.Engine)) reloadSteps {
+	return reloadSteps{
+		load: load,
+		check: func(b *config.Bundle) error {
+			if err := gate.CheckReload(b); err != nil {
+				return err
+			}
+			if err := preloadBundleSecrets(ctx, secrets, b); err != nil {
+				return fmt.Errorf("reload refused: MCP server credentials: %w", err)
+			}
+			return nil
+		},
+		persist: persist,
+		gate: func(b *config.Bundle, pol *policy.Engine) error {
+			return reloadGitOps(ctx, logger, gate, binding, b, pol)
+		},
+		apply:  apply,
+		logger: logger,
+	}
+}
+
+// reloadSchedules swaps the scheduler to b's schedules. It runs in apply,
+// after the gate swap, so it cannot refuse the reload; a failure is logged.
+// The loader refuses an invalid cron expression, so it fails only for a
+// bundle that skipped the loader, and then no schedule fires until the next
+// accepted reload.
+func reloadSchedules(ctx context.Context, logger *slog.Logger, s *controlplane.Scheduler, b *config.Bundle) {
+	if err := s.Reload(ctx, b); err != nil {
+		logger.Error("schedules not reloaded; no schedule fires until the next accepted reload", "error", err)
+	}
+}
+
 // reloadSteps is the order of a manifest reload, and a refused reload changes
 // nothing. load reads the manifests and writes nothing. check runs every test
-// that can refuse the bundle (the gate's CheckReload) before anything is
+// that can refuse the bundle (the gate's CheckReload and, in the daemon, the
+// MCP server secret registration of daemonReloadSteps) before anything is
 // written or swapped. Only then does persist write the workloads to the store,
 // gate swap the gate's bundle, policy and upstream tools, and apply swap the
 // rest. When load fails or check refuses, nothing is written or swapped; a

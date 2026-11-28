@@ -2,13 +2,16 @@ package providers
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/shadewright-labs/sablecourt/internal/redact"
 	"github.com/shadewright-labs/sablecourt/internal/secret"
 )
 
@@ -30,7 +33,7 @@ func TestRegistryConnectSyncAndDisconnect(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5"},{"id":"text-embedding-3-large"},{"id":"o3"}]}`))
 		case "anthropic.test":
-			if r.Header.Get("x-api-key") != "sk-ant" {
+			if r.Header.Get("x-api-key") != "sk-ant-test" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -68,7 +71,7 @@ func TestRegistryConnectSyncAndDisconnect(t *testing.T) {
 	if err := reg.Connect(ctx, "openai", "sk-openai"); err != nil {
 		t.Fatalf("Connect openai: %v", err)
 	}
-	if err := reg.Connect(ctx, "anthropic", "sk-ant"); err != nil {
+	if err := reg.Connect(ctx, "anthropic", "sk-ant-test"); err != nil {
 		t.Fatalf("Connect anthropic: %v", err)
 	}
 	if err := reg.Connect(ctx, "gemini", "AIza-gem"); err != nil {
@@ -143,5 +146,40 @@ func TestAgySyncUsesBuiltinCatalog(t *testing.T) {
 		if err != nil || !slices.Equal(ids, def.DefaultModels) {
 			t.Errorf("installed %v: catalog %v, error %v", present, ids, err)
 		}
+	}
+}
+
+// A provider key shorter than the exact matcher's minimum is refused before it
+// is stored; the error names the setting and never the value.
+func TestConnectRefusesShortKey(t *testing.T) {
+	sec := secret.NewMemoryStore(nil)
+	reg := NewRegistry(Options{Secrets: sec})
+	short := "sk-" + "s7x"
+	err := reg.Connect(context.Background(), "openai", short)
+	if err == nil || !strings.Contains(err.Error(), "openai_api_key") || strings.Contains(err.Error(), short) {
+		t.Fatalf("Connect = %v, want a refusal naming openai_api_key", err)
+	}
+	if _, err := sec.Get(context.Background(), "openai_api_key"); err == nil {
+		t.Fatal("short key was stored")
+	}
+}
+
+// Fix round: behind the daemon's ObservingStore a short optional key (local)
+// comes back as an error from Get, and SyncModels went on without it instead
+// of refusing with the setting named.
+func TestSyncModelsRefusesShortOptionalKey(t *testing.T) {
+	short := "lo" + "-s7x"
+	sec := secret.NewObservingStore(secret.NewMemoryStore(map[string]string{"local_model_api_key": short}), func(name, v string) error {
+		return redact.RegisterSetting(name, v)
+	})
+	called := false
+	cli := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+	})}
+	reg := NewRegistry(Options{Secrets: sec, Client: cli})
+	_, err := reg.SyncModels(context.Background(), "local")
+	if err == nil || !strings.Contains(err.Error(), "local_model_api_key") || strings.Contains(err.Error(), short) || called {
+		t.Fatalf("SyncModels = %v, upstream called %v; want a refusal naming local_model_api_key", err, called)
 	}
 }

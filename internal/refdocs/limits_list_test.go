@@ -30,6 +30,8 @@ var limitConstants = []string{
 	"internal/contextpack.councilPeerBudget",
 	"internal/contextpack.MaxCouncilEncodedPacketBytes",
 	"internal/contextpack.MaxCouncilOpeningEncodedPacketBytes",
+	"internal/contextpack.MaxLearningSectionBytes",
+	"internal/contextpack.MaxPacketLearnings",
 	"internal/contextpack.maxPacketBytes",
 	"internal/contextpack.maxPrecheckBytes",
 	"internal/contextpack.precheckTimeout",

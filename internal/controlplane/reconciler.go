@@ -48,6 +48,9 @@ type Options struct {
 	MaxConcurrent   int
 	OnTaskFailed    func(task domain.Task, reason string)
 	Now             func() time.Time
+	// PacketDestination holds the startup facts that decide whether context
+	// packets may carry learnings. The zero value withholds them.
+	PacketDestination contextpack.Destination
 }
 
 type launchReservation struct {
@@ -67,6 +70,7 @@ type Reconciler struct {
 	maxConcurrent   int
 	onTaskFailed    func(task domain.Task, reason string)
 	now             func() time.Time
+	packetDest      contextpack.Destination
 
 	instance          string
 	recovering        map[string]bool
@@ -397,6 +401,7 @@ func NewReconciler(opts Options) *Reconciler {
 		maxConcurrent:     opts.MaxConcurrent,
 		onTaskFailed:      opts.OnTaskFailed,
 		now:               nowFn,
+		packetDest:        opts.PacketDestination,
 		handles:           make(map[string]scruntime.Handle),
 		handleAdapters:    make(map[string]scruntime.Adapter),
 		partialStarts:     make(map[string]bool),
@@ -1096,6 +1101,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 			if err := r.store.RenewTaskLeases(ctx, task.ID, now, expiresAt); err != nil {
 				return true, err
 			}
+			// Keep the lease token registered for exact-match redaction while
+			// the renewed lease is live.
+			redact.ExtendOwned(task.ID, expiresAt)
 		} else if r.isTaskStale(task, now) {
 			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 		}
@@ -1281,20 +1289,27 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 		return errAuthorCheckoutUnavailable
 	}
 	var inputJSON string
+	var pinned []string
 	if command != nil {
 		// A command step gives no model a prompt, so it gets no context packet
 		// and none of its host pre-checks run. Without a container runner it
-		// is refused here, before any setup (issue 134).
+		// is refused here, before any setup (issue 134). It gets no Model Gate
+		// coordinates, so no learning providers are pinned.
 		if cap, ok := adapter.(councilContainerCapable); !ok || !cap.SupportsCouncilContainers() || wl.Spec.Class != domain.ClassCodingAgent || wl.Spec.Coding == nil {
 			return &scruntime.CommandRefusal{Command: command.Name, Reason: scruntime.CommandNoContainerRuntime}
 		}
 		inputJSON = "{}"
 	} else {
-		wl, inputJSON, err = r.prepareLaunchInput(ctx, task, wl)
+		wl, inputJSON, pinned, err = r.prepareLaunchInput(ctx, task, wl)
 		if err != nil {
 			return err
 		}
 	}
+	// The input reaches the workload as an environment value. It is a declared
+	// JSON record: decoded once and, when it shows a daemon-held value, refused
+	// whole (redact.RefusedJSON, none of the payload). Exact match only, so
+	// ordinary task text is not rewritten by pattern rules.
+	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(inputJSON)
 	if readOnly && command == nil {
 		var payload struct {
 			Packet string `json:"context_packet"`
@@ -1314,7 +1329,7 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 			return err
 		}
 	}
-	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry)
+	token, err := r.issueLaunchToken(ctx, task.ID, maxLeaseExpiry, pinned)
 	if err != nil {
 		return err
 	}
@@ -1446,7 +1461,9 @@ func (r *Reconciler) councilDeadline(ctx context.Context, conclaveID string) (ti
 	return snap.Deadline, nil
 }
 
-func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time) (string, error) {
+// issueLaunchToken mints the launch lease. A non-nil pinned list holds the
+// providers the task's learning packet was admitted under.
+func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExpiry time.Time, pinned []string) (string, error) {
 	r.mu.Lock()
 	reservation := r.launching[taskID]
 	r.mu.Unlock()
@@ -1473,7 +1490,7 @@ func (r *Reconciler) issueLaunchToken(ctx context.Context, taskID string, maxExp
 			expiresAt = maxExpiry
 		}
 	}
-	return model.MintTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt)
+	return model.MintPinnedTaskTokenUntil(ctx, r.store, current.ID, current.WorkloadName, now, expiresAt, pinned)
 }
 
 func (r *Reconciler) advanceWorkflowStep(ctx context.Context, completedTask domain.Task) error {
