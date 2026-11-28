@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"log/slog"
 	"os"
@@ -9,9 +10,12 @@ import (
 	"testing"
 
 	"github.com/shadewright-labs/sablecourt/internal/config"
+	"github.com/shadewright-labs/sablecourt/internal/controlplane"
 	"github.com/shadewright-labs/sablecourt/internal/domain"
 	mcpgate "github.com/shadewright-labs/sablecourt/internal/gate/mcp"
 	"github.com/shadewright-labs/sablecourt/internal/policy"
+	"github.com/shadewright-labs/sablecourt/internal/redact"
+	"github.com/shadewright-labs/sablecourt/internal/secret"
 	"github.com/shadewright-labs/sablecourt/internal/store/sqlite"
 )
 
@@ -197,5 +201,140 @@ func TestRecordWorkloadsCouncilPanel(t *testing.T) {
 		if !panel && (it.ManifestDigest != "d1" || it.AgentCardJSON == "") {
 			t.Fatalf("manifest workload recorded as %+v", it)
 		}
+	}
+}
+
+// A reloaded bundle naming an MCP server secret too short to redact is
+// refused before anything is written or swapped: the reload returns a
+// refusal naming the setting (never the value), apply never runs, and the
+// store keeps the previous workloads (persist runs before the gate step, so
+// the gate is not reached either). With a secret long enough the same reload is accepted,
+// and the secret is registered for exact redaction before the store write,
+// the gate swap and apply, so no step can see the new grants first.
+func TestReloadWithShortMCPSecretKeepsPreviousState(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	manifests := filepath.Join(dir, "sablecourt.yaml")
+	m1 := `apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: alpha, zone: sandbox}
+spec:
+  class: long-lived-agent
+  runtime: {type: docker, image: "alpine:3.21"}
+`
+	if err := os.WriteFile(manifests, []byte(m1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(filepath.Join(dir, "sablecourt.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	loader := newPolicyLoader(manifests)
+	b1, pol1, err := loader.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordWorkloads(ctx, st, b1, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shorter than redact.MinSecretLength.
+	shortSecret := "s7" + "x9q"
+	longSecret := synthDaemonSecret("reload", "_mcp_", "55117799")
+	mem := secret.NewMemoryStore(map[string]string{"short_mcp_tok": shortSecret, "long_mcp_tok": longSecret})
+	secretStore := secret.NewObservingStore(mem, registerDaemonSecret)
+	gate := mcpgate.New(mcpgate.Options{Store: st, Bundle: b1, Policy: pol1})
+	if err := gate.SetUpstreamBridge(mcpgate.NewUpstreamBridge(secretStore, nil)); err != nil {
+		t.Fatal(err)
+	}
+	binding := mcpgate.RegisterBuiltinGitOps(gate, dir, nil)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	applied := false
+	registeredAtPersist := false
+	steps := daemonReloadSteps(ctx, logger,
+		func() (*config.Bundle, *policy.Engine, error) { return loader.Load(ctx) },
+		func(b *config.Bundle) error {
+			registeredAtPersist = !strings.Contains(redact.String("v="+longSecret), longSecret)
+			return recordWorkloads(ctx, st, b, false)
+		},
+		secretStore, gate, binding,
+		func(*config.Bundle, *policy.Engine) { applied = true })
+
+	m2 := func(secretName string) string {
+		return `apiVersion: sablecourt.io/v1alpha1
+kind: Workload
+metadata: {name: alpha, zone: runtime}
+spec:
+  class: long-lived-agent
+  runtime: {type: docker, image: "alpine:3.21"}
+  grants:
+    mcpTools: [ext.read]
+    mcpServers:
+      - name: ext
+        url: "https://mcp.example.test/mcp"
+        secretName: ` + secretName + `
+        allowedTools: [read]
+`
+	}
+	if err := os.WriteFile(manifests, []byte(m2("short_mcp_tok")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = steps.run()
+	if err == nil || !strings.HasPrefix(err.Error(), "reload refused") || !strings.Contains(err.Error(), "short_mcp_tok") {
+		t.Fatalf("run = %v, want reload refused naming short_mcp_tok", err)
+	}
+	if strings.Contains(err.Error(), shortSecret) || strings.Contains(logBuf.String(), shortSecret) {
+		t.Fatal("refusal leaked the short secret value")
+	}
+	if !strings.Contains(logBuf.String(), "manifest reload refused; previous bundle, policy, upstream tools and stored workloads kept") {
+		t.Fatalf("log does not say the reload was refused:\n%s", logBuf.String())
+	}
+	if applied {
+		t.Fatal("apply ran after a short MCP secret was refused")
+	}
+	items, err := st.ListWorkloads(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Zone != domain.ZoneSandbox || items[0].ManifestDigest != b1.ManifestDigest {
+		t.Fatalf("refused reload mutated store workloads: %+v (want sandbox alpha digest %s)", items, b1.ManifestDigest)
+	}
+
+	if err := os.WriteFile(manifests, []byte(m2("long_mcp_tok")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := steps.run(); err != nil {
+		t.Fatalf("accepted reload: %v", err)
+	}
+	if !applied || !registeredAtPersist {
+		t.Fatalf("accepted reload: applied=%v, secret registered before persist=%v", applied, registeredAtPersist)
+	}
+}
+
+// apply runs after the gate swap and cannot refuse, so a scheduler that
+// fails to take the new schedules is logged, not dropped. The loader refuses
+// an invalid cron expression, so only a bundle that skipped it gets here.
+func TestReloadSchedulesLogsFailure(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	b := &config.Bundle{Schedules: map[string]domain.Schedule{
+		"nightly": {Metadata: domain.ObjectMeta{Name: "nightly"}, Spec: domain.ScheduleSpec{Cron: "not a cron", Enabled: true}},
+	}}
+	s := controlplane.NewScheduler(nil)
+	t.Cleanup(s.Stop)
+	reloadSchedules(t.Context(), logger, s, b)
+	if !strings.Contains(logBuf.String(), "schedules not reloaded") || !strings.Contains(logBuf.String(), "nightly") {
+		t.Fatalf("scheduler failure not logged:\n%s", logBuf.String())
+	}
+	logBuf.Reset()
+	reloadSchedules(t.Context(), logger, s, &config.Bundle{})
+	if logBuf.Len() != 0 {
+		t.Fatalf("accepted schedules logged an error:\n%s", logBuf.String())
 	}
 }

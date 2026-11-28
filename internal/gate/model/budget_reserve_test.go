@@ -274,6 +274,7 @@ func TestModelGateRetriesFailedRelease(t *testing.T) {
 	fail.Store(true)
 	c := newChildGate(t, `{"maxOutputTokens":5}`, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if fail.Load() {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}

@@ -1092,6 +1092,9 @@ func (r *Reconciler) observeTask(ctx context.Context, task domain.Task) (bool, e
 			if err := r.store.RenewTaskLeases(ctx, task.ID, now, expiresAt); err != nil {
 				return true, err
 			}
+			// Keep the lease token registered for exact-match redaction while
+			// the renewed lease is live.
+			redact.ExtendOwned(task.ID, expiresAt)
 		} else if r.isTaskStale(task, now) {
 			return false, r.failTask(ctx, task, reasonLostOnRestart, `{"reason":"stale_observation"}`)
 		}
@@ -1271,6 +1274,11 @@ func (r *Reconciler) launchTask(ctx context.Context, task domain.Task, wl domain
 	if err != nil {
 		return err
 	}
+	// The input reaches the workload as an environment value. It is a declared
+	// JSON record: decoded once and, when it shows a daemon-held value, refused
+	// whole (redact.RefusedJSON, none of the payload). Exact match only, so
+	// ordinary task text is not rewritten by pattern rules.
+	inputJSON, _ = redact.DefaultRegistry().RedactJSONRecord(inputJSON)
 	if readOnly {
 		var payload struct {
 			Packet string `json:"context_packet"`

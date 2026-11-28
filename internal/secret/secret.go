@@ -110,6 +110,22 @@ func (f *FileStore) Delete(_ context.Context, name string) error {
 	return f.saveLocked(data)
 }
 
+// Keys returns the secret names stored in the file without returning values.
+func (f *FileStore) Keys(_ context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
 func (f *FileStore) loadLocked() (map[string]string, error) {
 	info, err := os.Stat(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -263,4 +279,50 @@ func (m *MemoryStore) Delete(_ context.Context, name string) error {
 	}
 	delete(m.values, name)
 	return nil
+}
+
+// ObservingStore wraps a SecretStore and invokes OnValue whenever a secret is
+// successfully read or about to be written, so callers can register held
+// secret values before they can appear in any output. When OnValue refuses a
+// value (a credential too short to redact), Get returns that error instead of
+// the value and Set stores nothing.
+type ObservingStore struct {
+	Inner   SecretStore
+	OnValue func(name, value string) error
+}
+
+func NewObservingStore(inner SecretStore, onValue func(name, value string) error) *ObservingStore {
+	return &ObservingStore{Inner: inner, OnValue: onValue}
+}
+
+func (o *ObservingStore) Get(ctx context.Context, name string) (string, error) {
+	if o == nil || o.Inner == nil {
+		return "", ErrSecretNotFound
+	}
+	val, err := o.Inner.Get(ctx, name)
+	if err == nil && o.OnValue != nil {
+		if err := o.OnValue(name, val); err != nil {
+			return "", err
+		}
+	}
+	return val, err
+}
+
+func (o *ObservingStore) Set(ctx context.Context, name, value string) error {
+	if o == nil || o.Inner == nil {
+		return errors.New("no primary secret store configured")
+	}
+	if o.OnValue != nil {
+		if err := o.OnValue(name, value); err != nil {
+			return err
+		}
+	}
+	return o.Inner.Set(ctx, name, value)
+}
+
+func (o *ObservingStore) Delete(ctx context.Context, name string) error {
+	if o == nil || o.Inner == nil {
+		return ErrSecretNotFound
+	}
+	return o.Inner.Delete(ctx, name)
 }
